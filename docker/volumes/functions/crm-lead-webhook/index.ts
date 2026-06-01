@@ -99,23 +99,46 @@ Deno.serve(async (req) => {
     return json({ error: "integration_inactive" }, 403);
   }
 
-  // (2) secret — aceita em multiplas convencoes pra compatibilizar com diferentes LPs:
-  //   a) Header X-Webhook-Secret: <secret>  (preferido)
-  //   b) Header Authorization: Bearer <secret>  (padrao OAuth-like)
-  //   c) Query param ?secret=  /  ?token=  /  ?access_token=  (alguns sistemas como SprintHub
-  //      so permitem secret na URL).
+  // (2) secret — aceita em muitas convencoes pra compatibilizar com diferentes LPs/CRMs.
+  // Coleta todos os candidatos possiveis e checa cada um em constant-time.
   const authHeader = req.headers.get("authorization") ?? "";
   const bearerMatch = authHeader.match(/^Bearer\s+(.+)$/i);
-  const receivedSecret =
-    req.headers.get("x-webhook-secret")
-    ?? (bearerMatch ? bearerMatch[1] : null)
-    ?? url.searchParams.get("secret")
-    ?? url.searchParams.get("token")
-    ?? url.searchParams.get("access_token")
-    ?? "";
-  if (!constantTimeEqual(receivedSecret, integration.secret)) {
+  const tokenSchemeMatch = authHeader.match(/^Token\s+(.+)$/i);
+  const candidates: (string | null)[] = [
+    req.headers.get("x-webhook-secret"),
+    req.headers.get("x-auth-token"),
+    req.headers.get("x-token"),
+    req.headers.get("token"),
+    req.headers.get("x-api-key"),
+    req.headers.get("api-key"),
+    bearerMatch ? bearerMatch[1] : null,
+    tokenSchemeMatch ? tokenSchemeMatch[1] : null,
+    // Authorization sem prefixo conhecido (alguns sistemas mandam o token cru)
+    authHeader && !bearerMatch && !tokenSchemeMatch && !authHeader.toLowerCase().startsWith("basic ")
+      ? authHeader : null,
+    url.searchParams.get("secret"),
+    url.searchParams.get("token"),
+    url.searchParams.get("access_token"),
+    url.searchParams.get("api_token"),
+    url.searchParams.get("auth_token"),
+    url.searchParams.get("api_key"),
+    url.searchParams.get("key"),
+    url.searchParams.get("hash"),
+  ];
+  const secretOk = candidates.some((c) => c && constantTimeEqual(c, integration.secret));
+  if (!secretOk) {
+    // Debug seguro: nomes dos headers (sem valores) + nomes dos query params,
+    // pra identificar onde o sistema externo (SprintHub etc) esta passando o token.
+    const HIDE = new Set(["host", "content-length", "user-agent", "accept", "content-type", "accept-encoding", "connection", "cache-control"]);
+    const headerNames = Array.from(req.headers.keys())
+      .filter((k) => !HIDE.has(k.toLowerCase()))
+      .slice(0, 30)
+      .join(",");
+    const queryNames = Array.from(url.searchParams.keys()).filter((k) => k !== "int").join(",");
+    const debug = `headers=[${headerNames}] query=[${queryNames}]`.slice(0, 800);
     await admin.from("crm_webhook_logs").insert({
-      integration_id: integration.id, slug, status: "secret_invalido", ip_origem: ipOrigem,
+      integration_id: integration.id, slug, status: "secret_invalido",
+      erro: debug, ip_origem: ipOrigem,
     });
     return json({ error: "invalid_secret" }, 401);
   }
