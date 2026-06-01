@@ -99,8 +99,20 @@ Deno.serve(async (req) => {
     return json({ error: "integration_inactive" }, 403);
   }
 
-  // (2) secret
-  const receivedSecret = req.headers.get("x-webhook-secret") ?? "";
+  // (2) secret — aceita em multiplas convencoes pra compatibilizar com diferentes LPs:
+  //   a) Header X-Webhook-Secret: <secret>  (preferido)
+  //   b) Header Authorization: Bearer <secret>  (padrao OAuth-like)
+  //   c) Query param ?secret=  /  ?token=  /  ?access_token=  (alguns sistemas como SprintHub
+  //      so permitem secret na URL).
+  const authHeader = req.headers.get("authorization") ?? "";
+  const bearerMatch = authHeader.match(/^Bearer\s+(.+)$/i);
+  const receivedSecret =
+    req.headers.get("x-webhook-secret")
+    ?? (bearerMatch ? bearerMatch[1] : null)
+    ?? url.searchParams.get("secret")
+    ?? url.searchParams.get("token")
+    ?? url.searchParams.get("access_token")
+    ?? "";
   if (!constantTimeEqual(receivedSecret, integration.secret)) {
     await admin.from("crm_webhook_logs").insert({
       integration_id: integration.id, slug, status: "secret_invalido", ip_origem: ipOrigem,
