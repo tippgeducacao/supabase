@@ -31,7 +31,7 @@ const pad = (n: number) => String(n).padStart(2, '0');
 function brData(isoUtc: string) {
   const b = new Date(new Date(isoUtc).getTime() - BR_OFFSET_MS);
   const dia = `${pad(b.getUTCDate())}/${pad(b.getUTCMonth() + 1)}`;
-  const hora = `${pad(b.getUTCHours())}h${b.getUTCMinutes() ? pad(b.getUTCMinutes()) : ''}`;
+  const hora = `${b.getUTCHours()}h${b.getUTCMinutes() ? pad(b.getUTCMinutes()) : ''}`;
   return { dia, hora };
 }
 const primeiroNome = (nome: string | null | undefined) =>
@@ -52,17 +52,17 @@ type Lembrete = {
 const LEMBRETES: Lembrete[] = [
   {
     coluna: 'lembrete_2h_em',
-    template_name: '', // PREENCHER (template utility de 2h antes)
+    template_name: 'lembrete_2_horas_antes_utility', // {{1}}=nome {{2}}=hora {{3}}=link
     lang: 'pt_BR',
     janelaMin: [90, 120],
-    params: (c) => [c.nome, c.hora, c.link], // ajustar à ordem real das variáveis
+    params: (c) => [c.nome, c.hora, c.link],
   },
   {
     coluna: 'lembrete_30min_em',
-    template_name: '', // PREENCHER (template utility de 30min antes)
+    template_name: 'lembre_de_30_min_utility', // {{1}}=nome {{2}}=hora {{3}}=link  (CONFERIR nome: "lembre" vs "lembrete")
     lang: 'pt_BR',
     janelaMin: [10, 35],
-    params: (c) => [c.nome, c.hora, c.link], // ajustar à ordem real das variáveis
+    params: (c) => [c.nome, c.hora, c.link],
   },
 ];
 
