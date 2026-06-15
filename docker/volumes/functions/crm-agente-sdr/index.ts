@@ -20,6 +20,7 @@ import { type CtxConversa, executarTool, montarToolResults } from './tools.ts';
 import { prepararMensagem } from './midia.ts';
 import { enviarResposta } from './saida.ts';
 import { rodarEsteiraFollowup } from './followup.ts';
+import { rodarEsteiraFollowupTemplate } from './followup-template.ts';
 import { criarTelemetria, resumir, type Telemetria } from './eventos.ts';
 
 declare const EdgeRuntime: { waitUntil?: (p: Promise<unknown>) => void } | undefined;
@@ -141,7 +142,15 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   // Reabriu a conversa: atualiza o relógio âncora e ZERA o estágio de follow-up
   // (se o lead esfriar de novo, a cadência recomeça do 1º toque — igual ao n8n,
   // onde o reset do timestamp_mensagem + dedup por estágio reiniciava a régua).
-  await atualizarLead(supabase, remotejid, { timestamp_mensagem: new Date().toISOString(), follow_up: null });
+  // Zera também os flags da esteira de TEMPLATE (janela fechada): o lead respondeu,
+  // a janela reabriu, então a cadência de template recomeça do zero se esfriar de novo.
+  await atualizarLead(supabase, remotejid, {
+    timestamp_mensagem: new Date().toISOString(),
+    follow_up: null,
+    template_1_dia: false, template_2_dia: false, template_3_dia: false, template_4_dia: false,
+    template_5_dia: false, template_6_dia: false, template_7_dia: false,
+    template_followup_em: null,
+  });
 
   // Arquivos analisados viram mensagem própria; o texto acumulado vira UMA mensagem.
   for (const item of itens) {
@@ -316,6 +325,34 @@ Deno.serve(async (req) => {
     if (typeof EdgeRuntime !== 'undefined' && EdgeRuntime?.waitUntil) EdgeRuntime.waitUntil(trabalho);
     else await trabalho;
     return json({ ok: true, esteira: 'followup', modo: 'background' });
+  }
+
+  // Esteira de TEMPLATE (janela fechada): mesma auth da janela aberta. O cron chama
+  // em vários horários do dia; o módulo espalha o envio por lead e respeita a trava
+  // de 24h. ?wait=1 roda síncrono (vê estatísticas); ?hora=<0-23> força a hora do
+  // tick (teste); ?limite=<n> limita os leads do tick.
+  if (url.searchParams.get('mode') === 'followup-template') {
+    const { data: cfg } = await supabase
+      .from('crm_agente_sdr_config')
+      .select('followup_secret')
+      .eq('id', 1)
+      .maybeSingle();
+    const segredo = cfg?.followup_secret ?? '';
+    if (!segredo || req.headers.get('x-followup-key') !== segredo) {
+      return json({ error: 'unauthorized' }, 401);
+    }
+    const limiteParam = Number(url.searchParams.get('limite'));
+    const horaParam = Number(url.searchParams.get('hora'));
+    const trabalho = rodarEsteiraFollowupTemplate(supabase, {
+      limite: Number.isFinite(limiteParam) && limiteParam > 0 ? limiteParam : undefined,
+      horaUtc: Number.isFinite(horaParam) ? horaParam : undefined,
+    });
+    if (url.searchParams.get('wait') === '1') {
+      return json({ ok: true, esteira: 'followup-template', ...(await trabalho) });
+    }
+    if (typeof EdgeRuntime !== 'undefined' && EdgeRuntime?.waitUntil) EdgeRuntime.waitUntil(trabalho);
+    else await trabalho;
+    return json({ ok: true, esteira: 'followup-template', modo: 'background' });
   }
 
   if (TOKEN && url.searchParams.get('token') !== TOKEN) return json({ error: 'unauthorized' }, 401);
