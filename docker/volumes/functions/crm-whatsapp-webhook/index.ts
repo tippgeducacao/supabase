@@ -16,6 +16,16 @@ const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 // App Secret do Meta App comercial. Quando definido, a assinatura X-Hub-Signature-256
 // é validada e payloads não assinados são rejeitados. Setar no Dokploy.
 const META_APP_SECRET = Deno.env.get("CRM_META_APP_SECRET") ?? "";
+// Relay do inbound pro agente SDR. CRM_N8N_INBOUND_URL funciona como liga/desliga
+// (vazio = relay off), mas a CHAMADA usa o kong INTERNO (SUPABASE_URL=http://kong:8000),
+// não a URL pública: o container do edge-runtime não alcança o próprio domínio
+// público (api.ppgeducacao.site) por hairpin NAT — só o pg_net da reconciliação
+// (no container do banco) chega lá. Com a URL pública, TODO inbound caía na
+// reconciliação de ~5min. O kong interno é o mesmo caminho usado p/ crm-whatsapp-send.
+const RELAY_BASE = (Deno.env.get("SUPABASE_URL") ?? "").replace(/\/$/, "");
+const N8N_INBOUND_URL = ((Deno.env.get("CRM_N8N_INBOUND_URL") ?? "") !== "" && RELAY_BASE)
+  ? `${RELAY_BASE}/functions/v1/crm-agente-sdr`
+  : "";
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -55,6 +65,40 @@ function isMetaMediaHost(u: string): boolean {
       || h.endsWith(".facebook.com");
   } catch {
     return false;
+  }
+}
+
+// Canoniza dígitos BR pro formato COM 9º dígito. O Meta dropa o 9 no inbound
+// (manda 554688166051), mas o lead é salvo COM o 9 (5546988166051, pela
+// crm-lead-webhook). Sem canonizar, o relay manda o remotejid sem o 9, o agente
+// não acha o lead (buscarLead) e a msg só é recuperada pela reconciliação (~5min).
+function canonicalBrDigits(raw: string): string {
+  let d = (raw ?? "").replace(/\D/g, "");
+  if (d.startsWith("55")) d = d.slice(2);
+  if (d.length === 10 && ["6", "7", "8", "9"].includes(d[2])) {
+    d = d.slice(0, 2) + "9" + d.slice(2);
+  }
+  return `55${d}`;
+}
+
+// Repassa a mensagem inbound normalizada pro n8n (buffer + roteador do agente SDR).
+// Awaited com timeout; em qualquer erro só loga — nunca derruba o webhook (Meta espera 200).
+async function relayToN8n(payload: Record<string, unknown>): Promise<void> {
+  if (!N8N_INBOUND_URL) return;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 10000);
+  try {
+    const res = await fetch(N8N_INBOUND_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) console.log(`[crm-whatsapp-webhook] relay n8n respondeu ${res.status}`);
+  } catch (e) {
+    console.log("[crm-whatsapp-webhook] relay n8n falhou:", e instanceof Error ? e.message : String(e));
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -172,25 +216,37 @@ Deno.serve(async (req) => {
           const profileName = value?.contacts?.[0]?.profile?.name ?? null;
 
           let conteudo = "";
+          let caption = ""; // legenda real da mídia (vazio se não houver) — separada do placeholder de conteudo
           // Mídia inbound a baixar da Meta (image/audio/video/document/sticker)
           let mediaInbound: { tipo: string; id?: string; mime_type?: string; filename?: string } | null = null;
+          // Resposta a uma mensagem interativa (clique em botão/lista) — guarda id+título p/ roteamento.
+          let interactiveReply: { tipo: string; id: string | null; title: string | null; description: string | null } | null = null;
           if (msgType === "text") {
             conteudo = msg?.text?.body ?? "";
           } else if (msgType === "interactive") {
-            conteudo = msg?.interactive?.button_reply?.title
-              ?? msg?.interactive?.list_reply?.title
-              ?? "[interativo]";
+            const br = msg?.interactive?.button_reply;
+            const lr = msg?.interactive?.list_reply;
+            conteudo = br?.title ?? lr?.title ?? "[interativo]";
+            interactiveReply = {
+              tipo: br ? "button_reply" : lr ? "list_reply" : "interactive",
+              id: br?.id ?? lr?.id ?? null,
+              title: br?.title ?? lr?.title ?? null,
+              description: lr?.description ?? null,
+            };
           } else if (msgType === "image") {
             conteudo = msg?.image?.caption ?? "[imagem]";
+            caption = msg?.image?.caption ?? "";
             mediaInbound = { tipo: "image", id: msg?.image?.id, mime_type: msg?.image?.mime_type };
           } else if (msgType === "audio") {
             conteudo = "[áudio]";
             mediaInbound = { tipo: "audio", id: msg?.audio?.id, mime_type: msg?.audio?.mime_type };
           } else if (msgType === "video") {
             conteudo = msg?.video?.caption ?? "[vídeo]";
+            caption = msg?.video?.caption ?? "";
             mediaInbound = { tipo: "video", id: msg?.video?.id, mime_type: msg?.video?.mime_type };
           } else if (msgType === "document") {
             conteudo = msg?.document?.filename ?? "[documento]";
+            caption = msg?.document?.caption ?? "";
             mediaInbound = { tipo: "document", id: msg?.document?.id, mime_type: msg?.document?.mime_type, filename: msg?.document?.filename };
           } else if (msgType === "sticker") {
             conteudo = "[sticker]";
@@ -198,7 +254,9 @@ Deno.serve(async (req) => {
           } else if (msgType === "location") {
             conteudo = `[localização: ${msg?.location?.latitude}, ${msg?.location?.longitude}]`;
           } else if (msgType === "reaction") {
-            conteudo = `[reação: ${msg?.reaction?.emoji ?? ""}]`;
+            // Marcador [reacao]<emoji> — mesmo formato do outbound; o chat renderiza
+            // como reação (emoji destacado) e o preview do card vira "Reagiu <emoji>".
+            conteudo = `[reacao]${msg?.reaction?.emoji ?? ""}`;
           } else {
             conteudo = `[${msgType}]`;
           }
@@ -302,16 +360,42 @@ Deno.serve(async (req) => {
               profile_name: profileName,
               original_type: msgType,
               timestamp: msg?.timestamp,
+              ...(interactiveReply ? { interactive_reply: interactiveReply } : {}),
             },
           });
 
           if (insertErr) {
-            console.error("[crm-whatsapp-webhook] insert msg erro:", insertErr.message);
+            // 23505 = unique_violation: retry da Meta com o mesmo wamid. Benigno: não relaya de novo.
+            if ((insertErr as { code?: string }).code === "23505") {
+              console.log("[crm-whatsapp-webhook] msg duplicada (retry meta), ignorada:", msgId);
+            } else {
+              console.error("[crm-whatsapp-webhook] insert msg erro:", insertErr.message);
+            }
           } else {
             processedMessages++;
             console.log(
               `[crm-whatsapp-webhook] msg inbound de ${from} (lead=${leadId ?? "?"}, op=${oportunidadeId ?? "?"}, anexos=${anexos.length}): ${conteudo.slice(0, 80)}`,
             );
+            // Relay pro n8n (somente após insert NOVO -> at-most-once garantido pelo índice único em wa_message_id).
+            await relayToN8n({
+              remotejid: `${canonicalBrDigits(phoneDigits)}@s.whatsapp.net`,
+              id: msgId,
+              timestamp: Number(msg?.timestamp) || Math.floor(Date.now() / 1000),
+              direcao: "inbound", // relay só dispara p/ inbound; nunca p/ as próprias saídas
+              from_me: false,     // Meta Cloud API não ecoa mensagens do negócio -> sempre false
+              tipo: msgType,
+              conteudo,
+              caption,
+              mime_type: anexos[0]?.mime_type ?? mediaInbound?.mime_type ?? null,
+              anexos,
+              // Clique em botão/lista: o agente (n8n) roteia pelo id/título escolhido.
+              interactive_reply: interactiveReply,
+              profile_name: profileName,
+              telefone: phoneDigits,
+              wa_account_id: accountId,
+              lead_id: leadId,
+              oportunidade_id: oportunidadeId,
+            });
           }
         }
 
