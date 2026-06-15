@@ -77,8 +77,37 @@ async function consultaDisponibilidade(input: any, toolUseId: string) {
   if (input.periodo_desejado) qs.set('periodo', input.periodo_desejado);
   if (input.horario_inicio_desejado) qs.set('horario_inicio', input.horario_inicio_desejado);
 
-  const res = await sdrApi(`disponibilidade?${qs.toString()}`);
-  const resultado = await res.json().catch(() => ({}));
+  // Consulta com 1 retry. A sdr-api às vezes falha/cold-start; SEM distinguir erro de
+  // agenda vazia, a ferramenta retornava [] e o agente dizia "sem horário" (mentira)
+  // ao lead, mesmo com a agenda cheia. Agora: erro técnico ≠ ausência de horário.
+  let res: Response | null = null;
+  let resultado: any = {};
+  let erroTecnico: string | null = null;
+  for (let tentativa = 1; tentativa <= 2; tentativa++) {
+    try {
+      res = await sdrApi(`disponibilidade?${qs.toString()}`);
+      resultado = await res.json().catch(() => ({}));
+      if (res.ok && resultado?.success !== false) { erroTecnico = null; break; }
+      erroTecnico = `HTTP ${res.status}${resultado?.error ? ` — ${resultado.error}` : ''}`;
+    } catch (e) {
+      erroTecnico = (e as Error).message;
+    }
+    if (tentativa < 2) await new Promise((r) => setTimeout(r, 600));
+  }
+
+  // Falha técnica (≠ agenda vazia): NÃO dizer ao lead que não há horários. Instrui o
+  // agente a tentar de novo / não inventar indisponibilidade.
+  if (erroTecnico) {
+    return {
+      resultado: 'ERRO ao consultar a agenda (falha técnica, NÃO é falta de horário). ' +
+        'NÃO diga ao lead que não há horários nem que a agenda fechou. Tente consultar de novo; ' +
+        'se persistir, diga que vai confirmar com o time e já retorna.',
+      erro: erroTecnico,
+      slots_raw: [],
+      id: toolUseId,
+    };
+  }
+
   const slots: any[] = resultado.data?.slots || resultado.slots || [];
 
   let conteudo: string;
