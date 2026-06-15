@@ -1,0 +1,144 @@
+// gmail-compose-send: envia um novo email (não-reply) pela caixa Gmail conectada
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
+import { ensureToken, base64UrlEncode, validateEmailList, friendlyGmailError, isTokenRevokedError, markCaixaTokenRevoked } from '../_shared/gmail.ts';
+
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+};
+
+const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
+const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+const ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY')!;
+
+Deno.serve(async (req) => {
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
+  try {
+    const auth = req.headers.get('Authorization');
+    if (!auth) throw new Error('not_authenticated');
+    const userClient = createClient(SUPABASE_URL, ANON_KEY, { global: { headers: { Authorization: auth } } });
+    const { data: { user } } = await userClient.auth.getUser();
+    if (!user) throw new Error('not_authenticated');
+
+    const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
+    const { caixa_id, to_emails, cc_emails, assunto, body_html, task_id, attachments } = await req.json();
+    if (!caixa_id || !to_emails?.length || !assunto || !body_html) {
+      throw new Error('caixa_id, to_emails, assunto e body_html obrigatórios');
+    }
+
+    const { data: canSee } = await userClient.rpc('email_caixa_visible', { _caixa_id: caixa_id, _user_id: user.id });
+    if (!canSee) throw new Error('forbidden');
+
+    const { data: caixa, error: cErr } = await admin
+      .from('email_caixas_conectadas')
+      .select('*, integ:calendar_integrations(*)')
+      .eq('id', caixa_id)
+      .maybeSingle();
+    if (cErr || !caixa) throw new Error('caixa não encontrada');
+
+    const fromEmail = caixa.email_caixa;
+    const fromNome = caixa.nome_exibicao;
+    const toCheck = validateEmailList(to_emails);
+    const ccCheck = validateEmailList(cc_emails);
+    if (toCheck.invalid.length) throw new Error(`Destinatário inválido: ${toCheck.invalid.join(', ')}`);
+    if (ccCheck.invalid.length) throw new Error(`Cópia inválida: ${ccCheck.invalid.join(', ')}`);
+    if (!toCheck.ok.length) throw new Error('Informe ao menos um destinatário válido em "Para".');
+    const to: string[] = toCheck.ok;
+    const cc: string[] = ccCheck.ok;
+    const atts = Array.isArray(attachments) ? attachments : [];
+
+    const baseHeaders = [
+      `From: "${fromNome}" <${fromEmail}>`,
+      `To: ${to.join(', ')}`,
+      cc.length ? `Cc: ${cc.join(', ')}` : null,
+      `Subject: ${assunto}`,
+      'MIME-Version: 1.0',
+    ].filter(Boolean);
+
+    let raw: string;
+    if (atts.length === 0) {
+      raw = [...baseHeaders, 'Content-Type: text/html; charset="UTF-8"', 'Content-Transfer-Encoding: 7bit', '', body_html].join('\r\n');
+    } else {
+      const boundary = `bnd_${crypto.randomUUID().replace(/-/g, '')}`;
+      const parts: string[] = [];
+      parts.push(`--${boundary}`);
+      parts.push('Content-Type: text/html; charset="UTF-8"');
+      parts.push('Content-Transfer-Encoding: 7bit');
+      parts.push('');
+      parts.push(body_html);
+      for (const a of atts) {
+        parts.push(`--${boundary}`);
+        parts.push(`Content-Type: ${a.mimeType || 'application/octet-stream'}; name="${a.filename}"`);
+        parts.push('Content-Transfer-Encoding: base64');
+        parts.push(`Content-Disposition: attachment; filename="${a.filename}"`);
+        parts.push('');
+        // wrap base64 in 76-char lines
+        parts.push((a.contentBase64 as string).replace(/(.{76})/g, '$1\r\n'));
+      }
+      parts.push(`--${boundary}--`);
+      raw = [...baseHeaders, `Content-Type: multipart/mixed; boundary="${boundary}"`, '', ...parts].join('\r\n');
+    }
+    const rawEncoded = base64UrlEncode(raw);
+
+    let token: string;
+    try {
+      token = await ensureToken(admin, caixa.integ);
+    } catch (e) {
+      if (isTokenRevokedError(e)) await markCaixaTokenRevoked(admin, caixa.id);
+      throw e;
+    }
+
+    const sendRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ raw: rawEncoded }),
+    });
+    const sendJson = await sendRes.json();
+    if (!sendRes.ok) throw new Error(`gmail_send_failed: ${JSON.stringify(sendJson)}`);
+
+    // Cria thread local
+    const nowIso = new Date().toISOString();
+    const { data: thread, error: thErr } = await admin
+      .from('email_threads')
+      .insert({
+        caixa_id,
+        gmail_thread_id: sendJson.threadId,
+        assunto,
+        snippet: body_html.replace(/<[^>]*>/g, '').slice(0, 200),
+        participantes: to.map(e => ({ email: e, name: '' })),
+        ultima_mensagem_em: nowIso,
+        ultima_mensagem_outgoing_em: nowIso,
+        nao_lido: false,
+        arquivado: false,
+        task_id: task_id || null,
+      })
+      .select()
+      .single();
+    if (thErr) throw thErr;
+
+    await admin.from('email_mensagens').insert({
+      thread_id: thread.id,
+      gmail_message_id: sendJson.id,
+      from_email: fromEmail,
+      from_nome: fromNome,
+      to_emails: to.map(e => ({ email: e, name: '' })),
+      cc_emails: cc.map(e => ({ email: e, name: '' })),
+      assunto,
+      snippet: body_html.replace(/<[^>]*>/g, '').slice(0, 200),
+      body_html,
+      enviado_em: nowIso,
+      is_outgoing: true,
+      enviado_por_user_id: user.id,
+      labels: ['SENT'],
+    });
+
+    return new Response(JSON.stringify({ success: true, thread_id: thread.id, gmail_id: sendJson.id }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  } catch (e) {
+    return new Response(JSON.stringify({ success: false, error: friendlyGmailError(e) }), {
+      status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }
+});
