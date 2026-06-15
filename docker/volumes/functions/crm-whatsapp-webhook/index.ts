@@ -233,6 +233,16 @@ Deno.serve(async (req) => {
               title: br?.title ?? lr?.title ?? null,
               description: lr?.description ?? null,
             };
+          } else if (msgType === "button") {
+            // Botão de QUICK-REPLY de TEMPLATE (≠ interactive.button_reply): o texto vem em msg.button.text.
+            // Sem este caso caía no fallback "[button]" e o card/chat perdia o texto ("Confirmar").
+            conteudo = msg?.button?.text ?? msg?.button?.payload ?? "[button]";
+            interactiveReply = {
+              tipo: "button",
+              id: msg?.button?.payload ?? null,
+              title: msg?.button?.text ?? null,
+              description: null,
+            };
           } else if (msgType === "image") {
             conteudo = msg?.image?.caption ?? "[imagem]";
             caption = msg?.image?.caption ?? "";

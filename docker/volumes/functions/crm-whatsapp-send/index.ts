@@ -20,6 +20,37 @@ function formatPhone(raw: string): string | null {
   return digits.startsWith("55") ? digits : `55${digits}`;
 }
 
+// Renderiza o corpo do template (cache crm_whatsapp_template_bodies + params {{1}},{{2}}…)
+// para persistir um conteúdo LEGÍVEL ("Oii, Juliana tudo bem?...") em vez do placeholder
+// "[template] nome". Cai no fallback (null) se o corpo não estiver no cache.
+async function renderTemplateBody(
+  admin: any,
+  name: string,
+  lang: string,
+  components: unknown,
+): Promise<string | null> {
+  try {
+    const { data } = await admin
+      .from("crm_whatsapp_template_bodies")
+      .select("body_text, language")
+      .eq("template_name", name);
+    if (!data || data.length === 0) return null;
+    const row = data.find((r: any) => r.language === lang) ?? data[0];
+    let body: string = row?.body_text ?? "";
+    if (!body) return null;
+    const bodyComp = Array.isArray(components)
+      ? (components as any[]).find((c) => c?.type === "body")
+      : null;
+    const params = Array.isArray(bodyComp?.parameters) ? bodyComp.parameters : [];
+    params.forEach((p: any, i: number) => {
+      body = body.replaceAll(`{{${i + 1}}}`, String(p?.text ?? ""));
+    });
+    return body;
+  } catch {
+    return null;
+  }
+}
+
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -114,9 +145,19 @@ Deno.serve(async (req) => {
     const waMsgId = waResp?.messages?.[0]?.id ?? null;
     const nowIso = new Date().toISOString();
 
-    // Conteúdo persistido
-    const conteudoPersist =
-      tipo === "text" ? String(conteudo) : `[template] ${template_name}`;
+    // Conteúdo persistido — texto cru, ou o CORPO renderizado do template (legível no card/chat)
+    let conteudoPersist: string;
+    if (tipo === "text") {
+      conteudoPersist = String(conteudo);
+    } else {
+      const rendered = await renderTemplateBody(
+        admin,
+        template_name,
+        template_lang || "pt_BR",
+        template_components,
+      );
+      conteudoPersist = rendered ?? `[template] ${template_name}`;
+    }
 
     // Persiste mensagem no CRM
     const { error: msgErr } = await admin.from("crm_whatsapp_messages").insert({
