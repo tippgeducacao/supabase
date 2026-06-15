@@ -1,0 +1,464 @@
+// Executores das tools do agente SDR — port fiel dos subfluxos do n8n:
+//   consulta_disponibilidade  → GET  sdr-api/disponibilidade (limite 6) + formatação Brasília
+//   confirmar_agendamento     → POST sdr-api/agendamentos → evento GCal c/ Meet → PATCH link_reuniao
+//   verificar_compatibilidade → LLM (matriz cursos_pos_graduacao) + validador de código
+//   consulta_objecoes         → Voyage (query) → match_ppg_voyage top-1
+//   envia_informacoes         → POST sdr-api/envia-informacoes + contrato de retorno
+//   pausa_ia                  → RPC crm_set_pausa_ia + followup_ativado=false
+// Todo output inclui o id do tool_use (mesmo formato que o n8n devolvia ao Claude).
+
+// deno-lint-ignore-file no-explicit-any
+import { MATRIZ_SYSTEM, MATRIZ_USER_TEMPLATE } from './prompts.ts';
+import { renderPrompt } from './contexto.ts';
+import { atualizarLead } from './historico.ts';
+import { chamarAnthropic } from './agente.ts';
+
+const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
+const SDR_API_URL = (Deno.env.get('AGENTE_SDR_SDRAPI_URL') ?? `${SUPABASE_URL}/functions/v1/sdr-api`).replace(/\/$/, '');
+const SDR_API_KEY = Deno.env.get('AGENTE_SDR_SDRAPI_KEY') ?? '';
+const VOYAGE_KEY = Deno.env.get('AGENTE_SDR_VOYAGE_KEY') ?? Deno.env.get('VOYAGE_API_KEY') ?? '';
+const MODELO_MATRIZ = Deno.env.get('AGENTE_SDR_MODEL_MATRIZ') ?? 'claude-sonnet-4-20250514';
+// Integração (calendar_integrations) da conta Workspace com acesso às agendas dos
+// monitores — equivalente à credencial "Workspace PPG" do n8n.
+const GCAL_INTEGRATION_ID = Deno.env.get('AGENTE_SDR_GCAL_INTEGRATION_ID') ?? '';
+const GOOGLE_CLIENT_ID = Deno.env.get('GOOGLE_CALENDAR_CLIENT_ID') ?? '';
+const GOOGLE_CLIENT_SECRET = Deno.env.get('GOOGLE_CALENDAR_CLIENT_SECRET') ?? '';
+
+export type CtxConversa = {
+  remotejid: string;
+  telefone: string;            // só dígitos, sem @s.whatsapp.net
+  waAccountId: string | null;
+  leadId: string | null;
+  oportunidadeId: string | null;
+};
+
+function sdrApi(path: string, init: RequestInit = {}): Promise<Response> {
+  return fetch(`${SDR_API_URL}/${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${SDR_API_KEY}`,
+      'Content-Type': 'application/json',
+      ...(init.headers ?? {}),
+    },
+  });
+}
+
+// Brasília = UTC-3 fixo (sem horário de verão desde 2019).
+const BR_OFFSET_MS = 3 * 60 * 60 * 1000;
+const pad = (n: number) => String(n).padStart(2, '0');
+
+function toBrasilia(isoUtc: string) {
+  const br = new Date(new Date(isoUtc).getTime() - BR_OFFSET_MS);
+  const hh = pad(br.getUTCHours());
+  const mm = pad(br.getUTCMinutes());
+  return {
+    data: `${br.getUTCFullYear()}-${pad(br.getUTCMonth() + 1)}-${pad(br.getUTCDate())}`,
+    horario: `${hh}:${mm}`,
+    display: mm === '00' ? `${hh}h` : `${hh}h${mm}`,
+  };
+}
+
+function toBrasiliaISO(isoUtc: string): string {
+  const br = new Date(new Date(isoUtc).getTime() - BR_OFFSET_MS);
+  return `${br.getUTCFullYear()}-${pad(br.getUTCMonth() + 1)}-${pad(br.getUTCDate())}` +
+    `T${pad(br.getUTCHours())}:${pad(br.getUTCMinutes())}:${pad(br.getUTCSeconds())}-03:00`;
+}
+
+function formataBrasiliaDataHora(isoUtc: string): string {
+  const br = new Date(new Date(isoUtc).getTime() - BR_OFFSET_MS);
+  return `${pad(br.getUTCDate())}/${pad(br.getUTCMonth() + 1)}/${br.getUTCFullYear()}` +
+    ` às ${pad(br.getUTCHours())}:${pad(br.getUTCMinutes())}`;
+}
+
+// ── consulta_disponibilidade ────────────────────────────────────────────────
+async function consultaDisponibilidade(input: any, toolUseId: string) {
+  const qs = new URLSearchParams({ pos: input.curso_escolhido ?? '', limite: '6' });
+  if (input.data_desejada) qs.set('data', input.data_desejada);
+  if (input.periodo_desejado) qs.set('periodo', input.periodo_desejado);
+  if (input.horario_inicio_desejado) qs.set('horario_inicio', input.horario_inicio_desejado);
+
+  const res = await sdrApi(`disponibilidade?${qs.toString()}`);
+  const resultado = await res.json().catch(() => ({}));
+  const slots: any[] = resultado.data?.slots || resultado.slots || [];
+
+  let conteudo: string;
+  if (!slots.length) {
+    conteudo = 'Nenhum horário disponível para o período solicitado.';
+  } else {
+    const formatted = slots.map((s) => {
+      const brt = toBrasilia(s.inicio);
+      return `- ${brt.display} do dia ${brt.data} (vendedor_id: ${s.vendedor_id}, nome: ${s.vendedor_nome})`;
+    });
+    conteudo = `Horários disponíveis (Brasília):\n${formatted.join('\n')}`;
+  }
+
+  return {
+    resultado: conteudo,
+    slots_raw: slots.map((s) => {
+      const brt = toBrasilia(s.inicio);
+      return { data: brt.data, horario: brt.horario, vendedor_id: s.vendedor_id, vendedor_nome: s.vendedor_nome };
+    }),
+    id: toolUseId,
+  };
+}
+
+// ── confirmar_agendamento (POST → GCal+Meet → PATCH link) ───────────────────
+async function gcalToken(supabase: any): Promise<string> {
+  if (!GCAL_INTEGRATION_ID) throw new Error('AGENTE_SDR_GCAL_INTEGRATION_ID não configurado');
+  const { data: integ, error } = await supabase
+    .from('calendar_integrations')
+    .select('id, oauth_access_token, oauth_refresh_token, oauth_token_expires_at, is_active')
+    .eq('id', GCAL_INTEGRATION_ID)
+    .maybeSingle();
+  if (error || !integ) throw new Error('Integração Google do agente não encontrada');
+  if (!integ.is_active) throw new Error('Integração Google do agente desativada');
+
+  const expiraEm = integ.oauth_token_expires_at ? new Date(integ.oauth_token_expires_at).getTime() : 0;
+  if (integ.oauth_access_token && expiraEm - Date.now() > 60_000) return integ.oauth_access_token;
+  if (!integ.oauth_refresh_token) throw new Error('Integração Google sem refresh token');
+
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: GOOGLE_CLIENT_ID,
+      client_secret: GOOGLE_CLIENT_SECRET,
+      refresh_token: integ.oauth_refresh_token,
+      grant_type: 'refresh_token',
+    }),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(`refresh do token Google falhou: ${JSON.stringify(json)}`);
+  await supabase.from('calendar_integrations')
+    .update({
+      oauth_access_token: json.access_token,
+      oauth_token_expires_at: new Date(Date.now() + json.expires_in * 1000).toISOString(),
+    })
+    .eq('id', integ.id);
+  return json.access_token;
+}
+
+async function criarEventoMeet(supabase: any, opts: {
+  calendarId: string; startISO: string; endISO: string; summary: string; description: string;
+}): Promise<{ hangoutLink: string | null; eventId: string }> {
+  const token = await gcalToken(supabase);
+  const url = new URL(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(opts.calendarId)}/events`);
+  url.searchParams.set('conferenceDataVersion', '1');
+
+  const res = await fetch(url.toString(), {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      summary: opts.summary,
+      description: opts.description,
+      start: { dateTime: opts.startISO, timeZone: 'America/Sao_Paulo' },
+      end: { dateTime: opts.endISO, timeZone: 'America/Sao_Paulo' },
+      conferenceData: {
+        createRequest: {
+          requestId: `meet-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          conferenceSolutionKey: { type: 'hangoutsMeet' },
+        },
+      },
+    }),
+  });
+  const gJson = await res.json();
+  if (!res.ok) throw new Error(`Google Calendar falhou: ${JSON.stringify(gJson)}`);
+  return { hangoutLink: gJson.hangoutLink ?? gJson.conferenceData?.entryPoints?.[0]?.uri ?? null, eventId: gJson.id };
+}
+
+async function confirmarAgendamento(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
+  try {
+    const post = await sdrApi('agendamentos', {
+      method: 'POST',
+      body: JSON.stringify({
+        lead: { whatsapp: ctx.telefone },
+        pos_graduacao_interesse: input.curso_escolhido,
+        vendedor_id: input.vendedor_id,
+        data_agendamento: `${input.data_escolhida}T${input.horario_escolhido}:00-03:00`,
+      }),
+    });
+    const resp = await post.json().catch(() => ({}));
+    if (!post.ok || resp.error || !resp.data) {
+      throw new Error(typeof resp.error === 'string' ? resp.error : `HTTP ${post.status} ao agendar`);
+    }
+    const ag = resp.data;
+
+    const calendarId = ag.vendedor?.id_calendar;
+    if (!calendarId) {
+      // Vendedor sem agenda vinculada — falha visível em vez de evento na agenda errada.
+      throw new Error(`Vendedor ${ag.vendedor?.name ?? ag.vendedor_id} sem id_calendar cadastrado`);
+    }
+
+    const startUtc = ag.data_agendamento;
+    const endUtc = ag.data_fim_agendamento ?? new Date(new Date(startUtc).getTime() + 30 * 60 * 1000).toISOString();
+    const evento = await criarEventoMeet(supabase, {
+      calendarId,
+      startISO: toBrasiliaISO(startUtc),
+      endISO: toBrasiliaISO(endUtc),
+      summary: `Reunião PPG — ${ag.lead?.nome ?? 'Lead'}`,
+      description:
+        `Agendamento: ${ag.id}\n` +
+        `Curso: ${ag.pos_graduacao_interesse ?? '-'}\n` +
+        `Lead: ${ag.lead?.nome ?? '-'} (${ag.lead?.whatsapp ?? '-'})\n` +
+        `Vendedor: ${ag.vendedor?.name ?? '-'}\n` +
+        `Link: ${ag.link_reuniao ?? '-'}`,
+    });
+
+    if (evento.hangoutLink) {
+      await sdrApi(`agendamentos/${ag.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ link_reuniao: evento.hangoutLink }),
+      });
+    }
+
+    const vendedor = ag.vendedor?.name || ag.vendedor_id || 'monitor';
+    return {
+      resultado: `Agendamento confirmado. id: ${ag.id}, data: ${formataBrasiliaDataHora(ag.data_agendamento)}, monitor: ${vendedor}, link: ${evento.hangoutLink ?? ag.link_reuniao ?? ''}`,
+      agendamento_id: ag.id,
+      id: toolUseId,
+    };
+  } catch (e) {
+    return { resultado: `Erro ao agendar: ${(e as Error).message}`, agendamento_id: null, id: toolUseId };
+  }
+}
+
+// ── verificar_compatibilidade_curso (LLM + validador) ───────────────────────
+const CURSOS_OFICIAIS = [
+  'Sanidade Avícola', 'MBA Postura Comercial', 'Reprodução, Nutrição e Gestão de Bovinos',
+  'Reprodução de Bovinos', 'Nutrição e Gestão de Bovinos', 'Produção, Nutrição e Gestão de Bovinos',
+  'Produção de Suínos', 'Clínica Médica e Cirúrgica de Bovinos', 'Clínica Médica de Bovinos',
+  'Saúde Única e Zoonoses', 'Qualidade e Segurança de POA', 'Comportamento e BEA Animais Produção',
+  'Comportamento e BEA Animais Companhia', 'Cooperativismo e Crédito Rural', 'Cannabis Medicinal',
+  'Gestão e Produção Avicola', 'Fitoterapia', 'MBA em Liderança e Gestão de Fazendas',
+  'MBA em Liderança e Inteligência Artificial no Agronegócio', 'MBA em Liderança e Extensão Rural na Agroindústria',
+];
+const CURSOS_EXCLUSIVOS = [
+  'Sanidade Avícola', 'Reprodução, Nutrição e Gestão de Bovinos', 'Reprodução de Bovinos',
+  'Clínica Médica e Cirúrgica de Bovinos', 'Clínica Médica de Bovinos',
+];
+const ALTERNATIVAS: Record<string, string> = {
+  'Sanidade Avícola': 'Gestão e Produção Avicola',
+  'Reprodução, Nutrição e Gestão de Bovinos': 'Produção, Nutrição e Gestão de Bovinos',
+  'Reprodução de Bovinos': 'Produção, Nutrição e Gestão de Bovinos',
+  'Clínica Médica e Cirúrgica de Bovinos': 'Produção, Nutrição e Gestão de Bovinos',
+  'Clínica Médica de Bovinos': 'Produção, Nutrição e Gestão de Bovinos',
+};
+
+// Port do code node "Saida Estruturada" (validação + correções de lógica).
+function validarMatriz(resultado: any): any {
+  const obrigatorios = [
+    'formacao_identificada', 'e_medico_veterinario', 'curso_solicitado', 'pode_cursar',
+    'curso_alternativo_recomendado', 'mensagem_para_lead', 'compativel', 'output',
+  ];
+  for (const campo of obrigatorios) {
+    if (resultado[campo] === undefined) throw new Error(`Campo obrigatório ausente: ${campo}`);
+  }
+  for (const campo of ['e_medico_veterinario', 'pode_cursar', 'compativel', 'curso_alternativo_recomendado']) {
+    if (typeof resultado[campo] !== 'boolean') throw new Error(`${campo} deve ser boolean`);
+  }
+
+  const ehExclusivo = CURSOS_EXCLUSIVOS.includes(resultado.curso_solicitado);
+  if (ehExclusivo !== resultado.curso_exclusivo_veterinario) resultado.curso_exclusivo_veterinario = ehExclusivo;
+
+  if (!resultado.e_medico_veterinario && ehExclusivo && resultado.pode_cursar === true) {
+    resultado.pode_cursar = false;
+    resultado.compativel = false;
+    const alternativa = ALTERNATIVAS[resultado.curso_solicitado];
+    if (alternativa) {
+      resultado.curso_alternativo = alternativa;
+      resultado.curso_alternativo_recomendado = true;
+    }
+  }
+  if (resultado.e_medico_veterinario && ehExclusivo && resultado.pode_cursar === false) {
+    resultado.pode_cursar = true;
+    resultado.compativel = true;
+    resultado.curso_alternativo = null;
+    resultado.curso_alternativo_recomendado = false;
+  }
+  if (resultado.compativel !== resultado.pode_cursar) resultado.compativel = resultado.pode_cursar;
+
+  const deveSerTrue = resultado.pode_cursar === false && resultado.curso_alternativo != null;
+  if (resultado.curso_alternativo_recomendado !== deveSerTrue) resultado.curso_alternativo_recomendado = deveSerTrue;
+
+  if (resultado.pode_cursar && resultado.output !== 'APROVADO') resultado.output = 'APROVADO';
+
+  if (resultado.curso_alternativo_recomendado === true) {
+    if (resultado.curso_alternativo == null) throw new Error('Inconsistência: marcou alternativa mas não forneceu curso');
+    if (resultado.pode_cursar === true) throw new Error('Inconsistência: marcou alternativa mas aprovou curso original');
+  }
+  return resultado;
+}
+
+async function verificarCompatibilidade(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
+  // Side effect do subfluxo: grava objetivos/área no lead (não bloqueante).
+  const patch: Record<string, unknown> = {};
+  if (input.objetivos_profissionais) patch.objetivos_profissionais = input.objetivos_profissionais;
+  if (input.area_trabalho) patch.situacao_trabalho_atual = input.area_trabalho;
+  if (Object.keys(patch).length) {
+    try { await atualizarLead(supabase, ctx.remotejid, patch); } catch (e) {
+      console.log(`[crm-agente-sdr] update lead na matriz falhou (segue): ${(e as Error).message}`);
+    }
+  }
+
+  const { data: cursos, error } = await supabase
+    .from('cursos_pos_graduacao')
+    .select('pos_graduacao, pode_fazer, parcialmente_aceitas, status')
+    .eq('status', 'ativo');
+  if (error) throw new Error(`cursos_pos_graduacao: ${error.message}`);
+
+  // No n8n a tabela chegava ao agente via tool getAll; aqui vai injetada no system.
+  const system = `${MATRIZ_SYSTEM}\n\n---\n\n## TABELA cursos_pos_graduacao (status = 'ativo') — FONTE DA VERDADE\n\n${JSON.stringify(cursos, null, 1)}`;
+  const user = renderPrompt(MATRIZ_USER_TEMPLATE, {
+    formacao_academica: input.formacao_academica ?? '',
+    curso_interesse: input.curso_interesse ?? '',
+  });
+
+  const resp = await chamarAnthropic({
+    model: MODELO_MATRIZ,
+    max_tokens: 1024,
+    system,
+    messages: [{ role: 'user', content: user }],
+  });
+  const texto = (resp.content ?? [])
+    .filter((b: any) => b.type === 'text')
+    .map((b: any) => b.text)
+    .join('');
+  const semMarkdown = texto.includes('```') ? texto.replace(/```json\n?/g, '').replace(/```\n?/g, '') : texto;
+
+  let parsed: any;
+  try { parsed = JSON.parse(semMarkdown.trim()); } catch (e) {
+    throw new Error(`IA da matriz não retornou JSON válido: ${(e as Error).message}`);
+  }
+  return { ...validarMatriz(parsed), id: toolUseId };
+}
+
+// ── consulta_objecoes (Voyage + match_ppg_voyage top-1) ─────────────────────
+async function consultaObjecoes(supabase: any, input: any, toolUseId: string) {
+  const vRes = await fetch('https://api.voyageai.com/v1/embeddings', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${VOYAGE_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      input: [input.mensagem_lead],
+      model: 'voyage-4-large',
+      input_type: 'query',
+      output_dimension: 1024,
+    }),
+  });
+  if (!vRes.ok) throw new Error(`Voyage HTTP ${vRes.status}: ${await vRes.text()}`);
+  const vJson = await vRes.json();
+  const embedding = vJson.data?.[0]?.embedding;
+  if (!embedding) throw new Error('Voyage não retornou embedding');
+
+  const { data, error } = await supabase.rpc('match_ppg_voyage', {
+    query_embedding: `[${embedding.join(',')}]`,
+    match_count: 1,
+    filter: {},
+  });
+  if (error) throw new Error(`match_ppg_voyage: ${error.message}`);
+
+  // top-1 sempre — retriever burro (idem n8n).
+  const resposta = data?.[0]?.metadata?.resposta;
+  return { resposta_objecao: resposta || 'CONFIANCA_BAIXA', id: toolUseId };
+}
+
+// ── envia_informacoes (sdr-api + contrato de retorno) ───────────────────────
+async function enviaInformacoes(input: any, ctx: CtxConversa, toolUseId: string) {
+  const conteudo = input.conteudo || 'cronograma';
+  const enviarCronograma = conteudo === 'cronograma' || conteudo === 'cronograma_e_valor';
+  const incluirValor = conteudo === 'valor' || conteudo === 'cronograma_e_valor';
+  const sair = (texto: string) => ({ resultado: texto, id: toolUseId });
+
+  if (!input.curso_escolhido) {
+    return sair('Erro: curso_escolhido não informado pela tool. Diga ao lead que vai enviar em seguida e conduza a conversa normalmente.');
+  }
+
+  const res = await sdrApi('envia-informacoes', {
+    method: 'POST',
+    body: JSON.stringify({ whatsapp: ctx.telefone, pos: input.curso_escolhido, conteudo }),
+  });
+  let body: any;
+  try { body = await res.json(); } catch { body = { raw: await res.text().catch(() => '') }; }
+  const d = body?.data ?? body ?? {};
+
+  if (res.status < 200 || res.status >= 300) {
+    const msg = d.error || body?.error || `HTTP ${res.status} no envia-informacoes`;
+    const code = d.code || body?.code || '';
+    if (code === 'cronograma_nao_cadastrado') {
+      return sair('Cronograma ainda não cadastrado para este curso. Diga ao lead que vai mandar o material em seguida e conduza a conversa normalmente.');
+    }
+    if (code === 'valor_nao_cadastrado') {
+      return sair('Valor não cadastrado para este curso. Diga que essa informação é passada na reunião e reconduza pro agendamento.');
+    }
+    if (code === 'cronograma_ja_enviado') {
+      return sair('O cronograma já foi enviado anteriormente nesta conversa. NÃO reenvie nem chame a função de novo. Diga que o material já está com ele e siga a conversa.');
+    }
+    return sair(`Erro ao enviar informações (${msg}${code ? ' / ' + code : ''}). Diga ao lead que vai enviar em seguida e siga a conversa.`);
+  }
+
+  const partes: string[] = [];
+  if (enviarCronograma) {
+    partes.push(d.cronograma_enviado
+      ? 'Cronograma enviado com sucesso no WhatsApp do lead. Confirme em uma linha que enviou e reconduza a conversa pro agendamento.'
+      : 'Cronograma não pôde ser enviado. Diga que vai mandar em seguida e siga a conversa.');
+  }
+  if (incluirValor) {
+    if (d.valor_integral) {
+      partes.push(`Valor integral da pós: ${d.valor_integral}, sem nenhuma condição aplicada. Informe exatamente este valor e lembre que a condição especial liberada hoje, com valor mais em conta e parcelamento mais leve, é apresentada na conversa com o monitor.`);
+    } else {
+      partes.push('Valor não cadastrado. Diga que essa informação é passada na reunião.');
+    }
+    const valorMatricula = d.valor_matricula || null;
+    const linkMatricula = d.link_matricula || null;
+    if (valorMatricula || linkMatricula) {
+      const matriculaTxt = [valorMatricula, linkMatricula].filter(Boolean).join(' ');
+      partes.push(`Matrícula (valor e link pra garantir a vaga direto no valor integral): ${matriculaTxt}. Ofereça pra quem preferir fechar agora, deixando claro que pelo link é o valor integral, sem condição. NUNCA diga ou insinue que o valor da matrícula pode ser reduzido ou negociado.`);
+    }
+  }
+  return sair(partes.join(' '));
+}
+
+// ── pausa_ia ────────────────────────────────────────────────────────────────
+async function pausaIa(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
+  const { error } = await supabase.rpc('crm_set_pausa_ia', {
+    p_telefone: ctx.telefone,
+    p_pausa: true,
+    p_motivo: input.motivo ?? null,
+  });
+  if (error) throw new Error(`crm_set_pausa_ia: ${error.message}`);
+  // n8n também desligava o follow-up automático ao pausar.
+  try { await atualizarLead(supabase, ctx.remotejid, { followup_ativado: false }); } catch { /* não bloqueia */ }
+  return { mensagem: 'Atendimento em Pausa', status: 'pausado', id: toolUseId };
+}
+
+// ── dispatcher ──────────────────────────────────────────────────────────────
+export async function executarTool(
+  supabase: any,
+  toolUse: { id: string; name: string; input: any },
+  ctx: CtxConversa,
+): Promise<Record<string, unknown>> {
+  const { id, name, input } = toolUse;
+  try {
+    switch (name) {
+      case 'consulta_disponibilidade': return await consultaDisponibilidade(input, id);
+      case 'confirmar_agendamento': return await confirmarAgendamento(supabase, input, ctx, id);
+      case 'verificar_compatibilidade_curso': return await verificarCompatibilidade(supabase, input, ctx, id);
+      case 'consulta_objecoes': return await consultaObjecoes(supabase, input, id);
+      case 'envia_informacoes': return await enviaInformacoes(input, ctx, id);
+      case 'pausa_ia': return await pausaIa(supabase, input, ctx, id);
+      default: return { resultado: `Tool desconhecida: ${name}`, id };
+    }
+  } catch (e) {
+    // Erro vira tool_result legível — o agente contorna na conversa em vez de travar.
+    console.error(`[crm-agente-sdr] tool ${name} falhou:`, e);
+    return { resultado: `Erro ao executar ${name}: ${(e as Error).message}. Conduza a conversa normalmente sem citar o erro.`, id };
+  }
+}
+
+// tool_results no formato que o Claude espera (content = JSON do output, idem n8n).
+export function montarToolResults(outputs: Record<string, unknown>[]): any[] {
+  return outputs.map((output) => ({
+    type: 'tool_result',
+    tool_use_id: output.id,
+    content: JSON.stringify(output),
+  }));
+}
