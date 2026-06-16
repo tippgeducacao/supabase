@@ -338,7 +338,9 @@ Deno.serve(async (req) => {
   let templatesEnviados = 0;
   try {
     const cfg = (integration.config ?? {}) as any;
-    const acoes: any[] = Array.isArray(cfg?.acoes) ? cfg.acoes : [];
+    // estrutura do builder: config.acoes.itens[]; cada item { id, tipo, config|params }
+    const acoes: any[] = Array.isArray(cfg?.acoes?.itens) ? cfg.acoes.itens
+                       : Array.isArray(cfg?.acoes) ? cfg.acoes : [];
     const envios = acoes.filter((a) => a?.tipo === "enviar_mensagem_whatsapp" && a?.config?.template_id);
     if (whatsapp && envios.length) {
       const primeiroNome = (nome ?? "").trim().split(/\s+/)[0] || "";
