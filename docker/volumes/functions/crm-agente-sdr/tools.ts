@@ -195,6 +195,27 @@ async function criarEventoMeet(supabase: any, opts: {
   return { hangoutLink: gJson.hangoutLink ?? gJson.conferenceData?.entryPoints?.[0]?.uri ?? null, eventId: gJson.id };
 }
 
+// Move um evento existente (mesmo Meet/link) para um novo horário — usado ao remarcar.
+async function moverEventoMeet(
+  supabase: any,
+  calendarId: string,
+  eventId: string,
+  startISO: string,
+  endISO: string,
+): Promise<void> {
+  const token = await gcalToken(supabase);
+  const url = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`;
+  const res = await fetch(url, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      start: { dateTime: startISO, timeZone: 'America/Sao_Paulo' },
+      end: { dateTime: endISO, timeZone: 'America/Sao_Paulo' },
+    }),
+  });
+  if (!res.ok) throw new Error(`Google Calendar (mover evento) falhou: ${await res.text()}`);
+}
+
 async function confirmarAgendamento(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
   try {
     const post = await sdrApi('agendamentos', {
@@ -239,6 +260,12 @@ async function confirmarAgendamento(supabase: any, input: any, ctx: CtxConversa,
         body: JSON.stringify({ link_reuniao: evento.hangoutLink }),
       });
     }
+    // Guarda o id do evento do GCal pra poder MOVER (não recriar) ao remarcar.
+    try {
+      await supabase.from('agendamentos').update({ google_event_id: evento.eventId }).eq('id', ag.id);
+    } catch (e) {
+      console.log(`[crm-agente-sdr] salvar google_event_id falhou (segue): ${(e as Error).message}`);
+    }
 
     const vendedor = ag.vendedor?.name || ag.vendedor_id || 'monitor';
     return {
@@ -248,6 +275,85 @@ async function confirmarAgendamento(supabase: any, input: any, ctx: CtxConversa,
     };
   } catch (e) {
     return { resultado: `Erro ao agendar: ${(e as Error).message}`, agendamento_id: null, id: toolUseId };
+  }
+}
+
+// ── remarcar_agendamento (atualiza o agendamento EXISTENTE do lead → novo horário vale) ──
+// Acha o agendamento ativo do lead, faz PATCH (fn_sdr_api_reagendar) com a nova data e
+// MOVE o evento do Google Calendar pro novo horário (mesmo link). NÃO cria agendamento novo.
+async function remarcarAgendamento(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
+  try {
+    // 1) acha o agendamento ATIVO (status=agendado) do lead — o mais próximo no futuro.
+    const get = await sdrApi(`agendamentos?telefone=${encodeURIComponent(ctx.telefone)}&status=agendado&limit=50`);
+    const getResp = await get.json().catch(() => ({}));
+    const lista: any[] = Array.isArray(getResp.data) ? getResp.data : [];
+    const agora = Date.now();
+    const alvo = lista
+      .filter((a) => a.data_agendamento && new Date(a.data_agendamento).getTime() > agora - 3_600_000)
+      .sort((a, b) => new Date(a.data_agendamento).getTime() - new Date(b.data_agendamento).getTime())[0] ?? lista[0];
+    if (!alvo) {
+      return { resultado: 'Nenhum agendamento ativo encontrado para este lead. Se ele quer marcar do zero, use consulta_disponibilidade + confirmar_agendamento.', id: toolUseId };
+    }
+
+    const vendedorNovo = input.vendedor_id ?? alvo.vendedor_id;
+    const startBR = `${input.data_escolhida}T${input.horario_escolhido}:00-03:00`;
+    const startMs = new Date(startBR).getTime();
+    if (!Number.isFinite(startMs)) {
+      return { resultado: 'data/horário inválido pra remarcar (use data_escolhida YYYY-MM-DD e horario_escolhido HH:mm).', id: toolUseId };
+    }
+    const endIsoUtc = new Date(startMs + 30 * 60 * 1000).toISOString();
+
+    // 2) PATCH no MESMO agendamento (reagenda) — novo horário passa a valer na base.
+    const patch = await sdrApi(`agendamentos/${alvo.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        data_agendamento: startBR,
+        vendedor_id: input.vendedor_id ?? undefined,
+        observacoes: 'Remarcado pela IA a pedido do lead.',
+      }),
+    });
+    const patchResp = await patch.json().catch(() => ({}));
+    if (!patch.ok || patchResp.success === false || patchResp.error) {
+      const err = patchResp.error || `HTTP ${patch.status}`;
+      return { resultado: `Não consegui remarcar (${err}). Rode consulta_disponibilidade pro novo horário e ofereça um slot livre antes de remarcar.`, id: toolUseId };
+    }
+    const agNovo = patchResp.agendamento ?? {};
+    let link = agNovo.link_reuniao ?? alvo.link_reuniao ?? '';
+
+    // 3) move (ou cria) o evento no Google Calendar pro novo horário.
+    try {
+      const mesmoVendedor = String(vendedorNovo) === String(alvo.vendedor_id);
+      let calendarId = mesmoVendedor ? alvo.vendedor?.id_calendar : null;
+      if (!calendarId) {
+        const { data: prof } = await supabase.from('profiles').select('id_calendar').eq('id', vendedorNovo).maybeSingle();
+        calendarId = prof?.id_calendar ?? null;
+      }
+      const startISO = toBrasiliaISO(new Date(startMs).toISOString());
+      const endISO = toBrasiliaISO(endIsoUtc);
+      const eventId = agNovo.google_event_id ?? null;
+      if (eventId && mesmoVendedor && calendarId) {
+        await moverEventoMeet(supabase, calendarId, eventId, startISO, endISO);
+      } else if (calendarId) {
+        // sem event_id (agendamento antigo) ou trocou de vendedor → cria evento novo
+        const evento = await criarEventoMeet(supabase, {
+          calendarId, startISO, endISO,
+          summary: `Reunião PPG — remarcada`,
+          description: `Agendamento: ${alvo.id} (remarcado pela IA)\nLink: ${link || '-'}`,
+        });
+        link = evento.hangoutLink ?? link;
+        await supabase.from('agendamentos').update({ link_reuniao: link, google_event_id: evento.eventId }).eq('id', alvo.id);
+      }
+    } catch (e) {
+      console.error(`[crm-agente-sdr] remarcar: GCal não atualizado (segue): ${(e as Error).message}`);
+    }
+
+    return {
+      resultado: `Reunião remarcada. Novo horário: ${formataBrasiliaDataHora(startBR)}. Link: ${link || '(o mesmo de antes)'}. Confirme o novo horário e o link pro lead.`,
+      agendamento_id: alvo.id,
+      id: toolUseId,
+    };
+  } catch (e) {
+    return { resultado: `Erro ao remarcar: ${(e as Error).message}`, id: toolUseId };
   }
 }
 
@@ -470,6 +576,7 @@ export async function executarTool(
     switch (name) {
       case 'consulta_disponibilidade': return await consultaDisponibilidade(input, id);
       case 'confirmar_agendamento': return await confirmarAgendamento(supabase, input, ctx, id);
+      case 'remarcar_agendamento': return await remarcarAgendamento(supabase, input, ctx, id);
       case 'verificar_compatibilidade_curso': return await verificarCompatibilidade(supabase, input, ctx, id);
       case 'consulta_objecoes': return await consultaObjecoes(supabase, input, id);
       case 'envia_informacoes': return await enviaInformacoes(input, ctx, id);
