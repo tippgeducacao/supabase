@@ -359,7 +359,7 @@ Deno.serve(async (req) => {
         }
       };
       for (const a of envios) {
-        const ac = a.config;
+        const ac = a.config ?? a.params ?? {};
         const params: any[] = Array.isArray(ac.template_params) ? ac.template_params : [];
         let components: unknown[] = [];
         if (params.length) {
@@ -382,6 +382,35 @@ Deno.serve(async (req) => {
           else console.error(`[crm-lead-webhook] template ${ac.template_id} HTTP ${r.status}: ${await r.text()}`);
         } catch (e: any) {
           console.error(`[crm-lead-webhook] disparo template ${ac.template_id} falhou:`, e?.message);
+        }
+      }
+
+      // Ativa a IA (João) pra esses leads: registra na tabela do agente com
+      // iniciar_atendimento=true. Quando o lead responder o template, o agente assume e
+      // agenda (com contexto: curso + formação). ativar_ia=false na ação desliga isso.
+      const querIa = envios.some((a) => ((a.config ?? a.params) as any)?.ativar_ia !== false);
+      if (querIa) {
+        try {
+          const remotejid = `${whatsapp}@s.whatsapp.net`;
+          const acIa = (envios[0].config ?? envios[0].params ?? {}) as any;
+          const cursoIa = asString(payload?.[acIa.ia_curso_chave ?? "oportunidade"]) ?? null;
+          const formacaoIa = asString(payload?.[acIa.ia_formacao_chave ?? "formacao"]) ?? null;
+          const nomeIa = asString(payload?.[acIa.ia_nome_chave ?? "nome"]) ?? nome ?? "Sem nome";
+          const { data: jaSdr } = await admin
+            .from("cliente_ppg_leads_sdr").select("remotejid").eq("remotejid", remotejid).maybeSingle();
+          if (!jaSdr) {
+            await admin.from("cliente_ppg_leads_sdr").insert({
+              remotejid, nome: nomeIa,
+              curso_interesse_original: cursoIa,
+              formacao_academica: formacaoIa,
+              iniciar_atendimento: true, followup_ativado: true,
+              timestamp: new Date().toISOString(),
+            });
+          } else {
+            await admin.from("cliente_ppg_leads_sdr").update({ iniciar_atendimento: true }).eq("remotejid", remotejid);
+          }
+        } catch (e: any) {
+          console.error("[crm-lead-webhook] ativar IA (cliente_ppg_leads_sdr) falhou (segue):", e?.message);
         }
       }
     }
