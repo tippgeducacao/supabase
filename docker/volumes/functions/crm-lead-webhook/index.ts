@@ -86,7 +86,7 @@ Deno.serve(async (req) => {
   // (1) integracao
   const { data: integration } = await admin
     .from("crm_webhook_integrations")
-    .select("id, slug, nome, secret, segmento_id, area_interesse, pagina_nome, field_mapping, ativa")
+    .select("id, slug, nome, secret, segmento_id, area_interesse, pagina_nome, field_mapping, ativa, config")
     .eq("slug", slug)
     .maybeSingle();
 
@@ -331,12 +331,69 @@ Deno.serve(async (req) => {
     }, 200);
   }
 
+  // (9.5) disparo de template WhatsApp configurado NO PRÓPRIO webhook — replica a ação
+  // `enviar_mensagem_whatsapp` da automação (mesmas origens + mesmo payload p/ crm-whatsapp-send),
+  // mas com as variáveis resolvidas a partir dos campos JÁ mapeados aqui. Encurta o processo:
+  // dispensa a automação separada por segmento. Config em integration.config.acoes[].
+  let templatesEnviados = 0;
+  try {
+    const cfg = (integration.config ?? {}) as any;
+    const acoes: any[] = Array.isArray(cfg?.acoes) ? cfg.acoes : [];
+    const envios = acoes.filter((a) => a?.tipo === "enviar_mensagem_whatsapp" && a?.config?.template_id);
+    if (whatsapp && envios.length) {
+      const primeiroNome = (nome ?? "").trim().split(/\s+/)[0] || "";
+      // {{curso}}: vem de um campo do payload mapeado p/ "oportunidade.curso"; cai no area_interesse da integração.
+      const curso = asString(pickByMapping(payload, mapping, "oportunidade.curso")) ?? integration.area_interesse ?? "";
+      const resolveOrigem = (el: any): string => {
+        switch (el?.origem) {
+          case "lead_primeiro_nome": return primeiroNome || "Olá";
+          case "lead_nome":          return nome || "Olá";
+          case "lead_email":         return email || "-";
+          case "lead_telefone":      return whatsapp || "-";
+          case "oportunidade_curso": return curso || "-";
+          case "texto":              return asString(el?.texto) ?? "-";
+          case "payload":            return asString(payload?.[el?.chave]) ?? "-";
+          default:                   return "-";
+        }
+      };
+      for (const a of envios) {
+        const ac = a.config;
+        const params: any[] = Array.isArray(ac.template_params) ? ac.template_params : [];
+        let components: unknown[] = [];
+        if (params.length) {
+          components = [{ type: "body", parameters: params.map((el) => ({ type: "text", text: resolveOrigem(el) })) }];
+        } else if (ac.template_usa_nome) {
+          components = [{ type: "body", parameters: [{ type: "text", text: primeiroNome || "Olá" }] }];
+        }
+        try {
+          const r = await fetch(`${SUPABASE_URL}/functions/v1/crm-whatsapp-send`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${SERVICE_ROLE}`, "Content-Type": "application/json" },
+            body: JSON.stringify({
+              telefone: whatsapp, tipo: "template",
+              template_name: ac.template_id, template_lang: ac.template_lang ?? "pt_BR",
+              template_components: components,
+              lead_id: leadId, oportunidade_id: oportunidadeId,
+            }),
+          });
+          if (r.ok) templatesEnviados++;
+          else console.error(`[crm-lead-webhook] template ${ac.template_id} HTTP ${r.status}: ${await r.text()}`);
+        } catch (e: any) {
+          console.error(`[crm-lead-webhook] disparo template ${ac.template_id} falhou:`, e?.message);
+        }
+      }
+    }
+  } catch (e: any) {
+    console.error("[crm-lead-webhook] bloco de template falhou (segue):", e?.message);
+  }
+
   // (10) log de sucesso
   await admin.from("crm_webhook_logs").insert({
     integration_id: integration.id, slug, payload,
     resultado: {
       lead_id: leadId, segmento_aplicado: segmentoAplicado,
       lead_oportunidade_id: leadOportunidadeId, oportunidade_id: oportunidadeId, duplicado,
+      templates_enviados: templatesEnviados,
     },
     status: duplicado && !oportunidadeId ? "duplicado" : "ok",
     ip_origem: ipOrigem,
@@ -349,5 +406,6 @@ Deno.serve(async (req) => {
     lead_oportunidade_id: leadOportunidadeId,
     oportunidade_id: oportunidadeId,
     duplicado,
+    templates_enviados: templatesEnviados,
   }, 200);
 });
