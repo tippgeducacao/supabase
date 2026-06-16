@@ -360,9 +360,15 @@ Deno.serve(async (req) => {
       };
       for (const a of envios) {
         const ac = a.config ?? a.params ?? {};
+        const variaveis: any[] = Array.isArray(ac.variaveis) ? ac.variaveis : [];
         const params: any[] = Array.isArray(ac.template_params) ? ac.template_params : [];
         let components: unknown[] = [];
-        if (params.length) {
+        if (variaveis.length) {
+          // modelo da UI do webhook: cada variável é um texto com tokens {webhook=chave}
+          const interpolar = (s: string) =>
+            String(s ?? "").replace(/\{webhook=([^}]+)\}/g, (_m, k) => asString(payload?.[String(k).trim()]) ?? "");
+          components = [{ type: "body", parameters: variaveis.map((v) => ({ type: "text", text: interpolar(String(v)) })) }];
+        } else if (params.length) {
           components = [{ type: "body", parameters: params.map((el) => ({ type: "text", text: resolveOrigem(el) })) }];
         } else if (ac.template_usa_nome) {
           components = [{ type: "body", parameters: [{ type: "text", text: primeiroNome || "Olá" }] }];
