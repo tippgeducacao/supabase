@@ -549,7 +549,13 @@ Deno.serve(async (req) => {
       // Criação Automática (espelha o "atualiza e cria" do SprintHub — fill-if-empty
       // também no lead que já existe). Mapeamento de Entrada (in*) tem prioridade.
       const patch: Record<string, string> = {};
-      if (!existing.nome && (inNome ?? criacaoDefaults.nome))                     patch.nome = (inNome ?? criacaoDefaults.nome)!;
+      // "Sem nome" é tratado como VAZIO: lead duplicado que ficou com esse literal recebe
+      // o nome real que chega depois (antes `!existing.nome` via "Sem nome" como preenchido
+      // e nunca sobrescrevia). Só grava um nome REAL (nunca "Sem nome" por cima).
+      const nomeVazio = (s: string | null | undefined) =>
+        !s || !s.trim() || s.trim().toLowerCase() === "sem nome";
+      const nomeNovo = inNome ?? criacaoDefaults.nome;
+      if (nomeVazio(existing.nome) && nomeNovo && !nomeVazio(nomeNovo))           patch.nome = nomeNovo;
       if (!existing.email && (email ?? criacaoDefaults.email))                    patch.email = (email ?? criacaoDefaults.email)!;
       if (!existing.whatsapp && (whatsapp ?? criacaoDefaults.whatsapp))           patch.whatsapp = (whatsapp ?? criacaoDefaults.whatsapp)!;
       if (!existing.curso_interesse && (inCurso ?? criacaoDefaults.curso_interesse))   patch.curso_interesse = (inCurso ?? criacaoDefaults.curso_interesse)!;
