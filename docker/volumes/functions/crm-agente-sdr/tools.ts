@@ -17,7 +17,7 @@ const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
 const SDR_API_URL = (Deno.env.get('AGENTE_SDR_SDRAPI_URL') ?? `${SUPABASE_URL}/functions/v1/sdr-api`).replace(/\/$/, '');
 const SDR_API_KEY = Deno.env.get('AGENTE_SDR_SDRAPI_KEY') ?? '';
 const VOYAGE_KEY = Deno.env.get('AGENTE_SDR_VOYAGE_KEY') ?? Deno.env.get('VOYAGE_API_KEY') ?? '';
-const MODELO_MATRIZ = Deno.env.get('AGENTE_SDR_MODEL_MATRIZ') ?? 'claude-sonnet-4-20250514';
+const MODELO_MATRIZ = Deno.env.get('AGENTE_SDR_MODEL_MATRIZ') ?? 'claude-sonnet-4-6';
 // Integração (calendar_integrations) da conta Workspace com acesso às agendas dos
 // monitores — equivalente à credencial "Workspace PPG" do n8n.
 const GCAL_INTEGRATION_ID = Deno.env.get('AGENTE_SDR_GCAL_INTEGRATION_ID') ?? '';
