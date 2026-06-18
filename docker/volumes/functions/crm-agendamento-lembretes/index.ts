@@ -96,6 +96,10 @@ async function enviarTemplate(telefone: string, lem: Lembrete, ctx: Ctx): Promis
       template_lang: lem.lang,
       template_components: components,
       wa_account_id: null,
+      // Lembrete é UTILITY (reunião iminente) → fura a trava de 24h de marketing. Sem isso o
+      // crm-whatsapp-send bloqueava silenciosamente (HTTP 200) quando a lead pegou template do
+      // disparo no mesmo dia → o claim ficava setado e o lembrete nunca chegava.
+      forcar_template: true,
     }),
   });
   if (!res.ok) {
