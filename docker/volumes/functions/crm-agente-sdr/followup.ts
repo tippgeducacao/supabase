@@ -42,6 +42,21 @@ const LOCK_TTL_SEGUNDOS = 240;    // mesmo TTL do lock do inbound
 const MAX_LEADS_POR_TICK = 30;    // teto por varredura (worker timeout 5min); resto vem no próximo tick
 const CONCORRENCIA = 5;           // leads processados em paralelo por tick
 
+// ── pausa noturna: NÃO reabre conversa de madrugada ─────────────────────────
+// Entre 22:00 e 06:30 (Brasília) a esteira de janela aberta fica em silêncio —
+// não mandar follow-up no meio da noite. A varredura é curto-circuitada por
+// inteiro nesse intervalo. Quando volta às 06:30 o catch-up de proximoToqueDevido
+// manda UM toque por lead que cruzou thresholds na madrugada (não uma rajada).
+const PAUSA_NOTURNA_INICIO_MIN = 22 * 60;       // 22:00 BRT
+const PAUSA_NOTURNA_FIM_MIN = 6 * 60 + 30;      // 06:30 BRT
+function dentroDaPausaNoturna(): boolean {
+  // Brasília = UTC-3 fixo (sem horário de verão desde 2019), igual ao contexto.ts.
+  const br = new Date(Date.now() - 3 * 60 * 60 * 1000);
+  const min = br.getUTCHours() * 60 + br.getUTCMinutes();
+  // Janela cruza a meia-noite: [22:00, 24:00) ∪ [00:00, 06:30).
+  return min >= PAUSA_NOTURNA_INICIO_MIN || min < PAUSA_NOTURNA_FIM_MIN;
+}
+
 // ── estado do follow no lead (coluna follow_up, texto "follow_0N") ──────────
 function stageDoFollowUp(follow_up: string | null | undefined): number {
   const m = String(follow_up ?? '').match(/(\d+)/);
@@ -324,6 +339,13 @@ async function comConcorrencia<T>(itens: T[], limite: number, fn: (t: T) => Prom
 export async function rodarEsteiraFollowup(supabase: any, limite?: number): Promise<{ candidatos: number; devidos: number; enviados: number }> {
   const telSweep = criarTelemetria(supabase, 'followup-sweep');
   const inicio = Date.now();
+
+  // Pausa noturna (22:00–06:30 BRT): não reabre conversa de madrugada.
+  if (dentroDaPausaNoturna()) {
+    telSweep.registrar('followup_tick', { pausa_noturna: true, candidatos: 0, devidos: 0, enviados: 0 }, Date.now() - inicio);
+    return { candidatos: 0, devidos: 0, enviados: 0 };
+  }
+
   const cap = Number.isFinite(limite) && (limite as number) > 0 ? Math.floor(limite as number) : MAX_LEADS_POR_TICK;
   const candidatos = await selecionarCandidatos(supabase);
 
