@@ -497,23 +497,53 @@ async function consultaObjecoes(supabase: any, input: any, toolUseId: string) {
 }
 
 // ── envia_informacoes (sdr-api + contrato de retorno) ───────────────────────
-async function enviaInformacoes(input: any, ctx: CtxConversa, toolUseId: string) {
+// Curso da OPORTUNIDADE do lead — fallback quando a tool não passa `curso_escolhido`
+// OU a sdr-api não acha a pós (pos_nao_encontrada). Limpa prefixo de landing e símbolos.
+async function cursoDaOportunidade(supabase: any, ctx: CtxConversa): Promise<string> {
+  try {
+    let titulo: string | null = null;
+    if (ctx.oportunidadeId) {
+      const { data } = await supabase.from('crm_oportunidades').select('titulo').eq('id', ctx.oportunidadeId).maybeSingle();
+      titulo = (data as any)?.titulo ?? null;
+    }
+    if (!titulo && ctx.leadId) {
+      const { data } = await supabase.from('crm_oportunidades').select('titulo')
+        .eq('lead_id', ctx.leadId).order('criada_em', { ascending: false }).limit(1).maybeSingle();
+      titulo = (data as any)?.titulo ?? null;
+    }
+    if (!titulo) return '';
+    return String(titulo).replace(/^lead great pages\s+/i, '').replace(/^[^\p{L}\p{N}]+/u, '').trim();
+  } catch { return ''; }
+}
+
+async function enviaInformacoes(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
   const conteudo = input.conteudo || 'cronograma';
   const enviarCronograma = conteudo === 'cronograma' || conteudo === 'cronograma_e_valor';
   const incluirValor = conteudo === 'valor' || conteudo === 'cronograma_e_valor';
   const sair = (texto: string) => ({ resultado: texto, id: toolUseId });
 
-  if (!input.curso_escolhido) {
-    return sair('Erro: curso_escolhido não informado pela tool. Diga ao lead que vai enviar em seguida e conduza a conversa normalmente.');
+  const cursoOp = await cursoDaOportunidade(supabase, ctx);
+  const pos = String(input.curso_escolhido ?? '').trim() || cursoOp;
+  if (!pos) {
+    return sair('Erro: curso_escolhido não informado e sem curso na oportunidade. Diga ao lead que vai enviar em seguida e conduza a conversa normalmente.');
   }
 
-  const res = await sdrApi('envia-informacoes', {
-    method: 'POST',
-    body: JSON.stringify({ whatsapp: ctx.telefone, pos: input.curso_escolhido, conteudo }),
-  });
-  let body: any;
-  try { body = await res.json(); } catch { body = { raw: await res.text().catch(() => '') }; }
-  const d = body?.data ?? body ?? {};
+  const chamar = async (p: string) => {
+    const r = await sdrApi('envia-informacoes', {
+      method: 'POST',
+      body: JSON.stringify({ whatsapp: ctx.telefone, pos: p, conteudo }),
+    });
+    let b: any;
+    try { b = await r.json(); } catch { b = { raw: await r.text().catch(() => '') }; }
+    return { res: r, body: b, d: b?.data ?? b ?? {} };
+  };
+
+  let { res, body, d } = await chamar(pos);
+  // Fallback: pós não encontrada → tenta com o curso da oportunidade (se for diferente).
+  if ((res.status < 200 || res.status >= 300) && (d.code === 'pos_nao_encontrada' || body?.code === 'pos_nao_encontrada')
+      && cursoOp && cursoOp.toLowerCase() !== pos.toLowerCase()) {
+    ({ res, body, d } = await chamar(cursoOp));
+  }
 
   if (res.status < 200 || res.status >= 300) {
     const msg = d.error || body?.error || `HTTP ${res.status} no envia-informacoes`;
@@ -579,7 +609,7 @@ export async function executarTool(
       case 'remarcar_agendamento': return await remarcarAgendamento(supabase, input, ctx, id);
       case 'verificar_compatibilidade_curso': return await verificarCompatibilidade(supabase, input, ctx, id);
       case 'consulta_objecoes': return await consultaObjecoes(supabase, input, id);
-      case 'envia_informacoes': return await enviaInformacoes(input, ctx, id);
+      case 'envia_informacoes': return await enviaInformacoes(supabase, input, ctx, id);
       case 'pausa_ia': return await pausaIa(supabase, input, ctx, id);
       default: return { resultado: `Tool desconhecida: ${name}`, id };
     }

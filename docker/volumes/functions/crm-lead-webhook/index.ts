@@ -383,7 +383,7 @@ Deno.serve(async (req) => {
   // O builder agora oferece TODOS os campos de contato (sistema + customizados, ex.:
   // Estado). Resolvemos cada alias: coluna física de `leads` (lead_coluna whitelisted)
   // OU valor customizado (EAV crm_campo_valores). Tudo defensivo — nunca derruba o intake.
-  const LEAD_COLS_WL = new Set(["nome", "profissao", "area_interesse", "curso_interesse", "tempo_formacao"]);
+  const LEAD_COLS_WL = new Set(["nome", "profissao", "area_interesse", "curso_interesse", "tempo_formacao", "regiao"]);
   function eavCols(tipo: string, valor: string): Record<string, unknown> {
     if (tipo === "numero" || tipo === "inteiro") {
       const n = Number(valor);
@@ -1010,9 +1010,10 @@ Deno.serve(async (req) => {
       const remoteJid = `${telCanon}@s.whatsapp.net`;
       const { data: leadSdr } = await admin
         .from("cliente_ppg_leads_sdr")
-        .select("id")
+        .select("id, nome, curso_interesse_original, formacao_academica")
         .eq("remotejid", remoteJid)
         .maybeSingle();
+      const novaForm = formacaoLead ?? tempoFormacao ?? areaLead;
       if (!leadSdr) {
         await admin.from("cliente_ppg_leads_sdr").insert({
           remotejid: remoteJid,
@@ -1020,7 +1021,7 @@ Deno.serve(async (req) => {
           numero_formatado: whatsapp ?? null,
           email: email ?? null,
           curso_interesse_original: cursoParaAgente ?? null,
-          formacao_academica: formacaoLead ?? tempoFormacao ?? areaLead ?? null,
+          formacao_academica: novaForm ?? null,
           fonte: "sprinthub",
           pausa_ia: false,
           dados_iniciais_coletados: false,
@@ -1028,11 +1029,20 @@ Deno.serve(async (req) => {
           iniciar_atendimento: acaoAtivarIa,
           followup_ativado: acaoAtivarIa,
         });
-      } else if (acaoAtivarIa) {
-        // Lead já existia: garante que o agente responda quando ele reagir ao template.
-        await admin.from("cliente_ppg_leads_sdr")
-          .update({ iniciar_atendimento: true })
-          .eq("id", (leadSdr as any).id);
+      } else {
+        // Lead JÁ EXISTIA: preenche os campos VAZIOS do registro do agente (fill-if-empty,
+        // não sobrescreve bom). Antes só mexia em iniciar_atendimento → por isso ~95% ficavam
+        // SEM curso/nome no agente e o envia_informacoes dava pos_nao_encontrada.
+        const ls = leadSdr as any;
+        const vazio = (s: any) => !s || !String(s).trim() || String(s).trim().toLowerCase() === "sem nome";
+        const patch: Record<string, unknown> = {};
+        if (vazio(ls.curso_interesse_original) && cursoParaAgente) patch.curso_interesse_original = cursoParaAgente;
+        if (vazio(ls.nome) && nome) patch.nome = nome;
+        if (vazio(ls.formacao_academica) && novaForm) patch.formacao_academica = novaForm;
+        if (acaoAtivarIa) patch.iniciar_atendimento = true; // responde quando reagir ao template
+        if (Object.keys(patch).length) {
+          await admin.from("cliente_ppg_leads_sdr").update(patch).eq("id", ls.id);
+        }
       }
     } catch (e: any) {
       console.error("[crm-lead-webhook] seed cliente_ppg_leads_sdr falhou:", e?.message);
