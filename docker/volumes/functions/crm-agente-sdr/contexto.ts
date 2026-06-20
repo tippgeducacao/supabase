@@ -168,9 +168,30 @@ const HORARIOS: Record<number, Janela[] | null> = {
 
 const fmt = (h: number, m: number) => `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 
+const NOME_DIA: Record<number, string> = {
+  0: 'domingo', 1: 'segunda-feira', 2: 'terça-feira', 3: 'quarta-feira',
+  4: 'quinta-feira', 5: 'sexta-feira', 6: 'sábado',
+};
+
+// Próximo dia COM atendimento a partir de amanhã (pula domingo/qualquer dia sem janela em
+// HORARIOS). Evita o "amanhã" fixo apontar pra um dia fechado (ex.: sábado pós-horário → domingo).
+function proximoDiaAtendimento(diaSemana: number): string {
+  for (let i = 1; i <= 7; i++) {
+    const d = (diaSemana + i) % 7;
+    const janelas = HORARIOS[d];
+    if (janelas && janelas.length) {
+      const ini = fmt(janelas[0].inicio.h, janelas[0].inicio.m);
+      return i === 1
+        ? `amanhã (${NOME_DIA[d]}) a partir das ${ini}`
+        : `${NOME_DIA[d]} a partir das ${ini}`;
+    }
+  }
+  return 'no próximo dia útil';
+}
+
 function verificarDisponibilidade(diaSemana: number, hora: number, minuto: number) {
   if (diaSemana === 0) {
-    return { disponivel: false, mensagem: '⚠️ HOJE É DOMINGO - Não atendemos aos domingos.' };
+    return { disponivel: false, mensagem: `⚠️ HOJE É DOMINGO - Não atendemos aos domingos. Próximo atendimento: ${proximoDiaAtendimento(diaSemana)}.` };
   }
   const periodos = HORARIOS[diaSemana]!;
   const minutoAtual = hora * 60 + minuto;
@@ -205,7 +226,7 @@ function verificarDisponibilidade(diaSemana: number, hora: number, minuto: numbe
   const ultimo = periodos[periodos.length - 1];
   return {
     disponivel: false,
-    mensagem: `⚠️ ATENÇÃO: Já passou do último horário de hoje (${fmt(ultimo.fim.h, ultimo.fim.m)}). Próximo disponível: amanhã.`,
+    mensagem: `⚠️ ATENÇÃO: Já passou do último horário de hoje (${fmt(ultimo.fim.h, ultimo.fim.m)}). Próximo disponível: ${proximoDiaAtendimento(diaSemana)}.`,
   };
 }
 
