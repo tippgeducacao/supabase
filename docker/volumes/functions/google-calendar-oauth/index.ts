@@ -14,15 +14,49 @@ const CLIENT_ID = Deno.env.get('GOOGLE_CALENDAR_CLIENT_ID')!;
 const CLIENT_SECRET = Deno.env.get('GOOGLE_CALENDAR_CLIENT_SECRET')!;
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-const ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY')!;
 
-const REDIRECT_URI = `${SUPABASE_URL}/functions/v1/google-calendar-oauth/callback`;
-const SCOPES = [
-  'https://www.googleapis.com/auth/calendar',
-  'https://www.googleapis.com/auth/calendar.events',
-  'https://www.googleapis.com/auth/userinfo.email',
-  'openid',
-].join(' ');
+// Em ambientes self-hosted, SUPABASE_URL dentro do container aponta pro endereço
+// interno (http://kong:8000) que o Google não consegue acessar. Usamos
+// SUPABASE_PUBLIC_URL (já setado pelo docker-compose do Supabase self-hosted)
+// para o redirect público; fallback pra SUPABASE_URL se não estiver definida.
+const PUBLIC_BASE_URL =
+  Deno.env.get('SUPABASE_PUBLIC_URL') ||
+  Deno.env.get('GOOGLE_OAUTH_REDIRECT_BASE_URL') ||
+  Deno.env.get('PUBLIC_SUPABASE_URL') ||
+  SUPABASE_URL;
+
+const REDIRECT_URI = `${PUBLIC_BASE_URL}/functions/v1/google-calendar-oauth/callback`;
+
+// Scopes modulares: o frontend escolhe qual conjunto pedir via ?mode=
+// 'email'    → só Gmail (envio, leitura, modify)
+// 'calendar' → só Calendar
+// 'full'     → ambos (default, retrocompatibilidade)
+const SCOPE_GROUPS = {
+  base: ['https://www.googleapis.com/auth/userinfo.email', 'openid'],
+  email: [
+    'https://www.googleapis.com/auth/gmail.send',
+    'https://www.googleapis.com/auth/gmail.readonly',
+    'https://www.googleapis.com/auth/gmail.modify',
+  ],
+  calendar: [
+    'https://www.googleapis.com/auth/calendar',
+    'https://www.googleapis.com/auth/calendar.events',
+  ],
+};
+
+type OAuthMode = 'email' | 'calendar' | 'full';
+
+function buildScopes(mode: OAuthMode): string {
+  const list = [...SCOPE_GROUPS.base];
+  if (mode === 'email' || mode === 'full') list.push(...SCOPE_GROUPS.email);
+  if (mode === 'calendar' || mode === 'full') list.push(...SCOPE_GROUPS.calendar);
+  return list.join(' ');
+}
+
+function parseMode(raw: string | null): OAuthMode {
+  if (raw === 'email' || raw === 'calendar') return raw;
+  return 'full';
+}
 
 async function upsertCalendarIntegrations(
   admin: ReturnType<typeof createClient>,
@@ -92,23 +126,29 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'invalid_action' }, 400);
       }
 
-      // Auth user
+      // Auth user — valida o JWT via service role (não depende de SUPABASE_ANON_KEY no runtime)
       const authHeader = req.headers.get('Authorization');
       if (!authHeader?.startsWith('Bearer ')) return jsonResponse({ error: 'unauthorized' }, 401);
-      const userClient = createClient(SUPABASE_URL, ANON_KEY, {
-        global: { headers: { Authorization: authHeader } },
-      });
-      const { data: userData, error: cErr } = await userClient.auth.getUser();
-      if (cErr || !userData?.user?.id) return jsonResponse({ error: 'unauthorized' }, 401);
+      const token = authHeader.replace(/^Bearer\s+/i, '');
+      const adminAuth = createClient(SUPABASE_URL, SERVICE_ROLE);
+      const { data: userData, error: cErr } = await adminAuth.auth.getUser(token);
+      if (cErr || !userData?.user?.id) {
+        console.error('auth.getUser failed', cErr);
+        return jsonResponse({ error: 'unauthorized', detail: cErr?.message }, 401);
+      }
       const userId = userData.user.id;
 
       const integrationId = url.searchParams.get('integration_id');
       if (!integrationId) return jsonResponse({ error: 'missing integration_id' }, 400);
 
-      // state = base64({ integration_id, user_id, nonce })
+      const mode = parseMode(url.searchParams.get('mode'));
+      const scopes = buildScopes(mode);
+
+      // state = base64({ integration_id, user_id, mode, nonce })
       const state = btoa(JSON.stringify({
         i: integrationId,
         u: userId,
+        m: mode,
         n: crypto.randomUUID(),
       }));
 
@@ -116,11 +156,20 @@ Deno.serve(async (req) => {
       authUrl.searchParams.set('client_id', CLIENT_ID);
       authUrl.searchParams.set('redirect_uri', REDIRECT_URI);
       authUrl.searchParams.set('response_type', 'code');
-      authUrl.searchParams.set('scope', SCOPES);
+      authUrl.searchParams.set('scope', scopes);
       authUrl.searchParams.set('access_type', 'offline');
       authUrl.searchParams.set('prompt', 'consent');
       authUrl.searchParams.set('include_granted_scopes', 'true');
       authUrl.searchParams.set('state', state);
+
+      console.log('[oauth-start]', {
+        mode,
+        integrationId,
+        clientIdLen: CLIENT_ID?.length || 0,
+        clientIdSet: !!CLIENT_ID,
+        redirectUri: REDIRECT_URI,
+        scopes,
+      });
 
       return jsonResponse({ url: authUrl.toString() });
     }
@@ -135,12 +184,13 @@ Deno.serve(async (req) => {
     }
     if (!code || !stateRaw) return htmlResponse(closePopupHtml(false, 'missing_code_or_state'), 400);
 
-    let state: { i: string; u: string };
+    let state: { i: string; u: string; m?: OAuthMode };
     try {
       state = JSON.parse(atob(stateRaw));
     } catch {
       return htmlResponse(closePopupHtml(false, 'invalid_state'), 400);
     }
+    const mode: OAuthMode = state.m === 'email' || state.m === 'calendar' ? state.m : 'full';
 
     // Exchange code -> tokens
     const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
@@ -160,7 +210,7 @@ Deno.serve(async (req) => {
       return htmlResponse(closePopupHtml(false, tokenJson.error || 'token_exchange_failed'), 400);
     }
 
-    const { access_token, refresh_token, expires_in } = tokenJson;
+    const { access_token, refresh_token, expires_in, scope: grantedScope } = tokenJson;
 
     // Get user email
     const uiRes = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
@@ -173,7 +223,57 @@ Deno.serve(async (req) => {
 
     const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
 
-    // Buscar TODAS as sub-agendas da conta Google (calendarList)
+    // Carrega a integration original (para owner_user_id, scope, etc)
+    const { data: baseInteg } = await admin
+      .from('calendar_integrations')
+      .select('*')
+      .eq('id', state.i)
+      .maybeSingle();
+
+    if (!baseInteg) {
+      return htmlResponse(closePopupHtml(false, 'integration_not_found'), 404);
+    }
+
+    // === MODE = email: só atualiza tokens, não toca em calendários ===
+    if (mode === 'email') {
+      const emailUpdates: Record<string, unknown> = {
+        oauth_access_token: access_token,
+        oauth_token_expires_at: expiresAt,
+        scopes: grantedScope ?? buildScopes('email'),
+      };
+      if (refresh_token) emailUpdates.oauth_refresh_token = refresh_token;
+      if (accountEmail) emailUpdates.account_email = accountEmail;
+
+      const { error: emailErr } = await admin
+        .from('calendar_integrations')
+        .update(emailUpdates)
+        .eq('id', state.i);
+      if (emailErr) {
+        console.error('update integration (email mode) failed', emailErr);
+        return htmlResponse(closePopupHtml(false, emailErr.message), 500);
+      }
+
+      // Limpa flag de token revogado em caixas dessa conta
+      if (accountEmail) {
+        await admin
+          .from('email_caixas_conectadas')
+          .update({ last_sync_error: null })
+          .eq('email_caixa', accountEmail);
+      }
+
+      // Dispara sync de inbox em background (não bloqueia)
+      if (accountEmail) {
+        fetch(`${SUPABASE_URL}/functions/v1/gmail-sync-inbox`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${SERVICE_ROLE}` },
+          body: JSON.stringify({ email_caixa: accountEmail }),
+        }).catch((e) => console.error('initial gmail sync failed', e));
+      }
+
+      return htmlResponse(closePopupHtml(true));
+    }
+
+    // === MODE = calendar ou full: descobre sub-agendas ===
     const listRes = await fetch(
       'https://www.googleapis.com/calendar/v3/users/me/calendarList?minAccessRole=reader',
       { headers: { Authorization: `Bearer ${access_token}` } },
@@ -187,17 +287,6 @@ Deno.serve(async (req) => {
       accessRole?: string;
     }> = Array.isArray(listJson?.items) ? listJson.items : [];
 
-    // Carrega a integration original (para owner_user_id, scope, etc)
-    const { data: baseInteg } = await admin
-      .from('calendar_integrations')
-      .select('*')
-      .eq('id', state.i)
-      .maybeSingle();
-
-    if (!baseInteg) {
-      return htmlResponse(closePopupHtml(false, 'integration_not_found'), 404);
-    }
-
     // Identifica primary
     const primaryItem = items.find(i => i.primary) ?? items[0];
     const primaryId = primaryItem?.id ?? 'primary';
@@ -209,6 +298,7 @@ Deno.serve(async (req) => {
       external_calendar_id: primaryId,
       is_primary: true,
       selected: true,
+      scopes: grantedScope ?? buildScopes(mode),
     };
     if (refresh_token) baseUpdates.oauth_refresh_token = refresh_token;
     if (accountEmail) baseUpdates.account_email = accountEmail;
@@ -223,6 +313,14 @@ Deno.serve(async (req) => {
     if (updErr) {
       console.error('update integration failed', updErr);
       return htmlResponse(closePopupHtml(false, updErr.message), 500);
+    }
+
+    // Limpa flag de token revogado em caixas dessa conta (caso scopes Gmail estejam incluídos)
+    if (accountEmail && mode === 'full') {
+      await admin
+        .from('email_caixas_conectadas')
+        .update({ last_sync_error: null })
+        .eq('email_caixa', accountEmail);
     }
 
     // 2) Insere/atualiza demais sub-agendas (selected=false por padrão)

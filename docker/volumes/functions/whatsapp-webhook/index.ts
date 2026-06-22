@@ -205,8 +205,26 @@ Deno.serve(async (req) => {
               } else if (msg?.type === "sticker") {
                 tipoEvento = "inbound_media";
                 mediaInbound = { tipo: "sticker", id: msg.sticker?.id, mime_type: msg.sticker?.mime_type || "image/webp" };
+              } else if (msg?.type === "reaction") {
+                // Reação a uma mensagem (emoji). Antes caía no else e virava
+                // conteúdo vazio -> card mostrava o "[anexo]" genérico.
+                textoLivre = msg.reaction?.emoji
+                  ? `↩️ Reagiu ${msg.reaction.emoji}`
+                  : "↩️ Reação removida";
+              } else if (msg?.type === "location") {
+                const loc = msg.location || {};
+                const ref = loc.name || loc.address;
+                textoLivre = ref ? `📍 Localização: ${ref}` : "📍 Localização";
+              } else if (msg?.type === "contacts") {
+                const nomeContato = msg.contacts?.[0]?.name?.formatted_name;
+                textoLivre = nomeContato ? `👤 Contato: ${nomeContato}` : "👤 Contato";
               } else {
-                console.log("[whatsapp-webhook] msg type ignorado:", msg?.type);
+                // Tipo desconhecido / "unsupported" (enquete, ver-uma-vez, etc.):
+                // a Meta NÃO entrega o arquivo. Registra O QUE chegou em vez de
+                // gravar vazio — que era o que virava "[anexo]" no card e deixava
+                // o atendente sem saber o que o contato mandou.
+                textoLivre = `⚠️ Mensagem não suportada${msg?.type ? ` (${msg.type})` : ""}`;
+                console.log("[whatsapp-webhook] msg type nao suportado:", msg?.type);
               }
 
               console.log("[whatsapp-webhook] msg", { from, tipoEvento, buttonRaw, textoLivre, mediaInbound });

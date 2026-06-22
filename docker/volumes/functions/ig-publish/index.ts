@@ -20,15 +20,26 @@ Deno.serve(async (req) => {
 
     const body = await req.json().catch(() => ({}));
     const mode = body.mode || "cron";
+    const nowIso = new Date().toISOString();
 
     if (mode === "single" && body.post_id) {
-      const { data: post } = await supabase
+      // CLAIM atômico: só publica se a linha ainda não está em publicação/publicada.
+      // Evita publicação dupla quando o usuário clica "Publicar agora" e o cron
+      // pega o mesmo post no mesmo segundo (ou em duplo-clique).
+      const { data: claimed } = await supabase
         .from("ig_scheduled_posts")
-        .select("*, ig_accounts(*)")
+        .update({ status: "publishing", updated_at: nowIso })
         .eq("id", body.post_id)
-        .single();
+        .in("status", ["scheduled", "draft", "failed"])
+        .select("*, ig_accounts(*)");
 
-      if (!post) throw new Error("Post not found");
+      const post = claimed?.[0];
+      if (!post) {
+        // Já reivindicado por outra execução (cron/clique) ou já publicado.
+        return new Response(JSON.stringify({ skipped: true, reason: "já em publicação ou publicado" }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
 
       const result = await publishPost(supabase, post, post.ig_accounts);
       return new Response(JSON.stringify(result), {
@@ -36,18 +47,35 @@ Deno.serve(async (req) => {
       });
     }
 
-    // Cron mode
+    // Cron mode — CLAIM atômico evita publicação duplicada (bug do Reels saindo 2-3x).
+    // O cron roda a cada minuto; um Reels fica até ~150s no waitForContainer enquanto
+    // o Instagram processa o vídeo. Antes, a linha continuava 'scheduled' esse tempo todo,
+    // então a execução do minuto seguinte pegava o MESMO post e publicava de novo.
+    // Agora a linha vira 'publishing' de forma atômica: a próxima execução recebe zero
+    // linhas para ela e não republica.
     const { data: posts } = await supabase
       .from("ig_scheduled_posts")
-      .select("*, ig_accounts(*)")
+      .update({ status: "publishing", updated_at: nowIso })
       .eq("status", "scheduled")
-      .lte("scheduled_at", new Date().toISOString());
+      .lte("scheduled_at", nowIso)
+      .select("*, ig_accounts(*)");
 
     const results = [];
     for (const post of posts || []) {
       const result = await publishPost(supabase, post, post.ig_accounts);
       results.push(result);
     }
+
+    // Recupera posts presos em 'publishing' há mais de 15 min (uma execução anterior
+    // morreu no meio). NÃO republica — marca como falha p/ revisão manual, evitando
+    // duplicar algo que pode já ter saído no Instagram. 15 min >> 150s máx de processamento,
+    // então nunca pega uma publicação ainda legitimamente em andamento.
+    const staleCutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    await supabase
+      .from("ig_scheduled_posts")
+      .update({ status: "failed", error_message: "Publicação interrompida — confira no Instagram antes de reenviar" })
+      .eq("status", "publishing")
+      .lt("updated_at", staleCutoff);
 
     return new Response(JSON.stringify({ success: true, processed: results.length, results }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -89,9 +117,10 @@ async function publishPost(supabase: any, post: any, account: any) {
     } else {
       containerId = await createSingleContainer(ig_user_id, access_token, post, userTags, collaborators);
 
-      if (post.media_type === "VIDEO" || post.media_type === "REELS") {
-        await waitForContainer(containerId, access_token);
-      }
+      // Aguarda o container ficar FINISHED antes de publicar — vale para TODOS os tipos.
+      // Imagem também precisa: chamar media_publish cedo demais (antes do Instagram
+      // baixar/processar a mídia) retorna "Media ID is not available".
+      await waitForContainer(containerId, access_token);
     }
 
     // Publish
@@ -217,10 +246,14 @@ async function publishCarousel(
 async function waitForContainer(containerId: string, accessToken: string) {
   for (let i = 0; i < 30; i++) {
     await new Promise((r) => setTimeout(r, 5000));
-    const res = await fetch(`${META_API}/${containerId}?fields=status_code&access_token=${accessToken}`);
+    // `status` traz o detalhe do erro do Instagram (formato/codec/duração do vídeo etc.);
+    // sem ele a falha vira só "Media processing failed" e ninguém sabe o motivo.
+    const res = await fetch(`${META_API}/${containerId}?fields=status_code,status&access_token=${accessToken}`);
     const data = await res.json();
     if (data.status_code === "FINISHED") return;
-    if (data.status_code === "ERROR") throw new Error("Media processing failed");
+    if (data.status_code === "ERROR") {
+      throw new Error(`Instagram recusou a mídia: ${data.status || "verifique formato/duração do vídeo"}`);
+    }
   }
-  throw new Error("Media processing timeout");
+  throw new Error("Tempo esgotado processando a mídia no Instagram (vídeo muito grande ou longo?)");
 }

@@ -88,17 +88,27 @@ function buildComponents(t: any) {
 
   if (Array.isArray(t.botoes) && t.botoes.length > 0) {
     const buttons = t.botoes.map((b: any) => {
-      const type = String(b.type ?? b.tipo ?? '').toUpperCase();
-      const text = b.text ?? b.texto;
+      // Texto do botão: o editor salva quick-reply como { label, action };
+      // CTA pode vir como { text/texto, url } ou { ..., phone_number }.
+      const text = b.text ?? b.texto ?? b.label ?? b.titulo ?? '';
+      const url = b.url ?? b.link;
+      const phone = b.phone_number ?? b.telefone;
+      // Tipo explícito (type/tipo) tem prioridade; senão infere pelo conteúdo
+      // (URL/telefone) e, no caso padrão {label, action}, cai em QUICK_REPLY.
+      let type = String(b.type ?? b.tipo ?? '').toUpperCase();
+      if (!type) {
+        if (url) type = 'URL';
+        else if (phone) type = 'PHONE_NUMBER';
+        else type = 'QUICK_REPLY';
+      }
       const out: any = { type, text };
-      if (type === 'URL' && (b.url ?? b.link)) {
-        const url = b.url ?? b.link;
+      if (type === 'URL' && url) {
         out.url = url;
         const filled = fillUrlExample(url, b.url_vars_mapping ?? b.variaveis_mapping);
         if (filled) out.example = [filled];
       }
-      if (type === 'PHONE_NUMBER' && (b.phone_number ?? b.telefone)) {
-        out.phone_number = b.phone_number ?? b.telefone;
+      if (type === 'PHONE_NUMBER' && phone) {
+        out.phone_number = phone;
       }
       return out;
     });

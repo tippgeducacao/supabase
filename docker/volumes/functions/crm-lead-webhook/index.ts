@@ -166,6 +166,7 @@ const ACAO_LABELS: Record<string, string> = {
   atualizar_lead:      "Atualizar campo do contato",
   definir_responsavel: "Mudar permissões de acesso ao contato",
   criar_oportunidade:  "Criar oportunidade",
+  distribuir_lead:     "Distribuir lead",
   enviar_mensagem_whatsapp: "Enviar template WhatsApp",
   add_segmento:        "Adicionar a um segmento",
   remove_segmento:     "Remover de um segmento",
@@ -953,6 +954,52 @@ Deno.serve(async (req) => {
         if (mudou) {
           acoesAplicadas.push("atualizar_lead");
           await logAtividade(leadId, "acao_webhook", "Ação de Webhook Integrado executada", acaoChip("atualizar_lead"));
+        }
+      } else if (a?.tipo === "distribuir_lead" && leadId) {
+        // "Distribuir lead": escolhe UM responsável (rodízio balanceado por carga) num pool
+        // por cargo/departamento e o aplica nas DUAS superfícies — seta na oportunidade
+        // criada no (9b) e ABRE+atribui um atendimento no SAC (resolve/cria sac_contatos por
+        // telefone). Mesmo dono no CRM e no SAC. Carga conta SÓ o que ESTA ação distribuiu
+        // (recontato não pesa); o motor grava em crm_distribuicao_log.
+        const pc: any = a?.params ?? {};
+        const cargos = Array.isArray(pc.cargos) ? pc.cargos.map((x: unknown) => String(x)).filter(Boolean) : [];
+        const deptos = Array.isArray(pc.departamentos) ? pc.departamentos.map((x: unknown) => String(x)).filter(Boolean) : [];
+        if (cargos.length || deptos.length) {
+          const { data: pick, error: pErr } = await admin.rpc("distribuir_proximo_responsavel", {
+            p_acao_id: a.id,
+            p_cargos: cargos.length ? cargos : null,
+            p_departamentos: deptos.length ? deptos : null,
+          });
+          if (pErr) throw pErr;
+          const row: any = Array.isArray(pick) ? pick[0] : pick;
+          const usuarioId: string | null = row?.usuario_id ?? null;
+          const logId: string | null = row?.log_id ?? null;
+          if (usuarioId) {
+            // (a) mesmo responsável na oportunidade criada nesta rodada (9b)
+            if (pc.setarOportunidade !== false && oportunidadeId) {
+              await admin.from("crm_oportunidades").update({ responsavel_id: usuarioId }).eq("id", oportunidadeId);
+            }
+            // (b) abre+atribui o atendimento no SAC
+            let atendId: string | null = null;
+            if (pc.abrirSac !== false && pc.sacFunilId && pc.sacEtapaId) {
+              const { data: aid } = await admin.rpc("sac_cria_atend", {
+                p_lead_id: leadId,
+                p_funil_id: pc.sacFunilId,
+                p_etapa_id: pc.sacEtapaId,
+                p_responsavel_id: usuarioId,
+                p_origem: "distribuicao",
+              });
+              atendId = (aid as string) ?? null;
+            }
+            // (c) amarra os ids no log → a carga passa a contar pelo estado real (aberta/ativo)
+            if (logId) {
+              await admin.from("crm_distribuicao_log")
+                .update({ lead_id: leadId, oportunidade_id: oportunidadeId ?? null, atendimento_id: atendId })
+                .eq("id", logId);
+            }
+            acoesAplicadas.push("distribuir_lead");
+            await logAtividade(leadId, "acao_webhook", "Ação de Webhook Integrado executada", acaoChip("distribuir_lead"));
+          }
         }
       } else if (a?.tipo === "enviar_mensagem_whatsapp") {
         // "Enviar template WhatsApp": dispara um template aprovado já com as variáveis

@@ -1,158 +1,188 @@
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+// disc-feedback
+// Gera relatório DISC personalizado para um colaborador via Anthropic.
+// Saída em 3 blocos de 3 itens: hábitos, esportes e estudos.
+
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, cache-control, pragma, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type, cache-control, pragma, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
-serve(async (req) => {
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
+const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const ANTHROPIC_MODEL = Deno.env.get("ANTHROPIC_MODEL") ?? "claude-haiku-4-5-20251001";
+
+async function getAnthropicKey(sb: any): Promise<string> {
+  const { data, error } = await sb
+    .from("ai_api_keys")
+    .select("api_key")
+    .eq("provider", "anthropic")
+    .eq("is_active", true)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error("Erro ao ler chave Anthropic: " + error.message);
+  if (!data?.api_key) {
+    throw new Error("Chave Anthropic ativa não encontrada em ai_api_keys. Configure em /ia-config.");
+  }
+  return data.api_key as string;
+}
+
+// Robust JSON extractor: aceita resposta com fences markdown ou prefixos.
+function extractJson(text: string): any | null {
+  let s = (text || "").trim();
+  s = s.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
+  // Pega da primeira { até a última } (Claude às vezes acrescenta intro).
+  const firstBrace = s.indexOf("{");
+  const lastBrace = s.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) s = s.slice(firstBrace, lastBrace + 1);
+  try {
+    return JSON.parse(s);
+  } catch {
+    return null;
+  }
+}
+
+Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
     const { nome, perfil_d, perfil_i, perfil_s, perfil_c, perfil_dominante, setor } = await req.json();
 
-    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
-    if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY not configured");
+    const sb = createClient(SUPABASE_URL, SERVICE_KEY);
+    const ANTHROPIC_API_KEY = await getAnthropicKey(sb);
 
-    const prompt = `Você é um consultor sênior de desenvolvimento humano e comportamental com 20 anos de experiência em metodologia DISC. Gere um relatório COMPLETO e APROFUNDADO para o colaborador "${nome}" do setor "${setor}".
+    const perfis = [
+      { letra: "D", nome: "Dominância", pct: perfil_d },
+      { letra: "I", nome: "Influência", pct: perfil_i },
+      { letra: "S", nome: "Estabilidade", pct: perfil_s },
+      { letra: "C", nome: "Conformidade", pct: perfil_c },
+    ];
+    const ordenados = [...perfis].sort((a, b) => a.pct - b.pct);
+    const fracos = ordenados.slice(0, 2).map((p) => `${p.letra} (${p.nome}) = ${p.pct}%`).join(", ");
+    const fortes = [...perfis].sort((a, b) => b.pct - a.pct).slice(0, 2)
+      .map((p) => `${p.letra} (${p.nome}) = ${p.pct}%`).join(", ");
 
-PERFIL DISC DO COLABORADOR:
-- Dominância (D): ${perfil_d}%
-- Influência (I): ${perfil_i}%
-- Estabilidade (S): ${perfil_s}%
-- Conformidade (C): ${perfil_c}%
+    const systemPrompt =
+      "Você é um consultor sênior de desenvolvimento humano que trabalha com a metodologia DISC. " +
+      "Sua resposta deve ser SOMENTE JSON válido, sem markdown, sem texto antes ou depois. " +
+      "O JSON deve seguir EXATAMENTE o schema solicitado pelo usuário, sem chaves extras. " +
+      "Escreva em português brasileiro acolhedor e prático, sem jargão corporativo importado.\n\n" +
+      "CONTEXTO INTERNO (use somente como filtro para SUAS escolhas — NUNCA mencione no texto):\n" +
+      "- O colaborador vive em uma cidade pequena de interior, sem acesso fácil a centros grandes.\n" +
+      "- Toda recomendação precisa ser realista e acessível em qualquer cidade do interior.\n" +
+      "- Prefira opções gratuitas ou de baixo custo; evite golfe, tênis privado, equitação, esqui, " +
+      "mentorias premium pagas, eventos em capitais.\n\n" +
+      "REGRAS DE ESCRITA DO RELATÓRIO (obrigatórias):\n" +
+      "- NUNCA cite a cidade pelo nome (Ampere/PR ou qualquer outra). Trate o colaborador como uma pessoa qualquer.\n" +
+      "- NUNCA mencione salário, faixa de renda, orçamento, valores em reais, custo mensal ou similares.\n" +
+      "- NUNCA escreva frases tipo 'pensando em uma cidade pequena' ou 'considerando seu salário' — isso é constrangedor.\n" +
+      "- Para 'onde_encontrar' e 'como_comecar' apenas indique onde acessar (ex: 'YouTube', 'biblioteca municipal', " +
+      "'Sebrae online', 'app gratuito X') sem comentar custo nem localização do colaborador.";
+
+    const userPrompt = `Gere um relatório DISC personalizado para "${nome}" do setor "${setor}".
+
+PERFIL:
+- D (Dominância): ${perfil_d}%
+- I (Influência): ${perfil_i}%
+- S (Estabilidade): ${perfil_s}%
+- C (Conformidade): ${perfil_c}%
 - Perfil dominante: ${perfil_dominante}
+- Perfis mais fracos (foco das recomendações): ${fracos}
+- Perfis mais fortes (já dominados): ${fortes}
 
-CONTEXTO DOS PERFIS DISC:
-- D (Dominância): Orientação a resultados, competitividade, assertividade, tomada de decisão rápida
-- I (Influência): Comunicação, entusiasmo, persuasão, sociabilidade, otimismo
-- S (Estabilidade): Paciência, lealdade, cooperação, consistência, harmonia
-- C (Conformidade): Análise, precisão, qualidade, organização, pensamento crítico
+REGRAS GERAIS:
+- DISC mede PROBABILIDADE DE REAÇÃO IMEDIATA a um acontecimento, NÃO julga qualidade de pessoa.
+- Não tratar perfis fracos como "ruins". Cada um pode escolher o que faz sentido desenvolver.
+- 3 hábitos, 3 esportes, 3 estudos — cada um com motivação clara.
+- Esportes válidos: caminhada, corrida de rua, futebol/futsal, ciclismo, vôlei, bocha, pesca esportiva,
+  tênis de mesa, natação, academia (qualquer uma). Nenhum outro.
+- Estudos: livro físico, e-book, podcast, canal do YouTube, curso (Sebrae, FGV, Coursera audit, etc.).
+  Indicar onde encontrar (sem citar custo).
+- Resumo do perfil em português natural (parágrafo de 4-6 frases).
+- NUNCA escrever sobre cidade, salário, orçamento ou valores no relatório.
 
-INSTRUÇÕES:
-- Analise os percentuais para entender o equilíbrio do perfil
-- Perfis abaixo de 20% são áreas de desenvolvimento importante
-- Perfis acima de 30% são traços dominantes
-- Considere a combinação dos perfis (ex: alto D + baixo S = pode ser visto como impaciente)
-- Seja ESPECÍFICO, PRÁTICO e PERSONALIZADO
-
-Gere um JSON com esta estrutura EXATA (sem markdown, apenas JSON válido):
+Responda EXATAMENTE com este JSON (sem markdown, sem texto fora):
 {
-  "resumo_perfil": "Parágrafo de 5-6 frases com análise profunda do perfil comportamental, explicando como os percentuais se combinam e o que isso significa no dia a dia profissional",
-  
-  "pontos_fortes_naturais": [
-    "4-5 pontos fortes NATURAIS baseados nos perfis dominantes, com explicação prática de como se manifestam no trabalho"
-  ],
-  
-  "habilidades_a_desenvolver": [
+  "resumo_perfil": "Parágrafo de 4-6 frases explicando o que esses % significam no dia a dia desta pessoa, sem julgar, terminando com uma frase que mostre quais pontos podem ser desenvolvidos se ela quiser.",
+  "habitos": [
     {
-      "habilidade": "Nome da habilidade",
-      "perfil_relacionado": "D/I/S/C",
-      "situacao_atual": "Como o baixo percentual neste perfil se manifesta no dia a dia",
-      "nivel_urgencia": "alto/medio/baixo",
-      "como_desenvolver": "2-3 ações práticas e específicas"
+      "nome": "Nome curto e direto do hábito (verbo no infinitivo)",
+      "por_que": "1-2 frases explicando como esse hábito ajuda esta pessoa especificamente",
+      "como_comecar": "Passo concreto e barato pra começar hoje (com gatilho, horário, ferramenta gratuita)"
     }
   ],
-  
-  "comportamentos_a_moldar": [
+  "esportes": [
     {
-      "comportamento_atual": "Comportamento típico do perfil dominante que pode ser excessivo",
-      "impacto": "Como isso afeta colegas e resultados",
-      "comportamento_ideal": "Equilíbrio desejado",
-      "estrategia": "Como ajustar gradualmente"
+      "esporte": "Nome do esporte (somente da lista válida)",
+      "por_que": "1-2 frases ligando o esporte ao perfil",
+      "como_comecar": "Como começar (sem citar cidade nem orçamento): rotina sugerida, frequência, dica prática"
     }
   ],
-  
-  "esportes_e_atividades": [
+  "estudos": [
     {
-      "atividade": "Nome do esporte ou atividade",
-      "por_que": "Como essa atividade trabalha os perfis mais fracos e equilibra o comportamento",
-      "frequencia": "Sugestão de frequência semanal"
+      "tipo": "livro | curso | podcast | canal_youtube",
+      "titulo": "Nome real do material (livros conhecidos, cursos reais)",
+      "autor_canal": "Autor do livro, canal/instituição do curso ou podcast",
+      "por_que": "1-2 frases conectando o material ao desenvolvimento do perfil",
+      "onde_encontrar": "Onde acessar (preferir grátis: biblioteca municipal, YouTube, Coursera audit, Sebrae)"
     }
   ],
-  
-  "habitos_recomendados": [
-    {
-      "habito": "Hábito diário ou semanal",
-      "objetivo": "Qual perfil DISC ele fortalece e por quê",
-      "como_implementar": "Passo a passo prático"
-    }
-  ],
-  
-  "plano_desenvolvimento_90_dias": {
-    "mes_1": {
-      "foco": "Tema principal",
-      "acoes": ["3-4 ações concretas"],
-      "meta": "Resultado esperado"
-    },
-    "mes_2": {
-      "foco": "Tema principal",
-      "acoes": ["3-4 ações concretas"],
-      "meta": "Resultado esperado"
-    },
-    "mes_3": {
-      "foco": "Tema principal",
-      "acoes": ["3-4 ações concretas"],
-      "meta": "Resultado esperado"
-    }
-  },
-  
-  "sugestoes_estudo": [
-    {
-      "tema": "Tema de estudo",
-      "por_que": "Conexão com o perfil DISC",
-      "recursos": "Livros, cursos, podcasts recomendados"
-    }
-  ],
-  
-  "dicas_comunicacao": {
-    "com_perfil_d": "Como o colaborador deve se comunicar com pessoas de perfil D",
-    "com_perfil_i": "Como se comunicar com perfis I",
-    "com_perfil_s": "Como se comunicar com perfis S",
-    "com_perfil_c": "Como se comunicar com perfis C"
-  },
-  
-  "mensagem_motivacional": "Mensagem personalizada de 2-3 frases mencionando o nome"
-}`;
+  "mensagem_final": "Mensagem curta (2-3 frases) fechando o relatório, mencionando ${nome} pelo nome. Tom acolhedor, sem clichê motivacional, lembrando que o teste mostra apenas tendência de reação imediata e que o desenvolvimento é uma escolha pessoal."
+}
 
-    const aiResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+IMPORTANTE:
+- Exatamente 3 itens em habitos, esportes e estudos.
+- Foque nos perfis fracos (${fracos}) mas pode reforçar os fortes em 1 dos itens.
+- Para "estudos", varie os tipos (não 3 livros — misture livro + canal/podcast + curso).`;
+
+    const aiResp = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${LOVABLE_API_KEY}`,
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "google/gemini-3-flash-preview",
+        model: ANTHROPIC_MODEL,
+        max_tokens: 3000,
+        system: systemPrompt,
         messages: [
-          { role: "system", content: "Você é um consultor sênior de comportamento organizacional especializado em DISC. Responda APENAS com JSON válido, sem markdown, sem blocos de código. Seja extremamente específico, prático e profundo." },
-          { role: "user", content: prompt },
+          { role: "user", content: userPrompt },
+          // Prefill abre direto a chave do JSON — Claude continua de onde parou
+          // e nunca devolve "Aqui está o JSON:" antes.
+          { role: "assistant", content: "{" },
         ],
       }),
     });
 
-    if (!aiResponse.ok) {
-      if (aiResponse.status === 429) {
-        return new Response(JSON.stringify({ error: "Limite de requisições excedido. Tente novamente em alguns segundos." }), {
-          status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-      if (aiResponse.status === 402) {
-        return new Response(JSON.stringify({ error: "Créditos de IA esgotados. Adicione créditos no workspace." }), {
-          status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-      throw new Error(`AI gateway error: ${aiResponse.status}`);
+    if (!aiResp.ok) {
+      const t = await aiResp.text();
+      console.error("Anthropic error", aiResp.status, t);
+      const map: Record<number, [number, string]> = {
+        401: [401, "Chave Anthropic inválida. Atualize em /ia-config."],
+        429: [429, "Limite de uso da Anthropic atingido. Tente novamente em alguns segundos."],
+      };
+      const [status, msg] = map[aiResp.status] ?? [502, `Anthropic error ${aiResp.status}: ${t.slice(0, 200)}`];
+      return new Response(JSON.stringify({ error: msg }), {
+        status, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
-    const aiData = await aiResponse.json();
-    let content = aiData.choices?.[0]?.message?.content || "";
-    content = content.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+    const aiJson = await aiResp.json();
+    // Como usamos prefill "{", a resposta vem sem a abertura — reconstituímos.
+    const rawText: string = (aiJson.content?.[0]?.text ?? "").trim();
+    const fullJsonText = rawText.startsWith("{") ? rawText : "{" + rawText;
+    let parsed = extractJson(fullJsonText);
 
-    let parsed;
-    try {
-      parsed = JSON.parse(content);
-    } catch {
-      parsed = { resumo_perfil: content.slice(0, 500), error: "Could not parse AI response as JSON" };
+    if (!parsed || typeof parsed !== "object") {
+      console.error("JSON parse failed. Raw:", fullJsonText.slice(0, 500));
+      return new Response(JSON.stringify({
+        error: "A IA retornou em formato inesperado. Tente regerar.",
+        debug_raw: fullJsonText.slice(0, 300),
+      }), { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
     return new Response(JSON.stringify(parsed), {

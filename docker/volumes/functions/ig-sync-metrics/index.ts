@@ -180,6 +180,7 @@ async function syncAccount(supabase: any, account: any) {
     await supabase.from("ig_profile_metrics_daily").upsert({
       account_id: accountId,
       metric_date: today,
+      followers_count: accountUpdate.followers_count ?? null,
       reach: accountUpdate.reach || 0,
       impressions: accountUpdate.impressions || 0,
       profile_views: accountUpdate.profile_views || 0,

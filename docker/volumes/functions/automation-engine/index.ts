@@ -10,7 +10,14 @@ Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
 
   try {
-    const { task_id, trigger_type, old_status_id, new_status_id, user_id, tag } = await req.json();
+    const body = await req.json();
+    const { task_id, trigger_type, old_status_id, new_status_id, user_id, tag } = body;
+    // Encadeamento de automações: quando uma ação muda o status/lista da tarefa, o
+    // motor re-dispara a si mesmo com o evento status_changed para que as automações
+    // de "chegou no status X" também rodem. _depth limita a recursão e evita loops
+    // infinitos entre automações que se acionam em cadeia/ciclo.
+    const depth = Number(body._depth) || 0;
+    const MAX_CHAIN_DEPTH = 5;
 
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
@@ -25,6 +32,8 @@ Deno.serve(async (req) => {
     if (taskErr || !task) {
       return new Response(JSON.stringify({ error: 'Task not found' }), { status: 404, headers: corsHeaders });
     }
+    // Status no início — comparamos no fim para detectar se alguma ação o mudou.
+    const initialStatusId = task.status_id;
 
     // Get list info for department
     const { data: list } = await supabase.from('gt_task_lists').select('id, name, project_id').eq('id', task.list_id).single();
@@ -137,6 +146,10 @@ Deno.serve(async (req) => {
       const autActions = allActions.filter(a => a.automation_id === auto.id).sort((a, b) => a.action_order - b.action_order);
       const executedActions: any[] = [];
       let notifiedThisAutomation = false;
+      // Uma tarefa vive em UMA lista só. Se a automação tem vários "Mover para
+      // outro espaço/lista", o 1º move a tarefa original e os demais recebem uma
+      // CÓPIA — senão cada move sobrescreve o anterior e só o último destino fica.
+      let moveToListCount = 0;
 
       for (const action of autActions) {
         const cfg = action.config || {};
@@ -149,6 +162,18 @@ Deno.serve(async (req) => {
             case 'move_to_list': {
               if (!cfg.list_id) {
                 executedActions.push({ type: 'move_to_list', status: 'failed', error: 'list_id ausente' });
+                break;
+              }
+              moveToListCount++;
+              // 2º destino em diante: copia a tarefa em vez de mover (uma tarefa
+              // não pode estar em várias listas ao mesmo tempo).
+              if (moveToListCount > 1) {
+                const copy = await copyTaskToList(supabase, task, task_id, cfg.list_id, cfg.status_id);
+                if (copy.ok) {
+                  executedActions.push({ type: 'move_to_list', status: 'success', list_id: cfg.list_id, status_id: copy.status_id, copied: true, new_task_id: copy.id });
+                } else {
+                  executedActions.push({ type: 'move_to_list', status: 'failed', error: copy.error || 'cópia falhou', list_id: cfg.list_id });
+                }
                 break;
               }
               const update: any = { list_id: cfg.list_id };
@@ -165,17 +190,27 @@ Deno.serve(async (req) => {
                   .maybeSingle();
                 if (!chk) targetStatusId = null;
               }
+              let targetStatusIsDone = false;
               if (!targetStatusId) {
                 const { data: firstStatus } = await supabase
                   .from('gt_list_statuses')
-                  .select('id')
+                  .select('id, is_done')
                   .eq('list_id', cfg.list_id)
                   .order('sort_order', { ascending: true })
                   .limit(1)
                   .maybeSingle();
                 targetStatusId = firstStatus?.id || null;
+                targetStatusIsDone = !!firstStatus?.is_done;
+              } else {
+                const { data: targetStatus } = await supabase
+                  .from('gt_list_statuses')
+                  .select('is_done')
+                  .eq('id', targetStatusId)
+                  .maybeSingle();
+                targetStatusIsDone = !!targetStatus?.is_done;
               }
               if (targetStatusId) update.status_id = targetStatusId;
+              if (!targetStatusIsDone) update.completed_at = null;
 
               const { error: moveErr } = await supabase.from('gt_tasks').update(update).eq('id', task_id);
               if (moveErr) {
@@ -288,6 +323,87 @@ Deno.serve(async (req) => {
               executedActions.push({ type: 'create_task', status: 'success' });
               break;
             }
+            case 'duplicate_task': {
+              try {
+                const targetListId = cfg.list_id || task.list_id;
+                // Resolve status for target list
+                let dupStatusId: string | null = cfg.status_id || null;
+                if (dupStatusId) {
+                  const { data: chk } = await supabase
+                    .from('gt_list_statuses')
+                    .select('id').eq('id', dupStatusId).eq('list_id', targetListId).maybeSingle();
+                  if (!chk) dupStatusId = null;
+                }
+                if (!dupStatusId) {
+                  const { data: firstStatus } = await supabase
+                    .from('gt_list_statuses')
+                    .select('id').eq('list_id', targetListId)
+                    .order('sort_order', { ascending: true }).limit(1).maybeSingle();
+                  dupStatusId = firstStatus?.id || null;
+                }
+                const suffix = cfg.title_suffix ?? ' (cópia)';
+                const copyTags = cfg.copy_tags !== false;
+                const copyAssignees = cfg.copy_assignees !== false;
+                const copySubtasks = cfg.copy_subtasks === true;
+
+                const { data: newTask, error: dupErr } = await supabase
+                  .from('gt_tasks')
+                  .insert({
+                    list_id: targetListId,
+                    status_id: dupStatusId,
+                    title: `${task.title || 'Tarefa'}${suffix}`,
+                    description: task.description || null,
+                    priority: task.priority || 'normal',
+                    due_date: task.due_date || null,
+                    start_date: task.start_date || null,
+                    tags: copyTags ? (task.tags || []) : [],
+                    assignee_id: copyAssignees ? task.assignee_id : null,
+                    reporter_id: task.reporter_id,
+                    source_task_id: task_id,
+                    created_by: null,
+                    sort_order: 0,
+                  })
+                  .select('id')
+                  .single();
+                if (dupErr || !newTask) {
+                  executedActions.push({ type: 'duplicate_task', status: 'failed', error: dupErr?.message || 'insert failed' });
+                  break;
+                }
+
+                if (copyAssignees) {
+                  const { data: assignees } = await supabase
+                    .from('gt_task_assignees').select('user_id').eq('task_id', task_id);
+                  const rows = (assignees || []).filter((a: any) => a.user_id).map((a: any) => ({ task_id: newTask.id, user_id: a.user_id }));
+                  if (rows.length) await supabase.from('gt_task_assignees').insert(rows);
+                }
+
+                if (copySubtasks) {
+                  const { data: subs } = await supabase
+                    .from('gt_tasks').select('title, description, priority, tags, assignee_id, sort_order').eq('parent_task_id', task_id);
+                  if (subs && subs.length) {
+                    const subRows = subs.map((s: any) => ({
+                      list_id: targetListId,
+                      status_id: dupStatusId,
+                      parent_task_id: newTask.id,
+                      title: s.title,
+                      description: s.description,
+                      priority: s.priority || 'normal',
+                      tags: s.tags || [],
+                      assignee_id: copyAssignees ? s.assignee_id : null,
+                      reporter_id: task.reporter_id,
+                      sort_order: s.sort_order || 0,
+                      created_by: null,
+                    }));
+                    await supabase.from('gt_tasks').insert(subRows);
+                  }
+                }
+
+                executedActions.push({ type: 'duplicate_task', status: 'success', new_task_id: newTask.id, list_id: targetListId });
+              } catch (e) {
+                executedActions.push({ type: 'duplicate_task', status: 'failed', error: String(e) });
+              }
+              break;
+            }
             case 'send_webhook': {
               const url = cfg.webhook_url;
               const method = cfg.webhook_method || 'POST';
@@ -304,6 +420,102 @@ Deno.serve(async (req) => {
               }
               break;
             }
+            case 'send_email': {
+              try {
+                if (!cfg.template_id) {
+                  executedActions.push({ type: 'send_email', status: 'failed', error: 'template_id ausente' });
+                  break;
+                }
+                // Nome do template para registro no histórico
+                const { data: tpl } = await supabase
+                  .from('email_templates')
+                  .select('nome, remetente_id')
+                  .eq('id', cfg.template_id)
+                  .maybeSingle();
+                const templateName = tpl?.nome || 'Template';
+                const remetenteId = cfg.remetente_id || tpl?.remetente_id || null;
+
+                // Resolver destinatário
+                let recipientEmail: string | null = null;
+                const source = cfg.recipient_source || 'custom_field';
+                if (source === 'fixed') {
+                  recipientEmail = cfg.recipient_email || null;
+                } else if (source === 'custom_field' && cfg.recipient_field) {
+                  const { data: cfv } = await supabase
+                    .from('gt_custom_field_values')
+                    .select('value_text')
+                    .eq('task_id', task_id)
+                    .eq('field_id', cfg.recipient_field)
+                    .maybeSingle();
+                  recipientEmail = cfv?.value_text || null;
+                } else if (source === 'assignee') {
+                  const targetUserId = task.assignee_id;
+                  if (targetUserId) {
+                    const { data: prof } = await supabase.from('profiles').select('email').eq('user_id', targetUserId).maybeSingle();
+                    recipientEmail = prof?.email || null;
+                  }
+                } else if (source === 'reporter') {
+                  if (task.reporter_id) {
+                    const { data: prof } = await supabase.from('profiles').select('email').eq('user_id', task.reporter_id).maybeSingle();
+                    recipientEmail = prof?.email || null;
+                  }
+                }
+
+                if (!recipientEmail) {
+                  executedActions.push({ type: 'send_email', status: 'failed', error: 'destinatário não resolvido', template_name: templateName, label: `email "${templateName}" não enviado (sem destinatário)` });
+                  break;
+                }
+
+                // Chama email-send via fetch interno usando service role
+                const sendRes = await fetch(`${supabaseUrl}/functions/v1/email-send`, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${serviceKey}`,
+                  },
+                  body: JSON.stringify({
+                    template_id: cfg.template_id,
+                    remetente_id: remetenteId,
+                    destinatario_email: recipientEmail,
+                    automacao_id: auto.id,
+                    contexto_tipo: 'gt_task',
+                    contexto_id: task_id,
+                    idempotencia_key: `auto-${auto.id}-${task_id}-${cfg.template_id}`,
+                    variaveis: {
+                      'task.title': task.title || '',
+                      'task.id': task.id || '',
+                      'task.status': task.gt_list_statuses?.name || '',
+                    },
+                  }),
+                });
+                const sendData = await sendRes.json().catch(() => ({}));
+                if (sendRes.ok) {
+                  executedActions.push({
+                    type: 'send_email',
+                    status: 'success',
+                    template_id: cfg.template_id,
+                    template_name: templateName,
+                    recipient: recipientEmail,
+                    log_id: sendData?.log_id,
+                    duplicado: sendData?.duplicado || false,
+                    label: sendData?.duplicado
+                      ? `email "${templateName}" já enviado (idempotência)`
+                      : `email "${templateName}" enviado para ${recipientEmail}`,
+                  });
+                } else {
+                  executedActions.push({
+                    type: 'send_email',
+                    status: 'failed',
+                    template_name: templateName,
+                    error: sendData?.error || `HTTP ${sendRes.status}`,
+                    label: `falha ao enviar email "${templateName}"`,
+                  });
+                }
+              } catch (e) {
+                executedActions.push({ type: 'send_email', status: 'failed', error: String(e) });
+              }
+              break;
+            }
           }
         } catch (e) {
           executedActions.push({ type: action.action_type, status: 'failed', error: String(e) });
@@ -313,10 +525,53 @@ Deno.serve(async (req) => {
       // Auto-notify all assignees if no explicit send_notification action ran
       if (!notifiedThisAutomation) {
         try {
-          const recipients = await resolveRecipients(supabase, { recipient: 'all_assignees' }, task);
+          const recipientSet = new Set<string>(
+            await resolveRecipients(supabase, { recipient: 'all_assignees' }, task)
+          );
+
+          // Build destination breadcrumb for any move_to_list actions
+          let moveSummary = '';
+          const moveActions = executedActions.filter((a: any) => a.type === 'move_to_list' && a.status === 'success');
+          if (moveActions.length > 0) {
+            // Always notify whoever triggered the move — they may not have access
+            // to the destination space and otherwise the task appears to vanish.
+            if (user_id) recipientSet.add(user_id);
+            try {
+              const destListId = moveActions[0].list_id;
+              const { data: destList } = await supabase
+                .from('gt_task_lists')
+                .select('name, project_id')
+                .eq('id', destListId)
+                .maybeSingle();
+              let projName = '';
+              let deptName = '';
+              if (destList?.project_id) {
+                const { data: destProj } = await supabase
+                  .from('gt_projects')
+                  .select('name, department_id')
+                  .eq('id', destList.project_id)
+                  .maybeSingle();
+                projName = destProj?.name || '';
+                if (destProj?.department_id) {
+                  const { data: destDept } = await supabase
+                    .from('gt_departments')
+                    .select('name')
+                    .eq('id', destProj.department_id)
+                    .maybeSingle();
+                  deptName = destDept?.name || '';
+                }
+              }
+              const breadcrumb = [deptName, projName, destList?.name].filter(Boolean).join(' › ');
+              if (breadcrumb) moveSummary = ` Destino: ${breadcrumb}.`;
+            } catch (e) {
+              console.warn('move destination breadcrumb failed', e);
+            }
+          }
+
+          const recipients = Array.from(recipientSet);
           const summary = executedActions
             .filter((a: any) => a.status === 'success')
-            .map((a: any) => actionLabelPt(a.type))
+            .map((a: any) => a.label || actionLabelPt(a.type))
             .filter(Boolean)
             .join(', ');
           for (const rid of recipients) {
@@ -324,9 +579,9 @@ Deno.serve(async (req) => {
               user_id: rid,
               type: 'automation',
               title: auto.name || 'Automação executada',
-              body: summary
+              body: (summary
                 ? `Automação executada na tarefa "${task.title}": ${summary}`
-                : `Automação executada na tarefa "${task.title}"`,
+                : `Automação executada na tarefa "${task.title}"`) + moveSummary,
               link: `/?gt=task:${task_id}`,
               reference_type: 'task',
               reference_id: task_id,
@@ -354,7 +609,7 @@ Deno.serve(async (req) => {
       try {
         const summary = executedActions
           .filter((a: any) => a.status === 'success')
-          .map((a: any) => actionLabelPt(a.type))
+          .map((a: any) => a.label || actionLabelPt(a.type))
           .filter(Boolean)
           .join(', ');
         await supabase.from('gt_activity_log').insert({
@@ -381,6 +636,40 @@ Deno.serve(async (req) => {
       }).eq('id', auto.id);
 
       processed++;
+    }
+
+    // Encadeamento: se alguma ação mudou o status da tarefa (change_status ou
+    // move_to_list — que escrevem direto no banco, sem passar pelo front), re-dispara
+    // o motor com status_changed para que automações de chegada no novo status rodem.
+    // Re-busca o status atual porque move_to_list resolve o status na lista de destino.
+    if (processed > 0 && depth < MAX_CHAIN_DEPTH) {
+      try {
+        const { data: fresh } = await supabase
+          .from('gt_tasks')
+          .select('status_id')
+          .eq('id', task_id)
+          .maybeSingle();
+        const newStatusId = fresh?.status_id || null;
+        if (newStatusId && newStatusId !== initialStatusId) {
+          await fetch(`${supabaseUrl}/functions/v1/automation-engine`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${serviceKey}`,
+            },
+            body: JSON.stringify({
+              task_id,
+              trigger_type: 'status_changed',
+              old_status_id: initialStatusId,
+              new_status_id: newStatusId,
+              user_id: user_id || null,
+              _depth: depth + 1,
+            }),
+          });
+        }
+      } catch (e) {
+        console.error('automation chain re-dispatch failed', e);
+      }
     }
 
     return new Response(JSON.stringify({ processed }), {
@@ -415,6 +704,76 @@ function replaceVariables(template: string, task: any, trigger: any): string {
       const cfv = task.custom_field_values || {};
       return cfv[fieldSlug] || '';
     });
+}
+
+// Copia uma tarefa para outra lista, resolvendo o status de destino e
+// replicando os responsáveis. Usado quando uma automação tem vários
+// "Mover para outro espaço/lista" (o 1º move, os demais copiam).
+async function copyTaskToList(
+  supabase: any,
+  task: any,
+  sourceTaskId: string,
+  targetListId: string,
+  cfgStatusId?: string | null,
+): Promise<{ ok: boolean; id?: string; status_id?: string | null; error?: string }> {
+  try {
+    // Resolver status_id válido na lista de destino (cada lista tem seus status)
+    let statusId: string | null = cfgStatusId || null;
+    if (statusId) {
+      const { data: chk } = await supabase
+        .from('gt_list_statuses')
+        .select('id')
+        .eq('id', statusId)
+        .eq('list_id', targetListId)
+        .maybeSingle();
+      if (!chk) statusId = null;
+    }
+    if (!statusId) {
+      const { data: firstStatus } = await supabase
+        .from('gt_list_statuses')
+        .select('id')
+        .eq('list_id', targetListId)
+        .order('sort_order', { ascending: true })
+        .limit(1)
+        .maybeSingle();
+      statusId = firstStatus?.id || null;
+    }
+
+    const { data: newTask, error } = await supabase
+      .from('gt_tasks')
+      .insert({
+        list_id: targetListId,
+        status_id: statusId,
+        title: task.title || 'Tarefa',
+        description: task.description || null,
+        priority: task.priority || 'normal',
+        due_date: task.due_date || null,
+        start_date: task.start_date || null,
+        tags: task.tags || [],
+        assignee_id: task.assignee_id,
+        reporter_id: task.reporter_id,
+        source_task_id: sourceTaskId,
+        created_by: null,
+        sort_order: 0,
+      })
+      .select('id')
+      .single();
+    if (error || !newTask) return { ok: false, error: error?.message || 'insert falhou' };
+
+    // Replicar responsáveis (tabela N:N)
+    const { data: assignees } = await supabase
+      .from('gt_task_assignees')
+      .select('user_id')
+      .eq('task_id', sourceTaskId);
+    const rows = (assignees || [])
+      .filter((a: any) => a.user_id)
+      .map((a: any) => ({ task_id: newTask.id, user_id: a.user_id }));
+    if (rows.length) await supabase.from('gt_task_assignees').insert(rows);
+
+    return { ok: true, id: newTask.id, status_id: statusId };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
 }
 
 async function resolveRecipients(supabase: any, cfg: any, task: any): Promise<string[]> {
@@ -459,7 +818,9 @@ function actionLabelPt(t: string): string {
     remove_tag: 'tag removida',
     add_comment: 'comentário adicionado',
     send_notification: 'notificação enviada',
+    send_email: 'email enviado',
     create_task: 'nova tarefa criada',
+    duplicate_task: 'tarefa duplicada',
     send_webhook: 'webhook disparado',
   };
   return map[t] || '';

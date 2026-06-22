@@ -42,12 +42,38 @@ Deno.serve(async (req) => {
   }
 
   try {
-    console.log('🔄 Iniciando backup do banco de dados...');
-
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
+    const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY')!;
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-    
+
+    // Auth check: require a valid JWT and 'diretor' role
+    const authHeader = req.headers.get('Authorization');
+    if (!authHeader) {
+      return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+        status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+    const userClient = createClient(supabaseUrl, supabaseAnonKey, {
+      global: { headers: { Authorization: authHeader } },
+    });
+    const { data: userData, error: userErr } = await userClient.auth.getUser();
+    if (userErr || !userData?.user) {
+      return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+        status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
+    const { data: roleRow } = await supabase
+      .from('user_roles').select('role').eq('user_id', userData.user.id).eq('role', 'diretor').maybeSingle();
+    const { data: profileRow } = await supabase
+      .from('profiles').select('user_type').eq('id', userData.user.id).maybeSingle();
+    if (!roleRow && profileRow?.user_type !== 'diretor') {
+      return new Response(JSON.stringify({ error: 'Forbidden: diretor role required' }), {
+        status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    console.log('🔄 Iniciando backup do banco de dados...');
 
     const backupData: BackupData = {
       timestamp: new Date().toISOString(),

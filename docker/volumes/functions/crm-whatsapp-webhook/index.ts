@@ -34,6 +34,148 @@ function json(data: unknown, status = 200) {
   });
 }
 
+// ── Saúde da conta (eventos da Meta que NÃO são mensagens) ────────────────────
+// Template baixou de qualidade / foi pausado / desabilitado; conta com problema de
+// pagamento / restrição / banimento; número perdeu qualidade. Gravamos em
+// crm_whatsapp_alertas (via RPC idempotente) para a aba "Saúde da conta" + banner.
+function upper(s: unknown): string {
+  return String(s ?? "").toUpperCase();
+}
+
+function severidadePorPalavra(txt: string, criticas: string[], avisos: string[]): "info" | "aviso" | "critico" {
+  const t = upper(txt);
+  if (criticas.some((k) => t.includes(k))) return "critico";
+  if (avisos.some((k) => t.includes(k))) return "aviso";
+  return "info";
+}
+
+/** Resolve a conta CRM pelo WABA id (entry.id dos webhooks da WhatsApp Business Account). */
+async function resolveAccountByWaba(admin: any, wabaId?: string | null): Promise<string | null> {
+  if (!wabaId) return null;
+  const { data } = await admin
+    .from("crm_whatsapp_accounts")
+    .select("id")
+    .eq("waba_id", String(wabaId))
+    .limit(1);
+  return data?.[0]?.id ?? null;
+}
+
+interface AlertaConta {
+  tipo: string;
+  severidade: "info" | "aviso" | "critico";
+  titulo: string;
+  descricao: string | null;
+  evento: string | null;
+  referencia: string | null;
+}
+
+/** Mapeia um change (field != messages) para um alerta, ou null se for evento irrelevante. */
+function mapearAlerta(field: string, value: any): AlertaConta | null {
+  switch (field) {
+    case "message_template_quality_update": {
+      const nome = value?.message_template_name ?? value?.message_template_id ?? "template";
+      const novo = upper(value?.new_quality_score);
+      const ant = upper(value?.previous_quality_score);
+      const sev = novo === "RED" ? "critico" : novo === "YELLOW" ? "aviso" : "info";
+      return {
+        tipo: "template_quality",
+        severidade: sev,
+        titulo: `Qualidade do template "${nome}": ${novo || "—"}`,
+        descricao: `A Meta mudou a qualidade do template de ${ant || "—"} para ${novo || "—"}.`
+          + (novo === "RED" ? " Em RED, a Meta pode pausar o envio do template." : ""),
+        evento: novo || null,
+        referencia: nome,
+      };
+    }
+    case "message_template_status_update": {
+      const nome = value?.message_template_name ?? value?.message_template_id ?? "template";
+      const ev = upper(value?.event);
+      const sev = ["REJECTED", "DISABLED", "PENDING_DELETION"].includes(ev)
+        ? "critico"
+        : ["PAUSED", "FLAGGED"].includes(ev) ? "aviso" : "info";
+      const reason = value?.reason && value.reason !== "NONE" ? ` Motivo: ${value.reason}.` : "";
+      return {
+        tipo: "template_status",
+        severidade: sev,
+        titulo: `Template "${nome}": ${ev || "atualizado"}`,
+        descricao: `A Meta mudou o status do template para ${ev || "—"}.${reason}`,
+        evento: ev || null,
+        referencia: nome,
+      };
+    }
+    case "account_update": {
+      const ev = upper(value?.event);
+      const sev = severidadePorPalavra(
+        ev,
+        ["VIOLATION", "DISABLED", "RESTRICTION", "DELETED", "BAN", "PAYMENT"],
+        ["WARNING", "FLAGGED", "DOWNGRADE", "REVIEW"],
+      );
+      const extra = value?.ban_info ?? value?.restriction_info ?? value?.violation_info ?? null;
+      return {
+        tipo: "account_update",
+        severidade: sev,
+        titulo: `Conta WhatsApp: ${ev || "atualização"}`,
+        descricao: extra ? `Detalhes: ${JSON.stringify(extra)}` : `Evento de conta: ${ev || "—"}.`,
+        evento: ev || null,
+        referencia: value?.phone_number ?? null,
+      };
+    }
+    case "account_alerts": {
+      const tipoAlerta = value?.alert_type ?? value?.alert_status ?? "alerta";
+      const sev = severidadePorPalavra(
+        `${value?.alert_severity ?? ""} ${tipoAlerta}`,
+        ["CRITICAL", "SEVERE", "PAYMENT", "DISABLED"],
+        ["WARNING", "MEDIUM"],
+      );
+      return {
+        tipo: "account_alert",
+        severidade: sev,
+        titulo: `Alerta da conta: ${tipoAlerta}`,
+        descricao: value?.alert_description ?? `Severidade: ${value?.alert_severity ?? "—"}.`,
+        evento: upper(tipoAlerta) || null,
+        referencia: value?.entity_id ?? null,
+      };
+    }
+    case "phone_number_quality_update": {
+      const tel = value?.display_phone_number ?? "número";
+      const ev = upper(value?.event);
+      const sev = ev === "FLAGGED" ? "aviso" : "info";
+      const limite = value?.current_limit ? ` Limite atual: ${value.current_limit}.` : "";
+      return {
+        tipo: "phone_quality",
+        severidade: sev,
+        titulo: `Número ${tel}: ${ev || "atualização de qualidade"}`,
+        descricao: `Qualidade/limite do número mudou.${limite}`,
+        evento: ev || null,
+        referencia: String(tel),
+      };
+    }
+    default:
+      return null; // eventos não relacionados a saúde da conta são ignorados
+  }
+}
+
+async function processarAlertaConta(admin: any, entry: any, field: string, value: any): Promise<boolean> {
+  const alerta = mapearAlerta(field, value);
+  if (!alerta) return false;
+  const accountId = await resolveAccountByWaba(admin, entry?.id);
+  const { error } = await admin.rpc("crm_whatsapp_alerta_registrar", {
+    p_wa_account_id: accountId,
+    p_tipo: alerta.tipo,
+    p_severidade: alerta.severidade,
+    p_titulo: alerta.titulo,
+    p_descricao: alerta.descricao,
+    p_evento: alerta.evento,
+    p_referencia: alerta.referencia,
+    p_dados: value ?? {},
+  });
+  if (error) {
+    console.error("[crm-whatsapp-webhook] registrar alerta erro:", error.message);
+    return false;
+  }
+  return true;
+}
+
 // Valida o HMAC-SHA256 que a Meta envia em X-Hub-Signature-256 (formato "sha256=<hex>").
 async function validMetaSignature(raw: string, header: string | null, appSecret: string): Promise<boolean> {
   if (!header) return false;
@@ -164,14 +306,24 @@ Deno.serve(async (req) => {
     const entries = payload?.entry ?? [];
     let processedMessages = 0;
     let processedStatuses = 0;
+    let processedAlertas = 0;
 
     for (const entry of entries) {
       const changes = entry?.changes ?? [];
 
       for (const change of changes) {
-        if (change?.field !== "messages") continue;
         const value = change?.value;
         if (!value) continue;
+
+        // Eventos de SAÚDE DA CONTA (template/conta/número) — não são mensagens.
+        if (change?.field !== "messages") {
+          try {
+            if (await processarAlertaConta(admin, entry, change.field, value)) processedAlertas++;
+          } catch (e) {
+            console.error("[crm-whatsapp-webhook] alerta conta erro:", e instanceof Error ? e.message : String(e));
+          }
+          continue;
+        }
 
         const phoneNumberId = value?.metadata?.phone_number_id;
         if (!phoneNumberId) continue;
@@ -234,11 +386,14 @@ Deno.serve(async (req) => {
               description: lr?.description ?? null,
             };
           } else if (msgType === "button") {
-            // Botão de QUICK-REPLY de TEMPLATE (≠ interactive.button_reply): o texto vem em msg.button.text.
-            // Sem este caso caía no fallback "[button]" e o card/chat perdia o texto ("Confirmar").
+            // Clique num botão de TEMPLATE (quick-reply). Formato DIFERENTE do
+            // "interactive" (que é botão/lista enviado por API): o texto visível
+            // vem em button.text e o payload definido no template em button.payload.
+            // Sem este branch o clique caía no default e virava "[button]",
+            // perdendo o texto tanto no chat quanto na memória do agente (relay).
             conteudo = msg?.button?.text ?? msg?.button?.payload ?? "[button]";
             interactiveReply = {
-              tipo: "button",
+              tipo: "template_button",
               id: msg?.button?.payload ?? null,
               title: msg?.button?.text ?? null,
               description: null,
@@ -445,9 +600,9 @@ Deno.serve(async (req) => {
     }
 
     console.log(
-      `[crm-whatsapp-webhook] processado: ${processedMessages} msgs, ${processedStatuses} statuses`,
+      `[crm-whatsapp-webhook] processado: ${processedMessages} msgs, ${processedStatuses} statuses, ${processedAlertas} alertas`,
     );
-    return json({ ok: true, messages: processedMessages, statuses: processedStatuses });
+    return json({ ok: true, messages: processedMessages, statuses: processedStatuses, alertas: processedAlertas });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error("[crm-whatsapp-webhook] erro de processamento:", msg);

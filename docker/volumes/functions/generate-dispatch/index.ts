@@ -241,11 +241,17 @@ serve(async (req) => {
     // 4. Limpa mensagens antigas desse dispatch (regerar)
     await supabase.from("dispatch_messages").delete().eq("dispatch_id", dispatch.id);
 
-    // 5. Para cada mensagem da sequência x cada canal aplicável, gera conteúdo
+    // 5. Monta a lista de tarefas (mensagem × canal) e gera EM PARALELO.
+    //    Antes era 100% sequencial: tipos grandes (ex: "Aula de Abertura" = 17 chamadas
+    //    à Claude) estouravam o wall-clock da edge function, que era morta ("early
+    //    termination") antes de retornar — deixando o spinner do front travado pra sempre.
+    //    Em paralelo (com concorrência limitada) o tempo total ≈ a chamada mais lenta.
     const startTime = Date.now();
     let totalIn = 0;
     let totalOut = 0;
-    const generated: any[] = [];
+
+    type GenTask = { msg: any; canal: string; systemPrompt: string; userMessage: string };
+    const tasks: GenTask[] = [];
 
     for (const msg of seq || []) {
       const msgChannels = (msg.canais as string[]) || [];
@@ -302,36 +308,58 @@ ${channelInstr}${buttonsHint}`;
 
         const userMessage = `Gere a mensagem agora seguindo TODAS as regras acima. Atenha-se RIGOROSAMENTE ao tema do evento — não traga outros tópicos.`;
 
+        tasks.push({ msg, canal, systemPrompt, userMessage });
+      }
+    }
+
+    // Executa as chamadas Claude com concorrência limitada (rápido, mas sem estourar
+    // o rate limit da Anthropic). Cada worker pega a próxima tarefa livre da fila.
+    const CONCURRENCY = 6;
+    const rows: any[] = new Array(tasks.length);
+    let cursor = 0;
+    const worker = async () => {
+      while (true) {
+        const i = cursor++;
+        if (i >= tasks.length) break;
+        const t = tasks[i];
         const out = await generateOneMessage({
           apiKey: keyRow.api_key,
-          systemPrompt,
-          userMessage,
+          systemPrompt: t.systemPrompt,
+          userMessage: t.userMessage,
         });
         totalIn += out.inputTokens;
         totalOut += out.outputTokens;
-
         const insertRow: any = {
           dispatch_id: dispatch.id,
-          dispatch_type_message_id: msg.id,
-          canal,
+          dispatch_type_message_id: t.msg.id,
+          canal: t.canal,
           conteudo_gerado: out.text,
           status: "rascunho",
         };
-        if (canal === "whatsapp_oficial" && msg.tem_botoes_interacao && msg.botoes) {
+        if (t.canal === "whatsapp_oficial" && t.msg.tem_botoes_interacao && t.msg.botoes) {
           insertRow.botoes_payload = {
-            pergunta: msg.pergunta_botoes || null,
-            botoes: msg.botoes,
-            acao_ao_clicar: msg.acao_ao_clicar || null,
+            pergunta: t.msg.pergunta_botoes || null,
+            botoes: t.msg.botoes,
+            acao_ao_clicar: t.msg.acao_ao_clicar || null,
           };
         }
-        const { data: inserted, error: insErr } = await supabase
-          .from("dispatch_messages")
-          .insert(insertRow)
-          .select("*")
-          .single();
-        if (insErr) throw insErr;
-        generated.push(inserted);
+        rows[i] = insertRow;
       }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(CONCURRENCY, tasks.length || 1) }, () => worker()),
+    );
+
+    // Bulk insert preservando a ordem da sequência
+    const rowsToInsert = rows.filter(Boolean);
+    let generated: any[] = [];
+    if (rowsToInsert.length) {
+      const { data: insertedRows, error: insErr } = await supabase
+        .from("dispatch_messages")
+        .insert(rowsToInsert)
+        .select("*");
+      if (insErr) throw insErr;
+      generated = insertedRows || [];
     }
 
     // 6. Tracking de custo

@@ -207,7 +207,8 @@ Deno.serve(async (req) => {
                   contatoId = novoContato?.id ?? null;
                 }
                 if (contatoId) {
-                  const { data: atendAberto } = await supabase.from("sac_atendimentos").select("id").eq("contato_id", contatoId).eq("status", "ativo").maybeSingle();
+                  // 1 atendimento por contato (constraint uq_sac_atend_um_por_contato): busca em QUALQUER status
+                  const { data: atendAberto } = await supabase.from("sac_atendimentos").select("id, status").eq("contato_id", contatoId).maybeSingle();
                   const { data: funilRow } = await supabase.from("sac_funis").select("id").order("created_at", { ascending: true }).limit(1).maybeSingle();
                   const funilId = funilRow?.id;
                   let etapaInicialId: string | null = null;
@@ -216,7 +217,7 @@ Deno.serve(async (req) => {
                     etapaInicialId = etapaRow?.id ?? null;
                   }
                   if (atendAberto?.id) {
-                    await supabase.from("sac_atendimentos").update({ ped_conversa_id_legacy: conversaId, ultima_mensagem_preview: corpoRender.slice(0, 140), ultima_mensagem_em: nowIso }).eq("id", atendAberto.id);
+                    await supabase.from("sac_atendimentos").update({ ped_conversa_id_legacy: conversaId, ultima_mensagem_preview: corpoRender.slice(0, 140), ultima_mensagem_em: nowIso, ...(atendAberto.status !== "ativo" ? { status: "ativo", resolvido_em: null } : {}) }).eq("id", atendAberto.id);
                   } else if (funilId && etapaInicialId) {
                     await supabase.from("sac_atendimentos").insert({ contato_id: contatoId, funil_id: funilId, etapa_id: etapaInicialId, status: "ativo", nao_lido: false, ultima_mensagem_preview: corpoRender.slice(0, 140), ultima_mensagem_em: nowIso, entrou_na_etapa_em: nowIso, ped_conversa_id_legacy: conversaId });
                   }

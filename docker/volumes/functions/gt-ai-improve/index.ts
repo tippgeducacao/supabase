@@ -7,7 +7,8 @@ const corsHeaders = {
 };
 
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
-const MODEL = "claude-sonnet-4-20250514";
+// claude-sonnet-4-20250514 (Sonnet 4.0) foi descontinuado em 15/06/2026 → 404.
+const MODEL = "claude-sonnet-4-6";
 
 const FORMAT_RULES = `REGRAS DE FORMATAÇÃO OBRIGATÓRIAS:
 - Responda em TEXTO PURO. NUNCA use markdown: nada de **negrito**, *itálico*, _sublinhado_, # títulos, > citações, \`código\`.
@@ -130,11 +131,16 @@ Deno.serve(async (req) => {
       // Anthropic falhou — log e decide se faz fallback
       const errText = await aiRes.text();
       console.error("Anthropic error:", aiRes.status, errText);
+      // Cai pro Gemini não só em problemas de cobrança/limite, mas também quando o
+      // modelo some (404) ou a Anthropic está fora (5xx) — assim uma troca/retirada
+      // de modelo degrada pro fallback em vez de estourar 500 seco pro usuário.
       const shouldFallback =
         aiRes.status === 401 ||
         aiRes.status === 402 ||
+        aiRes.status === 404 ||
         aiRes.status === 429 ||
-        /credit|balance|billing|quota/i.test(errText);
+        aiRes.status >= 500 ||
+        /credit|balance|billing|quota|not_found|model/i.test(errText);
 
       if (!shouldFallback) {
         return new Response(JSON.stringify({ error: `Erro Anthropic ${aiRes.status}` }), {

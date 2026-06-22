@@ -691,11 +691,12 @@ Deno.serve(async (req) => {
 
                 // 3b) cria/atualiza sac_atendimentos ativo
                 if (contatoId) {
+                  // 1 atendimento por contato (constraint uq_sac_atend_um_por_contato):
+                  // busca o existente em QUALQUER status — reabre abaixo se estiver dormindo.
                   const { data: atendAberto } = await supabase
                     .from("sac_atendimentos")
-                    .select("id, etapa_id")
+                    .select("id, etapa_id, status")
                     .eq("contato_id", contatoId)
-                    .eq("status", "ativo")
                     .maybeSingle();
 
                   // funil e etapa pedagógicos
@@ -727,6 +728,8 @@ Deno.serve(async (req) => {
                         ped_conversa_id_legacy: conversaId,
                         ultima_mensagem_preview: corpoRender.slice(0, 140),
                         ultima_mensagem_em: nowIso,
+                        // reabre se estava resolvido/arquivado
+                        ...(atendAberto.status !== "ativo" ? { status: "ativo", resolvido_em: null } : {}),
                       })
                       .eq("id", atendAberto.id);
                   } else if (funilId && etapaInicialId) {

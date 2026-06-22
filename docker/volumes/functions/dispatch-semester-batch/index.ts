@@ -281,11 +281,12 @@ Deno.serve(async (req) => {
           }
 
           if (contatoId) {
+            // 1 atendimento por contato (constraint uq_sac_atend_um_por_contato):
+            // busca em QUALQUER status — reabre abaixo se estiver dormindo.
             const { data: atendAberto } = await supabase
               .from("sac_atendimentos")
-              .select("id")
+              .select("id, status")
               .eq("contato_id", contatoId)
-              .eq("status", "ativo")
               .maybeSingle();
             const { data: funilRow } = await supabase
               .from("sac_funis").select("id").order("created_at", { ascending: true }).limit(1).maybeSingle();
@@ -305,6 +306,8 @@ Deno.serve(async (req) => {
                 ped_conversa_id_legacy: conversaId,
                 ultima_mensagem_preview: conteudoPersist.slice(0, 140),
                 ultima_mensagem_em: nowIso,
+                // reabre se estava resolvido/arquivado
+                ...(atendAberto.status !== "ativo" ? { status: "ativo", resolvido_em: null } : {}),
               }).eq("id", atendAberto.id);
             } else if (funilId && etapaInicialId) {
               await supabase.from("sac_atendimentos").insert({

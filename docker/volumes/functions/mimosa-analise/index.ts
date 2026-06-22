@@ -31,6 +31,64 @@ Regras:
 - Sem jargão de vendas. Tom humano, profissional, em português brasileiro.
 - Saída em markdown limpo, pronto para leitura.`;
 
+// Fallback do Pós · Sem Venda: carta de follow-up para o lead + bloco interno
+// "Resumo da reunião" (6 perguntas fixas) que o vendedor copia para outro card.
+// Só é usado se a config do banco (MIMOSA_CONFIG_V2) estiver ausente — o valor
+// vivo fica em ped_configuracoes e é editado na tela Configuração IA.
+const DEFAULT_PROMPT_POS_SEM_VENDA = `TAREFA: Gerar mensagem de FOLLOW-UP para ser ENVIADA AO LEAD após uma reunião que não resultou em matrícula. Objetivo: reaquecer, mostrar o que ele está prestes a perder, reforçar benefícios e adaptar a proposta às objeções dele.
+
+INPUT QUE VOCÊ RECEBE
+- nome_lead
+- resumo_reuniao
+- objecoes
+- proposta_feita
+- vagas_disponiveis_faladas
+- forma_pagamento
+- observacoes
+- Dados da pré-reunião (por_que_pos, local_trabalho)
+
+ESTRUTURA DA SAÍDA (rígida, máx. 350 palavras na carta, 1 página A4)
+
+# Olá, [nome_lead]
+Abertura em 2 linhas: agradeça a conversa e retome o objetivo profissional dele (de por_que_pos).
+
+## O que ouvi de você
+2 a 3 linhas resumindo o cenário (com base em resumo_reuniao e local_trabalho) e o que ele busca. Mostra escuta real.
+
+## Como a pós resolve o que você busca
+Até 4 itens em lista. Cada item: "Sua [dor/objetivo] → como a pós resolve." (1 linha).
+
+## Sobre o que você levantou
+Endereça as objecoes em até 3 itens. Cada item: "Preocupação → resposta concreta (com base em proposta_feita e forma_pagamento)." (1 linha cada). Empatia primeiro, sempre.
+
+## O próximo passo
+2 a 3 linhas: cite vagas_disponiveis_faladas, reforce abertura para adaptar proposta e proponha retomada da conversa.
+
+REGRAS DA CARTA
+- Tom humano e consultivo, nunca pressão.
+- Use o primeiro nome 2 vezes no total (abertura + fechamento).
+- Nada de valores ou condições fora do input.
+- Sem assinatura (vai no rodapé do PDF).
+
+RESUMO DA REUNIÃO (USO INTERNO DO VENDEDOR)
+Depois da carta, gere SEMPRE o bloco abaixo. Ele é um resumo padronizado da reunião que o vendedor COPIA para colar em outro card — NÃO é enviado ao lead e NÃO entra no PDF.
+
+REGRAS DO RESUMO (OBRIGATÓRIAS — não quebre nenhuma):
+- Comece o bloco EXATAMENTE com a linha de título "## Resumo da reunião (uso interno)".
+- Em seguida escreva as 6 perguntas EXATAMENTE como estão abaixo: mesmo texto, mesma ordem, mesma numeração de "1-" a "6-". NUNCA altere, reescreva, traduza, resuma ou reordene as perguntas.
+- Preencha a resposta de cada uma com base no que foi registrado na reunião / pré-reunião / dados do lead. 1 linha por resposta, direta ao ponto, sem floreio.
+- Se a informação não tiver sido registrada, escreva exatamente: não informado na reunião.
+- Na pergunta 5, extraia a data/combinação acertada do resumo_reuniao ou das observacoes (ex.: "segunda-feira 27/04").
+- NÃO acrescente perguntas novas, comentários, títulos ou qualquer texto depois da pergunta 6.
+
+## Resumo da reunião (uso interno)
+1- Área de interesse: [a pós/área que o lead quer cursar]
+2- Condição e negociação apresentada: [proposta_feita + forma_pagamento, ex.: "20% no cartão de crédito em 24x"]
+3- Dor principal identificada: [a principal dor/objetivo que apareceu na conversa]
+4- Por que compraria a pós: [a motivação concreta para fazer a pós]
+5- Combinado/próxima ação: [data/combinação acertada]
+6- Onde Trabalha/área de atuação: [local_trabalho / área de atuação]`;
+
 const DEFAULT_SYSTEM = 'Você é a Mimosa, inteligência comercial da PPGVET Educação. Sua missão é apoiar o time comercial gerando análises humanizadas e personalizadas para cada lead, sempre tratando o lead pelo primeiro nome (em segunda pessoa, "você") e nunca usando o termo "lead". Mantenha o tom acolhedor, profissional e orientado a próximos passos.';
 
 const DEFAULT_CONFIG = {
@@ -40,7 +98,7 @@ const DEFAULT_CONFIG = {
   systemPrompt: DEFAULT_SYSTEM,
   prompts: {
     pre: DEFAULT_PROMPT_PRE,
-    posSemVenda: DEFAULT_PROMPT_PRE,
+    posSemVenda: DEFAULT_PROMPT_POS_SEM_VENDA,
     posComVenda: DEFAULT_PROMPT_PRE,
   },
 };

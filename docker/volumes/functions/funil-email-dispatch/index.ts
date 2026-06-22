@@ -32,9 +32,16 @@ interface DispatchBody {
   etapa_key: string
   funil_tipo: string
   funil_ref?: string
+  // Etapa registrada na idempotencia_key (e logo no histórico) quando difere da
+  // etapa usada para resolver a automação. Ex.: e-mail personalizado reaproveita o
+  // remetente da automação DOCUMENTOS_PENDENTES mas aparece como EMAIL_PERSONALIZADO.
+  etapa_key_log?: string
   variaveis_override?: Record<string, string>
   destinatarios_override?: Array<{ nome?: string; email: string }>
   anexos_override?: Array<{ filename: string; content_base64: string; content_type?: string }>
+  // E-mail personalizado: assunto/corpo digitados na hora (ignora o template).
+  assunto_override?: string
+  corpo_html_override?: string
   force?: boolean
 }
 
@@ -78,10 +85,16 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: 'invalid json' }, 400)
   }
 
-  const { task_id, etapa_key, funil_tipo, funil_ref, variaveis_override, destinatarios_override, anexos_override, force } = body
+  const {
+    task_id, etapa_key, etapa_key_log, funil_tipo, funil_ref,
+    variaveis_override, destinatarios_override, anexos_override,
+    assunto_override, corpo_html_override, force,
+  } = body
   if (!task_id || !etapa_key || !funil_tipo) {
     return json({ ok: false, error: 'task_id, etapa_key, funil_tipo obrigatórios' }, 400)
   }
+
+  try {
 
   // 1) Resolve automação (1 linha por etapa — maybeSingle é seguro).
   //    A trava `ativo` governa só o disparo AUTOMÁTICO (trigger). Envio manual
@@ -181,13 +194,32 @@ Deno.serve(async (req) => {
     return json({ ok: true, skipped: 'no_recipients' })
   }
 
+  // Modo "e-mail personalizado": email-send exige remetente_id quando NÃO há
+  // template_id. Reaproveitamos o remetente do template da própria automação.
+  let remetenteCustom: string | null = null
+  if (corpo_html_override) {
+    const { data: tpl } = await supabase
+      .from('email_templates')
+      .select('remetente_id')
+      .eq('id', automacao.template_id)
+      .maybeSingle()
+    remetenteCustom = (tpl?.remetente_id as string | null) ?? null
+    if (!remetenteCustom) {
+      return json(
+        { ok: false, error: 'Remetente não configurado para envio personalizado (template da etapa sem remetente).' },
+        400,
+      )
+    }
+  }
+
   // 4) Envia para cada aluno (idempotência por task+etapa+email)
+  const logEtapa = etapa_key_log || etapa_key
   const windowMin = automacao.idempotencia_minutos ?? 1440
   const sinceIso = new Date(Date.now() - windowMin * 60 * 1000).toISOString()
   const results: Array<{ email: string; status: string }> = []
 
   for (const r of recipients) {
-    const idempotenciaKey = `funil-tcc-${task_id}-${etapa_key}-${r.email}`
+    const idempotenciaKey = `funil-tcc-${task_id}-${logEtapa}-${r.email}`
 
     if (!force) {
       const { data: jaEnviou } = await supabase
@@ -217,23 +249,51 @@ Deno.serve(async (req) => {
       ...(variaveis_override ?? {}),
     }
 
-    const { data: sendRes, error: sendErr } = await supabase.functions.invoke('email-send', {
-      body: {
-        template_id: automacao.template_id,
-        automacao_id: automacao.id,
-        destinatario_email: r.email,
-        destinatario_nome: r.nome || null,
-        variaveis,
-        contexto_tipo: 'gt_task',
-        contexto_id: task_id,
-        idempotencia_key: force ? `${idempotenciaKey}-${Date.now()}` : idempotenciaKey,
-        ...(anexos_override?.length ? { anexos: anexos_override } : {}),
-      },
-    })
+    const idemKey = force ? `${idempotenciaKey}-${Date.now()}` : idempotenciaKey
+    const sendBody = corpo_html_override
+      ? {
+          remetente_id: remetenteCustom,
+          automacao_id: automacao.id,
+          destinatario_email: r.email,
+          destinatario_nome: r.nome || null,
+          variaveis,
+          contexto_tipo: 'gt_task',
+          contexto_id: task_id,
+          idempotencia_key: idemKey,
+          idempotencia_janela_min: windowMin,
+          assunto: assunto_override ?? '',
+          corpo_html: corpo_html_override,
+          ...(anexos_override?.length ? { anexos: anexos_override } : {}),
+        }
+      : {
+          template_id: automacao.template_id,
+          automacao_id: automacao.id,
+          destinatario_email: r.email,
+          destinatario_nome: r.nome || null,
+          variaveis,
+          contexto_tipo: 'gt_task',
+          contexto_id: task_id,
+          idempotencia_key: idemKey,
+          idempotencia_janela_min: windowMin,
+          ...(anexos_override?.length ? { anexos: anexos_override } : {}),
+        }
+
+    const { data: sendRes, error: sendErr } = await supabase.functions.invoke('email-send', { body: sendBody })
 
     if (sendErr) {
-      console.error('[funil-email-dispatch] email-send error:', r.email, sendErr.message)
-      results.push({ email: r.email, status: `erro: ${sendErr.message}` })
+      // FunctionsHttpError esconde o motivo real ("non-2xx status code"); o corpo da
+      // resposta do email-send tem o erro de verdade (Gmail desconectado, etc.).
+      let detail = sendErr.message || 'erro'
+      try {
+        const errBody = await (sendErr as { context?: { json?: () => Promise<unknown> } }).context?.json?.()
+        const realErr = (errBody as { error?: unknown })?.error
+        if (realErr) detail = typeof realErr === 'string' ? realErr : JSON.stringify(realErr)
+      } catch { /* corpo não-JSON */ }
+      console.error('[funil-email-dispatch] email-send error:', r.email, detail)
+      results.push({ email: r.email, status: `erro: ${detail}` })
+    } else if (sendRes && (sendRes as { duplicado?: boolean }).duplicado) {
+      // email-send deduplicou (já havia envio com essa key na janela) — não é entrega nova.
+      results.push({ email: r.email, status: 'idempotent' })
     } else {
       results.push({ email: r.email, status: 'enviado' })
       void sendRes
@@ -258,5 +318,17 @@ Deno.serve(async (req) => {
     )
   }
 
-  return json({ ok: erros.length === 0, etapa_key, results })
+    return json({
+      ok: erros.length === 0,
+      etapa_key,
+      results,
+      ...(erros.length
+        ? { error: erros.map((e) => `${e.email}: ${e.status.replace(/^erro:\s*/, '')}`).join(' · ') }
+        : {}),
+    })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'erro desconhecido'
+    console.error('[funil-email-dispatch] erro inesperado:', msg)
+    return json({ ok: false, error: msg }, 500)
+  }
 })

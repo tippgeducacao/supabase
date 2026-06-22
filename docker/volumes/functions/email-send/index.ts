@@ -22,6 +22,9 @@ interface SendPayload {
   contexto_id?: string;
   anexos?: Array<{ filename: string; content_base64: string; content_type?: string }>;
   idempotencia_key?: string;
+  // Janela (min) p/ a dedup por idempotencia_key. Sem isto, casa QUALQUER linha com a
+  // mesma key (mesmo antiga) → reenvio de etapa >24h virava falso "duplicado" sem entrega.
+  idempotencia_janela_min?: number;
   assunto?: string;
   corpo_html?: string;
   corpo_texto?: string;
@@ -141,12 +144,19 @@ Deno.serve(async (req) => {
       userId = user?.id ?? null;
     }
 
-    // Idempotência
+    // Idempotência (opcionalmente limitada a uma janela de tempo)
     if (payload.idempotencia_key) {
-      const { data: existente } = await supabaseAdmin
+      let dupQuery = supabaseAdmin
         .from("emails_enviados")
         .select("id, status")
-        .eq("idempotencia_key", payload.idempotencia_key)
+        .eq("idempotencia_key", payload.idempotencia_key);
+      if (payload.idempotencia_janela_min && payload.idempotencia_janela_min > 0) {
+        const desde = new Date(Date.now() - payload.idempotencia_janela_min * 60_000).toISOString();
+        dupQuery = dupQuery.gte("criado_em", desde);
+      }
+      const { data: existente } = await dupQuery
+        .order("criado_em", { ascending: false })
+        .limit(1)
         .maybeSingle();
       if (existente) {
         return new Response(JSON.stringify({ ok: true, duplicado: true, id: existente.id }), {
@@ -292,7 +302,11 @@ Deno.serve(async (req) => {
     }
     let gmailRes = await callGmail();
     if (gmailRes.status === 429) {
-      await new Promise((r) => setTimeout(r, 60_000));
+      // Backoff CURTO de propósito: o edge-runtime self-hosted mata o worker em
+      // ~60s (WorkerRequestCancelled). Um sleep de 60s aqui garantia a morte do
+      // worker (e do dispatcher que o chama em lote) → toast "non-2xx". 4s segura
+      // o burst de 429 sem estourar o wall-clock; se persistir, devolve o 502 abaixo.
+      await new Promise((r) => setTimeout(r, 4_000));
       gmailRes = await callGmail();
     }
     const gmailData = await gmailRes.json();
@@ -301,9 +315,13 @@ Deno.serve(async (req) => {
       await supabaseAdmin.from("emails_enviados").update({
         status: "falhou", erro_msg: JSON.stringify(gmailData),
       }).eq("id", log.id);
-      return new Response(JSON.stringify({ error: "Gmail API falhou", details: gmailData, log_id: log.id }), {
-        status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      // Preserva o 429 (rate limit) do Gmail p/ o chamador reagir — o
+      // email-campaign-dispatcher pausa a campanha quando recebe 429. Demais falhas = 502.
+      const rateLimited = gmailRes.status === 429;
+      return new Response(
+        JSON.stringify({ error: "Gmail API falhou", details: gmailData, log_id: log.id, rate_limited: rateLimited }),
+        { status: rateLimited ? 429 : 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
     }
 
     await supabaseAdmin.from("emails_enviados").update({

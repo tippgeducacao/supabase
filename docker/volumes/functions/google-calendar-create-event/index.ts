@@ -11,7 +11,7 @@ const CLIENT_ID = Deno.env.get('GOOGLE_CALENDAR_CLIENT_ID')!;
 const CLIENT_SECRET = Deno.env.get('GOOGLE_CALENDAR_CLIENT_SECRET')!;
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-const ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY')!;
+
 
 async function refreshAccessToken(refreshToken: string) {
   const res = await fetch('https://oauth2.googleapis.com/token', {
@@ -47,14 +47,16 @@ Deno.serve(async (req) => {
   if (req.method !== 'POST') return new Response('Method not allowed', { status: 405, headers: corsHeaders });
 
   try {
-    // Auth do usuário (precisa estar logado)
+    // Auth do usuário — valida JWT via service role (não depende de SUPABASE_ANON_KEY runtime)
     const authHeader = req.headers.get('Authorization');
-    if (!authHeader) throw new Error('Não autenticado');
-    const userClient = createClient(SUPABASE_URL, ANON_KEY, {
-      global: { headers: { Authorization: authHeader } },
-    });
-    const { data: { user }, error: userErr } = await userClient.auth.getUser();
-    if (userErr || !user) throw new Error('Sessão inválida');
+    if (!authHeader?.startsWith('Bearer ')) throw new Error('Não autenticado');
+    const token = authHeader.replace(/^Bearer\s+/i, '');
+    const adminAuth = createClient(SUPABASE_URL, SERVICE_ROLE);
+    const { data: { user }, error: userErr } = await adminAuth.auth.getUser(token);
+    if (userErr || !user) {
+      console.error('[google-calendar-create-event] auth failed:', userErr);
+      throw new Error('Sessão inválida');
+    }
 
     const body = await req.json();
     const {

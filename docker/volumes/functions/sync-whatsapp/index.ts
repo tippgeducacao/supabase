@@ -49,7 +49,7 @@ Deno.serve(async (req) => {
         try {
           // 1. Templates
           const tplRes = await fetch(
-            `${META_API}/${waba_id}/message_templates?fields=id,name,language,category,status,components&limit=200`,
+            `${META_API}/${waba_id}/message_templates?fields=id,name,language,category,status,components,quality_score&limit=200`,
             { headers: h }
           );
           const tplData = await tplRes.json();
@@ -85,6 +85,12 @@ Deno.serve(async (req) => {
                 header_text: headerComp?.text || headerComp?.format || null,
                 footer_text: footerComp?.text || null,
                 buttons: buttons?.length ? buttons : null,
+                // Meta devolve quality_score como objeto { score: "GREEN"|"YELLOW"|"RED"|"UNKNOWN" }
+                // (ou ausente em templates novos). Achatamos para o texto do score.
+                quality_score:
+                  (t.quality_score && typeof t.quality_score === "object"
+                    ? t.quality_score.score
+                    : t.quality_score) ?? null,
               };
             });
             const { error } = await supabase

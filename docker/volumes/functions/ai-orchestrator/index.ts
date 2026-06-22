@@ -10,7 +10,7 @@ const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_MODEL = "claude-sonnet-4-20250514";
 const MAX_TOOL_LOOPS = 5;
 // Hard deadline (ms) to stay safely under Supabase Edge Runtime ~150s wall limit
-const SOFT_DEADLINE_MS = 110_000;
+const SOFT_DEADLINE_MS = 80_000;
 // Per-tool timeout to prevent any single tool from stalling the loop
 const TOOL_TIMEOUT_MS = 25_000;
 
@@ -63,7 +63,7 @@ const TOOL_DEFINITIONS: Record<string, any> = {
   },
   query_instagram: {
     name: "query_instagram",
-    description: "Consulta métricas do Instagram dos perfis conectados no banco de dados.",
+    description: "Consulta métricas do Instagram dos perfis conectados. Para cada conta, 'reach' (e 'reach_periodo') é o ALCANCE DEDUPLICADO DO PERÍODO buscado ao vivo na API (use esse número como alcance do relatório) e 'novos_seguidores' é o total de novos seguidores no período. 'followers_count' é o total atual de seguidores. (Alcance/novos seguidores cobrem no máximo os últimos 30 dias por limite da API.)",
     input_schema: {
       type: "object",
       properties: {
@@ -367,11 +367,59 @@ async function executeTool(
     case "query_instagram": {
       const { start, end } = getPeriodDates(toolInput.period);
 
-      let accountQuery = supabase.from("ig_accounts").select("id, username, followers_count, reach, impressions, profile_views, total_likes, total_comments, total_shares, total_saves").eq("is_active", true);
+      let accountQuery = supabase.from("ig_accounts").select("id, ig_user_id, access_token, username, followers_count, reach, impressions, profile_views, total_likes, total_comments, total_shares, total_saves").eq("is_active", true);
       if (toolInput.profiles?.length) {
         accountQuery = accountQuery.in("username", toolInput.profiles);
       }
-      const { data: accounts } = await accountQuery;
+      const { data: accountsRaw } = await accountQuery;
+
+      if (!accountsRaw?.length) return JSON.stringify({ accounts: [], posts: [], stories: [] });
+
+      // ── Alcance do PERÍODO + novos seguidores AO VIVO na Graph API ──
+      // O snapshot salvo em ig_accounts.reach é sempre dos últimos 30 dias (da hora do
+      // sync), então não batia com o período pedido no relatório (vinha abaixo da
+      // ferramenta). Aqui buscamos o alcance deduplicado e os novos seguidores para o
+      // MESMO período do relatório. Fallback pro snapshot se a chamada falhar.
+      // metric_type=total_value/period=day aceita no máx. 30 dias → clampa o início.
+      const GRAPH_API = "https://graph.facebook.com/v21.0";
+      const untilTs = Math.floor(new Date(`${end}T23:59:59Z`).getTime() / 1000);
+      const sinceRaw = Math.floor(new Date(`${start}T00:00:00Z`).getTime() / 1000);
+      const sinceTs = Math.max(sinceRaw, untilTs - 30 * 86400);
+
+      const fetchProfileTotal = async (
+        igUserId: string, token: string, metric: string,
+      ): Promise<number | null> => {
+        try {
+          const url = `${GRAPH_API}/${igUserId}/insights?metric=${metric}&metric_type=total_value&period=day&since=${sinceTs}&until=${untilTs}&access_token=${token}`;
+          const r = await fetch(url);
+          const j = await r.json();
+          const m = j?.data?.[0];
+          if (!m) return null;
+          if (m.total_value?.value !== undefined && m.total_value?.value !== null) return Number(m.total_value.value) || 0;
+          if (Array.isArray(m.values)) return m.values.reduce((s: number, v: any) => s + (Number(v?.value) || 0), 0);
+          return null;
+        } catch (_) {
+          return null;
+        }
+      };
+
+      const accounts = await Promise.all(accountsRaw.map(async (a: any) => {
+        const { ig_user_id, access_token, ...rest } = a;
+        const out: any = { ...rest };
+        if (ig_user_id && access_token) {
+          const [reachPeriod, newFollowers] = await Promise.all([
+            fetchProfileTotal(ig_user_id, access_token, "reach"),
+            fetchProfileTotal(ig_user_id, access_token, "follower_count"),
+          ]);
+          // Alcance do período substitui o snapshot quando a API responde
+          if (reachPeriod !== null) {
+            out.reach = reachPeriod;
+            out.reach_periodo = reachPeriod;
+          }
+          out.novos_seguidores = newFollowers ?? 0;
+        }
+        return out;
+      }));
 
       if (!accounts?.length) return JSON.stringify({ accounts: [], posts: [], stories: [] });
 
@@ -938,28 +986,50 @@ serve(async (req) => {
         break;
       }
 
-      // Use smaller token budget on intermediate iterations to keep latency low
-      const isLikelyFinal = loop === MAX_TOOL_LOOPS - 1;
+      // Orçamento de tokens generoso: a tool `generate_report` recebe as seções do
+      // relatório como INPUT do modelo (markdown rico, várias seções) — ou seja, é uma
+      // saída grande. Com o teto antigo (2048) o modelo escrevia o preâmbulo
+      // ("Agora vou gerar o relatório...") e era CORTADO por max_tokens ANTES de emitir
+      // o bloco tool_use. Aí stop_reason virava "max_tokens", caía no else como se fosse
+      // resposta final e salvava só o preâmbulo → relatório vazio e PDF em branco.
       const body: any = {
         model: ANTHROPIC_MODEL,
         system: systemPrompt,
         messages: currentMessages,
-        max_tokens: isLikelyFinal ? 4096 : 2048,
+        // 8192 é suficiente p/ o relatório (seções do generate_report ≈ poucos milhares de
+        // tokens) e MUITO mais rápido que 16384 — o teto alto fazia uma única chamada gerar
+        // texto demais e estourar o wall-clock do worker (5xx "cancelled by supervisor").
+        max_tokens: 8192,
       };
 
       if (tools.length > 0) {
         body.tools = tools;
       }
 
-      const aiRes = await fetch(ANTHROPIC_API_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": anthropicKey.api_key,
-          "anthropic-version": "2023-06-01",
-        },
-        body: JSON.stringify(body),
-      });
+      // Timeout por chamada: uma única chamada Anthropic lenta não pode rodar até o limite
+      // duro do worker e ser morta pelo supervisor (vira 5xx). Se passar, abortamos e
+      // encerramos com o que já temos (resposta graciosa em vez de 500).
+      const callController = new AbortController();
+      const callTimer = setTimeout(() => callController.abort(), 55_000);
+      let aiRes: Response;
+      try {
+        aiRes = await fetch(ANTHROPIC_API_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": anthropicKey.api_key,
+            "anthropic-version": "2023-06-01",
+          },
+          body: JSON.stringify(body),
+          signal: callController.signal,
+        });
+      } catch (err) {
+        clearTimeout(callTimer);
+        console.warn(`ai-orchestrator: chamada Anthropic abortada/erro no loop ${loop}: ${err instanceof Error ? err.message : err}`);
+        hitDeadline = true;
+        break;
+      }
+      clearTimeout(callTimer);
 
       if (!aiRes.ok) {
         const errText = await aiRes.text();
@@ -1035,6 +1105,12 @@ serve(async (req) => {
           .filter((b: any) => b.type === "text")
           .map((b: any) => b.text)
           .join("\n");
+        // Se o modelo foi cortado por max_tokens (resposta truncada), registra para
+        // diagnóstico. O front trata reportHtml=null como falha e pede para tentar de novo,
+        // evitando salvar um relatório só com o preâmbulo.
+        if (stopReason === "max_tokens") {
+          console.warn(`ai-orchestrator: stop_reason=max_tokens no loop ${loop} — resposta possivelmente truncada (reportHtml=${reportHtml ? "ok" : "null"}).`);
+        }
         break;
       }
     }

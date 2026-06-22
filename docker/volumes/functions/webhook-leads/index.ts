@@ -142,6 +142,15 @@ serve(async (req) => {
       };
     }
 
+    // 🆕 NORMALIZAÇÃO: payload novo do n8n vem aninhado em `dados_completos`
+    // (formulário direto Meta). Achatar mantendo campos da raiz com prioridade.
+    if (body && typeof body === 'object' && body.dados_completos && typeof body.dados_completos === 'object') {
+      console.log('📦 Payload aninhado detectado (dados_completos) — achatando...');
+      const inner = body.dados_completos as Record<string, any>;
+      body = { ...inner, ...body }; // raiz prevalece (ex.: curso_de_Interesse, tipo_lead)
+      delete (body as any).dados_completos;
+    }
+
     console.log('🔍 DADOS RECEBIDOS:');
     console.log('- Número de campos:', Object.keys(body).length);
     console.log('- Campos disponíveis:', Object.keys(body));
@@ -271,6 +280,29 @@ serve(async (req) => {
       return normalized;
     };
 
+    // Gera as variantes de um WhatsApp brasileiro normalizado (+55DDD...) para
+    // deduplicação tolerante ao 9º dígito. Celulares têm 9 dígitos locais (com o
+    // '9' inicial) mas o mesmo número pode ter sido salvo com 8 (sem o 9), ou
+    // vice-versa. Retorna as formas equivalentes para casar em `.in(...)`.
+    const whatsappVariants = (normalized: string | null): string[] => {
+      if (!normalized) return [];
+      const digits = normalized.replace(/\D/g, '');
+      const variants = new Set<string>([normalized]);
+      // Espera formato +55 + DDD(2) + local. Sem código do país, não dá pra inferir DDD com segurança.
+      if (digits.startsWith('55') && digits.length >= 12) {
+        const ddd = digits.slice(2, 4);
+        const local = digits.slice(4);
+        if (local.length === 9 && local.startsWith('9')) {
+          // Com 9º dígito → adiciona forma sem o 9.
+          variants.add(`+55${ddd}${local.slice(1)}`);
+        } else if (local.length === 8) {
+          // Sem 9º dígito → adiciona forma com o 9.
+          variants.add(`+55${ddd}9${local}`);
+        }
+      }
+      return Array.from(variants);
+    };
+
     // Função robusta para converter UTC para timezone brasileiro
     const convertUTCToBrazilTime = (input: string): string => {
       try {
@@ -316,9 +348,9 @@ serve(async (req) => {
     console.log('🗂️ Iniciando mapeamento aprimorado dos dados...');
     
     const leadData = {
-      // Nome - múltiplas variações possíveis (incluindo página /sueli)
-      nome: body.Nome || body.nome || body.Name || body.NOME || body.full_name || 
-            body.fullName || body.firstName || body.first_name || body.cliente || 
+      // Nome - múltiplas variações possíveis (incluindo página /sueli e formulário direto Meta)
+      nome: body.Nome || body.nome || body.Name || body.NOME || body.full_name || body.fullName ||
+            body.firstName || body.first_name || body.cliente ||
             body.lead_name || body.Nome_do_Lead || body['Nome'] || body['nome'] || 'Nome não informado',
       
       // Email - múltiplas variações possíveis (incluindo página /sueli)
@@ -326,10 +358,10 @@ serve(async (req) => {
              body.mail || body.emailAddress || body.email_address || body.E_mail_do_Lead ||
              body['E-mail'] || body['email'] || body['E_mail'] || null,
       
-      // WhatsApp/Telefone - múltiplas variações possíveis (incluindo página /sueli)
+      // WhatsApp/Telefone - múltiplas variações (incluindo `whatsapp_number` do formulário direto Meta)
       whatsapp: normalizeWhatsApp(
-        body.Seu_WhatsApp || body.whatsapp || body.phone || body.telefone || 
-        body.WhatsApp || body.WHATSAPP || body.celular || body.mobile || 
+        body.Seu_WhatsApp || body.whatsapp || body.whatsapp_number || body.phone || body.telefone ||
+        body.WhatsApp || body.WHATSAPP || body.celular || body.mobile ||
         body.phoneNumber || body.phone_number || body.Whatsapp_do_Lead ||
         body['Telefone'] || body['WhatsApp'] || body['Seu_WhatsApp']
       ),
@@ -342,8 +374,8 @@ serve(async (req) => {
                        body.fonte || body.campaign_source || 
                        null,
 
-      // Dispositivo
-      dispositivo: body.Dispositivo || body.device || body.dispositivo || body.user_agent || 
+      // Dispositivo (platform=ig/fb do Meta)
+      dispositivo: body.Dispositivo || body.device || body.dispositivo || body.user_agent ||
                   body.platform || body.browser || null,
       
       // Região
@@ -351,10 +383,10 @@ serve(async (req) => {
               body.region || body.regiao || body.location || body.cidade || 
               body.city || body.state || body.estado || null,
       
-      // Informações da página
+      // Informações da página (form_id/ad_id/campaign_id do Meta)
       pagina_id: body.Id_da_pagina || body.page_id || body.pagina_id || body.form_id ||
                  body.formId || body.Id_do_formulario || body.campaign_id || body.ad_id || null,
-      // pagina_nome: prioriza a URL real da landing (URL/referer), depois nome do funil/evento
+      // pagina_nome: prioriza a URL real da landing (URL/referer), depois nome do funil/evento/anúncio
       pagina_nome: clean(body.URL) || clean(body.url) || clean(body.page_url) ||
                    clean(body.landing_url) || clean(body.landing_page) ||
                    clean(body.referer) || clean(body.referrer) ||
@@ -362,12 +394,13 @@ serve(async (req) => {
                    clean(body.page_title) || clean(body.form_name) || clean(body.formName) ||
                    clean(body.campaign_name) || clean(body.ad_name) || null,
       
-      // UTM Parameters - com limpeza de placeholders
+      // UTM Parameters - com limpeza de placeholders. Para formulário direto Meta sem UTMs,
+      // usamos campaign_name/adset_name/ad_name como proxy.
       utm_source: clean(body.utm_source, 'GreatPages'),
       utm_medium: clean(body.utm_medium, 'form'),
-      utm_campaign: clean(body.utm_campaign),
-      utm_content: clean(body.utm_content),
-      utm_term: clean(body.utm_term),
+      utm_campaign: clean(body.utm_campaign) || clean(body.campaign_name),
+      utm_content: clean(body.utm_content) || clean(body.ad_name),
+      utm_term: clean(body.utm_term) || clean(body.adset_name),
       
       // Informações técnicas
       ip_address: body.IP_do_usuario || body.ip || body.ip_address || body.client_ip || 
@@ -375,11 +408,21 @@ serve(async (req) => {
                  req.headers.get('x-real-ip') || null,
       user_agent: body.user_agent || req.headers.get('user-agent') || null,
       
-      // Tempo de formação
-      tempo_formacao: body.Tempo_formacao || body.tempo_formacao || null,
+      // Tempo de formação (formulário direto Meta usa "há_quanto_tempo_está_está_formado?")
+      tempo_formacao:
+        body.Tempo_formacao || body.tempo_formacao ||
+        body['há_quanto_tempo_está_está_formado?'] ||
+        body['ha_quanto_tempo_esta_formado'] ||
+        body['ha_quanto_tempo_esta_esta_formado'] ||
+        null,
       
-      // Profissão/Área (incluindo página /sueli)
-      profissao: body.Eu_sou || body.profissao || body.Profissao || body.Formacao || null,
+      // Profissão/Área (formulário direto Meta usa "eu_sou..." com reticências literais)
+      // Algumas landings (ex.: ebooksaude / "Landing Saúde Única & Zoonoses") mandam
+      // a profissão no campo `perfil` — tratamos como profissão.
+      profissao:
+        body.Eu_sou || body.eu_sou || body['eu_sou...'] ||
+        body.profissao || body.Profissao || body.Formacao ||
+        body.perfil || body.Perfil || null,
       
       // Área de interesse (incluindo página /sueli)
       area_interesse: body.Area_de_Interesse || body.area_interesse || body.area_de_interesse || null,
@@ -392,6 +435,17 @@ serve(async (req) => {
       
       // Observações
       observacoes: null as string | null,
+
+      // Metadados de anúncios do Meta (formulário direto)
+      meta_campaign_id: body.campaign_id || null,
+      meta_campaign_name: body.campaign_name || null,
+      meta_adset_id: body.adset_id || null,
+      meta_adset_name: body.adset_name || null,
+      meta_ad_id: body.ad_id || null,
+      meta_ad_name: body.ad_name || null,
+      meta_form_id: body.form_id || null,
+      meta_form_name: body.form_name || null,
+      meta_platform: body.platform || null,
     }
 
     // Detectar landing pages do Lovable (subdomínio.ppgvet.com.br) sem UTM → fonte = Google
@@ -551,6 +605,16 @@ serve(async (req) => {
     leadData.profissao = sanitize(leadData.profissao, 255);
     leadData.area_interesse = sanitize(leadData.area_interesse, 255);
     leadData.curso_interesse = sanitize(leadData.curso_interesse, 255);
+    // Metadados Meta
+    leadData.meta_campaign_id = sanitize(leadData.meta_campaign_id, 255);
+    leadData.meta_campaign_name = sanitize(leadData.meta_campaign_name, 255);
+    leadData.meta_adset_id = sanitize(leadData.meta_adset_id, 255);
+    leadData.meta_adset_name = sanitize(leadData.meta_adset_name, 255);
+    leadData.meta_ad_id = sanitize(leadData.meta_ad_id, 255);
+    leadData.meta_ad_name = sanitize(leadData.meta_ad_name, 255);
+    leadData.meta_form_id = sanitize(leadData.meta_form_id, 255);
+    leadData.meta_form_name = sanitize(leadData.meta_form_name, 255);
+    leadData.meta_platform = sanitize(leadData.meta_platform, 50);
     if (leadData.observacoes) {
       leadData.observacoes = sanitize(leadData.observacoes, 1000);
     }
@@ -599,13 +663,16 @@ serve(async (req) => {
     let criouOportunidade = false;
     let motivo = 'lead_existente';
 
-    // 1. Buscar lead existente pelo WhatsApp normalizado
+    // 1. Buscar lead existente pelo WhatsApp normalizado — tolerante ao 9º dígito
+    //    (casa formas com/sem o '9' inicial). Mantém o MAIS ANTIGO como ativo
+    //    (atribuição de primeiro toque), preservando a origem original do lead.
     let existingLead = null;
     if (leadData.whatsapp) {
+      const variants = whatsappVariants(leadData.whatsapp);
       const { data: found } = await supabase
         .from('leads')
         .select('*')
-        .eq('whatsapp', leadData.whatsapp)
+        .in('whatsapp', variants)
         .neq('status', 'mesclado')
         .order('created_at', { ascending: true })
         .limit(1)
@@ -624,6 +691,16 @@ serve(async (req) => {
       if (leadData.area_interesse && !existingLead.area_interesse) updates.area_interesse = leadData.area_interesse;
       if (leadData.curso_interesse && !existingLead.curso_interesse) updates.curso_interesse = leadData.curso_interesse;
       if (leadData.regiao && !existingLead.regiao) updates.regiao = leadData.regiao;
+      // Metadados Meta: preencher se ainda vazio
+      if (leadData.meta_campaign_id && !existingLead.meta_campaign_id) updates.meta_campaign_id = leadData.meta_campaign_id;
+      if (leadData.meta_campaign_name && !existingLead.meta_campaign_name) updates.meta_campaign_name = leadData.meta_campaign_name;
+      if (leadData.meta_adset_id && !existingLead.meta_adset_id) updates.meta_adset_id = leadData.meta_adset_id;
+      if (leadData.meta_adset_name && !existingLead.meta_adset_name) updates.meta_adset_name = leadData.meta_adset_name;
+      if (leadData.meta_ad_id && !existingLead.meta_ad_id) updates.meta_ad_id = leadData.meta_ad_id;
+      if (leadData.meta_ad_name && !existingLead.meta_ad_name) updates.meta_ad_name = leadData.meta_ad_name;
+      if (leadData.meta_form_id && !existingLead.meta_form_id) updates.meta_form_id = leadData.meta_form_id;
+      if (leadData.meta_form_name && !existingLead.meta_form_name) updates.meta_form_name = leadData.meta_form_name;
+      if (leadData.meta_platform && !existingLead.meta_platform) updates.meta_platform = leadData.meta_platform;
       
       if (Object.keys(updates).length > 0) {
         updates.updated_at = new Date().toISOString();
@@ -660,7 +737,8 @@ serve(async (req) => {
 
       const { data: newLead, error: insertError } = await supabase
         .from('leads')
-        .insert([leadData])
+        // origem_criacao → evento "Criado por <origem>" na timeline do Contato 360 (via trigger).
+        .insert([{ ...leadData, origem_criacao: 'Captação de leads (site)' }])
         .select()
         .single();
 

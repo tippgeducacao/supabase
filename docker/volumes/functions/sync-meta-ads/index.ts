@@ -192,47 +192,79 @@ Deno.serve(async (req) => {
             console.log("Sample creative image_url:", normalizeCreativeImageUrl(allCreatives[0]?.image_url) || "none");
             console.log("Sample creative thumbnail_url:", normalizeCreativeImageUrl(allCreatives[0]?.thumbnail_url)?.substring(0, 120) || "none");
             
-            // For creatives without image_url, try fetching high-res via image_hash
-            const creativesWithImages = await Promise.all(allCreatives.map(async (cr: any) => {
-              let bestImage = normalizeCreativeImageUrl(cr.image_url) || null;
-              const normalizedThumb = normalizeCreativeImageUrl(cr.thumbnail_url);
-              
-              // If no image_url but has image_hash, fetch full-res from ad account images
-              if (!bestImage && cr.image_hash) {
-                try {
-                  const imgRes = await fetch(
-                    `${META_API}/${ad_account_id}/adimages?hashes=["${cr.image_hash}"]&fields=url_128,url`,
-                    { headers: h }
-                  );
-                  const imgData = await imgRes.json();
-                  const imgObj = imgData.data?.images?.[cr.image_hash] || Object.values(imgData.data?.images || {})[0] as any;
-                  if (imgObj) {
-                    bestImage = normalizeCreativeImageUrl(imgObj.url) || normalizeCreativeImageUrl(imgObj.url_128) || null;
-                  }
-                } catch (e) {
-                  console.log("Failed to fetch image for hash:", cr.image_hash, getErrorMessage(e));
-                }
-              }
-              
-              // Fallback to decoded source thumbnail or upgraded sized thumbnail
-              if (!bestImage && normalizedThumb) {
-                bestImage = normalizedThumb;
-              }
-              
+            // Monta as linhas usando a imagem que JÁ vem do /adcreatives
+            // (image_url ou thumbnail_url). Só os criativos SEM nenhuma imagem
+            // precisam da busca extra por image_hash.
+            //
+            // ⚠️ Antes isso era um Promise.all em TODOS os ~900 criativos, cada um
+            // disparando um fetch /adimages — centenas de chamadas concorrentes à
+            // Graph API. Isso estourava rate limit/wall-clock e a edge function era
+            // morta ANTES do upsert (por isso os criativos pararam de atualizar em
+            // ~abr/2026 enquanto os insights, que vêm antes, seguiam ok). Agora a
+            // maioria nem chama a Graph, e os poucos que precisam vão com
+            // concorrência limitada.
+            const needHash: any[] = [];
+            const baseRows = allCreatives.map((cr: any) => {
+              const bestImage =
+                normalizeCreativeImageUrl(cr.image_url) ||
+                normalizeCreativeImageUrl(cr.thumbnail_url) ||
+                null;
+              if (!bestImage && cr.image_hash) needHash.push(cr);
               const adInfo = adMap[cr.id] || {};
               return {
-                id: cr.id,
-                ad_account_id: db_account_id,
-                campaign_id: adInfo.campaign_id || null,
-                ad_id: adInfo.ad_id || null,
-                ad_name: adInfo.ad_name || cr.name,
-                creative_type: cr.object_story_spec ? Object.keys(cr.object_story_spec)[0] : null,
-                thumbnail_url: bestImage || normalizedThumb || cr.thumbnail_url,
-                body: cr.body,
-                title: cr.title,
-                fetched_at: new Date().toISOString(),
+                cr,
+                row: {
+                  id: cr.id,
+                  ad_account_id: db_account_id,
+                  campaign_id: adInfo.campaign_id || null,
+                  ad_id: adInfo.ad_id || null,
+                  ad_name: adInfo.ad_name || cr.name,
+                  creative_type: cr.object_story_spec ? Object.keys(cr.object_story_spec)[0] : null,
+                  thumbnail_url: bestImage || cr.thumbnail_url || null,
+                  body: cr.body,
+                  title: cr.title,
+                  fetched_at: new Date().toISOString(),
+                },
               };
-            }));
+            });
+
+            // Resolve as imagens faltantes (poucas) com concorrência limitada
+            const hashToUrl: Record<string, string> = {};
+            if (needHash.length > 0) {
+              const HASH_CONCURRENCY = 5;
+              let cursor = 0;
+              const worker = async () => {
+                while (true) {
+                  const i = cursor++;
+                  if (i >= needHash.length) break;
+                  const cr = needHash[i];
+                  try {
+                    const imgRes = await fetch(
+                      `${META_API}/${ad_account_id}/adimages?hashes=["${cr.image_hash}"]&fields=url_128,url`,
+                      { headers: h },
+                    );
+                    const imgData = await imgRes.json();
+                    const imgObj = imgData.data?.images?.[cr.image_hash] || Object.values(imgData.data?.images || {})[0] as any;
+                    const url = imgObj
+                      ? (normalizeCreativeImageUrl(imgObj.url) || normalizeCreativeImageUrl(imgObj.url_128))
+                      : null;
+                    if (url) hashToUrl[cr.image_hash] = url;
+                  } catch (e) {
+                    console.log("Failed to fetch image for hash:", cr.image_hash, getErrorMessage(e));
+                  }
+                }
+              };
+              await Promise.all(
+                Array.from({ length: Math.min(HASH_CONCURRENCY, needHash.length) }, () => worker()),
+              );
+            }
+
+            const creativesWithImages = baseRows.map(({ cr, row }: any) => {
+              if (!row.thumbnail_url && cr.image_hash && hashToUrl[cr.image_hash]) {
+                row.thumbnail_url = hashToUrl[cr.image_hash];
+              }
+              return row;
+            });
             
             const { error } = await supabase
               .from("meta_creatives")
