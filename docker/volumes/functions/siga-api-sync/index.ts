@@ -181,6 +181,7 @@ function normalizeBase(it: any, tipoData: string) {
     valor_previsto: parseNum(it.valorPrevisto),
     data_vencimento: brToIso(it.dataVencimento),
     data_pagamento: brToIso(it.dataPagamento ?? it.dataPagamentoAntecipado),
+    data_recebimento: brToIso(it.dataRecebimento), // data REAL do crédito (PJBank); "" -> null
     tipo_data: tipoData,
     raw: it,
   };
