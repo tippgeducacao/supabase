@@ -98,28 +98,50 @@ Deno.serve(async (req) => {
     }
 
     // Check if user is director
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('user_type')
-      .eq('id', user.id)
-      .single()
+    let isDiretor = false;
 
-    const { data: roles } = await supabase
-      .from('user_roles')
-      .select('role')
-      .eq('user_id', user.id)
+    try {
+      const { data: profile, error: profileError } = await supabase
+        .from('profiles')
+        .select('user_type')
+        .eq('id', user.id)
+        .single()
 
-    const isDiretor = roles?.some(r => r.role === 'diretor') || profile?.user_type === 'diretor'
-    
+      if (profileError) {
+        console.error('Error fetching profile:', profileError);
+      } else if (profile?.user_type === 'diretor') {
+        isDiretor = true;
+      }
+    } catch (e) {
+      console.error('Exception checking profile:', e);
+    }
+
     if (!isDiretor) {
-      logger.warn('Non-director attempted user creation', { 
-        requesterId: user.id.substring(0, 8) 
+      try {
+        const { data: roles, error: rolesError } = await supabase
+          .from('user_roles')
+          .select('role')
+          .eq('user_id', user.id)
+
+        if (rolesError) {
+          console.error('Error fetching roles:', rolesError);
+        } else if (roles?.some(r => r.role === 'diretor')) {
+          isDiretor = true;
+        }
+      } catch (e) {
+        console.error('Exception checking roles:', e);
+      }
+    }
+
+    if (!isDiretor) {
+      logger.warn('Non-director attempted user creation', {
+        requesterId: user.id.substring(0, 8)
       });
       return new Response(
         JSON.stringify({ error: 'Apenas diretores podem criar usuários' }),
-        { 
-          status: 403, 
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        {
+          status: 403,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
         }
       )
     }

@@ -2,6 +2,7 @@
 // Envia mensagem WhatsApp (texto, template ou documento/PDF) via Meta Cloud API para o CRM Comercial.
 // Diferente do whatsapp-send-message (pedagógico) — usa crm_whatsapp_accounts e crm_whatsapp_messages.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
+import { getWaProvider } from "../_shared/waProviders.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -14,10 +15,51 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const META_GRAPH = "https://graph.facebook.com/v21.0";
 
+/**
+ * Sobe um arquivo de mídia pro endpoint /media da Meta e devolve o media_id.
+ * É o que faz o WhatsApp renderizar áudio OGG/Opus como MENSAGEM DE VOZ (forma de
+ * onda) em vez de "arquivo de áudio": enviar por `audio.id` (mídia carregada) ⇒ voz;
+ * enviar por `audio.link` ⇒ arquivo. Baixa do nosso storage e reenvia como multipart.
+ */
+async function metaUploadMedia(
+  phoneNumberId: string, accessToken: string, fileUrl: string, mime: string, filename: string,
+): Promise<string> {
+  const fileResp = await fetch(fileUrl);
+  if (!fileResp.ok) throw new Error(`download mídia ${fileResp.status}`);
+  const bytes = new Uint8Array(await fileResp.arrayBuffer());
+  const form = new FormData();
+  form.append("messaging_product", "whatsapp");
+  form.append("type", mime);
+  form.append("file", new Blob([bytes], { type: mime }), filename);
+  const r = await fetch(`${META_GRAPH}/${phoneNumberId}/media`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}` }, // sem Content-Type: o FormData define o boundary
+    body: form,
+  });
+  const j: any = await r.json().catch(() => ({}));
+  if (!r.ok || !j?.id) throw new Error(j?.error?.message ?? `media upload ${r.status}`);
+  return String(j.id);
+}
+
 function formatPhone(raw: string): string | null {
   const digits = (raw ?? "").replace(/\D/g, "");
   if (!digits) return null;
   return digits.startsWith("55") ? digits : `55${digits}`;
+}
+
+// Variantes p/ casar a conversa pelo telefone apesar do 9º dígito (Uazapi e Meta
+// dropam o 9 no inbound). Gera com/sem DDI 55 e com/sem o 9 do celular.
+function phoneVariants(raw: string): string[] {
+  let d = (raw ?? "").replace(/\D/g, "");
+  if (d.startsWith("55")) d = d.slice(2);
+  const ddd = d.slice(0, 2);
+  const rest = d.slice(2);
+  const set = new Set<string>();
+  const add = (x: string) => { set.add(x); set.add(`55${x}`); };
+  if (rest) add(ddd + rest);
+  if (rest.length === 8) add(`${ddd}9${rest}`);            // sem 9 -> adiciona
+  if (rest.length === 9 && rest[0] === "9") add(ddd + rest.slice(1)); // com 9 -> remove
+  return [...set];
 }
 
 // Canoniza p/ o formato COM 9º dígito (igual à crm-lead-webhook) — usado no remotejid
@@ -29,6 +71,28 @@ function canonicalBrPhone(raw: string): string {
     d = d.slice(0, 2) + "9" + d.slice(2);
   }
   return `55${d}`;
+}
+
+// A Meta REJEITA parâmetro de corpo de template que contenha quebra de linha (\n),
+// tab (\t) ou 4+ espaços seguidos — erro 132018 ("issue with the parameters"). Vários
+// leads do SprintHub chegam com a variável do curso terminando em "\n" (ex.: "CLÍNICA
+// MÉDICA E CIRÚRGICA DE BOVINOS\n"), o que derrubava o 1º template SILENCIOSAMENTE — e
+// NÃO aparecia como número inválido (≠ 131026). Normaliza o whitespace de TODO parâmetro
+// de body aqui, no ponto ÚNICO por onde passa todo envio de template (webhook,
+// reconciliação, broadcast, automações).
+function sanitizarComponentsTemplate(components: unknown): any[] {
+  if (!Array.isArray(components)) return [];
+  return components.map((c: any) => {
+    if (c?.type !== "body" || !Array.isArray(c?.parameters)) return c;
+    return {
+      ...c,
+      parameters: c.parameters.map((p: any) =>
+        p?.type === "text" && typeof p?.text === "string"
+          ? { ...p, text: p.text.replace(/[\r\n\t]+/g, " ").replace(/ {2,}/g, " ").trim() }
+          : p,
+      ),
+    };
+  });
 }
 
 // Renderiza o corpo do template substituindo {{1}}, {{2}}, ... pelos parâmetros do "body".
@@ -49,6 +113,91 @@ function json(data: unknown, status = 200) {
   });
 }
 
+// Envio por uma LINHA provider-agnóstica (wa_conexoes). Resolve o provider + token
+// (segredo, só service_role), envia pelo adapter e persiste em crm_whatsapp_messages
+// (-> trigger espelha pro SAC). Sem janela 24h/template (regra Meta não se aplica).
+async function enviarViaConexao(admin: any, p: {
+  conexaoId: string; to: string; tipo: string; conteudo?: string;
+  anexo_url?: string; filename?: string; mime_type?: string;
+  lead_id?: string | null; oportunidade_id?: string | null; origemFinal: string | null;
+  reaction_message_id?: string | null;
+  enviadoPorId?: string | null; enviadoPorNome?: string | null;
+}): Promise<Response> {
+  const { data: conex } = await admin
+    .from("wa_conexoes")
+    .select("id, provider, server_url, status_conexao")
+    .eq("id", p.conexaoId)
+    .maybeSingle();
+  if (!conex) return json({ error: "conexão não encontrada" }, 404);
+  if (conex.status_conexao !== "conectado") {
+    return json({ error: "linha desconectada — reconecte o número antes de enviar", status_conexao: conex.status_conexao }, 409);
+  }
+  const { data: sec } = await admin
+    .from("wa_conexoes_secrets").select("token").eq("conexao_id", p.conexaoId).maybeSingle();
+  if (!sec?.token) return json({ error: "token da conexão ausente" }, 500);
+
+  const provider = getWaProvider(conex.provider);
+  const numberDigits = p.to; // já normalizado (55 + dígitos)
+
+  let result: { externalId: string | null; ok: boolean; raw: unknown };
+  let anexosPersist: any[] = [];
+  let conteudoPersist = String(p.conteudo ?? "");
+
+  if (p.tipo === "text") {
+    if (!conteudoPersist.trim()) return json({ error: "conteudo vazio" }, 400);
+    result = await provider.sendText(conex.server_url, sec.token, numberDigits, conteudoPersist.slice(0, 4096));
+  } else if (["document", "audio", "image", "sticker", "video"].includes(p.tipo)) {
+    const urlMidia = String(p.anexo_url ?? "").trim();
+    if (!urlMidia) return json({ error: `anexo_url obrigatório para tipo ${p.tipo}` }, 400);
+    const caption = p.tipo === "audio" || p.tipo === "sticker" ? "" : conteudoPersist.trim();
+    result = await provider.sendMedia(conex.server_url, sec.token, numberDigits, {
+      tipo: p.tipo, url: urlMidia, caption, filename: p.filename, mime: p.mime_type,
+    });
+    anexosPersist = [{
+      tipo: p.tipo,
+      mime_type: String(p.mime_type ?? (p.tipo === "audio" ? "audio/mp4" : p.tipo === "image" ? "image/jpeg" : p.tipo === "sticker" ? "image/webp" : "application/octet-stream")),
+      url: urlMidia,
+      filename: p.filename ?? `${p.tipo}`,
+    }];
+    if (p.tipo === "audio" || p.tipo === "sticker") conteudoPersist = "";
+  } else if (p.tipo === "reaction") {
+    const emoji = conteudoPersist.trim();
+    if (!emoji || !p.reaction_message_id) return json({ error: "reaction_message_id e conteudo (emoji) obrigatórios" }, 400);
+    result = await provider.sendReaction(conex.server_url, sec.token, numberDigits, String(p.reaction_message_id), emoji);
+    conteudoPersist = `[reacao]${emoji}`; // marcador renderizado como reação no chat
+  } else {
+    return json({ error: `tipo '${p.tipo}' não suportado nesta linha (use text, document, audio, image, video, sticker, reaction)` }, 400);
+  }
+
+  const nowIso = new Date().toISOString();
+  const { error: msgErr } = await admin.from("crm_whatsapp_messages").insert({
+    provider: conex.provider,
+    wa_conexao_id: p.conexaoId,
+    wa_account_id: null,
+    lead_id: p.lead_id ?? null,
+    oportunidade_id: p.oportunidade_id ?? null,
+    telefone: p.to,
+    direcao: "outbound",
+    tipo: p.tipo,
+    conteudo: conteudoPersist,
+    anexos: anexosPersist,
+    wa_message_id: result.externalId,
+    status_entrega: result.ok ? "sent" : "failed",
+    erro: result.ok ? null : { provider_response: result.raw },
+    metadata: {
+      provider: conex.provider,
+      ...(p.origemFinal ? { origem: p.origemFinal } : {}),
+      ...(p.enviadoPorId ? { enviado_por_id: p.enviadoPorId, enviado_por_nome: p.enviadoPorNome } : {}),
+    },
+  });
+  if (msgErr) console.error("[crm-whatsapp-send] insert (conexao) erro:", msgErr.message);
+
+  if (!result.ok) {
+    return json({ error: "provider recusou o envio", provider_response: result.raw }, 502);
+  }
+  return json({ success: true, wa_message_id: result.externalId, sent_at: nowIso, wa_conexao_id: p.conexaoId });
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
@@ -56,6 +205,9 @@ Deno.serve(async (req) => {
     const body = await req.json().catch(() => ({}));
     const {
       wa_account_id,
+      // Quando presente, a conversa é de uma LINHA provider-agnóstica (ex.: Uazapi):
+      // roteamos pelo adapter do provider, sem janela 24h/template (regras da Meta).
+      wa_conexao_id,
       telefone,
       tipo = "text",
       conteudo,
@@ -97,7 +249,7 @@ Deno.serve(async (req) => {
     if (tipo === "document" && !String(anexo_url ?? "").trim() && !String(curso ?? "").trim()) {
       return json({ error: "informe anexo_url ou curso para tipo document" }, 400);
     }
-    if ((tipo === "audio" || tipo === "sticker") && !String(anexo_url ?? "").trim()) {
+    if ((tipo === "audio" || tipo === "sticker" || tipo === "image") && !String(anexo_url ?? "").trim()) {
       return json({ error: `anexo_url obrigatório para tipo ${tipo}` }, 400);
     }
     if (tipo === "reaction" && (!String(reaction_message_id ?? "").trim() || !String(conteudo ?? "").trim())) {
@@ -145,30 +297,58 @@ Deno.serve(async (req) => {
     // qualquer atendente mesmo com o front antigo em cache (não depende do composer
     // mandar `origem`). Template é resolvido à parte no espelho (tipo='template').
     let origemFinal: string | null = origem ? String(origem) : null;
-    if (!origemFinal) {
+    // QUEM enviou (humano): resolve SEMPRE o usuário do JWT — também quando o composer já
+    // mandou origem='humano' — pra carimbar o nome do atendente na mensagem (balão rosa).
+    let enviadoPorId: string | null = null;
+    let enviadoPorNome: string | null = null;
+    {
       const authToken = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
       if (authToken && authToken !== SERVICE_ROLE) {
         try {
           const { data: u } = await admin.auth.getUser(authToken);
-          if (u?.user?.id) origemFinal = "humano";
+          if (u?.user?.id) {
+            enviadoPorId = u.user.id;
+            if (!origemFinal) origemFinal = "humano";
+          }
         } catch { /* token não-usuário (anon/serviço): não é humano */ }
       }
     }
+    if (enviadoPorId) {
+      try {
+        const { data: prof } = await admin.from("profiles").select("name").eq("id", enviadoPorId).maybeSingle();
+        enviadoPorNome = (prof?.name ?? "").trim() || null;
+      } catch { /* perfil indisponível — segue sem nome */ }
+    }
 
-    // Trava de FREQUÊNCIA de template (recomendação Meta): no máximo 1 template por
-    // número a cada 24h. Vale para TODA origem (composer, automação/fluxo, agente João,
-    // disparo em massa) — todas passam por aqui. Fonte da verdade: crm_whatsapp_messages.
-    // Bypass explícito por chamada com `forcar_template: true` (ex.: reenvio manual ciente).
-    if (tipo === "template" && body?.forcar_template !== true) {
-      const { data: jaEnviou } = await admin.rpc("crm_whatsapp_template_enviado_24h", { p_telefone: to });
-      if (jaEnviou === true) {
-        return json({
-          ok: true,
-          skipped: "template_24h",
-          motivo: "Já houve um template para este número nas últimas 24h (regra de frequência da Meta).",
-        });
+    // ── Rota provider-agnóstica (Uazapi etc.) ────────────────────────────────
+    // Roteamento de canal (prioridade): (1) wa_conexao_id explícito → linha web;
+    // (2) wa_account_id explícito → conta Meta (ex.: botão "Testar") — NUNCA sobreposto;
+    // (3) nenhum → AUTO-DETECTA pela última mensagem (CRM/SAC/Omnichat respondem no canal
+    // certo sem passar nada). Conta/linha explícita SEMPRE ganha do auto-detect.
+    let conexaoIdRota: string | null = wa_conexao_id ? String(wa_conexao_id) : null;
+    if (!conexaoIdRota && !wa_account_id) {
+      let q = admin
+        .from("crm_whatsapp_messages")
+        .select("provider, wa_conexao_id")
+        .order("created_at", { ascending: false })
+        .limit(1);
+      q = lead_id ? q.eq("lead_id", lead_id) : q.in("telefone", phoneVariants(to));
+      const { data: lastRows } = await q;
+      const last = (lastRows?.[0] ?? null) as { provider?: string; wa_conexao_id?: string } | null;
+      if (last?.wa_conexao_id && last.provider && last.provider !== "meta") {
+        conexaoIdRota = last.wa_conexao_id;
       }
     }
+    if (conexaoIdRota) {
+      return await enviarViaConexao(admin, {
+        conexaoId: conexaoIdRota, to, tipo, conteudo, anexo_url, filename, mime_type,
+        lead_id, oportunidade_id, origemFinal, reaction_message_id, enviadoPorId, enviadoPorNome,
+      });
+    }
+
+    // (Trava de frequência de template "1 por número a cada 24h" REMOVIDA a pedido do
+    // diretor — templates podem ser enviados livremente. O parâmetro `forcar_template`
+    // do body fica sem efeito, mantido só por compatibilidade com chamadas antigas.)
 
     // Busca conta WA ativa do CRM
     const { data: waRow, error: waErr } = await admin.rpc("get_crm_wa_account", {
@@ -207,7 +387,7 @@ Deno.serve(async (req) => {
       return json({ error: `cronograma não encontrado para o curso '${curso ?? ""}'` }, 404);
     }
     if (!docFilename) {
-      docFilename = tipo === "audio" ? "audio" : tipo === "sticker" ? "sticker.webp" : "documento.pdf";
+      docFilename = tipo === "audio" ? "audio" : tipo === "sticker" ? "sticker.webp" : tipo === "image" ? "imagem.jpg" : "documento.pdf";
     }
 
     // Monta payload Meta
@@ -227,7 +407,7 @@ Deno.serve(async (req) => {
         template: {
           name: template_name,
           language: { code: template_lang || "pt_BR" },
-          components: Array.isArray(template_components) ? template_components : [],
+          components: sanitizarComponentsTemplate(template_components),
         },
       };
     } else if (tipo === "document") {
@@ -243,13 +423,39 @@ Deno.serve(async (req) => {
           ...(caption ? { caption: caption.slice(0, 1024) } : {}),
         },
       };
+    } else if (tipo === "image") {
+      // Imagem INLINE (não vira "arquivo"): type=image + caption opcional. Meta aceita
+      // jpeg/png por URL pública.
+      const caption = String(conteudo ?? "").trim();
+      waPayload = {
+        messaging_product: "whatsapp",
+        to,
+        type: "image",
+        image: { link: docUrl, ...(caption ? { caption: caption.slice(0, 1024) } : {}) },
+      };
     } else if (tipo === "audio") {
-      // Áudio por URL pública. Meta aceita aac/mp4/mpeg/amr/ogg-opus (sem caption).
+      // OGG/Opus → MENSAGEM DE VOZ (forma de onda) só se enviado por `audio.id` (mídia
+      // carregada no /media); por `audio.link` a Meta renderiza como "arquivo de áudio".
+      // Sobe o OGG e manda por id; qualquer falha cai no link (vira arquivo, mas envia).
+      // `voice: true` é o flag OFICIAL da Cloud API que faz o áudio virar NOTA DE VOZ
+      // (forma de onda) em vez de "arquivo de áudio". Exige OGG/Opus e mídia carregada
+      // (audio.id). Ver doc Meta "Audio messages".
+      const ehOgg = /audio\/ogg/i.test(String(mime_type ?? "")) || /\.ogg(\?|$)/i.test(docUrl);
+      let audioObj: Record<string, unknown> = { link: docUrl };
+      if (ehOgg) {
+        try {
+          const mediaId = await metaUploadMedia(phoneNumberId, accessToken, docUrl, "audio/ogg", docFilename || "audio.ogg");
+          audioObj = { id: mediaId, voice: true };
+        } catch (e) {
+          console.warn("[crm-whatsapp-send] upload OGG /media falhou, usando link:", e instanceof Error ? e.message : e);
+          audioObj = { link: docUrl, voice: true };
+        }
+      }
       waPayload = {
         messaging_product: "whatsapp",
         to,
         type: "audio",
-        audio: { link: docUrl },
+        audio: audioObj,
       };
     } else if (tipo === "sticker") {
       // Figurinha: webp estático (512x512, <100KB) ou animado (<500KB) por URL pública.
@@ -373,7 +579,8 @@ Deno.serve(async (req) => {
           console.log("[crm-whatsapp-send] fetch corpo template falhou:", e?.message);
         }
       }
-      if (corpo) templateTexto = renderTemplate(corpo, template_components);
+      // Renderiza com os componentes JÁ saneados, p/ o texto persistido bater com o enviado.
+      if (corpo) templateTexto = renderTemplate(corpo, sanitizarComponentsTemplate(template_components));
     }
 
     // Conteúdo persistido (texto real do template quando temos o corpo; caption/nome do doc).
@@ -382,6 +589,7 @@ Deno.serve(async (req) => {
     if (tipo === "text") conteudoPersist = String(conteudo);
     else if (tipo === "template") conteudoPersist = templateTexto ?? `[template] ${template_name}`;
     else if (tipo === "audio" || tipo === "sticker") conteudoPersist = "";
+    else if (tipo === "image") conteudoPersist = String(conteudo ?? "").trim(); // legenda (ou vazio)
     else if (tipo === "reaction") conteudoPersist = `[reacao]${String(conteudo)}`;
     else if (tipo === "interactive") {
       // No thread, mostra o corpo + as opções enviadas (os botões/lista em si só aparecem
@@ -419,6 +627,13 @@ Deno.serve(async (req) => {
             url: docUrl,
             filename: docFilename,
           }]
+        : tipo === "image"
+        ? [{
+            tipo: "image",
+            mime_type: String(mime_type ?? "image/jpeg"),
+            url: docUrl,
+            filename: docFilename,
+          }]
         // text/template/reaction/interactive não têm anexo: [] (default da coluna,
         // jsonb NOT NULL DEFAULT '[]') — nunca null, pra casar com o contrato da tabela.
         : [];
@@ -437,7 +652,11 @@ Deno.serve(async (req) => {
       wa_message_id: waMsgId,
       status_entrega: r.ok ? "sent" : "failed",
       erro: r.ok ? null : { status: r.status, meta_response: waResp },
-      metadata: { payload_enviado: waPayload, ...(origemFinal ? { origem: origemFinal } : {}) },
+      metadata: {
+        payload_enviado: waPayload,
+        ...(origemFinal ? { origem: origemFinal } : {}),
+        ...(enviadoPorId ? { enviado_por_id: enviadoPorId, enviado_por_nome: enviadoPorNome } : {}),
+      },
     });
     if (msgErr) console.error("[crm-whatsapp-send] insert erro:", msgErr.message);
 

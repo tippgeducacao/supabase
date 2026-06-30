@@ -331,12 +331,15 @@ Deno.serve(async (req) => {
         // Encontra a conta CRM pelo phone_number_id
         const { data: accountRows } = await admin
           .from("crm_whatsapp_accounts")
-          .select("id")
+          .select("id, agente_ia_ativo, agente_ia_persona")
           .eq("phone_number_id", phoneNumberId)
           .eq("ativo", true)
           .limit(1);
 
         const accountId = accountRows?.[0]?.id;
+        // Só os números marcados como "agente IA" repassam o inbound pro crm-agente-sdr.
+        // Os demais (Monitor, pedagógico, etc.) são atendimento humano — a IA NÃO responde.
+        const accountIaAtivo = accountRows?.[0]?.agente_ia_ativo === true;
         if (!accountId) {
           console.warn("[crm-whatsapp-webhook] phone_number_id não encontrado no CRM:", phoneNumberId);
           continue;
@@ -541,26 +544,33 @@ Deno.serve(async (req) => {
             console.log(
               `[crm-whatsapp-webhook] msg inbound de ${from} (lead=${leadId ?? "?"}, op=${oportunidadeId ?? "?"}, anexos=${anexos.length}): ${conteudo.slice(0, 80)}`,
             );
-            // Relay pro n8n (somente após insert NOVO -> at-most-once garantido pelo índice único em wa_message_id).
-            await relayToN8n({
-              remotejid: `${canonicalBrDigits(phoneDigits)}@s.whatsapp.net`,
-              id: msgId,
-              timestamp: Number(msg?.timestamp) || Math.floor(Date.now() / 1000),
-              direcao: "inbound", // relay só dispara p/ inbound; nunca p/ as próprias saídas
-              from_me: false,     // Meta Cloud API não ecoa mensagens do negócio -> sempre false
-              tipo: msgType,
-              conteudo,
-              caption,
-              mime_type: anexos[0]?.mime_type ?? mediaInbound?.mime_type ?? null,
-              anexos,
-              // Clique em botão/lista: o agente (n8n) roteia pelo id/título escolhido.
-              interactive_reply: interactiveReply,
-              profile_name: profileName,
-              telefone: phoneDigits,
-              wa_account_id: accountId,
-              lead_id: leadId,
-              oportunidade_id: oportunidadeId,
-            });
+            // Relay pro agente de IA — SÓ se este número está marcado com agente_ia_ativo.
+            // (at-most-once garantido pelo índice único em wa_message_id no insert acima.)
+            if (accountIaAtivo) {
+              await relayToN8n({
+                remotejid: `${canonicalBrDigits(phoneDigits)}@s.whatsapp.net`,
+                id: msgId,
+                timestamp: Number(msg?.timestamp) || Math.floor(Date.now() / 1000),
+                direcao: "inbound", // relay só dispara p/ inbound; nunca p/ as próprias saídas
+                from_me: false,     // Meta Cloud API não ecoa mensagens do negócio -> sempre false
+                tipo: msgType,
+                conteudo,
+                caption,
+                mime_type: anexos[0]?.mime_type ?? mediaInbound?.mime_type ?? null,
+                anexos,
+                // Clique em botão/lista: o agente (n8n) roteia pelo id/título escolhido.
+                interactive_reply: interactiveReply,
+                profile_name: profileName,
+                telefone: phoneDigits,
+                wa_account_id: accountId,
+                // Persona do agente neste número: 'recontato' (no-show) | 'qualificador'.
+                agente_ia_persona: accountRows?.[0]?.agente_ia_persona ?? 'qualificador',
+                lead_id: leadId,
+                oportunidade_id: oportunidadeId,
+              });
+            } else {
+              console.log(`[crm-whatsapp-webhook] número ${phoneNumberId} sem agente IA — relay pulado (atendimento humano)`);
+            }
           }
         }
 

@@ -7,6 +7,7 @@
 
 // deno-lint-ignore-file no-explicit-any
 import { GEMINI_ANALISE_SCHEMA, GEMINI_ANALISE_SYSTEM } from './prompts.ts';
+import { resumir, type Telemetria } from './eventos.ts';
 
 const GEMINI_KEY = Deno.env.get('AGENTE_SDR_GEMINI_KEY') ?? Deno.env.get('GEMINI_API_KEY') ?? '';
 const MODELO_TRANSCRICAO = 'gemini-2.5-flash';
@@ -51,19 +52,37 @@ function urlAnexo(payload: any): { url: string; mime: string } | null {
   return { url, mime: a?.mime_type ?? payload?.mime_type ?? 'application/octet-stream' };
 }
 
-async function transcreverAudio(payload: any): Promise<string> {
+async function transcreverAudio(payload: any, tel?: Telemetria): Promise<string> {
   const anexo = urlAnexo(payload);
-  if (!anexo) return payload.conteudo || '[áudio sem anexo disponível]';
-  const { b64, mime } = await baixarBase64(anexo.url);
-  const resp = await gemini(MODELO_TRANSCRICAO, {
-    contents: [{
-      parts: [
-        { text: 'Transcreva esse audio.' },
-        { inlineData: { mimeType: anexo.mime || mime, data: b64 } },
-      ],
-    }],
-  });
-  return resp.candidates?.[0]?.content?.parts?.[0]?.text ?? '[transcrição indisponível]';
+  if (!anexo) {
+    tel?.registrar('transcricao', { ok: false, motivo: 'áudio sem anexo disponível' });
+    return payload.conteudo || '[áudio sem anexo disponível]';
+  }
+  // Nó de endpoint: registra acerto/erro da transcrição (Gemini) com o corpo do
+  // erro — é aqui que aparece, p.ex., "API key expired". Mantém o throw original
+  // (em erro o áudio segue sendo descartado pelo catch do processarInbound).
+  const t0 = Date.now();
+  try {
+    const { b64, mime } = await baixarBase64(anexo.url);
+    const resp = await gemini(MODELO_TRANSCRICAO, {
+      contents: [{
+        parts: [
+          { text: 'Transcreva esse audio.' },
+          { inlineData: { mimeType: anexo.mime || mime, data: b64 } },
+        ],
+      }],
+    });
+    const texto = resp.candidates?.[0]?.content?.parts?.[0]?.text ?? '[transcrição indisponível]';
+    tel?.registrar('transcricao', {
+      ok: true, modelo: MODELO_TRANSCRICAO, mime: anexo.mime || mime, texto: resumir(texto, 1500),
+    }, Date.now() - t0);
+    return texto;
+  } catch (e) {
+    tel?.registrar('transcricao',
+      { ok: false, modelo: MODELO_TRANSCRICAO, mime: anexo.mime },
+      Date.now() - t0, (e as Error).message);
+    throw e;
+  }
 }
 
 // Port do "Processa e Formata Arquivo": análise Gemini → descrição legível.
@@ -96,11 +115,15 @@ function formatarAnalise(analysis: any, messageType: string, legendaTexto: strin
     : descricaoArquivo;
 }
 
-async function analisarArquivo(payload: any): Promise<string> {
+async function analisarArquivo(payload: any, tel?: Telemetria): Promise<string> {
   const anexo = urlAnexo(payload);
   const legenda = payload.conteudo && !String(payload.conteudo).startsWith('[') ? String(payload.conteudo) : '';
-  if (!anexo) return formatarAnalise({ resumo_conteudo: 'Não foi possível analisar o arquivo.' }, payload.tipo, legenda);
+  if (!anexo) {
+    tel?.registrar('analise_midia', { ok: false, tipo: payload.tipo, motivo: 'sem anexo' });
+    return formatarAnalise({ resumo_conteudo: 'Não foi possível analisar o arquivo.' }, payload.tipo, legenda);
+  }
 
+  const t0 = Date.now();
   try {
     const { b64, mime } = await baixarBase64(anexo.url);
     const resp = await gemini(MODELO_ANALISE, {
@@ -121,8 +144,14 @@ async function analisarArquivo(payload: any): Promise<string> {
     } catch {
       analysis = { resumo_conteudo: 'Erro na análise do arquivo.' };
     }
+    tel?.registrar('analise_midia', {
+      ok: true, modelo: MODELO_ANALISE, tipo: payload.tipo, resumo: resumir(analysis?.resumo_conteudo ?? '', 800),
+    }, Date.now() - t0);
     return formatarAnalise(analysis, payload.tipo, legenda);
   } catch (e) {
+    tel?.registrar('analise_midia',
+      { ok: false, modelo: MODELO_ANALISE, tipo: payload.tipo },
+      Date.now() - t0, (e as Error).message);
     console.log(`[crm-agente-sdr] análise de arquivo falhou: ${(e as Error).message}`);
     return formatarAnalise({ resumo_conteudo: 'Não foi possível analisar o arquivo.' }, payload.tipo, legenda);
   }
@@ -130,15 +159,15 @@ async function analisarArquivo(payload: any): Promise<string> {
 
 // Trata UMA mensagem do gateway antes de entrar no buffer (port do "Roteador de
 // Mensagens" + braços de tratamento).
-export async function prepararMensagem(payload: any): Promise<MensagemTratada> {
+export async function prepararMensagem(payload: any, tel?: Telemetria): Promise<MensagemTratada> {
   const tipo = payload.tipo;
 
   if (tipo === 'audio') {
-    return { mensagem: await transcreverAudio(payload) };
+    return { mensagem: await transcreverAudio(payload, tel) };
   }
 
   if (tipo === 'image' || tipo === 'video') {
-    const arquivo = await analisarArquivo(payload);
+    const arquivo = await analisarArquivo(payload, tel);
     // No n8n a "mensagem" do buffer era a linha de legenda (ou espaço quando sem legenda).
     const mensagem = payload.conteudo && !String(payload.conteudo).startsWith('[')
       ? `Legenda do arquivo: ${payload.conteudo}`

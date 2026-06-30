@@ -216,6 +216,18 @@ async function moverEventoMeet(
   if (!res.ok) throw new Error(`Google Calendar (mover evento) falhou: ${await res.text()}`);
 }
 
+// Remove um evento do Google Calendar — usado ao remarcar quando NÃO dá pra mover
+// (trocou de vendedor → o evento fica na agenda do vendedor anterior; sem isso vira
+// fantasma). 404/410 = evento já não existe → idempotente, trata como sucesso.
+async function deletarEventoMeet(supabase: any, calendarId: string, eventId: string): Promise<void> {
+  const token = await gcalToken(supabase);
+  const url = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`;
+  const res = await fetch(url, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok && res.status !== 404 && res.status !== 410) {
+    throw new Error(`Google Calendar (deletar evento) falhou: ${await res.text()}`);
+  }
+}
+
 async function confirmarAgendamento(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
   try {
     const post = await sdrApi('agendamentos', {
@@ -342,6 +354,17 @@ async function remarcarAgendamento(supabase: any, input: any, ctx: CtxConversa, 
         });
         link = evento.hangoutLink ?? link;
         await supabase.from('agendamentos').update({ link_reuniao: link, google_event_id: evento.eventId }).eq('id', alvo.id);
+        // Apaga o evento ANTIGO da agenda do vendedor anterior (senão fica fantasma no
+        // horário velho). Só quando há id antigo e ele não é o evento que acabamos de criar.
+        const oldEventId = alvo.google_event_id ?? eventId;
+        const oldCalendarId = alvo.vendedor?.id_calendar;
+        if (oldEventId && oldCalendarId && oldEventId !== evento.eventId) {
+          try {
+            await deletarEventoMeet(supabase, oldCalendarId, oldEventId);
+          } catch (e) {
+            console.error(`[crm-agente-sdr] remarcar: evento antigo não removido (segue): ${(e as Error).message}`);
+          }
+        }
       }
     } catch (e) {
       console.error(`[crm-agente-sdr] remarcar: GCal não atualizado (segue): ${(e as Error).message}`);

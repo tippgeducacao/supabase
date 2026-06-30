@@ -47,30 +47,71 @@ Deno.serve(async (req) => {
       });
     }
 
-    // Cron mode — CLAIM atômico evita publicação duplicada (bug do Reels saindo 2-3x).
-    // O cron roda a cada minuto; um Reels fica até ~150s no waitForContainer enquanto
-    // o Instagram processa o vídeo. Antes, a linha continuava 'scheduled' esse tempo todo,
-    // então a execução do minuto seguinte pegava o MESMO post e publicava de novo.
-    // Agora a linha vira 'publishing' de forma atômica: a próxima execução recebe zero
-    // linhas para ela e não republica.
-    const { data: posts } = await supabase
-      .from("ig_scheduled_posts")
-      .update({ status: "publishing", updated_at: nowIso })
-      .eq("status", "scheduled")
-      .lte("scheduled_at", nowIso)
-      .select("*, ig_accounts(*)");
+    // Cron mode — CLAIM atômico + LIMITADO por execução (resiliência).
+    // - CLAIM atômico (status -> 'publishing') evita publicação duplicada (Reels saindo 2-3x):
+    //   um Reels segura até ~150s no waitForContainer; sem o claim a execução do minuto
+    //   seguinte pegava o MESMO post e republicava.
+    // - LIMITE por rodada (MAX_PER_RUN): processa poucos por execução p/ a função terminar
+    //   rápido e não ser morta no meio pelo limite de tempo / saturação do host. O resto é
+    //   pego nas próximas rodadas (cron roda a cada minuto). SKIP LOCKED + incremento de
+    //   publish_attempts ficam na RPC ig_claim_due_posts.
+    const MAX_PER_RUN = 3;
+    const MAX_ATTEMPTS = 3;
+    // Orçamento de tempo da rodada. Mídia pesada (REELS/vídeo) segura ~150s no
+    // waitForContainer; processar 2-3 numa única execução estourava o limite da função na
+    // VPS e ela morria no meio (posts ficavam "Publicação interrompida — confira no Instagram").
+    // Processamos o que couber no orçamento e DEVOLVEMOS o resto à fila (sem queimar tentativa,
+    // via ig_release_posts) — a próxima rodada do cron (a cada minuto) pega o restante. Na
+    // prática isto limita a ~1 mídia pesada por rodada sem deixar nada preso.
+    const TIME_BUDGET_MS = 110_000;
 
+    const { data: claimed } = await supabase.rpc("ig_claim_due_posts", { p_limit: MAX_PER_RUN, p_max_attempts: MAX_ATTEMPTS });
+    let posts: any[] = claimed || [];
+    if (posts.length) {
+      // a RPC não traz o join da conta; recarrega com ig_accounts(*) pelos ids reivindicados.
+      const ids = posts.map((p: any) => p.id);
+      const { data: withAcc } = await supabase
+        .from("ig_scheduled_posts")
+        .select("*, ig_accounts(*)")
+        .in("id", ids);
+      posts = withAcc || posts;
+    }
+
+    const startedAt = Date.now();
     const results = [];
-    for (const post of posts || []) {
+    const leftover: string[] = [];
+    for (const post of posts) {
+      // Sempre processa pelo menos 1 (results.length>0 garante avanço). A partir daí, se o
+      // orçamento estourou, devolve o resto à fila em vez de arriscar a função morrer no meio.
+      if (results.length > 0 && Date.now() - startedAt > TIME_BUDGET_MS) {
+        leftover.push(post.id);
+        continue;
+      }
       const result = await publishPost(supabase, post, post.ig_accounts);
       results.push(result);
     }
+    if (leftover.length) {
+      await supabase.rpc("ig_release_posts", { p_ids: leftover });
+    }
 
-    // Recupera posts presos em 'publishing' há mais de 15 min (uma execução anterior
-    // morreu no meio). NÃO republica — marca como falha p/ revisão manual, evitando
-    // duplicar algo que pode já ter saído no Instagram. 15 min >> 150s máx de processamento,
-    // então nunca pega uma publicação ainda legitimamente em andamento.
+    // Vigia de posts presos em 'publishing' há mais de 15 min (uma execução anterior morreu
+    // no meio). 15 min >> 150s máx de processamento, então nunca pega algo legitimamente em
+    // andamento. Decide pelo container:
+    //  (a) container_id NULO = nunca chegou a publicar no Instagram (não postou) e ainda tem
+    //      tentativas -> RECOLOCA NA FILA sozinho (auto-retry seguro, não duplica).
+    //  (b) container_id preenchido (pode ter postado) OU tentativas esgotadas -> marca ERRO
+    //      p/ revisão humana, evitando publicar 2×.
+    // A ORDEM importa: (a) roda ANTES de (b). O que (a) recoloca já saiu de 'publishing',
+    // então escapa do fail-geral de (b); o que sobrar em 'publishing' (container preenchido
+    // ou tentativas esgotadas) cai em (b). Os dois branches juntos esgotam os presos.
     const staleCutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    await supabase
+      .from("ig_scheduled_posts")
+      .update({ status: "scheduled", updated_at: nowIso })
+      .eq("status", "publishing")
+      .lt("updated_at", staleCutoff)
+      .is("ig_container_id", null)
+      .lt("publish_attempts", MAX_ATTEMPTS);
     await supabase
       .from("ig_scheduled_posts")
       .update({ status: "failed", error_message: "Publicação interrompida — confira no Instagram antes de reenviar" })
@@ -104,11 +145,68 @@ function parseCollaborators(collabStr: string | null): string | undefined {
   return usernames.join(",");
 }
 
+// Nome curto do arquivo p/ a mensagem de erro não despejar a URL gigante.
+function shortMediaName(url: string): string {
+  try { return new URL(url).pathname.split("/").pop() || url; } catch { return url.slice(0, 60); }
+}
+
+// HEAD na mídia; se o servidor não aceitar HEAD (405/501), tenta um GET mínimo (Range).
+async function headMedia(url: string): Promise<Response> {
+  let res = await fetch(url, { method: "HEAD" });
+  if (res.status === 405 || res.status === 501) {
+    res = await fetch(url, { method: "GET", headers: { Range: "bytes=0-0" } });
+  }
+  return res;
+}
+
+// Pré-validação de UMA mídia: existe (HTTP ok) e é do tipo esperado (image/* ou video/*).
+// Content-type genérico do storage (octet-stream) NÃO barra — a Meta decide o resto.
+async function assertMediaReachable(url: string, kind: "image" | "video") {
+  if (!url) throw new Error(`Post sem mídia (URL vazia) — reanexe o arquivo.`);
+  let res: Response;
+  try {
+    res = await headMedia(url);
+  } catch {
+    throw new Error(`Mídia inacessível (falha de rede ao buscar o arquivo): ${shortMediaName(url)}`);
+  }
+  if (!res.ok) {
+    throw new Error(`Mídia inacessível (HTTP ${res.status}) — confira se o arquivo ainda existe: ${shortMediaName(url)}`);
+  }
+  const ct = (res.headers.get("content-type") || "").toLowerCase();
+  const generico = ct === "application/octet-stream" || ct === "binary/octet-stream";
+  if (ct && !generico && !ct.startsWith(`${kind}/`)) {
+    const esperado = kind === "image" ? "imagem" : "vídeo";
+    throw new Error(`Formato de mídia inesperado (${ct}) — esperava ${esperado}: ${shortMediaName(url)}`);
+  }
+}
+
+// Pré-validação do post inteiro (todas as mídias) antes de criar qualquer container.
+async function preflightMedia(post: any) {
+  if (post.media_type === "CAROUSEL") {
+    let urls: string[];
+    try { urls = JSON.parse(post.media_url); } catch { throw new Error("URLs do carrossel inválidas (não é uma lista JSON)"); }
+    if (!Array.isArray(urls) || urls.length < 2 || urls.length > 10) throw new Error("Carrossel precisa de 2 a 10 itens");
+    for (const u of urls) {
+      const isVideo = /\.(mp4|mov|avi|webm)(\?|$)/i.test(u);
+      await assertMediaReachable(u, isVideo ? "video" : "image");
+    }
+  } else {
+    const kind = (post.media_type === "VIDEO" || post.media_type === "REELS") ? "video" : "image";
+    await assertMediaReachable(post.media_url, kind);
+  }
+}
+
 async function publishPost(supabase: any, post: any, account: any) {
   try {
     const { ig_user_id, access_token } = account;
     const userTags = parseUserTags(post.user_tags);
     const collaborators = parseCollaborators(post.collaborators);
+
+    // PRÉ-VALIDAÇÃO da mídia ANTES de gastar processamento no Instagram: confirma que cada
+    // URL existe (HTTP ok) e é do tipo certo (imagem/vídeo). Falha aqui vira uma mensagem
+    // CLARA ("Mídia inacessível…/Formato inesperado…") em vez do "Invalid parameter" /
+    // "Media processing failed" cru da Meta — o time entende que precisa reexportar/reanexar.
+    await preflightMedia(post);
 
     let containerId: string;
 
@@ -116,12 +214,21 @@ async function publishPost(supabase: any, post: any, account: any) {
       containerId = await publishCarousel(ig_user_id, access_token, post, userTags, collaborators);
     } else {
       containerId = await createSingleContainer(ig_user_id, access_token, post, userTags, collaborators);
-
-      // Aguarda o container ficar FINISHED antes de publicar — vale para TODOS os tipos.
-      // Imagem também precisa: chamar media_publish cedo demais (antes do Instagram
-      // baixar/processar a mídia) retorna "Media ID is not available".
-      await waitForContainer(containerId, access_token);
     }
+
+    // Aguarda o container ficar FINISHED antes de publicar — vale para TODOS os tipos,
+    // INCLUSIVE carrossel (o container-pai também processa). Chamar media_publish cedo
+    // demais (antes do Instagram baixar/processar a mídia) retorna "Media ID is not available".
+    await waitForContainer(containerId, access_token);
+
+    // Marca o container no banco ANTES de publicar. A partir daqui, se a função for
+    // interrompida, o vigia NÃO recoloca na fila sozinho (pode já ter saído no Instagram)
+    // -> vai p/ revisão humana, evitando publicação duplicada. Enquanto container_id for
+    // nulo (não chegou aqui), o auto-retry é seguro.
+    await supabase
+      .from("ig_scheduled_posts")
+      .update({ ig_container_id: containerId, updated_at: new Date().toISOString() })
+      .eq("id", post.id);
 
     // Publish
     const publishRes = await fetch(`${META_API}/${ig_user_id}/media_publish`, {
@@ -145,9 +252,11 @@ async function publishPost(supabase: any, post: any, account: any) {
     return { post_id: post.id, status: "published", ig_media_id: publishData.id };
   } catch (err) {
     const errorMessage = getErrorMessage(err);
+    // updated_at = âncora do backoff do retry automático (ig_claim_due_posts re-tenta após
+    // 3min*tentativas). Sem isto o backoff usaria o updated_at do claim e poderia re-tentar cedo.
     await supabase
       .from("ig_scheduled_posts")
-      .update({ status: "failed", error_message: errorMessage })
+      .update({ status: "failed", error_message: errorMessage, updated_at: new Date().toISOString() })
       .eq("id", post.id);
 
     return { post_id: post.id, status: "failed", error: errorMessage };

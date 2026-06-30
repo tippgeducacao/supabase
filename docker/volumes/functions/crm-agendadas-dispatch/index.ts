@@ -39,6 +39,7 @@ type Agendada = {
   template_name: string | null;
   template_lang: string | null;
   template_components: unknown;
+  automacao_id: string | null;
 };
 
 Deno.serve(async (req) => {
@@ -51,43 +52,47 @@ Deno.serve(async (req) => {
   const admin = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 
   try {
-    // Higiene: linha presa em 'enviando' há >10min = execução anterior morreu no meio.
-    // Não dá pra saber se a Meta chegou a receber, então marca erro em vez de reenviar.
+    // Higiene de órfãos: linha presa em 'enviando' há >5min = execução anterior morreu
+    // no meio (não chegou a enviar). Auto-cura:
+    //  • TEMPLATE → volta pra 'agendado' (re-enfileira). É seguro porque a crm-whatsapp-send
+    //    tem trava de 1 template/24h por número: se a Meta JÁ recebeu, o reenvio é PULADO
+    //    (não duplica). Sem isso, um disparo em massa perdia milhares de órfãos como erro.
+    //  • TEXTO LIVRE → 'erro' (sem trava 24h, reenviar duplicaria a mensagem).
+    const presoDesde = new Date(Date.now() - 5 * 60_000).toISOString();
     await admin
       .from("crm_mensagens_agendadas")
-      .update({
-        status: "erro",
-        erro_detalhe: "Envio interrompido (timeout do processamento). Verifique o chat e reagende se necessário.",
-      })
-      .eq("status", "enviando")
-      .lt("enviar_em", new Date(Date.now() - 10 * 60_000).toISOString());
-
-    // Seleciona os vencidos
-    const { data: due, error: dueErr } = await admin
+      .update({ status: "agendado", enviar_em: new Date().toISOString(), erro_detalhe: null })
+      .eq("status", "enviando").eq("tipo_mensagem", "template")
+      .lt("enviar_em", presoDesde);
+    await admin
       .from("crm_mensagens_agendadas")
-      .select("id")
-      .eq("status", "agendado")
-      .lte("enviar_em", new Date().toISOString())
-      .order("enviar_em", { ascending: true })
-      .limit(20);
-    if (dueErr) throw dueErr;
-    if (!due?.length) return jsonResp({ processed: 0 });
+      .update({ status: "erro", erro_detalhe: "Envio interrompido (timeout). Reagende se necessário." })
+      .eq("status", "enviando").neq("tipo_mensagem", "template")
+      .lt("enviar_em", presoDesde);
 
-    // Claim atômico: marca 'enviando' antes de processar pra não duplicar envio
-    // caso duas execuções do cron se sobreponham.
-    const { data: claimed, error: claimErr } = await admin
-      .from("crm_mensagens_agendadas")
-      .update({ status: "enviando" })
-      .in("id", due.map((d: { id: string }) => d.id))
-      .eq("status", "agendado")
-      .select(
-        "id, wa_account_id, telefone, lead_id, oportunidade_id, tipo_mensagem, conteudo, template_name, template_lang, template_components",
-      );
+    // Claim atômico via RPC: marca 'enviando' e devolve as linhas, num único UPDATE
+    // server-side (FOR UPDATE SKIP LOCKED). Evita o `.in([ids])` na URL — que com
+    // lote grande (800) estoura o limite de tamanho da request e derruba o dispatcher.
+    // ⚠️ LOTE precisa caber no TEMPO DE VIDA de UMA execução da edge. LOTE=8000 quebrou:
+    // a edge agarra 8000 (marca 'enviando') mas morre antes de enviar tudo, deixando
+    // milhares órfãos em 'enviando'. Com CONC=40 (~20 envios/s), ~1000 saem em ~50s —
+    // dentro de um ciclo de cron (60s), então cada execução TERMINA o que agarrou (zero
+    // órfão). Vazão ~1000/min. Não aumentar sem medir o tempo real de envio da edge.
+    const LOTE = 1000;
+    const { data: claimed, error: claimErr } = await admin.rpc("crm_agendadas_claim", { p_limit: LOTE });
     if (claimErr) throw claimErr;
+    if (!claimed?.length) return jsonResp({ processed: 0 });
 
+    // Processa em LOTES PARALELOS (CONC por vez) — CONC controla a concorrência contra a Meta.
+    const rows = (claimed ?? []) as Agendada[];
     const results: Record<string, string> = {};
-    for (const row of (claimed ?? []) as Agendada[]) {
-      results[row.id] = await processarUma(admin, row);
+    const CONC = 40;
+    for (let i = 0; i < rows.length; i += CONC) {
+      const chunk = rows.slice(i, i + CONC);
+      const settled = await Promise.all(
+        chunk.map((row) => processarUma(admin, row).then((res) => [row.id, res] as const)),
+      );
+      for (const [id, res] of settled) results[id] = res;
     }
     return jsonResp({ processed: Object.keys(results).length, results });
   } catch (e) {
@@ -116,6 +121,9 @@ async function processarUma(
       tipo: row.tipo_mensagem === "template" ? "template" : "text",
       lead_id: row.lead_id ?? undefined,
       oportunidade_id: row.oportunidade_id ?? undefined,
+      // Disparo de automação → carimba origem 'automacao' (balão roxo no chat). Template
+      // segue como 'template' no espelho (o mirror checa template antes da origem).
+      ...(row.automacao_id ? { origem: "automacao" } : {}),
     };
     if (row.tipo_mensagem === "template") {
       if (!row.template_name) return await falhar("Template não informado");

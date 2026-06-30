@@ -1,10 +1,57 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { encode as base64Encode } from "https://deno.land/std@0.168.0/encoding/base64.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, cache-control, pragma, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
+
+// Status transitórios das APIs de IA — vale a pena tentar de novo.
+// 529 = Anthropic "Overloaded"; 429 = rate limit; 5xx = instabilidade momentânea.
+const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504, 529]);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * fetch com retry + backoff exponencial para chamadas de IA. Em sucesso retorna a
+ * Response SEM consumir o corpo (o chamador lê o JSON). Em erro transitório (ou
+ * "overloaded"/"rate limit" no corpo) espera e tenta de novo; esgotando as
+ * tentativas, lança o erro com o corpo. Conserta o toast "Claude API error 529".
+ */
+async function fetchAIWithRetry(
+  url: string,
+  init: RequestInit,
+  label: string,
+  maxAttempts = 4,
+): Promise<Response> {
+  let lastErr: unknown = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await fetch(url, init);
+      if (res.ok) return res;
+      const text = await res.text();
+      const transient = RETRYABLE_STATUS.has(res.status) || /overloaded|rate.?limit/i.test(text);
+      if (transient && attempt < maxAttempts) {
+        const backoff = Math.min(8000, 600 * 2 ** (attempt - 1)) + Math.floor(Math.random() * 400);
+        console.warn(`${label}: ${res.status} (transitório), retry ${attempt}/${maxAttempts - 1} em ${backoff}ms`);
+        await sleep(backoff);
+        lastErr = new Error(`${label} ${res.status}: ${text.slice(0, 200)}`);
+        continue;
+      }
+      throw new Error(`${label} ${res.status}: ${text.slice(0, 300)}`);
+    } catch (e) {
+      // Erro de rede (sem Response) também é transitório.
+      const isNetwork = e instanceof TypeError;
+      if (isNetwork && attempt < maxAttempts) {
+        lastErr = e;
+        await sleep(Math.min(8000, 600 * 2 ** (attempt - 1)));
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(`${label}: falhou após ${maxAttempts} tentativas`);
+}
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
@@ -15,7 +62,7 @@ serve(async (req) => {
   );
 
   try {
-    const { user_id, brand_profile_id, context, tom_de_voz, post_type, original_caption, image_description, reference_images, operator_name } = await req.json();
+    const { user_id, brand_profile_id, context, tom_de_voz, post_type, original_caption, image_description, reference_images, operator_name, video_url, video_data, video_mime, ig_handle } = await req.json();
     if (!user_id) {
       return new Response(JSON.stringify({ error: "user_id is required" }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
@@ -29,17 +76,35 @@ serve(async (req) => {
       return new Response(JSON.stringify({ error: "Anthropic API key not configured" }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
-    // 2. Fetch brand profile (optional)
+    // 2. Resolver o BRAND PROFILE (inteligência de público-alvo) — SEMPRE carrega um.
+    //    Prioridade: id explícito → casa pelo @ do perfil (ig_handle) → perfil-mestre
+    //    PPGVET → 1º ativo. Assim a legenda nunca sai sem o público-alvo.
     let bp: any = null;
     if (brand_profile_id) {
       const { data } = await supabase.from("brand_profiles").select("*").eq("id", brand_profile_id).maybeSingle();
       bp = data;
+    }
+    if (!bp) {
+      const { data: allBp } = await supabase.from("brand_profiles").select("*").eq("is_active", true);
+      const norm = (s: any) => (s ?? "").toString().replace(/^@/, "").trim().toLowerCase();
+      if (ig_handle) {
+        const h = norm(ig_handle);
+        const matches = (allBp || []).filter((b: any) => norm(b.instagram_handle) === h);
+        // entre perfis do mesmo @ (ex.: ppgvet_oficial tem vários cursos), prefere o MESTRE da conta
+        bp = matches.find((b: any) => norm(b.account_name) === norm(b.brand_name) && (b.brand_name || "").length <= 12)
+          || matches[0] || null;
+      }
+      if (!bp) {
+        bp = (allBp || []).find((b: any) => norm(b.brand_name) === "ppgvet")
+          || (allBp || [])[0] || null;
+      }
     }
 
     // 3. Build system prompt
     const tomFinal = tom_de_voz || bp?.tom_de_voz || "Direto e Forte";
     const systemPrompt = `Você é um copywriter especialista em redes sociais com foco em conteúdo TÉCNICO e APLICÁVEL. Gere uma legenda para Instagram seguindo RIGOROSAMENTE estas diretrizes:
 
+${bp?.brand_name || bp?.account_name ? `MARCA/CONTA: ${bp.brand_name || bp.account_name}${bp?.instagram_handle ? ` (@${String(bp.instagram_handle).replace(/^@/, "")})` : ""}` : ""}
 TOM DE VOZ: ${tomFinal}
 ${bp?.tom_descricao ? `DESCRIÇÃO DO TOM: ${bp.tom_descricao}` : ""}
 
@@ -52,10 +117,17 @@ ${bp?.alertas_nao_usar ? `ALERTAS - NÃO UTILIZAR DE FORMA ALGUMA:\n${bp.alertas
 
 ${bp?.frases_exemplo ? `EXEMPLOS DE FRASES QUE REPRESENTAM O TOM:\n${bp.frases_exemplo}` : ""}
 
-${bp ? `PERSONA DO PÚBLICO:
-- Dores: ${bp.persona_dores || ""}
+=== PÚBLICO-ALVO (escreva FALANDO DIRETAMENTE para esta pessoa) ===
+${bp?.publico_alvo ? `QUEM É: ${bp.publico_alvo}` : ""}
+${bp?.persona_perfil_demografico ? `PERFIL DEMOGRÁFICO: ${bp.persona_perfil_demografico}` : ""}
+${bp?.segmento ? `SEGMENTO/NICHO: ${bp.segmento}` : ""}
+${bp ? `- Dores: ${bp.persona_dores || ""}
 - Objeções: ${bp.persona_objecoes || ""}
 - Desejos: ${bp.persona_desejos || ""}` : ""}
+
+${bp?.termos_obrigatorios ? `TERMOS OBRIGATÓRIOS (use com naturalidade quando couber): ${bp.termos_obrigatorios}` : ""}
+${bp?.termos_proibidos ? `TERMOS PROIBIDOS (NUNCA use): ${bp.termos_proibidos}` : ""}
+${bp?.regras_estilo ? `REGRAS DE ESTILO:\n${bp.regras_estilo}` : ""}
 
 === REGRAS OBRIGATÓRIAS DA LEGENDA ===
 
@@ -83,6 +155,86 @@ Gere APENAS a legenda, sem explicações adicionais. A legenda deve estar pronta
     if (original_caption) userParts.push(`Legenda original para referência: ${original_caption}`);
     const userMessage = userParts.length ? userParts.join("\n\n") : "Gere uma legenda criativa para um post de Instagram.";
 
+    // ===== VÍDEO → análise NATIVA via Gemini (sem STT/Whisper) =====
+    // Quando há vídeo (e nenhuma imagem), o Gemini analisa o vídeo diretamente,
+    // usando o MESMO system prompt (modelos aprovados + persona/tom do brand_profile).
+    const hasImages = Array.isArray(reference_images) && reference_images.length > 0;
+    if (!hasImages && (video_url || video_data)) {
+      const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
+      if (!GEMINI_API_KEY) {
+        return new Response(JSON.stringify({ error: "GEMINI_API_KEY não configurada (necessária para analisar vídeo)." }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
+
+      // Obter bytes + mime do vídeo (de dataURL local ou baixando a URL).
+      let b64 = "";
+      let mime = video_mime || "video/mp4";
+      try {
+        if (video_data) {
+          const m = String(video_data).match(/^data:(video\/[\w.+-]+);base64,(.+)$/);
+          if (!m) throw new Error("video_data inválido (esperado dataURL base64 de vídeo).");
+          mime = m[1];
+          b64 = m[2];
+        } else {
+          const vr = await fetch(video_url);
+          if (!vr.ok) throw new Error(`Não consegui baixar o vídeo (HTTP ${vr.status}).`);
+          const ct = vr.headers.get("content-type");
+          if (ct && ct.startsWith("video/")) mime = ct.split(";")[0];
+          const buf = new Uint8Array(await vr.arrayBuffer());
+          if (buf.byteLength > 18 * 1024 * 1024) throw new Error("Vídeo muito grande para análise inline (máx. ~18 MB). Reduza o vídeo ou gere a legenda a partir de uma imagem.");
+          b64 = base64Encode(buf);
+        }
+      } catch (ve) {
+        return new Response(JSON.stringify({ error: ve instanceof Error ? ve.message : "Falha ao ler o vídeo." }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
+
+      const startTimeV = Date.now();
+      const { data: genV } = await supabase.from("ai_generations").insert({
+        user_id,
+        brand_profile_id: brand_profile_id || null,
+        generation_type: "caption",
+        source_type: original_caption ? "organic" : "manual",
+        prompt_used: userMessage,
+        tom_de_voz_usado: tomFinal,
+        model_used: "gemini-2.5-flash",
+        provider: "google",
+        status: "processing",
+        operator_name: operator_name || null,
+      }).select("id").single();
+      const genVId = genV?.id;
+
+      try {
+        const gemRes = await fetchAIWithRetry(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            contents: [{ role: "user", parts: [
+              { inlineData: { mimeType: mime, data: b64 } },
+              { text: userMessage },
+            ] }],
+            generationConfig: { temperature: 0.7, maxOutputTokens: 1024 },
+          }),
+        }, "Gemini");
+        const gj = await gemRes.json();
+        const caption = (gj?.candidates?.[0]?.content?.parts || []).map((p: any) => p.text || "").join("").trim();
+        if (genVId) {
+          await supabase.from("ai_generations").update({
+            caption_generated: caption,
+            status: "completed",
+            generation_time_seconds: Math.round((Date.now() - startTimeV) / 1000),
+            completed_at: new Date().toISOString(),
+          }).eq("id", genVId);
+        }
+        return new Response(JSON.stringify({ success: true, generation_id: genVId, caption }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      } catch (gerr) {
+        const msg = gerr instanceof Error ? gerr.message : "Erro Gemini";
+        if (genVId) await supabase.from("ai_generations").update({ status: "failed", error_message: msg }).eq("id", genVId);
+        return new Response(JSON.stringify({ error: msg }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
+    }
+
     // Build Claude messages with optional image references
     const contentBlocks: any[] = [];
     if (reference_images && Array.isArray(reference_images)) {
@@ -107,7 +259,7 @@ Gere APENAS a legenda, sem explicações adicionais. A legenda deve estar pronta
       source_type: original_caption ? "organic" : "manual",
       prompt_used: userMessage,
       tom_de_voz_usado: tomFinal,
-      model_used: "claude-sonnet-4-20250514",
+      model_used: "claude-sonnet-4-6",
       provider: "anthropic",
       status: "processing",
       operator_name: operator_name || null,
@@ -120,8 +272,8 @@ Gere APENAS a legenda, sem explicações adicionais. A legenda deve estar pronta
     const generationId = gen.id;
 
     try {
-      // 6. Call Claude API
-      const claudeRes = await fetch("https://api.anthropic.com/v1/messages", {
+      // 6. Call Claude API (com retry/backoff p/ 529 Overloaded e afins)
+      const claudeRes = await fetchAIWithRetry("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -129,17 +281,12 @@ Gere APENAS a legenda, sem explicações adicionais. A legenda deve estar pronta
           "anthropic-version": "2023-06-01",
         },
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
+          model: "claude-sonnet-4-6",
           max_tokens: 1024,
           system: systemPrompt,
           messages: [{ role: "user", content: contentBlocks }],
         }),
-      });
-
-      if (!claudeRes.ok) {
-        const errText = await claudeRes.text();
-        throw new Error(`Claude API error ${claudeRes.status}: ${errText}`);
-      }
+      }, "Claude API error");
 
       const result = await claudeRes.json();
       const caption = result?.content?.[0]?.text || "";
@@ -174,7 +321,7 @@ Gere APENAS a legenda, sem explicações adicionais. A legenda deve estar pronta
       } else {
         await supabase.from("ai_cost_tracking").insert({
           user_id, month: monthStr, provider: "anthropic",
-          model: "claude-sonnet-4-20250514", total_generations: 1, captions_generated: 1,
+          model: "claude-sonnet-4-6", total_generations: 1, captions_generated: 1,
           total_cost_usd: costUsd, total_cost_brl: costUsd * 5.5,
         });
       }

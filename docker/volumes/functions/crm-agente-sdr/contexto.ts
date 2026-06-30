@@ -290,7 +290,14 @@ ${status.mensagem}
 const FORMACOES_VAGAS = ['Estudante', 'Outra área', 'Sem formação superior'];
 
 export function montarPerguntaFormacao(formacaoNormalizada: string): string {
-  if (!formacaoNormalizada || FORMACOES_VAGAS.includes(formacaoNormalizada)) {
+  // Só usa a forma de CONFIRMAÇÃO ("vc é formado em X, né?") quando X é uma
+  // formação RECONHECIDA (lista oficial, não-vaga). Se o campo trouxer texto
+  // livre/não mapeado (ex.: "Na faculdade entre o 9º e 10º Período"), cai na
+  // pergunta ABERTA — senão sai "vc é formado em Na faculdade entre o 9º..., né?".
+  const reconhecida = !!formacaoNormalizada
+    && FORMACOES_OFICIAIS.includes(formacaoNormalizada)
+    && !FORMACOES_VAGAS.includes(formacaoNormalizada);
+  if (!reconhecida) {
     return 'só antes de eu fechar esse horário me confirma: qual é o seu curso de graduação? e o que te levou a buscar a pós agora?';
   }
   return `só antes de eu fechar esse horário me confirma: vc é formado em ${formacaoNormalizada}, né? e o que te levou a buscar a pós agora?`;

@@ -125,6 +125,58 @@ Deno.serve(async (req) => {
       return json({ ok: true });
     }
 
+    // ── UPLOAD HEADER MEDIA ─────────────────────────────────────────────────────
+    // Sobe um arquivo de EXEMPLO (imagem/vídeo/documento) p/ o cabeçalho de mídia de
+    // um template e devolve o `header_handle` que a Meta exige no `example` ao criar.
+    // Usa a Resumable Upload API: POST /{APP_ID}/uploads (inicia sessão) → POST
+    // /{SESSION_ID} com os bytes (Authorization: OAuth). O APP_ID é descoberto a partir
+    // do próprio token (debug_token) — não depende de env extra.
+    if (action === "upload_header_media") {
+      const { file_base64, mime, filename } = body ?? {};
+      if (!file_base64 || !mime) {
+        return json({ error: "file_base64 e mime são obrigatórios" }, 400);
+      }
+      // bytes do arquivo
+      let bytes: Uint8Array;
+      try {
+        const raw = String(file_base64).includes(",") ? String(file_base64).split(",").pop()! : String(file_base64);
+        const bin = atob(raw);
+        bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      } catch {
+        return json({ error: "file_base64 inválido" }, 400);
+      }
+
+      // app_id a partir do token (debug_token)
+      const dbg = await fetch(
+        `${META_GRAPH}/debug_token?input_token=${encodeURIComponent(accessToken)}&access_token=${encodeURIComponent(accessToken)}`,
+      );
+      const dbgResp = await dbg.json().catch(() => ({}));
+      const appId = dbgResp?.data?.app_id ? String(dbgResp.data.app_id) : null;
+      if (!appId) return json({ error: `Não foi possível resolver o app_id da conta: ${metaErro(dbgResp, dbg.status)}` }, 400);
+
+      // 1) inicia a sessão de upload
+      const startUrl =
+        `${META_GRAPH}/${appId}/uploads?file_name=${encodeURIComponent(filename || "sample")}` +
+        `&file_length=${bytes.length}&file_type=${encodeURIComponent(mime)}`;
+      const startR = await fetch(startUrl, { method: "POST", headers: { Authorization: `Bearer ${accessToken}` } });
+      const startResp = await startR.json().catch(() => ({}));
+      const sessionId = startResp?.id ? String(startResp.id) : null;
+      if (!startR.ok || !sessionId) return json({ error: metaErro(startResp, startR.status) }, 400);
+
+      // 2) envia os bytes → devolve o handle `h`
+      const upR = await fetch(`${META_GRAPH}/${sessionId}`, {
+        method: "POST",
+        headers: { Authorization: `OAuth ${accessToken}`, file_offset: "0", "Content-Type": "application/octet-stream" },
+        body: bytes,
+      });
+      const upResp = await upR.json().catch(() => ({}));
+      const handle = upResp?.h ? String(upResp.h) : null;
+      console.log("[crm-whatsapp-templates] upload_header_media <- Meta status:", upR.status, handle ? "ok" : "sem handle");
+      if (!upR.ok || !handle) return json({ error: metaErro(upResp, upR.status) }, 400);
+      return json({ ok: true, handle });
+    }
+
     // ── LIST (default) ─────────────────────────────────────────────────────────
     // `fields` explícito garante que `components` venha com os `example` (exigidos
     // ao reeditar variáveis na tela de edição).

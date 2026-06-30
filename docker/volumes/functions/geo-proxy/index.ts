@@ -24,6 +24,16 @@ Deno.serve(async (req) => {
       })
     }
 
+    if (type === 'estados') {
+      const res = await fetch(
+        `https://servicodados.ibge.gov.br/api/v1/localidades/estados?orderBy=nome`
+      )
+      const data = await res.json()
+      return new Response(JSON.stringify(data), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      })
+    }
+
     if (type === 'municipios') {
       const uf = url.searchParams.get('uf')?.toUpperCase()
       if (!uf || uf.length !== 2) {
@@ -41,7 +51,7 @@ Deno.serve(async (req) => {
       })
     }
 
-    return new Response(JSON.stringify({ error: 'Tipo inválido. Use type=cep ou type=municipios' }), {
+    return new Response(JSON.stringify({ error: 'Tipo inválido. Use type=cep, type=estados ou type=municipios' }), {
       status: 400,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     })

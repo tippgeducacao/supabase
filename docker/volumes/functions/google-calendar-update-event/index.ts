@@ -69,6 +69,7 @@ Deno.serve(async (req) => {
       attendees,
       create_meet,
       reminders,
+      all_day, // boolean — evento de dia inteiro
     } = body || {};
 
     if (!event_cache_id || !action) throw new Error('event_cache_id e action obrigatórios');
@@ -122,12 +123,24 @@ Deno.serve(async (req) => {
     if (!title || !starts_at || !ends_at) {
       throw new Error('Campos obrigatórios para update: title, starts_at, ends_at');
     }
+    // Dia inteiro: Google usa { date } (sem hora) e o fim é EXCLUSIVO (último dia + 1).
+    const isAllDay = !!all_day;
+    const dateOnly = (s: any) => String(s).slice(0, 10);
+    const addDaysStr = (d: string, n: number) => {
+      const x = new Date(`${d}T00:00:00Z`);
+      x.setUTCDate(x.getUTCDate() + n);
+      return x.toISOString().slice(0, 10);
+    };
     const eventBody: any = {
       summary: title,
       description: description ?? null,
       location: location ?? null,
-      start: { dateTime: new Date(starts_at).toISOString(), timeZone: 'America/Sao_Paulo' },
-      end: { dateTime: new Date(ends_at).toISOString(), timeZone: 'America/Sao_Paulo' },
+      start: isAllDay
+        ? { date: dateOnly(starts_at) }
+        : { dateTime: new Date(starts_at).toISOString(), timeZone: 'America/Sao_Paulo' },
+      end: isAllDay
+        ? { date: addDaysStr(dateOnly(ends_at), 1) }
+        : { dateTime: new Date(ends_at).toISOString(), timeZone: 'America/Sao_Paulo' },
     };
     if (Array.isArray(attendees)) {
       eventBody.attendees = attendees
@@ -146,7 +159,7 @@ Deno.serve(async (req) => {
     const existingRaw: any = cached.raw || {};
     const hasMeet = !!(existingRaw.hangoutLink || existingRaw.conferenceData?.entryPoints?.length);
     let needConferenceVersion = false;
-    if (create_meet && !hasMeet) {
+    if (create_meet && !hasMeet && !isAllDay) {
       eventBody.conferenceData = {
         createRequest: {
           requestId: `meet-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -154,7 +167,7 @@ Deno.serve(async (req) => {
         },
       };
       needConferenceVersion = true;
-    } else if (create_meet === false && hasMeet) {
+    } else if ((create_meet === false || isAllDay) && hasMeet) {
       // Remover meet
       eventBody.conferenceData = null;
       needConferenceVersion = true;

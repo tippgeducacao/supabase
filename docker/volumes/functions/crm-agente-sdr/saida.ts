@@ -100,7 +100,7 @@ export function calcularDelaySegundos(mensagem: string): number {
   return Math.round(delay * 10) / 10;
 }
 
-async function enviarChunk(ctx: CtxConversa, conteudo: string): Promise<void> {
+async function enviarChunk(ctx: CtxConversa, conteudo: string): Promise<{ ok: boolean; status: number; erro?: string }> {
   const res = await fetch(SEND_URL, {
     method: 'POST',
     headers: { Authorization: `Bearer ${SERVICE_ROLE}`, 'Content-Type': 'application/json' },
@@ -114,25 +114,48 @@ async function enviarChunk(ctx: CtxConversa, conteudo: string): Promise<void> {
     }),
   });
   if (!res.ok) {
-    console.error(`[crm-agente-sdr] crm-whatsapp-send HTTP ${res.status}: ${await res.text()}`);
+    const corpo = await res.text();
+    console.error(`[crm-agente-sdr] crm-whatsapp-send HTTP ${res.status}: ${corpo}`);
+    return { ok: false, status: res.status, erro: `HTTP ${res.status}: ${corpo.slice(0, 500)}` };
   }
+  return { ok: true, status: res.status };
 }
 
 // Envia a resposta completa: fraciona, espera o "tempo de digitação" e manda.
+// `pausada` (opcional): rechecagem FRESCA da pausa da IA — os chunks pingam ao longo
+// de 2-12s CADA, então entre um balão e outro o atendente pode ter pausado a IA. Antes
+// de cada envio relê o flag e ABORTA os chunks restantes (a pausa precisa valer "em voo").
 export async function enviarResposta(
   ctx: CtxConversa,
   texto: string,
   renovarLock: () => Promise<void>,
   tel?: { registrar: (tipo: string, dados?: Record<string, unknown>, duracaoMs?: number, erro?: string) => void },
+  pausada?: () => Promise<boolean>,
 ): Promise<void> {
   const textoLimpo = humanizarTexto(texto);
   const chunks = await fracionarResposta(textoLimpo);
   tel?.registrar('resposta_chunks', { total: chunks.length, sanitizado: textoLimpo !== texto });
+  let enviados = 0;
   for (const chunk of chunks) {
     const delay = calcularDelaySegundos(chunk);
     await new Promise((r) => setTimeout(r, delay * 1000));
-    await enviarChunk(ctx, chunk);
-    tel?.registrar('chunk_enviado', { texto: chunk.length > 300 ? chunk.slice(0, 300) + '…' : chunk, delay_s: delay });
+    // Pausou durante o "tempo de digitação"? Não manda este nem os próximos balões.
+    if (pausada && (await pausada())) {
+      tel?.registrar('envio_abortado_pausa', {
+        onde: 'entre_chunks',
+        enviados,
+        abortados: chunks.length - enviados,
+      });
+      break;
+    }
+    const env = await enviarChunk(ctx, chunk);
+    if (env.ok) enviados++;
+    tel?.registrar(
+      'chunk_enviado',
+      { texto: chunk.length > 300 ? chunk.slice(0, 300) + '…' : chunk, delay_s: delay, ok: env.ok, status: env.status },
+      undefined,
+      env.ok ? undefined : env.erro,
+    );
     await renovarLock(); // rodada longa não pode perder o lock pro TTL
   }
 }

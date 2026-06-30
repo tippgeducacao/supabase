@@ -13,6 +13,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3';
 import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO } from './prompts.ts';
+import { AGENTE_RECONTATO, montarDossieRecontato } from './prompts-recontato.ts';
 import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, renderPrompt } from './contexto.ts';
 import { atualizarAgenteComRatchet, atualizarLead, buscarLead, carregarHistorico, criarLead, excluirDadosLead, gravarMensagem, limparParaRouter, sanitizarHistorico } from './historico.ts';
 import { carregarTools, chamarAgentePrincipal, chamarRouter } from './agente.ts';
@@ -117,6 +118,24 @@ async function lockSoltar(remotejid: string): Promise<void> {
   await supabase.from('crm_agente_sdr_lock').delete().eq('remotejid', remotejid);
 }
 
+// Rechecagem FRESCA da pausa da IA. O guard de entrada (Deno.serve) só lê pausa_ia
+// UMA vez, na chegada do inbound; mas entre a chegada e o envio passam o debounce
+// (agente_sdr_delay_segundos, hoje 45s) + a geração do LLM + o dribble de chunks —
+// uma janela de até ~2min em que o atendente pode pausar a IA. Sem este recheck, a
+// mensagem "em voo" saía mesmo depois da pausa (era a queixa dos SDRs). Lê só o flag.
+async function iaPausada(remotejid: string): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('cliente_ppg_leads_sdr')
+    .select('pausa_ia')
+    .eq('remotejid', remotejid)
+    .maybeSingle();
+  if (error) {
+    console.error(`[crm-agente-sdr] iaPausada ${remotejid}: ${error.message}`);
+    return false; // em erro de leitura, não bloqueia (mantém o comportamento atual)
+  }
+  return data?.pausa_ia === true;
+}
+
 // ── uma rodada do agente sobre um lote de mensagens drenadas ────────────────
 
 async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): Promise<void> {
@@ -168,45 +187,79 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   };
   const contextoTemporal = montarContextoTemporal();
 
-  // Router (em erro, mantém o agente atual — não derruba a conversa).
-  let proximo: 'agente_validacao' | 'agente_qualificador';
-  const inicioRouter = Date.now();
-  let routerFallback = false;
-  try {
-    proximo = await chamarRouter(limparParaRouter(await carregarHistorico(supabase, remotejid)));
-  } catch (e) {
-    console.error('[crm-agente-sdr] router falhou, mantendo agente atual:', e);
-    routerFallback = true;
-    proximo = lead?.agente_atual === 'agente_qualificador' ? 'agente_qualificador' : 'agente_validacao';
-  }
-  const agenteAtual = await atualizarAgenteComRatchet(supabase, remotejid, lead?.agente_atual ?? null, proximo);
-  tel.registrar('router_decisao', {
-    decidiu: proximo,
-    efetivo: agenteAtual,
-    anterior: lead?.agente_atual ?? null,
-    fallback: routerFallback,
-  }, Date.now() - inicioRouter);
+  // Persona do número (vem no relay/buffer). 'recontato' = no-show: missão fixa
+  // (reabrir + remarcar), então NÃO passa pelo router validação×qualificador.
+  const persona = ultimo.agente_ia_persona === 'recontato' ? 'recontato' : 'qualificador';
+  let promptAgente: string;
+  let tools: any[];
+  let contextoEfetivo = contextoTemporal;
+  let agenteEfetivo: string;
 
-  const promptAgente = renderPrompt(
-    agenteAtual === 'agente_qualificador' ? AGENTE_QUALIFICADOR : AGENTE_VALIDACAO,
-    vars,
-  );
-  const tools = await carregarTools(supabase, agenteAtual);
+  if (persona === 'recontato') {
+    agenteEfetivo = 'agente_recontato';
+    promptAgente = renderPrompt(AGENTE_RECONTATO, vars);
+    tools = await carregarTools(supabase, 'agente_recontato');
+    const dossie = montarDossieRecontato(lead?.contexto_recontato);
+    if (dossie) contextoEfetivo = `${contextoTemporal}\n\n${dossie}`;
+    tel.registrar('router_decisao', {
+      decidiu: 'agente_recontato',
+      efetivo: 'agente_recontato',
+      anterior: lead?.agente_atual ?? null,
+      persona: 'recontato',
+      dossie: dossie ? true : false,
+    }, 0);
+  } else {
+    // Router (em erro, mantém o agente atual — não derruba a conversa).
+    let proximo: 'agente_validacao' | 'agente_qualificador';
+    const inicioRouter = Date.now();
+    let routerFallback = false;
+    try {
+      proximo = await chamarRouter(limparParaRouter(await carregarHistorico(supabase, remotejid)));
+    } catch (e) {
+      console.error('[crm-agente-sdr] router falhou, mantendo agente atual:', e);
+      routerFallback = true;
+      proximo = lead?.agente_atual === 'agente_qualificador' ? 'agente_qualificador' : 'agente_validacao';
+    }
+    const agenteAtual = await atualizarAgenteComRatchet(supabase, remotejid, lead?.agente_atual ?? null, proximo);
+    agenteEfetivo = agenteAtual;
+    tel.registrar('router_decisao', {
+      decidiu: proximo,
+      efetivo: agenteAtual,
+      anterior: lead?.agente_atual ?? null,
+      fallback: routerFallback,
+    }, Date.now() - inicioRouter);
+    promptAgente = renderPrompt(
+      agenteAtual === 'agente_qualificador' ? AGENTE_QUALIFICADOR : AGENTE_VALIDACAO,
+      vars,
+    );
+    tools = await carregarTools(supabase, agenteAtual);
+  }
   const renovar = lockRenovar(remotejid);
 
   // Loop agêntico: igual ao n8n, o histórico é relido do banco a cada volta.
   for (let rodada = 0; rodada < MAX_RODADAS_TOOLS; rodada++) {
     const messages = sanitizarHistorico(await carregarHistorico(supabase, remotejid));
     const inicioLlm = Date.now();
-    const resp = await chamarAgentePrincipal({ promptAgente, contextoTemporal, messages, tools });
+    const resp = await chamarAgentePrincipal({ promptAgente, contextoTemporal: contextoEfetivo, messages, tools });
+    // OUTPUT da IA (não o prompt): o que o modelo gerou nesta volta — raciocínio
+    // (thinking), resposta crua (text) e as tools que ELA decidiu chamar.
+    const blocosResp = (resp.content ?? []) as any[];
+    const iaTexto = blocosResp.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+    const iaPensamento = blocosResp.filter((b) => b.type === 'thinking').map((b) => b.thinking ?? '').join('\n').trim();
+    const iaTools = blocosResp
+      .filter((b) => b.type === 'tool_use')
+      .map((b) => ({ nome: b.name, input: resumir(b.input, 600) }));
     tel.registrar('llm_chamada', {
       volta: rodada + 1,
-      agente: agenteAtual,
+      agente: agenteEfetivo,
       stop_reason: resp.stop_reason ?? null,
       tokens_entrada: resp.usage?.input_tokens ?? null,
       tokens_saida: resp.usage?.output_tokens ?? null,
       cache_lido: resp.usage?.cache_read_input_tokens ?? null,
-      blocos: (resp.content ?? []).map((b: any) => b.type),
+      blocos: blocosResp.map((b) => b.type),
+      pensamento: iaPensamento ? resumir(iaPensamento, 2000) : undefined,
+      texto: iaTexto ? resumir(iaTexto, 2000) : undefined,
+      tools_decididas: iaTools.length ? iaTools : undefined,
     }, Date.now() - inicioLlm);
     await gravarMensagem(supabase, remotejid, { role: 'assistant', content: resp.content });
 
@@ -234,7 +287,16 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       .map((b: any) => b.text)
       .join('\n')
       .trim();
-    if (texto) await enviarResposta(ctx, texto, renovar, tel);
+    if (texto) {
+      // Última checagem antes de falar: a geração do LLM (com tools) pode ter levado
+      // dezenas de segundos; se o atendente pausou nesse meio, NÃO envia. O recheck
+      // entre chunks (passado a enviarResposta) cobre a pausa durante o dribble.
+      if (await iaPausada(remotejid)) {
+        tel.registrar('envio_abortado_pausa', { onde: 'antes_envio', motivo: 'IA pausada durante a geração' });
+      } else {
+        await enviarResposta(ctx, texto, renovar, tel, () => iaPausada(remotejid));
+      }
+    }
     tel.registrar('rodada_fim', { voltas_llm: rodada + 1, respondeu: Boolean(texto) }, Date.now() - inicioRodada);
     return;
   }
@@ -247,14 +309,19 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
 async function processarInbound(payload: any): Promise<void> {
   const remotejid: string = payload.remotejid;
   let telAtual: Telemetria | null = null;
+  // Telemetria do pré-processamento (transcrição/análise de mídia). Só vira uma
+  // execução visível se a mídia registrar algum nó (texto puro não gera nada) ou
+  // se cair no catch — então não polui a lista com rodadas vazias.
+  const telPrep = criarTelemetria(supabase, remotejid);
   try {
     // Mídia é tratada ANTES do buffer (transcrição/análise), como no n8n.
-    const tratada = await prepararMensagem(payload);
+    const tratada = await prepararMensagem(payload, telPrep);
     await bufferInserir(remotejid, {
       ...tratada,
       msg_id: payload.id,
       timestamp: payload.timestamp,
       wa_account_id: payload.wa_account_id ?? null,
+      agente_ia_persona: payload.agente_ia_persona ?? null,
       lead_id: payload.lead_id ?? null,
       oportunidade_id: payload.oportunidade_id ?? null,
     });
@@ -270,6 +337,14 @@ async function processarInbound(payload: any): Promise<void> {
         const esperouMs = await aguardarSilencio(remotejid, delaySegundos, renovar);
         const itens = await bufferDrenar(remotejid);
         if (!itens.length) break;
+        // Pausou durante o debounce (45s)? Não gera nem responde esta leva — o lead
+        // fica registrado no histórico mas a IA não fala (defesa em profundidade barata).
+        if (await iaPausada(remotejid)) {
+          criarTelemetria(supabase, remotejid).registrar('envio_abortado_pausa', {
+            onde: 'pos_debounce', mensagens_descartadas: itens.length,
+          });
+          break;
+        }
         telAtual = criarTelemetria(supabase, remotejid);
         if (delaySegundos > 0) {
           telAtual.registrar('debounce', { config_s: delaySegundos, mensagens_acumuladas: itens.length }, esperouMs);
@@ -281,7 +356,7 @@ async function processarInbound(payload: any): Promise<void> {
     }
   } catch (e) {
     console.error(`[crm-agente-sdr] erro processando ${remotejid}:`, e);
-    (telAtual ?? criarTelemetria(supabase, remotejid)).registrar(
+    (telAtual ?? telPrep).registrar(
       'erro',
       { onde: 'processarInbound', stack: resumir((e as Error).stack ?? '', 1500) },
       undefined,
@@ -371,9 +446,18 @@ Deno.serve(async (req) => {
     return json({ ok: true, reset: true });
   }
 
-  // Gate de atendimento: só leads marcados pra IA (iniciar_atendimento) e não pausados.
+  // Gate de atendimento. Depende da PERSONA do número (vem no relay do webhook):
+  //  - 'recontato' (número de no-show): só atende lead com modo_recontato=true e NUNCA
+  //    roda o qualificador — leads carregam iniciar_atendimento=true global, então sem
+  //    esse gate o qualificador responderia comparecidos/leads antigos nesse número.
+  //  - 'qualificador' (padrão): atende quem tem iniciar_atendimento (fluxo de lead novo).
+  const persona = payload.agente_ia_persona === 'recontato' ? 'recontato' : 'qualificador';
   const lead = await buscarLead(supabase, payload.remotejid);
-  if (!lead || lead.iniciar_atendimento !== true) return json({ ok: true, skip: 'sem_iniciar_atendimento' });
+  if (persona === 'recontato') {
+    if (!lead || lead.modo_recontato !== true) return json({ ok: true, skip: 'fora_do_modo_recontato' });
+  } else {
+    if (!lead || lead.iniciar_atendimento !== true) return json({ ok: true, skip: 'sem_iniciar_atendimento' });
+  }
   if (lead.pausa_ia === true) return json({ ok: true, skip: 'pausa_ia' });
 
   const trabalho = processarInbound(payload);

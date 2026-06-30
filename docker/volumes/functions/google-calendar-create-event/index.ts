@@ -64,11 +64,12 @@ Deno.serve(async (req) => {
       title,
       description,
       location,
-      starts_at, // ISO
-      ends_at,   // ISO
+      starts_at, // ISO (ou 'YYYY-MM-DD' quando all_day)
+      ends_at,   // ISO (ou 'YYYY-MM-DD' quando all_day, dia FINAL inclusivo)
       attendees, // string[] de emails
       create_meet, // boolean
       reminders, // Array<{method:'popup'|'email', minutes:number}>
+      all_day,   // boolean — evento de dia inteiro
     } = body || {};
 
     if (!integration_id || !title || !starts_at || !ends_at) {
@@ -96,13 +97,26 @@ Deno.serve(async (req) => {
     const accessToken = await ensureToken(admin, integ);
     const calendarId = integ.external_calendar_id || 'primary';
 
+    // Dia inteiro: Google usa { date } (sem hora) e o fim é EXCLUSIVO (último dia + 1).
+    const isAllDay = !!all_day;
+    const dateOnly = (s: any) => String(s).slice(0, 10);
+    const addDaysStr = (d: string, n: number) => {
+      const x = new Date(`${d}T00:00:00Z`);
+      x.setUTCDate(x.getUTCDate() + n);
+      return x.toISOString().slice(0, 10);
+    };
+
     // Monta evento
     const eventBody: any = {
       summary: title,
       description: description || undefined,
       location: location || undefined,
-      start: { dateTime: new Date(starts_at).toISOString(), timeZone: 'America/Sao_Paulo' },
-      end: { dateTime: new Date(ends_at).toISOString(), timeZone: 'America/Sao_Paulo' },
+      start: isAllDay
+        ? { date: dateOnly(starts_at) }
+        : { dateTime: new Date(starts_at).toISOString(), timeZone: 'America/Sao_Paulo' },
+      end: isAllDay
+        ? { date: addDaysStr(dateOnly(ends_at), 1) }
+        : { dateTime: new Date(ends_at).toISOString(), timeZone: 'America/Sao_Paulo' },
     };
     if (Array.isArray(attendees) && attendees.length > 0) {
       eventBody.attendees = attendees
@@ -116,7 +130,7 @@ Deno.serve(async (req) => {
         .map((r: any) => ({ method: r.method, minutes: Number(r.minutes) }));
       eventBody.reminders = { useDefault: false, overrides };
     }
-    if (create_meet) {
+    if (create_meet && !isAllDay) {
       eventBody.conferenceData = {
         createRequest: {
           requestId: `meet-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -126,7 +140,7 @@ Deno.serve(async (req) => {
     }
 
     const url = new URL(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`);
-    if (create_meet) url.searchParams.set('conferenceDataVersion', '1');
+    if (create_meet && !isAllDay) url.searchParams.set('conferenceDataVersion', '1');
     url.searchParams.set('sendUpdates', 'all');
 
     const gRes = await fetch(url.toString(), {

@@ -166,7 +166,6 @@ const ACAO_LABELS: Record<string, string> = {
   atualizar_lead:      "Atualizar campo do contato",
   definir_responsavel: "Mudar permissões de acesso ao contato",
   criar_oportunidade:  "Criar oportunidade",
-  distribuir_lead:     "Distribuir lead",
   enviar_mensagem_whatsapp: "Enviar template WhatsApp",
   add_segmento:        "Adicionar a um segmento",
   remove_segmento:     "Remover de um segmento",
@@ -522,13 +521,14 @@ Deno.serve(async (req) => {
   // (5) find-or-create lead — dedup OR email/whatsapp (com variantes de prefixo 55)
   let leadId: string | null = null;
   let duplicado = false;
+  let leadArquivadoReativado = false;
   try {
     let existing: any = null;
 
     if (email) {
       const { data } = await admin
         .from("leads")
-        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao")
+        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, arquivado")
         .eq("email", email)
         .limit(1);
       existing = data?.[0] ?? null;
@@ -537,7 +537,7 @@ Deno.serve(async (req) => {
       const variants = [whatsapp, whatsapp.startsWith("55") ? whatsapp.slice(2) : `55${whatsapp}`];
       const { data } = await admin
         .from("leads")
-        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao")
+        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, arquivado")
         .in("whatsapp", variants)
         .limit(1);
       existing = data?.[0] ?? null;
@@ -546,6 +546,13 @@ Deno.serve(async (req) => {
     if (existing) {
       duplicado = true;
       leadId = existing.id;
+      // Lead estava arquivado → recadastro = reativar
+      if (existing.arquivado === true) {
+        leadArquivadoReativado = true;
+        await admin.from("leads")
+          .update({ arquivado: false, arquivado_em: null, arquivado_por: null })
+          .eq("id", existing.id);
+      }
       // Preenche campos vazios sem sobrescrever os existentes. Inclui os defaults da
       // Criação Automática (espelha o "atualiza e cria" do SprintHub — fill-if-empty
       // também no lead que já existe). Mapeamento de Entrada (in*) tem prioridade.
@@ -713,25 +720,44 @@ Deno.serve(async (req) => {
 
   // Resolve o responsavel do card conforme a estrategia (espelha "Tipo de Responsavel"):
   //   do_contato → leads.vendedor_atribuido; usuario → fixo; sequencial → rodizio (RPC);
-  //   menos_oportunidades → o com menos cards abertos na lista; aleatorio → sorteio; nenhum → null.
-  async function resolverResponsavel(acaoId: string, resp: any): Promise<string | null> {
+  //   menos_oportunidades → o com menos cards abertos na lista; aleatorio → sorteio;
+  //   setor_equipe → rodizio BALANCEADO por carga entre os MEMBROS dos DEPARTAMENTOS DO CRM
+  //   escolhidos (RPC distribuir_proximo_responsavel; devolve tambem o logId p/ amarrar
+  //   opp/atendimento e a carga contar pelo estado real); nenhum → null.
+  // Devolve { id, logId }: logId só vem na estrategia setor_equipe (linha em crm_distribuicao_log).
+  async function resolverResponsavel(acaoId: string, resp: any): Promise<{ id: string | null; logId: string | null }> {
     const estrategia = resp?.estrategia ?? "do_contato";
     try {
-      if (estrategia === "nenhum") return null;
-      if (estrategia === "usuario") return (typeof resp?.usuarioId === "string" && resp.usuarioId) ? resp.usuarioId : null;
+      if (estrategia === "nenhum") return { id: null, logId: null };
+      if (estrategia === "usuario") return { id: (typeof resp?.usuarioId === "string" && resp.usuarioId) ? resp.usuarioId : null, logId: null };
       if (estrategia === "do_contato") {
         const { data } = await admin.from("leads").select("vendedor_atribuido").eq("id", leadId).maybeSingle();
-        return (data as any)?.vendedor_atribuido ?? null;
+        return { id: (data as any)?.vendedor_atribuido ?? null, logId: null };
+      }
+      if (estrategia === "setor_equipe") {
+        // Pool = MEMBROS ATIVOS dos DEPARTAMENTOS DO CRM (crm_departamento_membros) escolhidos;
+        // rodizio balanceado pela carga (so dos leads que ESTA acao distribuiu — recontato nao
+        // pesa). p_departamentos = crm_departamentos.id. Sem departamento = sem pool.
+        const deptos: string[] = Array.isArray(resp?.departamentos) ? resp.departamentos.map((x: unknown) => String(x)).filter(Boolean) : [];
+        const excluir: string[] = Array.isArray(resp?.excluir) ? resp.excluir.map((x: unknown) => String(x)).filter(Boolean) : [];
+        if (!deptos.length) return { id: null, logId: null };
+        const { data: pick } = await admin.rpc("distribuir_proximo_responsavel", {
+          p_acao_id: acaoId,
+          p_departamentos: deptos,
+          p_excluir: excluir.length ? excluir : null,
+        });
+        const row: any = Array.isArray(pick) ? pick[0] : pick;
+        return { id: row?.usuario_id ?? null, logId: row?.log_id ?? null };
       }
       const lista: string[] = Array.isArray(resp?.usuarios)
         ? resp.usuarios.filter((x: any) => typeof x === "string" && x)
         : [];
-      if (lista.length === 0) return null;
-      if (estrategia === "aleatorio") return lista[Math.floor(Math.random() * lista.length)] ?? null;
+      if (lista.length === 0) return { id: null, logId: null };
+      if (estrategia === "aleatorio") return { id: lista[Math.floor(Math.random() * lista.length)] ?? null, logId: null };
       if (estrategia === "sequencial") {
         const { data: idx } = await admin.rpc("crm_webhook_acao_next_index", { p_acao_id: acaoId, p_len: lista.length });
         const i = typeof idx === "number" ? idx : 0;
-        return lista[i] ?? lista[0] ?? null;
+        return { id: lista[i] ?? lista[0] ?? null, logId: null };
       }
       if (estrategia === "menos_oportunidades") {
         const { data: rows } = await admin
@@ -746,12 +772,12 @@ Deno.serve(async (req) => {
         }
         let best = lista[0]; let bestN = Infinity;
         for (const u of lista) { const n = counts.get(u) ?? 0; if (n < bestN) { bestN = n; best = u; } }
-        return best ?? null;
+        return { id: best ?? null, logId: null };
       }
     } catch (e: any) {
       console.error("[crm-lead-webhook] resolverResponsavel erro:", e?.message);
     }
-    return null;
+    return { id: null, logId: null };
   }
 
   // (9b) ACAO 'criar_oportunidade' — cria card(s) no pipeline SOMENTE quando configurada.
@@ -786,7 +812,7 @@ Deno.serve(async (req) => {
         const rawValor = resolveWebhookVar(p.valor, dados).replace(",", ".").replace(/[^0-9.\-]/g, "").trim();
         const valorNum = rawValor !== "" && Number.isFinite(Number(rawValor)) ? Number(rawValor) : null;
         const statusOp = (p.status === "ganha" || p.status === "perdida") ? p.status : "aberta";
-        const responsavelId = await resolverResponsavel(a.id, p.responsavel);
+        const { id: responsavelId, logId } = await resolverResponsavel(a.id, p.responsavel);
         const nowIso = new Date().toISOString();
 
         const { data: op, error: opErr } = await admin
@@ -806,6 +832,8 @@ Deno.serve(async (req) => {
             status: statusOp,
             entrou_na_etapa_em: nowIso,
             ultima_atividade_em: nowIso,
+            reativado_de_arquivo: leadArquivadoReativado,
+            reativado_em: leadArquivadoReativado ? nowIso : null,
           })
           .select("id")
           .single();
@@ -813,6 +841,37 @@ Deno.serve(async (req) => {
         if (op?.id) {
           captacaoVinculada = true;
           if (!oportunidadeId) oportunidadeId = op.id;
+          // (9b.1) AÇÃO VISÍVEL "Também abrir atendimento no SAC" (toggle da Criar oportunidade):
+          // abre+atribui o atendimento em SAC Comercial ao MESMO responsável da oportunidade
+          // (o SDR distribuído). É a AUTOMAÇÃO que atribui o SDR no SAC — NÃO um gatilho
+          // escondido. O mirror do template reaproveita esse atendimento (dedup por
+          // contato+funil) → não duplica. Sem responsável distribuído → não abre.
+          if (p.abrirSac === true && responsavelId && leadId) {
+            try {
+              const { data: cfg } = await admin
+                .from("crm_pipeline_settings").select("sac_funil_comercial_id").eq("id", 1).maybeSingle();
+              const sacFunilId = (cfg as any)?.sac_funil_comercial_id ?? null;
+              if (sacFunilId) {
+                const { data: et } = await admin
+                  .from("sac_funis_etapas").select("id").eq("funil_id", sacFunilId)
+                  .order("ordem", { ascending: true }).limit(1).maybeSingle();
+                const sacEtapaId = (et as any)?.id ?? null;
+                if (sacEtapaId) {
+                  await admin.rpc("sac_cria_atend", {
+                    p_lead_id: leadId, p_funil_id: sacFunilId, p_etapa_id: sacEtapaId,
+                    p_responsavel_id: responsavelId, p_origem: "distribuicao",
+                  });
+                }
+              }
+            } catch (e: any) { console.error("[crm-lead-webhook] abrirSac falhou:", e?.message); }
+          }
+          // Estratégia setor_equipe: amarra a oportunidade na linha de crm_distribuicao_log →
+          // a carga do rodízio passa a contar pelo estado real (oportunidade aberta).
+          if (logId) {
+            await admin.from("crm_distribuicao_log")
+              .update({ lead_id: leadId, oportunidade_id: op.id })
+              .eq("id", logId);
+          }
           await logAtividade(
             leadId, "acao_webhook", "Ação de Webhook Integrado executada",
             `${integration.nome ?? slug} - ${ACAO_LABELS.criar_oportunidade}`,
@@ -955,52 +1014,6 @@ Deno.serve(async (req) => {
           acoesAplicadas.push("atualizar_lead");
           await logAtividade(leadId, "acao_webhook", "Ação de Webhook Integrado executada", acaoChip("atualizar_lead"));
         }
-      } else if (a?.tipo === "distribuir_lead" && leadId) {
-        // "Distribuir lead": escolhe UM responsável (rodízio balanceado por carga) num pool
-        // por cargo/departamento e o aplica nas DUAS superfícies — seta na oportunidade
-        // criada no (9b) e ABRE+atribui um atendimento no SAC (resolve/cria sac_contatos por
-        // telefone). Mesmo dono no CRM e no SAC. Carga conta SÓ o que ESTA ação distribuiu
-        // (recontato não pesa); o motor grava em crm_distribuicao_log.
-        const pc: any = a?.params ?? {};
-        const cargos = Array.isArray(pc.cargos) ? pc.cargos.map((x: unknown) => String(x)).filter(Boolean) : [];
-        const deptos = Array.isArray(pc.departamentos) ? pc.departamentos.map((x: unknown) => String(x)).filter(Boolean) : [];
-        if (cargos.length || deptos.length) {
-          const { data: pick, error: pErr } = await admin.rpc("distribuir_proximo_responsavel", {
-            p_acao_id: a.id,
-            p_cargos: cargos.length ? cargos : null,
-            p_departamentos: deptos.length ? deptos : null,
-          });
-          if (pErr) throw pErr;
-          const row: any = Array.isArray(pick) ? pick[0] : pick;
-          const usuarioId: string | null = row?.usuario_id ?? null;
-          const logId: string | null = row?.log_id ?? null;
-          if (usuarioId) {
-            // (a) mesmo responsável na oportunidade criada nesta rodada (9b)
-            if (pc.setarOportunidade !== false && oportunidadeId) {
-              await admin.from("crm_oportunidades").update({ responsavel_id: usuarioId }).eq("id", oportunidadeId);
-            }
-            // (b) abre+atribui o atendimento no SAC
-            let atendId: string | null = null;
-            if (pc.abrirSac !== false && pc.sacFunilId && pc.sacEtapaId) {
-              const { data: aid } = await admin.rpc("sac_cria_atend", {
-                p_lead_id: leadId,
-                p_funil_id: pc.sacFunilId,
-                p_etapa_id: pc.sacEtapaId,
-                p_responsavel_id: usuarioId,
-                p_origem: "distribuicao",
-              });
-              atendId = (aid as string) ?? null;
-            }
-            // (c) amarra os ids no log → a carga passa a contar pelo estado real (aberta/ativo)
-            if (logId) {
-              await admin.from("crm_distribuicao_log")
-                .update({ lead_id: leadId, oportunidade_id: oportunidadeId ?? null, atendimento_id: atendId })
-                .eq("id", logId);
-            }
-            acoesAplicadas.push("distribuir_lead");
-            await logAtividade(leadId, "acao_webhook", "Ação de Webhook Integrado executada", acaoChip("distribuir_lead"));
-          }
-        }
       } else if (a?.tipo === "enviar_mensagem_whatsapp") {
         // "Enviar template WhatsApp": dispara um template aprovado já com as variáveis
         // mapeadas dos campos do webhook ({webhook=Campo}, na ordem {{1}},{{2}}…). Encurta o
@@ -1139,6 +1152,7 @@ Deno.serve(async (req) => {
       acoes_aplicadas: acoesAplicadas,
       // observabilidade da normalização: null = título não resolvido (candidato a alias)
       curso_canonico: cursoCanonico,
+      lead_arquivado_reativado: leadArquivadoReativado || undefined,
     },
     status: duplicado ? "duplicado" : "ok",
     ip_origem: ipOrigem,

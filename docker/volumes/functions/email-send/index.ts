@@ -249,23 +249,58 @@ Deno.serve(async (req) => {
     }
 
     // Cria log enfileirado
-    const { data: log, error: logErr } = await supabaseAdmin
-      .from("emails_enviados").insert({
-        template_id: templateId,
-        automacao_id: payload.automacao_id ?? null,
-        remetente_id: remetenteId,
-        contexto_tipo: payload.contexto_tipo ?? null,
-        contexto_id: payload.contexto_id ?? null,
-        destinatario_email: payload.destinatario_email,
-        destinatario_nome: payload.destinatario_nome ?? null,
-        assunto_render: assunto,
-        corpo_html_render: corpoHtml,
-        corpo_texto_render: corpoTexto,
-        anexos: payload.anexos ?? [],
-        status: "enfileirado",
-        idempotencia_key: payload.idempotencia_key ?? null,
-        enviado_por: userId,
-      }).select("id").single();
+    const logRow = {
+      template_id: templateId,
+      automacao_id: payload.automacao_id ?? null,
+      remetente_id: remetenteId,
+      contexto_tipo: payload.contexto_tipo ?? null,
+      contexto_id: payload.contexto_id ?? null,
+      destinatario_email: payload.destinatario_email,
+      destinatario_nome: payload.destinatario_nome ?? null,
+      assunto_render: assunto,
+      corpo_html_render: corpoHtml,
+      corpo_texto_render: corpoTexto,
+      anexos: payload.anexos ?? [],
+      status: "enfileirado",
+      idempotencia_key: payload.idempotencia_key ?? null,
+      enviado_por: userId,
+    };
+
+    let { data: log, error: logErr } = await supabaseAdmin
+      .from("emails_enviados").insert(logRow).select("id").single();
+
+    // ⚠️ idempotencia_key tem índice ÚNICO GLOBAL (idx_emails_enviados_idempot, SEM
+    // janela). Quando a dedup é por JANELA (idempotencia_janela_min) e a etapa já foi
+    // enviada FORA da janela, o SELECT de dedup acima libera o reenvio, mas este INSERT
+    // colidiria com a linha antiga (mesma chave) → "falha ao registrar log" e o e-mail
+    // não sai (ex.: reenviar a etapa de um TCC que já passou por ela dias atrás).
+    if (logErr && (logErr as { code?: string }).code === "23505" && payload.idempotencia_key) {
+      // Distingue 2 causas da colisão:
+      //  (a) CORRIDA real — outro disparo gravou a MESMA chave AGORA (dentro da janela):
+      //      é duplicado de verdade, NÃO reenvia.
+      //  (b) REENVIO legítimo de etapa enviada FORA da janela: grava NOVO registro com
+      //      chave de-colidida (preserva o histórico e entrega o e-mail).
+      let dupCheck = supabaseAdmin
+        .from("emails_enviados").select("id")
+        .eq("idempotencia_key", payload.idempotencia_key);
+      if (payload.idempotencia_janela_min && payload.idempotencia_janela_min > 0) {
+        const desde = new Date(Date.now() - payload.idempotencia_janela_min * 60_000).toISOString();
+        dupCheck = dupCheck.gte("criado_em", desde);
+      }
+      const { data: recente } = await dupCheck
+        .order("criado_em", { ascending: false }).limit(1).maybeSingle();
+      if (recente) {
+        return new Response(JSON.stringify({ ok: true, duplicado: true, id: recente.id }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+      const retry = await supabaseAdmin
+        .from("emails_enviados")
+        .insert({ ...logRow, idempotencia_key: `${payload.idempotencia_key}:${Date.now()}-${crypto.randomUUID()}` })
+        .select("id").single();
+      log = retry.data;
+      logErr = retry.error;
+    }
 
     if (logErr || !log) {
       return new Response(JSON.stringify({ error: "falha ao registrar log", details: logErr?.message }), {
