@@ -249,7 +249,7 @@ Deno.serve(async (req) => {
     if (tipo === "document" && !String(anexo_url ?? "").trim() && !String(curso ?? "").trim()) {
       return json({ error: "informe anexo_url ou curso para tipo document" }, 400);
     }
-    if ((tipo === "audio" || tipo === "sticker" || tipo === "image") && !String(anexo_url ?? "").trim()) {
+    if ((tipo === "audio" || tipo === "sticker" || tipo === "image" || tipo === "video") && !String(anexo_url ?? "").trim()) {
       return json({ error: `anexo_url obrigatório para tipo ${tipo}` }, 400);
     }
     if (tipo === "reaction" && (!String(reaction_message_id ?? "").trim() || !String(conteudo ?? "").trim())) {
@@ -387,7 +387,7 @@ Deno.serve(async (req) => {
       return json({ error: `cronograma não encontrado para o curso '${curso ?? ""}'` }, 404);
     }
     if (!docFilename) {
-      docFilename = tipo === "audio" ? "audio" : tipo === "sticker" ? "sticker.webp" : tipo === "image" ? "imagem.jpg" : "documento.pdf";
+      docFilename = tipo === "audio" ? "audio" : tipo === "sticker" ? "sticker.webp" : tipo === "image" ? "imagem.jpg" : tipo === "video" ? "video.mp4" : "documento.pdf";
     }
 
     // Monta payload Meta
@@ -432,6 +432,17 @@ Deno.serve(async (req) => {
         to,
         type: "image",
         image: { link: docUrl, ...(caption ? { caption: caption.slice(0, 1024) } : {}) },
+      };
+    } else if (tipo === "video") {
+      // Vídeo INLINE (player no WhatsApp, não "arquivo"): type=video + caption opcional.
+      // Meta aceita mp4/3gp por URL pública (codec H.264 + AAC). Sem branch próprio, o
+      // vídeo era enviado como `document` e chegava como arquivo pra baixar.
+      const caption = String(conteudo ?? "").trim();
+      waPayload = {
+        messaging_product: "whatsapp",
+        to,
+        type: "video",
+        video: { link: docUrl, ...(caption ? { caption: caption.slice(0, 1024) } : {}) },
       };
     } else if (tipo === "audio") {
       // OGG/Opus → MENSAGEM DE VOZ (forma de onda) só se enviado por `audio.id` (mídia
@@ -516,7 +527,7 @@ Deno.serve(async (req) => {
         };
       }
     } else {
-      return json({ error: `tipo '${tipo}' não suportado (use text, template, document, audio, sticker, reaction ou interactive)` }, 400);
+      return json({ error: `tipo '${tipo}' não suportado (use text, template, document, image, video, audio, sticker, reaction ou interactive)` }, 400);
     }
 
     console.log("[crm-whatsapp-send] -> Meta:", JSON.stringify(waPayload));
@@ -589,7 +600,7 @@ Deno.serve(async (req) => {
     if (tipo === "text") conteudoPersist = String(conteudo);
     else if (tipo === "template") conteudoPersist = templateTexto ?? `[template] ${template_name}`;
     else if (tipo === "audio" || tipo === "sticker") conteudoPersist = "";
-    else if (tipo === "image") conteudoPersist = String(conteudo ?? "").trim(); // legenda (ou vazio)
+    else if (tipo === "image" || tipo === "video") conteudoPersist = String(conteudo ?? "").trim(); // legenda (ou vazio)
     else if (tipo === "reaction") conteudoPersist = `[reacao]${String(conteudo)}`;
     else if (tipo === "interactive") {
       // No thread, mostra o corpo + as opções enviadas (os botões/lista em si só aparecem
@@ -631,6 +642,13 @@ Deno.serve(async (req) => {
         ? [{
             tipo: "image",
             mime_type: String(mime_type ?? "image/jpeg"),
+            url: docUrl,
+            filename: docFilename,
+          }]
+        : tipo === "video"
+        ? [{
+            tipo: "video",
+            mime_type: String(mime_type ?? "video/mp4"),
             url: docUrl,
             filename: docFilename,
           }]
