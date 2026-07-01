@@ -76,9 +76,34 @@ function resolveCadencia(status: string, followupCount: number): string | null {
 
 function formatPhone(raw: string | null | undefined): string | null {
   if (!raw) return null;
-  const digits = raw.replace(/\D/g, "");
+  const trimmed = String(raw).trim();
+  const digits = trimmed.replace(/\D/g, "");
   if (!digits) return null;
-  return digits.startsWith("55") ? digits : `55${digits}`;
+  // Número internacional já com DDI (veio com '+', ex.: +1 dos EUA): NÃO force o 55.
+  if (trimmed.startsWith("+")) return digits;
+  // Já vem com o DDI do Brasil (55 + 10/11 dígitos).
+  if (digits.startsWith("55") && (digits.length === 12 || digits.length === 13)) return digits;
+  // Número brasileiro sem DDI (DDD + 8/9 dígitos).
+  if (digits.length === 10 || digits.length === 11) return `55${digits}`;
+  // Não reconhecido: devolve os dígitos como estão (não corrompe internacional sem '+').
+  return digits;
+}
+
+// Variantes ±9º dígito (Brasil) — casa o telefone salvo COM o 9 (cadastro) com o
+// wa_id que a Meta entrega SEM o 9. Espelha whatsapp-webhook.phoneVariants / sac_phone_variants.
+// Opera sobre os dígitos já formatados (NÃO reaplica o 55 — evita corromper número
+// internacional já sem '+', ex.: EUA).
+function phoneVariants(raw: string | null | undefined): string[] {
+  const n = String(raw ?? "").replace(/\D/g, "");
+  if (!n) return [];
+  const set = new Set<string>([n]);
+  if (n.startsWith("55") && n.length >= 12) {
+    const ddd = n.slice(2, 4);
+    const rest = n.slice(4);
+    if (rest.length === 9 && rest.startsWith("9")) set.add("55" + ddd + rest.slice(1)); // sem 9
+    else if (rest.length === 8) set.add("55" + ddd + "9" + rest); // com 9
+  }
+  return [...set];
 }
 
 function firstName(full: string | null | undefined): string {
@@ -589,17 +614,23 @@ Deno.serve(async (req) => {
         if (mode !== "off") {
           try {
 
-            // 1) busca conversa existente pelo telefone
-            const { data: existentes, error: findErr } = await supabase
-              .from("ped_conversas_avulsas")
-              .select("id")
-              .contains("metadata", { telefone: to })
-              .order("ultima_atividade_em", { ascending: false })
-              .limit(1);
-            if (findErr) console.log("[dispatch] find conversa erro:", findErr.message);
+            // 1) busca conversa existente pelo telefone — por VARIANTES ±9º dígito,
+            // pra reusar a conversa que a resposta do professor (wa_id sem o 9) já
+            // possa ter criado; senão o convite abriria um 2º card.
+            let existente: { id: string } | null = null;
+            for (const tel of phoneVariants(to)) {
+              const { data, error: findErr } = await supabase
+                .from("ped_conversas_avulsas")
+                .select("id")
+                .contains("metadata", { telefone: tel })
+                .order("ultima_atividade_em", { ascending: false })
+                .limit(1);
+              if (findErr) console.log("[dispatch] find conversa erro:", findErr.message);
+              if (data?.[0]?.id) { existente = data[0]; break; }
+            }
 
             const nowIso = new Date().toISOString();
-            let conversaId: string | null = existentes?.[0]?.id ?? null;
+            let conversaId: string | null = existente?.id ?? null;
 
             if (conversaId) {
               await supabase
@@ -656,12 +687,14 @@ Deno.serve(async (req) => {
 
               // 3) sincroniza com SAC: upsert sac_contatos + cria sac_atendimentos vinculado
               try {
-                // 3a) upsert sac_contatos por telefone
-                const { data: contatoExistente } = await supabase
+                // 3a) upsert sac_contatos por telefone — por VARIANTES ±9º dígito,
+                // pra reusar o contato que a resposta do professor já tenha criado.
+                const { data: contatosMatch } = await supabase
                   .from("sac_contatos")
                   .select("id, tipo, professor_id_ref")
-                  .eq("telefone", to)
-                  .maybeSingle();
+                  .in("telefone", phoneVariants(to))
+                  .limit(1);
+                const contatoExistente = contatosMatch?.[0] ?? null;
 
                 let contatoId = contatoExistente?.id ?? null;
                 if (contatoId) {

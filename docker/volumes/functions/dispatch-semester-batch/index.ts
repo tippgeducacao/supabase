@@ -39,9 +39,17 @@ function formatDateBR(dataYmd: string | null | undefined): string {
 
 function formatPhone(raw: string | null | undefined): string | null {
   if (!raw) return null;
-  const digits = raw.replace(/\D/g, "");
+  const trimmed = String(raw).trim();
+  const digits = trimmed.replace(/\D/g, "");
   if (!digits) return null;
-  return digits.startsWith("55") ? digits : `55${digits}`;
+  // Número internacional já com DDI (veio com '+', ex.: +1 dos EUA): NÃO force o 55.
+  if (trimmed.startsWith("+")) return digits;
+  // Já vem com o DDI do Brasil (55 + 10/11 dígitos).
+  if (digits.startsWith("55") && (digits.length === 12 || digits.length === 13)) return digits;
+  // Número brasileiro sem DDI (DDD + 8/9 dígitos).
+  if (digits.length === 10 || digits.length === 11) return `55${digits}`;
+  // Não reconhecido: devolve os dígitos como estão (não corrompe internacional sem '+').
+  return digits;
 }
 
 // A API da Meta REJEITA parâmetros de template que contenham quebra de linha,

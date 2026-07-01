@@ -334,17 +334,22 @@ Deno.serve(async (req) => {
                 ? new Date(parseInt(String(msg.timestamp), 10) * 1000).toISOString()
                 : nowIso;
 
-              // 1) busca conversa avulsa existente por telefone
+              // 1) busca conversa avulsa existente por telefone.
+              // IMPORTANTE: casa por VARIANTES ±9º dígito. A Meta entrega o wa_id
+              // do lead BR sem o 9º dígito, mas o convite de saída gravou o telefone
+              // COM o 9 (cadastro do professor) — casar exato criava um 2º card.
               let conversaId: string | null = null;
               {
-                const { data: existentes, error: findErr } = await supabase
-                  .from("ped_conversas_avulsas")
-                  .select("id")
-                  .contains("metadata", { telefone: from })
-                  .order("ultima_atividade_em", { ascending: false })
-                  .limit(1);
-                if (findErr) console.log("[whatsapp-webhook] find conversa erro:", findErr.message);
-                conversaId = existentes?.[0]?.id || null;
+                for (const tel of phoneVariants(from)) {
+                  const { data: existentes, error: findErr } = await supabase
+                    .from("ped_conversas_avulsas")
+                    .select("id")
+                    .contains("metadata", { telefone: tel })
+                    .order("ultima_atividade_em", { ascending: false })
+                    .limit(1);
+                  if (findErr) console.log("[whatsapp-webhook] find conversa erro:", findErr.message);
+                  if (existentes?.[0]?.id) { conversaId = existentes[0].id; break; }
+                }
               }
 
               if (conversaId) {

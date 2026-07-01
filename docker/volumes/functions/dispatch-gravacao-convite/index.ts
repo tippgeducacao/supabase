@@ -33,9 +33,17 @@ const DISPATCHABLE = Object.keys(STATUS_TO_CADENCIA);
 
 function formatPhone(raw: string | null | undefined): string | null {
   if (!raw) return null;
-  const d = raw.replace(/\D/g, "");
+  const trimmed = String(raw).trim();
+  const d = trimmed.replace(/\D/g, "");
   if (!d) return null;
-  return d.startsWith("55") ? d : `55${d}`;
+  // Número internacional já com DDI (veio com '+', ex.: +1 dos EUA): NÃO force o 55.
+  if (trimmed.startsWith("+")) return d;
+  // Já vem com o DDI do Brasil (55 + 10/11 dígitos).
+  if (d.startsWith("55") && (d.length === 12 || d.length === 13)) return d;
+  // Número brasileiro sem DDI (DDD + 8/9 dígitos).
+  if (d.length === 10 || d.length === 11) return `55${d}`;
+  // Não reconhecido: devolve os dígitos como estão (não corrompe internacional sem '+').
+  return d;
 }
 function firstName(full: string | null | undefined): string {
   return (full ?? "").trim().split(/\s+/)[0] ?? "";
