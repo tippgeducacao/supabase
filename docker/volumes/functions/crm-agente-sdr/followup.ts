@@ -125,9 +125,10 @@ async function selecionarCandidatos(supabase: any): Promise<any[]> {
   const maisVelhoQue = new Date(agora - CADENCIA_MIN[0] * 60_000).toISOString();    // >= 15min
   const { data, error } = await supabase
     .from('cliente_ppg_leads_sdr')
-    .select('remotejid, nome, curso_interesse_original, formacao_academica, follow_up, timestamp_mensagem, pausa_ia, atendimento_finalizado, followup_ativado, iniciar_atendimento')
+    .select('remotejid, nome, curso_interesse_original, formacao_academica, follow_up, timestamp_mensagem, pausa_ia, atendimento_finalizado, followup_ativado, iniciar_atendimento, modo_recontato')
     .eq('followup_ativado', true)
     .eq('iniciar_atendimento', true)
+    .not('modo_recontato', 'is', true) // lead em recontato (no-show) NÃO recebe follow-up de lead novo
     .or('pausa_ia.is.null,pausa_ia.eq.false')
     .or('atendimento_finalizado.is.null,atendimento_finalizado.eq.false')
     .gt('timestamp_mensagem', maisNovoQue)
@@ -271,6 +272,7 @@ async function processarFollowupLead(supabase: any, leadSel: any, stageSel: numb
     if (!lead) return false;
     if (lead.followup_ativado !== true) return false;
     if (lead.iniciar_atendimento !== true) return false;
+    if (lead.modo_recontato === true) return false; // virou recontato no meio-tempo
     if (lead.pausa_ia === true) return false;
     if (lead.atendimento_finalizado === true) return false;
 

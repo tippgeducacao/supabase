@@ -137,9 +137,10 @@ async function selecionarCandidatos(supabase: any): Promise<any[]> {
   const limiteJanela = new Date(Date.now() - JANELA_FECHADA_MIN * 60_000).toISOString(); // <= agora-24h
   const { data, error } = await supabase
     .from('cliente_ppg_leads_sdr')
-    .select('remotejid, nome, timestamp_mensagem, followup_ativado, iniciar_atendimento, agendado, pausa_ia, atendimento_finalizado, template_1_dia, template_2_dia, template_3_dia, template_4_dia, template_5_dia, template_6_dia, template_7_dia, template_followup_em')
+    .select('remotejid, nome, timestamp_mensagem, followup_ativado, iniciar_atendimento, agendado, pausa_ia, atendimento_finalizado, template_1_dia, template_2_dia, template_3_dia, template_4_dia, template_5_dia, template_6_dia, template_7_dia, template_followup_em, modo_recontato')
     .eq('followup_ativado', true)
     .eq('iniciar_atendimento', true)
+    .not('modo_recontato', 'is', true) // lead em recontato (no-show) NÃO recebe a cadência de lead novo
     .or('agendado.is.null,agendado.eq.false')
     .or('pausa_ia.is.null,pausa_ia.eq.false')
     .or('atendimento_finalizado.is.null,atendimento_finalizado.eq.false')
@@ -159,6 +160,7 @@ async function processarLead(supabase: any, leadSel: any, toqueSel: Toque, tel: 
     if (!lead) return false;
     if (lead.followup_ativado !== true) return false;
     if (lead.iniciar_atendimento !== true) return false;
+    if (lead.modo_recontato === true) return false; // virou recontato no meio-tempo
     if (lead.agendado === true) return false;
     if (lead.pausa_ia === true) return false;
     if (lead.atendimento_finalizado === true) return false;

@@ -187,9 +187,11 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   };
   const contextoTemporal = montarContextoTemporal();
 
-  // Persona do número (vem no relay/buffer). 'recontato' = no-show: missão fixa
-  // (reabrir + remarcar), então NÃO passa pelo router validação×qualificador.
-  const persona = ultimo.agente_ia_persona === 'recontato' ? 'recontato' : 'qualificador';
+  // Persona: LEAD em modo_recontato manda (independe do número — espelha o gate de
+  // entrada); senão vale a persona do número (relay/buffer). 'recontato' = no-show:
+  // missão fixa (reabrir + remarcar), então NÃO passa pelo router validação×qualificador.
+  const persona = lead?.modo_recontato === true || ultimo.agente_ia_persona === 'recontato'
+    ? 'recontato' : 'qualificador';
   let promptAgente: string;
   let tools: any[];
   let contextoEfetivo = contextoTemporal;
@@ -446,16 +448,17 @@ Deno.serve(async (req) => {
     return json({ ok: true, reset: true });
   }
 
-  // Gate de atendimento. Depende da PERSONA do número (vem no relay do webhook):
-  //  - 'recontato' (número de no-show): só atende lead com modo_recontato=true e NUNCA
-  //    roda o qualificador — leads carregam iniciar_atendimento=true global, então sem
-  //    esse gate o qualificador responderia comparecidos/leads antigos nesse número.
-  //  - 'qualificador' (padrão): atende quem tem iniciar_atendimento (fluxo de lead novo).
-  const persona = payload.agente_ia_persona === 'recontato' ? 'recontato' : 'qualificador';
+  // Gate de atendimento. A persona é decidida pelo LEAD primeiro, depois pelo número:
+  //  - lead com modo_recontato=true → persona 'recontato' em QUALQUER número (um disparo
+  //    de no-show pode sair por um número qualificador, ex.: João IA SDR — quem responde
+  //    lá também precisa do prompt de recontato, não do fluxo de lead novo).
+  //  - número 'recontato' com lead FORA do modo → skip (NUNCA roda o qualificador nesse
+  //    número — leads carregam iniciar_atendimento=true global, então sem esse gate o
+  //    qualificador responderia comparecidos/leads antigos).
+  //  - número 'qualificador' (padrão): atende quem tem iniciar_atendimento (lead novo).
   const lead = await buscarLead(supabase, payload.remotejid);
-  if (persona === 'recontato') {
-    if (!lead || lead.modo_recontato !== true) return json({ ok: true, skip: 'fora_do_modo_recontato' });
-  } else {
+  if (lead?.modo_recontato !== true) {
+    if (payload.agente_ia_persona === 'recontato') return json({ ok: true, skip: 'fora_do_modo_recontato' });
     if (!lead || lead.iniciar_atendimento !== true) return json({ ok: true, skip: 'sem_iniciar_atendimento' });
   }
   if (lead.pausa_ia === true) return json({ ok: true, skip: 'pausa_ia' });
