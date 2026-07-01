@@ -468,6 +468,9 @@ Deno.serve(async (req) => {
   const inProf  = formacaoLead ?? campoFisico.profissao ?? null;
   const inArea  = areaLead ?? campoFisico.area_interesse ?? null;
   const inTempo = tempoFormacao ?? campoFisico.tempo_formacao ?? null;
+  // Estado (campo:state → leads.regiao). Não há target fixo lead.regiao; só chega
+  // via campo:state no Mapeamento de Entrada (campoFisico.regiao) ou na Criação Automática.
+  const inRegiao = campoFisico.regiao ?? null;
 
   // Normaliza o título do SprintHub → nome canônico do curso (só pós/MBA; cascata
   // exato → normalizado → alias → fuzzy no banco). Curso livre e título desconhecido
@@ -528,7 +531,7 @@ Deno.serve(async (req) => {
     if (email) {
       const { data } = await admin
         .from("leads")
-        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, arquivado")
+        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, arquivado")
         .eq("email", email)
         .limit(1);
       existing = data?.[0] ?? null;
@@ -537,7 +540,7 @@ Deno.serve(async (req) => {
       const variants = [whatsapp, whatsapp.startsWith("55") ? whatsapp.slice(2) : `55${whatsapp}`];
       const { data } = await admin
         .from("leads")
-        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, arquivado")
+        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, arquivado")
         .in("whatsapp", variants)
         .limit(1);
       existing = data?.[0] ?? null;
@@ -570,6 +573,7 @@ Deno.serve(async (req) => {
       if (!existing.profissao && (inProf ?? criacaoDefaults.profissao))          patch.profissao = (inProf ?? criacaoDefaults.profissao)!;
       if (!existing.area_interesse && (inArea ?? criacaoDefaults.area_interesse))     patch.area_interesse = (inArea ?? criacaoDefaults.area_interesse)!;
       if (!existing.tempo_formacao && (inTempo ?? criacaoDefaults.tempo_formacao))    patch.tempo_formacao = (inTempo ?? criacaoDefaults.tempo_formacao)!;
+      if (!existing.regiao && (inRegiao ?? criacaoDefaults.regiao))               patch.regiao = (inRegiao ?? criacaoDefaults.regiao)!;
       if (Object.keys(patch).length) {
         await admin.from("leads").update(patch).eq("id", existing.id);
       }
@@ -586,6 +590,7 @@ Deno.serve(async (req) => {
           profissao: inProf ?? criacaoDefaults.profissao ?? null,
           area_interesse: inArea ?? criacaoDefaults.area_interesse ?? null,
           tempo_formacao: inTempo ?? criacaoDefaults.tempo_formacao ?? null,
+          regiao: inRegiao ?? criacaoDefaults.regiao ?? null,
           // Origem da criação → evento "Criado por <webhook>" na timeline (via trigger).
           origem_criacao: integration.nome ?? `Webhook ${slug}`,
         })
