@@ -101,6 +101,15 @@ Deno.serve(async (req) => {
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
   );
 
+  // Roteamento: mensagens recebidas no número do PODCAST (convite de convidados) são
+  // tratadas à parte — só qualificam INTERESSE, não entram no fluxo de convite de professor.
+  let podcastPhoneId: string | null = null;
+  try {
+    const { data: pacc } = await supabase.rpc("get_wa_account_podcast");
+    const acc = Array.isArray(pacc) ? pacc[0] : pacc;
+    podcastPhoneId = acc?.phone_number_id ?? null;
+  } catch (_e) { /* conta do podcast ainda não cadastrada */ }
+
   let body: any = null;
   try {
     body = await req.json();
@@ -121,6 +130,13 @@ Deno.serve(async (req) => {
 
         // === MENSAGENS ===
         if (field === "messages") {
+          // Número do PODCAST → só qualifica interesse (marca o candidato 'respondeu')
+          if (podcastPhoneId && value?.metadata?.phone_number_id === podcastPhoneId) {
+            try { await handlePodcastInbound(supabase, value); } catch (e) {
+              console.error("[whatsapp-webhook] podcast inbound erro", String(e));
+            }
+            continue;
+          }
           // === STATUS UPDATES (sent/delivered/read/failed) ===
           const statuses = Array.isArray(value?.statuses) ? value.statuses : [];
           for (const status of statuses) {
@@ -503,3 +519,49 @@ Deno.serve(async (req) => {
   // Sempre 200 pro Meta não reenviar
   return new Response("ok", { status: 200, headers: corsHeaders });
 });
+
+// === PODCAST: número dedicado → só qualifica INTERESSE do convidado ===
+// Qualquer resposta (botão "Tenho interesse"/"Quero saber mais" ou texto livre) marca o(s)
+// candidato(s) ativo(s) daquele convidado como 'respondeu' → responsáveis do pedagógico assumem
+// manualmente (SAC/e-mail). Não envia data/Calendly (automação só descobre interesse).
+async function handlePodcastInbound(supabase: any, value: any) {
+  const messages = Array.isArray(value?.messages) ? value.messages : [];
+  for (const msg of messages) {
+    const from: string = msg?.from || "";
+    if (!from) continue;
+    let resposta = "";
+    if (msg?.type === "interactive" && msg?.interactive?.type === "button_reply") {
+      resposta = msg.interactive.button_reply?.title || msg.interactive.button_reply?.id || "";
+    } else if (msg?.type === "button") {
+      resposta = msg.button?.text || msg.button?.payload || "";
+    } else if (msg?.type === "text") {
+      resposta = msg.text?.body || "";
+    } else {
+      resposta = `[${msg?.type || "mensagem"}]`;
+    }
+
+    // match do convidado por telefone (variantes ±9º dígito)
+    const { data: prof } = await supabase.rpc("ped_professor_por_whatsapp", { p_telefone: from });
+    const profRow = Array.isArray(prof) ? prof[0] : prof;
+    if (!profRow?.id) {
+      console.log("[whatsapp-webhook] podcast: convidado não encontrado p/", from);
+      continue;
+    }
+
+    const { data: cands } = await supabase
+      .from("pod_convite_candidatos")
+      .select("id, metadata")
+      .eq("professor_id", profRow.id)
+      .in("status", ["na_fila", "convidando"]);
+    for (const c of (cands ?? [])) {
+      await supabase.from("pod_convite_candidatos")
+        .update({
+          status: "respondeu",
+          respondeu_em: new Date().toISOString(),
+          metadata: { ...(c.metadata || {}), ultima_resposta: resposta },
+        })
+        .eq("id", c.id);
+    }
+    console.log("[whatsapp-webhook] podcast:", profRow.id, "respondeu:", resposta, "→", (cands ?? []).length, "cand.");
+  }
+}
