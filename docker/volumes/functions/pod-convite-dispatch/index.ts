@@ -40,6 +40,14 @@ function formatPhone(raw?: string | null): string | null {
 function htmlEscape(s: string): string {
   return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
+// resolve o valor de uma variável do template pelo NOME semântico (variaveis_mapping)
+function resolverVar(nomeVar: string, ctx: { nome: string; podcast: string; youtube: string }): string {
+  const v = String(nomeVar ?? "").toLowerCase();
+  if (v.includes("youtube")) return ctx.youtube;
+  if (v.includes("podcast")) return ctx.podcast;
+  if (v.includes("nome") || v.includes("convidado")) return ctx.nome;
+  return "";
+}
 
 Deno.serve(handler);
 
@@ -79,7 +87,7 @@ async function handler(req: Request): Promise<Response> {
     // templates aprovados por uso_cadencia
     const { data: tpls } = await admin
       .from("ped_wa_templates")
-      .select("id, nome, idioma, corpo, uso_cadencia, botoes, status, ativo")
+      .select("id, nome, idioma, corpo, uso_cadencia, botoes, status, ativo, variaveis_mapping")
       .in("uso_cadencia", ["podcast_convite", "podcast_followup_1", "podcast_followup_2"])
       .eq("status", "aprovado")
       .eq("ativo", true);
@@ -90,7 +98,7 @@ async function handler(req: Request): Promise<Response> {
 
     const nowIso = new Date().toISOString();
     const SEL = "id, podcast_id, professor_id, status, toque, aprovado_em, proxima_acao_em, " +
-      "professor:ped_professores(nome,email,contato_whatsapp), podcast:ped_podcasts(nome)";
+      "professor:ped_professores(nome,email,contato_whatsapp), podcast:ped_podcasts(nome,youtube_url)";
 
     // 1) toque inicial: na_fila liberados (mode on OU onda aprovada)
     let q1 = admin.from("pod_convite_candidatos").select(SEL).eq("status", "na_fila").limit(60);
@@ -127,6 +135,14 @@ async function handler(req: Request): Promise<Response> {
 
         const nome = primeiroNome(c.professor?.nome);
         const podcastNome = c.podcast?.nome ?? "podcast";
+        const youtube = c.podcast?.youtube_url ?? "";
+        const varCtx = { nome, podcast: podcastNome, youtube };
+
+        // parâmetros na ordem {{1}},{{2}},{{3}}... a partir do variaveis_mapping do template
+        const vm = (tpl.variaveis_mapping && typeof tpl.variaveis_mapping === "object")
+          ? tpl.variaveis_mapping : { "1": "nome_convidado", "2": "nome_podcast" };
+        const bodyParams = Object.keys(vm).filter((k) => /^\d+$/.test(k)).sort((a, b) => Number(a) - Number(b))
+          .map((k) => ({ type: "text", text: sanitizeWaParam(resolverVar(vm[k], varCtx)) }));
 
         // ---- WhatsApp (Meta template) ----
         const to = formatPhone(c.professor?.contato_whatsapp);
@@ -139,13 +155,7 @@ async function handler(req: Request): Promise<Response> {
             template: {
               name: tpl.nome,
               language: { code: tpl.idioma || "pt_BR" },
-              components: [{
-                type: "body",
-                parameters: [
-                  { type: "text", text: sanitizeWaParam(nome) },
-                  { type: "text", text: sanitizeWaParam(podcastNome) },
-                ],
-              }],
+              components: [{ type: "body", parameters: bodyParams }],
             },
           };
           const r = await fetch(`${META_GRAPH}/${wa.phone_number_id}/messages`, {
@@ -160,7 +170,7 @@ async function handler(req: Request): Promise<Response> {
         // ---- E-mail (best-effort) ----
         let emailOk = false;
         if (emailCtx && c.professor?.email) {
-          emailOk = await enviarEmail(emailCtx, c.professor.email, nome, podcastNome, proxToque);
+          emailOk = await enviarEmail(emailCtx, c.professor.email, nome, podcastNome, youtube, proxToque);
         }
 
         // ---- atualiza estado ----
@@ -200,27 +210,36 @@ async function resolverEmail(admin: any, caixaId: string | null) {
   return { admin, caixa, integ };
 }
 
-function corpoEmail(nome: string, podcast: string, toque: number): { assunto: string; html: string } {
+function corpoEmail(nome: string, podcast: string, youtube: string, toque: number): { assunto: string; html: string } {
+  const p = htmlEscape(podcast);
   const assunto = toque === 1
     ? `Convite para gravar no ${podcast} Podcast`
-    : `Sobre o convite — ${podcast} Podcast`;
-  const intro = toque === 1
-    ? `Gostaríamos de convidá-lo(a) para gravar um episódio online no <strong>${htmlEscape(podcast)} Podcast</strong>. São episódios de 30 a 45 minutos, gravados remotamente, sem necessidade de slides — nós cuidamos de toda a edição.`
-    : toque === 2
-      ? `Passando para saber se você teve a oportunidade de ver meu convite para participar do <strong>${htmlEscape(podcast)} Podcast</strong>. Sua experiência agregaria muito ao nosso público.`
-      : `Passando mais uma vez sobre o convite para gravar no <strong>${htmlEscape(podcast)} Podcast</strong>. Caso não seja o momento, sem problemas — fico à disposição para quando quiser.`;
+    : `Sobre o convite para o ${podcast} Podcast`;
+  let corpo: string;
+  if (toque === 1) {
+    corpo =
+      `<p>Aqui é a Janaína, falo em nome da PPGVET e dos nossos podcasts (O Aviário, Suinocast, Mais Rúmen e PetFood).</p>` +
+      `<p>O motivo do meu contato é um convite: eu gostaria de convidar você para uma gravação de episódio no <strong>${p} Podcast</strong>.</p>` +
+      (youtube ? `<p>Caso ainda não conheça, deixo aqui o nosso canal: 🎬 <a href="${htmlEscape(youtube)}">${htmlEscape(youtube)}</a></p>` : "") +
+      `<p>É um bate-papo técnico de 30 a 45 minutos, gravado remotamente e sem necessidade de slides. Uma conversa leve com um host da área, focada em conteúdo prático e relevante para o setor.</p>`;
+  } else if (toque === 2) {
+    corpo = `<p>Passando para saber se você teve a oportunidade de ver meu convite para participar do <strong>${p} Podcast</strong>. Acredito que sua experiência e atuação no setor agregariam muito ao nosso público.</p>`;
+  } else {
+    corpo =
+      `<p>Estou voltando para reforçar o convite: seria um prazer receber você em uma gravação do <strong>${p} Podcast</strong>.</p>` +
+      `<p>Caso não seja o momento agora, sem problemas. Também quero deixar aqui uma oportunidade: se você conhece alguém que acredita ser um bom nome para dividir conteúdo relevante com a nossa audiência, sua indicação também será muito bem-vinda.</p>`;
+  }
   const html =
     `<p>Olá ${htmlEscape(nome)}, tudo bem?</p>` +
-    `<p>Aqui é a Janaína, da PPGVET e Wisenetix.</p>` +
-    `<p>${intro}</p>` +
-    `<p><strong>Você teria interesse em participar?</strong> É só responder este e-mail. 🙂</p>` +
-    `<p>Um abraço,<br>Janaína — PPGVET / Wisenetix</p>`;
+    corpo +
+    `<p><strong>Tem interesse?</strong> É só responder este e-mail. 🙂</p>` +
+    `<p>Um abraço,<br>Janaína · PPGVET</p>`;
   return { assunto, html };
 }
 
-async function enviarEmail(ctx: any, to: string, nome: string, podcast: string, toque: number): Promise<boolean> {
+async function enviarEmail(ctx: any, to: string, nome: string, podcast: string, youtube: string, toque: number): Promise<boolean> {
   try {
-    const { assunto, html } = corpoEmail(nome, podcast, toque);
+    const { assunto, html } = corpoEmail(nome, podcast, youtube, toque);
     const token = await ensureToken(ctx.admin, ctx.integ);
     const raw = [
       `From: "${ctx.caixa.nome_exibicao || "PPGVET"}" <${ctx.caixa.email_caixa}>`,
