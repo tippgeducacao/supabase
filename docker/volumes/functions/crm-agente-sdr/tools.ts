@@ -5,12 +5,14 @@
 //   consulta_objecoes         → Voyage (query) → match_ppg_voyage top-1
 //   envia_informacoes         → POST sdr-api/envia-informacoes + contrato de retorno
 //   pausa_ia                  → RPC crm_set_pausa_ia + followup_ativado=false
+//   temporizador_proxima_turma→ RPC crm_agente_timer_proxima_turma (timer de recontato
+//                               com a data REAL da próxima turma) + pausa da IA
 // Todo output inclui o id do tool_use (mesmo formato que o n8n devolvia ao Claude).
 
 // deno-lint-ignore-file no-explicit-any
 import { MATRIZ_SYSTEM, MATRIZ_USER_TEMPLATE } from './prompts.ts';
 import { renderPrompt } from './contexto.ts';
-import { atualizarLead } from './historico.ts';
+import { atualizarLead, buscarLead } from './historico.ts';
 import { chamarAnthropic } from './agente.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
@@ -618,6 +620,50 @@ async function pausaIa(supabase: any, input: any, ctx: CtxConversa, toolUseId: s
   return { mensagem: 'Atendimento em Pausa', status: 'pausado', id: toolUseId };
 }
 
+// ── temporizador_proxima_turma ──────────────────────────────────────────────
+// Lead pediu pra ser chamado quando abrir a PRÓXIMA TURMA: agenda o Temporizador de
+// Recontato com a data real da próxima turma (ped_turmas, via RPC worker
+// crm_agente_timer_proxima_turma — service-role-only, timer POR TELEFONE) e pausa a IA.
+// Anti-SPAM: lead com timer ativo fica fora de todo disparo em massa até o timer vencer.
+async function temporizadorProximaTurma(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
+  const sair = (texto: string) => ({ resultado: texto, id: toolUseId });
+
+  // Curso: o que a IA passou > o que o agente aprendeu do lead > título da oportunidade.
+  let curso = String(input.curso ?? '').trim();
+  if (!curso) {
+    try {
+      const lead = await buscarLead(supabase, ctx.remotejid);
+      curso = String(lead?.curso_interesse_original ?? '').trim();
+    } catch { /* segue pros fallbacks */ }
+  }
+  if (!curso) curso = await cursoDaOportunidade(supabase, ctx);
+
+  const { data, error } = await supabase.rpc('crm_agente_timer_proxima_turma', {
+    p_telefone: ctx.telefone,
+    p_curso: curso || null,
+    p_motivo: input.motivo ?? null,
+  });
+  if (error) throw new Error(`crm_agente_timer_proxima_turma: ${error.message}`);
+
+  // Pausa a IA (mesmo efeito do pausa_ia) — o ciclo do timer devolve o lead ao time.
+  const { error: ePausa } = await supabase.rpc('crm_set_pausa_ia', {
+    p_telefone: ctx.telefone,
+    p_pausa: true,
+    p_motivo: input.motivo ?? 'Lead pediu recontato na próxima turma',
+  });
+  if (ePausa) console.error(`[crm-agente-sdr] pausa pós-timer falhou: ${ePausa.message}`);
+  try { await atualizarLead(supabase, ctx.remotejid, { followup_ativado: false }); } catch { /* não bloqueia */ }
+
+  const d = (data ?? {}) as Record<string, any>;
+  if (d.ok === false) {
+    return sair(`Não consegui agendar o temporizador (${d.erro ?? 'erro desconhecido'}), mas a IA foi pausada. Despeça-se com cordialidade dizendo que vai chamá-lo quando abrir a próxima turma.`);
+  }
+  if (d.turma_inicio) {
+    return sair(`Recontato agendado no temporizador: a próxima turma de ${d.curso_casado} está prevista pra começar em ${d.turma_inicio}, e o time vai chamar o lead por volta de ${d.recontato_em}. Confirme pro lead que vai chamá-lo quando abrir a próxima turma — pode citar o MÊS de forma aproximada, sem prometer dia exato — e despeça-se. A IA já foi pausada; não chame pausa_ia.`);
+  }
+  return sair(`Recontato agendado no temporizador (este curso ainda não tem turma futura cadastrada; o time vai retomar o lead em ${d.recontato_em}). Confirme pro lead que vai chamá-lo quando abrir a próxima turma, sem citar data, e despeça-se. A IA já foi pausada; não chame pausa_ia.`);
+}
+
 // ── dispatcher ──────────────────────────────────────────────────────────────
 export async function executarTool(
   supabase: any,
@@ -634,6 +680,7 @@ export async function executarTool(
       case 'consulta_objecoes': return await consultaObjecoes(supabase, input, id);
       case 'envia_informacoes': return await enviaInformacoes(supabase, input, ctx, id);
       case 'pausa_ia': return await pausaIa(supabase, input, ctx, id);
+      case 'temporizador_proxima_turma': return await temporizadorProximaTurma(supabase, input, ctx, id);
       default: return { resultado: `Tool desconhecida: ${name}`, id };
     }
   } catch (e) {
