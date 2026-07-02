@@ -34,6 +34,7 @@ import {
 import { enviarResposta } from './saida.ts';
 import type { CtxConversa } from './tools.ts';
 import { criarTelemetria, resumir, type Telemetria } from './eventos.ts';
+import { contaDoLead } from './conta.ts';
 
 // Cadência da JANELA ABERTA — 7 toques, em minutos desde a última msg do lead.
 const CADENCIA_MIN = [15, 60, 120, 240, 420, 720, 1380];
@@ -295,10 +296,16 @@ async function processarFollowupLead(supabase: any, leadSel: any, stageSel: numb
       return false;
     }
 
+    // Com 2+ números qualificadores em produção, o texto livre TEM que sair pelo
+    // número onde a janela de 24h do lead está aberta = o do último INBOUND dele
+    // (a janela da Meta é por número×lead). null (lead sem inbound rastreável) →
+    // conta ativa, comportamento antigo.
+    const telefone = String(remotejid).split('@')[0];
+    const contaLead = await contaDoLead(supabase, telefone, { direcao: 'inbound' });
     const ctx: CtxConversa = {
       remotejid,
-      telefone: String(remotejid).split('@')[0],
-      waAccountId: null,   // crm-whatsapp-send resolve a conta CRM ativa (get_crm_wa_account(null))
+      telefone,
+      waAccountId: contaLead,
       leadId: null,
       oportunidadeId: null,
     };
@@ -312,7 +319,7 @@ async function processarFollowupLead(supabase: any, leadSel: any, stageSel: numb
     await enviarResposta(ctx, message, lockRenovar(supabase, remotejid), tel);
     // Fala do follow no histórico (pro próximo toque detectar o estilo usado).
     await gravarMensagem(supabase, remotejid, { role: 'assistant', content: [{ type: 'text', text: message }] });
-    tel.registrar('followup_enviado', { stage, final_answer, message: resumir(message, 300) });
+    tel.registrar('followup_enviado', { stage, final_answer, conta: contaLead, message: resumir(message, 300) });
     return true;
   } catch (e) {
     tel.registrar('erro', { onde: 'processarFollowupLead', remotejid }, undefined, (e as Error).message);

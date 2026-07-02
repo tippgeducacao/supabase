@@ -24,8 +24,12 @@
 // e ASSÍNCRONA (status 'failed' chega depois pelo webhook — o resgate roda no próximo
 // tick, dentro de 48h, sem violar a trava de 24h entre templates ENTREGUES).
 //
-// NÚMERO: cada toque pode sair por uma conta Cloud específica (wa_account_id);
-// NULL = conta CRM ativa (comportamento antigo).
+// NÚMERO (2026-07-02, 2+ números qualificadores em produção): o toque sai pelo
+// número DO LEAD — a conta da última mensagem dele em crm_whatsapp_messages cuja
+// persona é qualificadora (conta de persona 'recontato' nunca; ver conta.ts).
+// Fallbacks, nessa ordem: wa_account_id configurado no toque → conta CRM ativa.
+// Assim a cadência continua na MESMA conversa em que o lead é atendido, e a
+// resposta dele cai num número onde a IA atende.
 //
 // Como roda: cron chama o index com mode=followup-template em vários horários do dia
 // (07/08/09/12/13/15/18 BRT). Cada lead "escolhe" deterministicamente UM desses
@@ -43,6 +47,7 @@
 import { extrairPrimeiroNome } from './contexto.ts';
 import { buscarLead, atualizarLead } from './historico.ts';
 import { criarTelemetria, type Telemetria } from './eventos.ts';
+import { contaDoLead, phoneVariants } from './conta.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
 const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
@@ -167,21 +172,6 @@ function resolverVariavel(v: VarMap, lead: any): string {
     case 'fixo':          return String(v?.valor ?? '');
     default:              return String(v?.valor ?? '');
   }
-}
-
-// Variantes do telefone (com/sem DDI 55, com/sem 9º dígito) — espelha o phoneVariants
-// do crm-whatsapp-send, pra casar a mensagem persistida em crm_whatsapp_messages.
-function phoneVariants(raw: string): string[] {
-  let d = (raw ?? '').replace(/\D/g, '');
-  if (d.startsWith('55')) d = d.slice(2);
-  const ddd = d.slice(0, 2);
-  const rest = d.slice(2);
-  const set = new Set<string>();
-  const add = (x: string) => { set.add(x); set.add(`55${x}`); };
-  if (rest) add(ddd + rest);
-  if (rest.length === 8) add(`${ddd}9${rest}`);
-  if (rest.length === 9 && rest[0] === '9') add(ddd + rest.slice(1));
-  return [...set];
 }
 
 // ── trava dura: nenhum template (de qualquer origem) nas últimas 24h ─────────
@@ -314,14 +304,16 @@ async function resgatarFalhaAsync(supabase: any, lead: any, toques: Toque[], tel
     .limit(1);
   if ((okRows ?? []).length > 0) return false;
 
-  const r = await enviarTemplate(telefone, envioFallback(t), lead);
+  // Mesma resolução de número do envio normal: conta do lead → config do toque → ativa.
+  const conta = (await contaDoLead(supabase, telefone)) ?? t.wa_account_id ?? null;
+  const r = await enviarTemplate(telefone, { ...envioFallback(t), wa_account_id: conta }, lead);
   if (!r.ok) {
-    tel.registrar('followup_template_fallback_falhou', { toque: t.toque, template_fallback: t.fallback_template_name, modo: 'assincrono', status: r.status, meta_code: r.metaCode });
+    tel.registrar('followup_template_fallback_falhou', { toque: t.toque, template_fallback: t.fallback_template_name, modo: 'assincrono', conta, status: r.status, meta_code: r.metaCode });
     return false;
   }
   await atualizarLead(supabase, lead.remotejid, { template_followup_em: new Date().toISOString() });
   tel.registrar('followup_template_fallback_enviado', {
-    toque: t.toque, modo: 'assincrono',
+    toque: t.toque, modo: 'assincrono', conta,
     template_principal: t.template_name, template_fallback: t.fallback_template_name,
   });
   return true;
@@ -355,14 +347,19 @@ async function processarLead(
       return false;
     }
 
+    // Número de saída: conta DO LEAD (última msg num número qualificador) →
+    // config do toque → conta ativa. Mantém a cadência na conversa em que o
+    // lead é atendido (janela/thread são por número na Meta).
+    const conta = (await contaDoLead(supabase, telefone)) ?? t.wa_account_id ?? null;
+
     let usouFallback = false;
-    let r = await enviarTemplate(telefone, envioPrincipal(t), lead);
+    let r = await enviarTemplate(telefone, { ...envioPrincipal(t), wa_account_id: conta }, lead);
     if (!r.ok) {
-      tel.registrar('followup_template_falhou', { toque: t.toque, template: t.template_name, status: r.status, meta_code: r.metaCode });
+      tel.registrar('followup_template_falhou', { toque: t.toque, template: t.template_name, conta, status: r.status, meta_code: r.metaCode });
       if (!temFallback(t)) return false; // não marca o toque: tenta de novo no próximo tick elegível
-      r = await enviarTemplate(telefone, envioFallback(t), lead);
+      r = await enviarTemplate(telefone, { ...envioFallback(t), wa_account_id: conta }, lead);
       if (!r.ok) {
-        tel.registrar('followup_template_fallback_falhou', { toque: t.toque, template_fallback: t.fallback_template_name, modo: 'sincrono', status: r.status, meta_code: r.metaCode });
+        tel.registrar('followup_template_fallback_falhou', { toque: t.toque, template_fallback: t.fallback_template_name, modo: 'sincrono', conta, status: r.status, meta_code: r.metaCode });
         return false;
       }
       usouFallback = true;
@@ -375,11 +372,11 @@ async function processarLead(
     });
     if (usouFallback) {
       tel.registrar('followup_template_fallback_enviado', {
-        toque: t.toque, dia: t.dia, modo: 'sincrono',
+        toque: t.toque, dia: t.dia, modo: 'sincrono', conta,
         template_principal: t.template_name, template_fallback: t.fallback_template_name,
       });
     } else {
-      tel.registrar('followup_template_enviado', { toque: t.toque, dia: t.dia, template: t.template_name });
+      tel.registrar('followup_template_enviado', { toque: t.toque, dia: t.dia, template: t.template_name, conta });
     }
     return true;
   } catch (e) {
