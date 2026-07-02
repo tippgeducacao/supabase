@@ -105,6 +105,11 @@ function normalize(it: any) {
     parcela_referente: it.parcela_referente != null ? Number(it.parcela_referente) : null,
     data_vencimento: toIsoDate(it.data_vencimento),
     data_pagamento: toIsoDate(it.data_pagamento),
+    // repasse (EDUQ passou a devolver 2026-07-02): líquido, taxa, situação e data do crédito
+    valor_repasse_liquido: num(it.valor_repasse_liquido),
+    taxa_aplicada: num(it.taxa_aplicada),
+    situacao_repasse: it.situacao_repasse ?? null,
+    data_repasse_credito: toIsoDate(it.data_repasse_credito),
     raw: it,
   };
 }
