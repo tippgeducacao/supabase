@@ -711,16 +711,35 @@ Deno.serve(async (req) => {
     }
   }
 
-  // Conta de WhatsApp ativa — anexada ao card criado pela acao (p/ conversa/saudacao).
+  // Conta de WhatsApp — anexada ao card criado pela acao (p/ conversa/saudacao) e usada
+  // no envio do template + contexto do agente. Se uma ação 'Enviar template WhatsApp'
+  // escolheu um NÚMERO específico (params.wa_account_id, seletor visível no builder),
+  // esse número ancora o fluxo INTEIRO; senão, a primeira conta ativa (legado).
   try {
-    const { data: waAcc } = await admin
-      .from("crm_whatsapp_accounts")
-      .select("id")
-      .eq("ativo", true)
-      .order("created_at", { ascending: true })
-      .limit(1)
-      .maybeSingle();
-    waAccId = waAcc?.id ?? null;
+    const acaoComConta = acoesItens.find(
+      (a: any) => a?.tipo === "enviar_mensagem_whatsapp" &&
+        typeof a?.params?.wa_account_id === "string" && a.params.wa_account_id,
+    );
+    if (acaoComConta) {
+      const { data: waSel } = await admin
+        .from("crm_whatsapp_accounts")
+        .select("id")
+        .eq("id", (acaoComConta as any).params.wa_account_id)
+        .eq("ativo", true)
+        .maybeSingle();
+      waAccId = waSel?.id ?? null;
+      if (!waAccId) console.warn("[crm-lead-webhook] wa_account_id da ação não é conta ativa — caindo na conta padrão");
+    }
+    if (!waAccId) {
+      const { data: waAcc } = await admin
+        .from("crm_whatsapp_accounts")
+        .select("id")
+        .eq("ativo", true)
+        .order("created_at", { ascending: true })
+        .limit(1)
+        .maybeSingle();
+      waAccId = waAcc?.id ?? null;
+    }
   } catch { /* sem conta ativa */ }
 
   // Resolve o responsavel do card conforme a estrategia (espelha "Tipo de Responsavel"):
@@ -1037,7 +1056,8 @@ Deno.serve(async (req) => {
               method: "POST",
               headers: { "Content-Type": "application/json", Authorization: `Bearer ${SERVICE_ROLE}` },
               body: JSON.stringify({
-                wa_account_id: waAccId,
+                // Número escolhido na ação (seletor do builder) > conta ancorada no fluxo.
+                wa_account_id: (typeof pc.wa_account_id === "string" && pc.wa_account_id) || waAccId,
                 telefone: whatsapp,
                 tipo: "template",
                 template_name: templateName,
