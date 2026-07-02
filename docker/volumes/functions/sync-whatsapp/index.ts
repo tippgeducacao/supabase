@@ -34,14 +34,33 @@ Deno.serve(async (req) => {
       .eq("is_active", true);
 
     if (accErr) throw accErr;
-    if (!accounts?.length) {
+
+    // TAMBÉM sincroniza as WABAs das contas do CRM (crm_whatsapp_accounts) que não
+    // estão em wa_accounts — número novo é cadastrado só no CRM (tela Contas) e sem
+    // isto os templates dele NUNCA entravam em wa_templates (picker do follow-up
+    // vazio, "Nada encontrado"). Dedup por waba_id: wa_accounts ganha quando repete.
+    const { data: crmAccounts, error: crmErr } = await supabase
+      .from("crm_whatsapp_accounts")
+      .select("nome, waba_id, access_token")
+      .eq("ativo", true)
+      .not("waba_id", "is", null);
+    if (crmErr) console.error("crm_whatsapp_accounts:", crmErr.message);
+    const todas = [...(accounts ?? [])];
+    const wabasCobertas = new Set(todas.map((a) => String(a.waba_id)));
+    for (const c of crmAccounts ?? []) {
+      if (!c.waba_id || !c.access_token || wabasCobertas.has(String(c.waba_id))) continue;
+      wabasCobertas.add(String(c.waba_id));
+      todas.push({ waba_id: c.waba_id, access_token: c.access_token, account_name: c.nome });
+    }
+
+    if (!todas.length) {
       return new Response(JSON.stringify({ message: "No active WhatsApp accounts" }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
     const results = await Promise.all(
-      accounts.map(async (account) => {
+      todas.map(async (account) => {
         const { access_token, waba_id } = account;
         const h = { Authorization: `Bearer ${access_token}` };
         const accountResult: Record<string, unknown> = { waba_id, account_name: account.account_name };
