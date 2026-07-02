@@ -4,10 +4,28 @@
 // 24h da última mensagem do lead, a janela do Meta fecha e texto livre é rejeitado
 // (erro 131047). A partir daí a reabertura é por TEMPLATE aprovado.
 //
-// Régua: 7 toques ao longo de 9 dias (dias contados desde o FECHAMENTO da janela =
-// última msg + 24h). 1 template por dia, em horário variável pra não parecer robô;
-// trava DURA "nunca < 24h entre templates" via crm_whatsapp_template_enviado_24h
-// (vê toda saída de template, de qualquer origem).
+// Régua: até 7 toques (dias contados desde o FECHAMENTO da janela = última msg + 24h).
+// 1 template por dia, em horário variável pra não parecer robô; trava DURA "nunca
+// < 24h entre templates" via crm_whatsapp_template_enviado_24h.
+//
+// CONFIG: os toques (template, dia, variáveis, ligado/desligado, NÚMERO de envio e
+// template de FALLBACK) vêm da tabela public.crm_agente_sdr_followup_toques, editada
+// pela tela (Config WhatsApp → Follow-up Janela Fechada). NÃO é hardcoded — cada tick
+// recarrega a config; só entram na cadência toques ATIVOS com template_name preenchido
+// (um toque desligado é PULADO e não trava os seguintes).
+// ⚠️ Esta versão (config na tabela) já foi PERDIDA uma vez: viveu só na VPS sem commit
+// e um git push com a versão antiga hardcoded a reverteu. NUNCA editar esta esteira
+// fora do repo — o deploy-edges.yml publica o que está aqui.
+//
+// FALLBACK (2026-07-02, pedido do usuário): template MARKETING sofre throttle/limite
+// da Meta (ex.: 131049) e o toque simplesmente não chega. Cada toque pode ter um
+// template de FALLBACK (em geral UTILITY): se o envio do principal FALHAR, o fallback
+// sai no lugar e o toque conta como feito. Cobre falha SÍNCRONA (Meta recusa o POST)
+// e ASSÍNCRONA (status 'failed' chega depois pelo webhook — o resgate roda no próximo
+// tick, dentro de 48h, sem violar a trava de 24h entre templates ENTREGUES).
+//
+// NÚMERO: cada toque pode sair por uma conta Cloud específica (wa_account_id);
+// NULL = conta CRM ativa (comportamento antigo).
 //
 // Como roda: cron chama o index com mode=followup-template em vários horários do dia
 // (07/08/09/12/13/15/18 BRT). Cada lead "escolhe" deterministicamente UM desses
@@ -15,11 +33,11 @@
 // segurança pra quem foi barrado pela trava de 24h mais cedo. Tudo sob o lock por
 // remotejid (não pisa numa rodada de inbound nem na esteira de janela aberta).
 //
-// SAI da esteira quando: followup_ativado=false (o agente desliga p/ lead sem
-// graduação / incompatível, ou ao agendar reunião), agendado=true, pausa_ia,
-// atendimento_finalizado, lead respondeu (a janela reabre e o inbound assume), ou
-// os 7 toques acabaram. Os flags template_N_dia são ZERADOS ao reabrir (no index),
-// então se o lead esfriar de novo a cadência recomeça do 1º toque.
+// SAI da esteira quando: followup_ativado=false, agendado=true, pausa_ia,
+// nao_perturbe, atendimento_finalizado, modo_recontato (persona de no-show assume),
+// lead respondeu (a janela reabre e o inbound assume), ou os toques acabaram. Os
+// flags template_N_dia são ZERADOS ao reabrir (no index), então se o lead esfriar
+// de novo a cadência recomeça do 1º toque ativo.
 
 // deno-lint-ignore-file no-explicit-any
 import { extrairPrimeiroNome } from './contexto.ts';
@@ -30,37 +48,87 @@ const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
 const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 const SEND_URL = (Deno.env.get('AGENTE_SDR_SEND_URL') ?? `${SUPABASE_URL}/functions/v1/crm-whatsapp-send`).replace(/\/$/, '');
 
-// ── RÉGUA DOS 7 TOQUES (PREENCHER os template_name quando cadastrar na Meta) ──
-// toque    = nº do toque (1..7), marca a coluna template_<toque>_dia ao enviar.
-// dia      = dias desde o FECHAMENTO da janela (última msg + 24h) p/ o toque ficar devido.
-// nome_var = true se o template usa {{1}} = primeiro nome do lead (manda o parâmetro);
-//            false se o template não tem variável (manda sem componentes).
-// template_name VAZIO ('') = toque DESLIGADO (ainda não cadastrado) → é pulado.
-type Toque = { toque: number; dia: number; template_name: string; lang: string; nome_var: boolean };
-const TOQUES: Toque[] = [
-  { toque: 1, dia: 1, template_name: '', lang: 'pt_BR', nome_var: true },
-  { toque: 2, dia: 2, template_name: '', lang: 'pt_BR', nome_var: true },
-  { toque: 3, dia: 3, template_name: '', lang: 'pt_BR', nome_var: true },
-  { toque: 4, dia: 4, template_name: '', lang: 'pt_BR', nome_var: true },
-  { toque: 5, dia: 5, template_name: '', lang: 'pt_BR', nome_var: true },
-  { toque: 6, dia: 7, template_name: '', lang: 'pt_BR', nome_var: true },
-  { toque: 7, dia: 9, template_name: 'mensagem_disparo_39', lang: 'pt_BR', nome_var: false },
-];
+// ── Mapa de uma variável {{N}} do template ──────────────────────────────────
+type VarTipo = 'primeiro_nome' | 'nome' | 'telefone' | 'email' | 'fixo';
+type VarMap = { tipo: VarTipo; valor?: string };
+
+// Um "envio" concreto: template + idioma + variáveis + conta de saída.
+type TemplateEnvio = { template_name: string; lang: string; variaveis: VarMap[]; wa_account_id: string | null };
+
+// toque: nº do toque (1..7), marca a coluna template_<toque>_dia ao enviar.
+// dia: dias desde o FECHAMENTO da janela (última msg + 24h) p/ o toque ficar devido.
+// fallback_template_name vazio = sem fallback.
+type Toque = {
+  toque: number;
+  dia: number;
+  template_name: string;
+  lang: string;
+  variaveis: VarMap[];
+  fallback_template_name: string;
+  fallback_lang: string;
+  fallback_variaveis: VarMap[];
+  wa_account_id: string | null;
+};
 
 const JANELA_FECHADA_MIN = 1440;            // 24h: antes disso é a esteira de janela aberta
 const MAX_LEADS_POR_TICK = 300;             // teto por tick (worker timeout 5min)
 const CONCORRENCIA = 5;                      // leads enviados em paralelo por tick
 const HORAS_UTC = [10, 11, 12, 15, 16, 18, 21]; // 07,08,09,12,13,15,18 BRT (UTC-3)
 const ULTIMA_HORA_UTC = 21;                  // rede de segurança: último tick do dia
+const RESGATE_JANELA_MS = 48 * 3600_000;     // falha assíncrona: resgata até 48h após o envio
 
 const colunaToque = (n: number) => `template_${n}_dia`;
 
-// Próximo toque pendente = o primeiro template_<toque>_dia que ainda não é true.
-function proximoToque(lead: any): Toque | null {
-  for (const t of TOQUES) {
+function parseVars(raw: unknown): VarMap[] {
+  return Array.isArray(raw)
+    ? (raw as any[]).map((v) => ({ tipo: String(v?.tipo ?? 'fixo') as VarTipo, valor: v?.valor != null ? String(v.valor) : undefined }))
+    : [];
+}
+
+// ── carrega a config dos toques (tabela editável pela tela) ─────────────────
+// Só retorna toques ATIVOS e com template cadastrado, ordenados pelo nº do toque.
+// select('*') de propósito: as colunas de fallback/número podem ainda não existir
+// (migration pendente) — nesse caso os campos voltam undefined e viram default.
+// Em erro/vazio retorna [] (a esteira não envia nada nesse tick — conservador).
+async function carregarToques(supabase: any): Promise<Toque[]> {
+  const { data, error } = await supabase
+    .from('crm_agente_sdr_followup_toques')
+    .select('*')
+    .eq('ativo', true)
+    .order('toque', { ascending: true });
+  if (error) {
+    console.error(`[crm-agente-sdr][followup-template] carregarToques: ${error.message}`);
+    return [];
+  }
+  return (data ?? [])
+    .filter((r: any) => typeof r.template_name === 'string' && r.template_name.trim() !== '')
+    .map((r: any) => ({
+      toque: Number(r.toque),
+      dia: Number(r.dia),
+      template_name: String(r.template_name).trim(),
+      lang: String(r.template_lang || 'pt_BR'),
+      variaveis: parseVars(r.variaveis),
+      fallback_template_name: String(r.fallback_template_name ?? '').trim(),
+      fallback_lang: String(r.fallback_template_lang || 'pt_BR'),
+      fallback_variaveis: parseVars(r.fallback_variaveis),
+      wa_account_id: r.wa_account_id ? String(r.wa_account_id) : null,
+    }));
+}
+
+const envioPrincipal = (t: Toque): TemplateEnvio =>
+  ({ template_name: t.template_name, lang: t.lang, variaveis: t.variaveis, wa_account_id: t.wa_account_id });
+const envioFallback = (t: Toque): TemplateEnvio =>
+  ({ template_name: t.fallback_template_name, lang: t.fallback_lang, variaveis: t.fallback_variaveis, wa_account_id: t.wa_account_id });
+// Fallback utilizável = configurado E diferente do principal (igual causaria loop de reenvio).
+const temFallback = (t: Toque): boolean =>
+  !!t.fallback_template_name && t.fallback_template_name !== t.template_name;
+
+// Próximo toque pendente = o primeiro toque ATIVO cujo template_<toque>_dia ainda não é true.
+function proximoToque(lead: any, toques: Toque[]): Toque | null {
+  for (const t of toques) {
     if (lead[colunaToque(t.toque)] !== true) return t;
   }
-  return null; // os 7 já saíram
+  return null; // todos os toques ativos já saíram
 }
 
 // Toque devido pelo calendário? (dias desde o fechamento da janela >= t.dia)
@@ -72,6 +140,13 @@ function devido(lead: any, now: number, t: Toque): boolean {
   return elapsedDias >= t.dia;
 }
 
+// Candidato a RESGATE de falha assíncrona: já teve toque enviado há pouco (<48h).
+// A confirmação (a última msg de template FALHOU?) é cara e roda só sob lock.
+function resgateCandidato(lead: any, now: number): boolean {
+  const ts = Date.parse(lead.template_followup_em ?? '');
+  return Number.isFinite(ts) && now - ts <= RESGATE_JANELA_MS;
+}
+
 // Horário "sorteado" do lead pra hoje (estável no dia, varia dia a dia) — espalha
 // os envios entre os ticks em vez de empilhar todos no primeiro horário.
 function horaPreferida(remotejid: string, now: number): number {
@@ -80,6 +155,33 @@ function horaPreferida(remotejid: string, now: number): number {
   let h = 0;
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
   return HORAS_UTC[h % HORAS_UTC.length];
+}
+
+// Resolve o valor de uma variável do template a partir do lead.
+function resolverVariavel(v: VarMap, lead: any): string {
+  switch (v.tipo) {
+    case 'primeiro_nome': return extrairPrimeiroNome(lead?.nome) || '';
+    case 'nome':          return String(lead?.nome ?? '').trim();
+    case 'telefone':      return String(lead?.remotejid ?? '').split('@')[0];
+    case 'email':         return String(lead?.email ?? '').trim();
+    case 'fixo':          return String(v?.valor ?? '');
+    default:              return String(v?.valor ?? '');
+  }
+}
+
+// Variantes do telefone (com/sem DDI 55, com/sem 9º dígito) — espelha o phoneVariants
+// do crm-whatsapp-send, pra casar a mensagem persistida em crm_whatsapp_messages.
+function phoneVariants(raw: string): string[] {
+  let d = (raw ?? '').replace(/\D/g, '');
+  if (d.startsWith('55')) d = d.slice(2);
+  const ddd = d.slice(0, 2);
+  const rest = d.slice(2);
+  const set = new Set<string>();
+  const add = (x: string) => { set.add(x); set.add(`55${x}`); };
+  if (rest) add(ddd + rest);
+  if (rest.length === 8) add(`${ddd}9${rest}`);
+  if (rest.length === 9 && rest[0] === '9') add(ddd + rest.slice(1));
+  return [...set];
 }
 
 // ── trava dura: nenhum template (de qualquer origem) nas últimas 24h ─────────
@@ -109,27 +211,32 @@ async function lockSoltar(supabase: any, remotejid: string): Promise<void> {
 }
 
 // ── envio do template via crm-whatsapp-send ─────────────────────────────────
-async function enviarTemplate(telefone: string, t: Toque, nome: string): Promise<boolean> {
-  const components = t.nome_var
-    ? [{ type: 'body', parameters: [{ type: 'text', text: nome || '' }] }]
-    : [];
+// Devolve o resultado detalhado (status HTTP + código da Meta) pro fallback decidir.
+async function enviarTemplate(
+  telefone: string,
+  envio: TemplateEnvio,
+  lead: any,
+): Promise<{ ok: boolean; status: number; metaCode: number | null }> {
+  const parametros = envio.variaveis.map((v) => ({ type: 'text', text: resolverVariavel(v, lead) }));
+  const components = parametros.length ? [{ type: 'body', parameters: parametros }] : [];
   const res = await fetch(SEND_URL, {
     method: 'POST',
     headers: { Authorization: `Bearer ${SERVICE_ROLE}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       telefone,
       tipo: 'template',
-      template_name: t.template_name,
-      template_lang: t.lang,
+      template_name: envio.template_name,
+      template_lang: envio.lang,
       template_components: components,
-      wa_account_id: null, // crm-whatsapp-send resolve a conta CRM ativa
+      wa_account_id: envio.wa_account_id, // null = crm-whatsapp-send resolve a conta CRM ativa
     }),
   });
-  if (!res.ok) {
-    console.error(`[crm-agente-sdr][followup-template] send HTTP ${res.status}: ${await res.text()}`);
-    return false;
-  }
-  return true;
+  if (res.ok) return { ok: true, status: res.status, metaCode: null };
+  const corpo = await res.text();
+  let metaCode: number | null = null;
+  try { metaCode = JSON.parse(corpo)?.meta_code ?? null; } catch { /* corpo não-JSON */ }
+  console.error(`[crm-agente-sdr][followup-template] send HTTP ${res.status} (${envio.template_name}): ${corpo}`);
+  return { ok: false, status: res.status, metaCode };
 }
 
 // ── seleção grossa no banco (booleans + janela fechada) ─────────────────────
@@ -137,12 +244,13 @@ async function selecionarCandidatos(supabase: any): Promise<any[]> {
   const limiteJanela = new Date(Date.now() - JANELA_FECHADA_MIN * 60_000).toISOString(); // <= agora-24h
   const { data, error } = await supabase
     .from('cliente_ppg_leads_sdr')
-    .select('remotejid, nome, timestamp_mensagem, followup_ativado, iniciar_atendimento, agendado, pausa_ia, atendimento_finalizado, template_1_dia, template_2_dia, template_3_dia, template_4_dia, template_5_dia, template_6_dia, template_7_dia, template_followup_em, modo_recontato')
+    .select('remotejid, nome, email, timestamp_mensagem, followup_ativado, iniciar_atendimento, agendado, pausa_ia, nao_perturbe, atendimento_finalizado, template_1_dia, template_2_dia, template_3_dia, template_4_dia, template_5_dia, template_6_dia, template_7_dia, template_followup_em, modo_recontato')
     .eq('followup_ativado', true)
     .eq('iniciar_atendimento', true)
     .not('modo_recontato', 'is', true) // lead em recontato (no-show) NÃO recebe a cadência de lead novo
     .or('agendado.is.null,agendado.eq.false')
     .or('pausa_ia.is.null,pausa_ia.eq.false')
+    .or('nao_perturbe.is.null,nao_perturbe.eq.false')
     .or('atendimento_finalizado.is.null,atendimento_finalizado.eq.false')
     .lt('timestamp_mensagem', limiteJanela)
     .order('timestamp_mensagem', { ascending: true })
@@ -151,24 +259,94 @@ async function selecionarCandidatos(supabase: any): Promise<any[]> {
   return data ?? [];
 }
 
+// Gates comuns (revalidados com o lead FRESCO, sob lock).
+function leadElegivel(lead: any): boolean {
+  if (!lead) return false;
+  if (lead.followup_ativado !== true) return false;
+  if (lead.iniciar_atendimento !== true) return false;
+  if (lead.modo_recontato === true) return false; // virou recontato no meio-tempo
+  if (lead.agendado === true) return false;
+  if (lead.pausa_ia === true) return false;
+  if (lead.nao_perturbe === true) return false;
+  if (lead.atendimento_finalizado === true) return false;
+  return true;
+}
+
+// ── RESGATE de falha ASSÍNCRONA ──────────────────────────────────────────────
+// O envio do toque voltou 200 mas a Meta marcou 'failed' depois (webhook) — típico
+// de throttle de MARKETING (131049). Se o último template do número FALHOU e ele é
+// o principal de um toque com fallback, manda o fallback agora. Guardas:
+// - só se NENHUM template com sucesso saiu nas últimas 24h (mantém a trava dura);
+// - o nome falho tem que ser o PRINCIPAL de um toque (fallback falho não re-tenta — sem loop).
+async function resgatarFalhaAsync(supabase: any, lead: any, toques: Toque[], tel: Telemetria): Promise<boolean> {
+  const telefone = String(lead.remotejid).split('@')[0];
+  const variants = phoneVariants(telefone);
+
+  const { data: rows, error } = await supabase
+    .from('crm_whatsapp_messages')
+    .select('template_name, status_entrega, created_at')
+    .in('telefone', variants)
+    .eq('direcao', 'outbound')
+    .eq('tipo', 'template')
+    .order('created_at', { ascending: false })
+    .limit(1);
+  if (error) {
+    console.error(`[crm-agente-sdr][followup-template] resgate ${telefone}: ${error.message}`);
+    return false;
+  }
+  const ult = rows?.[0];
+  if (!ult || ult.status_entrega !== 'failed') return false;
+
+  const t = toques.find((x) => x.template_name === ult.template_name);
+  if (!t || !temFallback(t)) return false;
+  if (lead[colunaToque(t.toque)] !== true) return false; // não foi a esteira que mandou
+
+  // Trava de 24h olhando só templates ENTREGÁVEIS (o failed não abriu conversa nenhuma).
+  const desde = new Date(Date.now() - 24 * 3600_000).toISOString();
+  const { data: okRows } = await supabase
+    .from('crm_whatsapp_messages')
+    .select('id')
+    .in('telefone', variants)
+    .eq('direcao', 'outbound')
+    .eq('tipo', 'template')
+    .neq('status_entrega', 'failed')
+    .gte('created_at', desde)
+    .limit(1);
+  if ((okRows ?? []).length > 0) return false;
+
+  const r = await enviarTemplate(telefone, envioFallback(t), lead);
+  if (!r.ok) {
+    tel.registrar('followup_template_fallback_falhou', { toque: t.toque, template_fallback: t.fallback_template_name, modo: 'assincrono', status: r.status, meta_code: r.metaCode });
+    return false;
+  }
+  await atualizarLead(supabase, lead.remotejid, { template_followup_em: new Date().toISOString() });
+  tel.registrar('followup_template_fallback_enviado', {
+    toque: t.toque, modo: 'assincrono',
+    template_principal: t.template_name, template_fallback: t.fallback_template_name,
+  });
+  return true;
+}
+
 // ── processa um lead (sob lock, revalidando o estado fresco) ────────────────
-async function processarLead(supabase: any, leadSel: any, toqueSel: Toque, tel: Telemetria): Promise<boolean> {
+async function processarLead(
+  supabase: any,
+  leadSel: any,
+  toqueSel: Toque | null,
+  toques: Toque[],
+  resgate: boolean,
+  tel: Telemetria,
+): Promise<boolean> {
   const remotejid = leadSel.remotejid;
   if (!(await lockClaim(supabase, remotejid))) return false; // inbound/outra esteira em andamento
   try {
     const lead = await buscarLead(supabase, remotejid);
-    if (!lead) return false;
-    if (lead.followup_ativado !== true) return false;
-    if (lead.iniciar_atendimento !== true) return false;
-    if (lead.modo_recontato === true) return false; // virou recontato no meio-tempo
-    if (lead.agendado === true) return false;
-    if (lead.pausa_ia === true) return false;
-    if (lead.atendimento_finalizado === true) return false;
+    if (!leadElegivel(lead)) return false;
+
+    if (resgate) return await resgatarFalhaAsync(supabase, lead, toques, tel);
 
     // Recalcula o toque com o estado FRESCO (pode ter mudado entre a seleção e agora).
-    const t = proximoToque(lead);
-    if (!t || t.toque !== toqueSel.toque) return false;
-    if (!t.template_name) return false;                 // toque não cadastrado
+    const t = proximoToque(lead, toques);
+    if (!t || !toqueSel || t.toque !== toqueSel.toque) return false;
     if (!devido(lead, Date.now(), t)) return false;
 
     const telefone = String(remotejid).split('@')[0];
@@ -177,11 +355,17 @@ async function processarLead(supabase: any, leadSel: any, toqueSel: Toque, tel: 
       return false;
     }
 
-    const nome = extrairPrimeiroNome(lead.nome);
-    const ok = await enviarTemplate(telefone, t, nome);
-    if (!ok) {
-      tel.registrar('followup_template_falhou', { toque: t.toque, template: t.template_name });
-      return false; // não marca o toque: tenta de novo no próximo tick elegível
+    let usouFallback = false;
+    let r = await enviarTemplate(telefone, envioPrincipal(t), lead);
+    if (!r.ok) {
+      tel.registrar('followup_template_falhou', { toque: t.toque, template: t.template_name, status: r.status, meta_code: r.metaCode });
+      if (!temFallback(t)) return false; // não marca o toque: tenta de novo no próximo tick elegível
+      r = await enviarTemplate(telefone, envioFallback(t), lead);
+      if (!r.ok) {
+        tel.registrar('followup_template_fallback_falhou', { toque: t.toque, template_fallback: t.fallback_template_name, modo: 'sincrono', status: r.status, meta_code: r.metaCode });
+        return false;
+      }
+      usouFallback = true;
     }
 
     // Marca o toque + âncora. (A msg já está logada em crm_whatsapp_messages pelo send.)
@@ -189,7 +373,14 @@ async function processarLead(supabase: any, leadSel: any, toqueSel: Toque, tel: 
       [colunaToque(t.toque)]: true,
       template_followup_em: new Date().toISOString(),
     });
-    tel.registrar('followup_template_enviado', { toque: t.toque, dia: t.dia, template: t.template_name });
+    if (usouFallback) {
+      tel.registrar('followup_template_fallback_enviado', {
+        toque: t.toque, dia: t.dia, modo: 'sincrono',
+        template_principal: t.template_name, template_fallback: t.fallback_template_name,
+      });
+    } else {
+      tel.registrar('followup_template_enviado', { toque: t.toque, dia: t.dia, template: t.template_name });
+    }
     return true;
   } catch (e) {
     tel.registrar('erro', { onde: 'processarLeadTemplate', remotejid }, undefined, (e as Error).message);
@@ -218,27 +409,37 @@ async function comConcorrencia<T>(itens: T[], limite: number, fn: (t: T) => Prom
 export async function rodarEsteiraFollowupTemplate(
   supabase: any,
   opts?: { limite?: number; horaUtc?: number },
-): Promise<{ candidatos: number; devidos: number; enviados: number; hora_utc: number }> {
+): Promise<{ candidatos: number; devidos: number; enviados: number; hora_utc: number; toques_ativos: number }> {
   const inicio = Date.now();
   const tel = criarTelemetria(supabase, 'followup-template-sweep');
   const horaAtual = Number.isFinite(opts?.horaUtc) ? (opts!.horaUtc as number) : new Date(inicio).getUTCHours();
   const cap = Number.isFinite(opts?.limite) && (opts!.limite as number) > 0 ? Math.floor(opts!.limite as number) : MAX_LEADS_POR_TICK;
 
+  const toques = await carregarToques(supabase);
+  if (!toques.length) {
+    tel.registrar('followup_template_tick', { hora_utc: horaAtual, candidatos: 0, devidos: 0, enviados: 0, motivo: 'sem_toques_ativos' }, Date.now() - inicio);
+    return { candidatos: 0, devidos: 0, enviados: 0, hora_utc: horaAtual, toques_ativos: 0 };
+  }
+  const algumFallback = toques.some(temFallback);
+
   const candidatos = await selecionarCandidatos(supabase);
-  const devidos: { lead: any; toque: Toque }[] = [];
+  const devidos: { lead: any; toque: Toque | null; resgate: boolean }[] = [];
   for (const lead of candidatos) {
-    const t = proximoToque(lead);
-    if (!t || !t.template_name) continue;          // sem toque pendente ou toque desligado
-    if (!devido(lead, inicio, t)) continue;        // ainda não chegou o dia do toque
     const hp = horaPreferida(lead.remotejid, inicio);
     if (horaAtual !== hp && horaAtual !== ULTIMA_HORA_UTC) continue; // espalha por horário
-    devidos.push({ lead, toque: t });
+    const t = proximoToque(lead, toques);
+    if (t && devido(lead, inicio, t)) {
+      devidos.push({ lead, toque: t, resgate: false });
+    } else if (algumFallback && resgateCandidato(lead, inicio)) {
+      // Toque recente pode ter falhado ASSÍNCRONO (webhook marcou 'failed' depois do 200).
+      devidos.push({ lead, toque: null, resgate: true });
+    }
     if (devidos.length >= cap) break;
   }
 
   let enviados = 0;
   await comConcorrencia(devidos, CONCORRENCIA, async (d) => {
-    if (await processarLead(supabase, d.lead, d.toque, tel)) enviados++;
+    if (await processarLead(supabase, d.lead, d.toque, toques, d.resgate, tel)) enviados++;
   });
 
   tel.registrar('followup_template_tick', {
@@ -246,6 +447,7 @@ export async function rodarEsteiraFollowupTemplate(
     candidatos: candidatos.length,
     devidos: devidos.length,
     enviados,
+    toques_ativos: toques.length,
   }, Date.now() - inicio);
-  return { candidatos: candidatos.length, devidos: devidos.length, enviados, hora_utc: horaAtual };
+  return { candidatos: candidatos.length, devidos: devidos.length, enviados, hora_utc: horaAtual, toques_ativos: toques.length };
 }
