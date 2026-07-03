@@ -525,13 +525,20 @@ Deno.serve(async (req) => {
   let leadId: string | null = null;
   let duplicado = false;
   let leadArquivadoReativado = false;
+  // Arquivamento HUMANO recente (<14d): o "recadastro" NÃO reativa nem dispara nada —
+  // o SprintHub re-empurra base existente como lead novo (94% duplicados no lote 18,
+  // 2026-07-03, caso Ana Limeira: arquivada 09:32, template às 14:32) e isso atropelava
+  // a decisão do SDR. Arquivado antigo (>=14d ou sem data) segue reativando (recadastro
+  // legítimo de lead que voltou).
+  let leadPermaneceArquivado = false;
+  const CARENCIA_ARQUIVADO_MS = 14 * 24 * 3600_000;
   try {
     let existing: any = null;
 
     if (email) {
       const { data } = await admin
         .from("leads")
-        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, arquivado")
+        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, arquivado, arquivado_em")
         .eq("email", email)
         .limit(1);
       existing = data?.[0] ?? null;
@@ -540,7 +547,7 @@ Deno.serve(async (req) => {
       const variants = [whatsapp, whatsapp.startsWith("55") ? whatsapp.slice(2) : `55${whatsapp}`];
       const { data } = await admin
         .from("leads")
-        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, arquivado")
+        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, arquivado, arquivado_em")
         .in("whatsapp", variants)
         .limit(1);
       existing = data?.[0] ?? null;
@@ -549,12 +556,19 @@ Deno.serve(async (req) => {
     if (existing) {
       duplicado = true;
       leadId = existing.id;
-      // Lead estava arquivado → recadastro = reativar
+      // Lead estava arquivado → recadastro = reativar, SALVO arquivamento recente (<14d):
+      // aí a decisão de arquivar (humana) prevalece — mantém arquivado e o fluxo abaixo
+      // vira no-op (sem card, sem template, sem IA).
       if (existing.arquivado === true) {
-        leadArquivadoReativado = true;
-        await admin.from("leads")
-          .update({ arquivado: false, arquivado_em: null, arquivado_por: null })
-          .eq("id", existing.id);
+        const arquivadoEmMs = existing.arquivado_em ? Date.parse(existing.arquivado_em) : NaN;
+        if (Number.isFinite(arquivadoEmMs) && Date.now() - arquivadoEmMs < CARENCIA_ARQUIVADO_MS) {
+          leadPermaneceArquivado = true;
+        } else {
+          leadArquivadoReativado = true;
+          await admin.from("leads")
+            .update({ arquivado: false, arquivado_em: null, arquivado_por: null })
+            .eq("id", existing.id);
+        }
       }
       // Preenche campos vazios sem sobrescrever os existentes. Inclui os defaults da
       // Criação Automática (espelha o "atualiza e cria" do SprintHub — fill-if-empty
@@ -633,6 +647,23 @@ Deno.serve(async (req) => {
         console.error("[crm-lead-webhook] eav campo erro:", err?.message);
       }
     }
+  }
+
+  // (5.7) Lead ARQUIVADO há menos de 14 dias → recadastro INERTE: dados já atualizados
+  // (fill-if-empty acima), mas NADA dispara (sem card, sem template, sem seed de IA, sem
+  // forward). A decisão humana de arquivar prevalece sobre o re-push do SprintHub.
+  if (leadPermaneceArquivado) {
+    await logAtividade(
+      leadId, "acao_webhook", "Recadastro recebido com lead ARQUIVADO",
+      `${integration.nome ?? slug} — arquivado há menos de 14 dias: mantido arquivado, sem envios`,
+    );
+    await admin.from("crm_webhook_logs").insert({
+      integration_id: integration.id, slug, payload, ...reqMeta,
+      resultado: { lead_id: leadId, duplicado: true, lead_arquivado_recente: true, acoes_aplicadas: [] },
+      status: "duplicado",
+      ip_origem: ipOrigem,
+    });
+    return json({ ok: true, discarded: true, reason: "lead_arquivado_recente", lead_id: leadId }, 200);
   }
 
   // (6) extras p/ lead_oportunidades
