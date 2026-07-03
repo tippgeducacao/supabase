@@ -54,7 +54,10 @@ const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 const SEND_URL = (Deno.env.get('AGENTE_SDR_SEND_URL') ?? `${SUPABASE_URL}/functions/v1/crm-whatsapp-send`).replace(/\/$/, '');
 
 // ── Mapa de uma variável {{N}} do template ──────────────────────────────────
-type VarTipo = 'primeiro_nome' | 'nome' | 'telefone' | 'email' | 'fixo';
+// 'curso' = cliente_ppg_leads_sdr.curso_interesse_original (curso/título do card,
+// preenchido pelo seed do webhook/automação). Lead sem curso → o toque é PULADO
+// (Meta rejeita parâmetro vazio; ver guarda em processarLead).
+type VarTipo = 'primeiro_nome' | 'nome' | 'telefone' | 'email' | 'curso' | 'fixo';
 type VarMap = { tipo: VarTipo; valor?: string };
 
 // Um "envio" concreto: template + idioma + variáveis + conta de saída.
@@ -169,9 +172,16 @@ function resolverVariavel(v: VarMap, lead: any): string {
     case 'nome':          return String(lead?.nome ?? '').trim();
     case 'telefone':      return String(lead?.remotejid ?? '').split('@')[0];
     case 'email':         return String(lead?.email ?? '').trim();
+    case 'curso':         return String(lead?.curso_interesse_original ?? '').trim();
     case 'fixo':          return String(v?.valor ?? '');
     default:              return String(v?.valor ?? '');
   }
+}
+
+// Toque cujo template usa a variável 'curso' e o lead não tem curso na base →
+// pular (a Meta rejeita parâmetro de body vazio; enviar '' queimaria o envio).
+function cursoVazio(variaveis: VarMap[], lead: any): boolean {
+  return variaveis.some((v) => v.tipo === 'curso' && !resolverVariavel(v, lead).trim());
 }
 
 // ── trava dura: nenhum template (de qualquer origem) nas últimas 24h ─────────
@@ -344,6 +354,13 @@ async function processarLead(
     const telefone = String(remotejid).split('@')[0];
     if (await templateNas24h(supabase, telefone)) {
       tel.registrar('followup_template_pulado', { motivo: 'trava_24h', toque: t.toque });
+      return false;
+    }
+
+    // Template do toque usa {{curso}} mas o lead não tem curso na base → pula
+    // (não marca o toque; se o curso for preenchido depois, ele sai no próximo tick).
+    if (cursoVazio(t.variaveis, lead)) {
+      tel.registrar('followup_template_pulado', { motivo: 'curso_vazio', toque: t.toque });
       return false;
     }
 
