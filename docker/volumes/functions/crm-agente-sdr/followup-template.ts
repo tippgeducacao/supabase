@@ -80,7 +80,19 @@ type Toque = {
    *  Ex.: template "Boa tarde…" com 12–18 só sai nos ticks da tarde. */
   hora_inicio: number | null;
   hora_fim: number | null;
+  /** Régua POR CONTA: id da conta Meta dona desta régua; null = régua PADRÃO.
+   *  A esteira escolhe a régua pela conta onde o LEAD conversa (contaDoLead). */
+  regua_wa_account_id: string | null;
 };
+
+/** Régua do lead: a da conta onde ele conversa (se tiver toques ativos), senão a padrão. */
+function reguaPara(toques: Toque[], conta: string | null): Toque[] {
+  if (conta) {
+    const daConta = toques.filter((t) => t.regua_wa_account_id === conta);
+    if (daConta.length) return daConta;
+  }
+  return toques.filter((t) => t.regua_wa_account_id === null);
+}
 
 const JANELA_FECHADA_MIN = 1440;            // 24h: antes disso é a esteira de janela aberta
 const MAX_LEADS_POR_TICK = 300;             // teto por tick (worker timeout 5min)
@@ -126,6 +138,7 @@ async function carregarToques(supabase: any): Promise<Toque[]> {
       wa_account_id: r.wa_account_id ? String(r.wa_account_id) : null,
       hora_inicio: Number.isFinite(Number(r.hora_inicio)) && r.hora_inicio !== null ? Number(r.hora_inicio) : null,
       hora_fim: Number.isFinite(Number(r.hora_fim)) && r.hora_fim !== null ? Number(r.hora_fim) : null,
+      regua_wa_account_id: r.regua_wa_account_id ? String(r.regua_wa_account_id) : null,
     }));
 }
 
@@ -352,6 +365,8 @@ async function resgatarFalhaAsync(supabase: any, lead: any, toques: Toque[], tel
 }
 
 // ── processa um lead (sob lock, revalidando o estado fresco) ────────────────
+// `contaSel` = conta onde o lead conversa (resolvida na seleção) — define a RÉGUA do
+// lead (reguaPara) e o número de saída.
 async function processarLead(
   supabase: any,
   leadSel: any,
@@ -359,6 +374,7 @@ async function processarLead(
   toques: Toque[],
   resgate: boolean,
   tel: Telemetria,
+  contaSel: string | null,
 ): Promise<boolean> {
   const remotejid = leadSel.remotejid;
   if (!(await lockClaim(supabase, remotejid))) return false; // inbound/outra esteira em andamento
@@ -366,10 +382,14 @@ async function processarLead(
     const lead = await buscarLead(supabase, remotejid);
     if (!leadElegivel(lead)) return false;
 
-    if (resgate) return await resgatarFalhaAsync(supabase, lead, toques, tel);
+    // Régua do lead: a da conta onde ele conversa (se existir), senão a padrão.
+    const toquesLead = reguaPara(toques, contaSel);
+    if (!toquesLead.length) return false;
+
+    if (resgate) return await resgatarFalhaAsync(supabase, lead, toquesLead, tel);
 
     // Recalcula o toque com o estado FRESCO (pode ter mudado entre a seleção e agora).
-    const t = proximoToque(lead, toques);
+    const t = proximoToque(lead, toquesLead);
     if (!t || !toqueSel || t.toque !== toqueSel.toque) return false;
     if (!devido(lead, Date.now(), t)) return false;
 
@@ -413,10 +433,10 @@ async function processarLead(
       return false;
     }
 
-    // Número de saída: conta DO LEAD (última msg num número qualificador) →
-    // config do toque → conta ativa. Mantém a cadência na conversa em que o
-    // lead é atendido (janela/thread são por número na Meta).
-    const conta = (await contaDoLead(supabase, telefone)) ?? t.wa_account_id ?? null;
+    // Número de saída: conta DO LEAD (resolvida na seleção — última msg num número
+    // qualificador) → config do toque → conta ativa. Mantém a cadência na conversa em
+    // que o lead é atendido (janela/thread são por número na Meta).
+    const conta = contaSel ?? (await contaDoLead(supabase, telefone)) ?? t.wa_account_id ?? null;
 
     let usouFallback = false;
     let r = await enviarTemplate(telefone, { ...envioPrincipal(t), wa_account_id: conta }, lead);
@@ -483,12 +503,25 @@ export async function rodarEsteiraFollowupTemplate(
     tel.registrar('followup_template_tick', { hora_utc: horaAtual, candidatos: 0, devidos: 0, enviados: 0, motivo: 'sem_toques_ativos' }, Date.now() - inicio);
     return { candidatos: 0, devidos: 0, enviados: 0, hora_utc: horaAtual, toques_ativos: 0 };
   }
-  const algumFallback = toques.some(temFallback);
 
   const candidatos = await selecionarCandidatos(supabase);
-  const devidos: { lead: any; toque: Toque | null; resgate: boolean }[] = [];
+  const devidos: { lead: any; toque: Toque | null; resgate: boolean; conta: string | null }[] = [];
+  // Régua POR CONTA: resolve a conta onde cada candidato conversa (cache por telefone —
+  // query indexada em crm_whatsapp_messages) e usa a régua daquela conta (fallback: padrão).
+  const contaCache = new Map<string, string | null>();
   for (const lead of candidatos) {
-    const t = proximoToque(lead, toques);
+    const telefone = String(lead.remotejid).split('@')[0];
+    let conta: string | null;
+    if (contaCache.has(telefone)) {
+      conta = contaCache.get(telefone) ?? null;
+    } else {
+      conta = await contaDoLead(supabase, telefone).catch(() => null);
+      contaCache.set(telefone, conta);
+    }
+    const toquesLead = reguaPara(toques, conta);
+    if (!toquesLead.length) continue;
+
+    const t = proximoToque(lead, toquesLead);
     if (t && devido(lead, inicio, t)) {
       // Espalhamento por horário DENTRO da janela do toque (janela sem tick elegível
       // ⇒ o toque nunca sai — a tela avisa na configuração). O catch-up do fim do dia
@@ -497,19 +530,19 @@ export async function rodarEsteiraFollowupTemplate(
       if (!horas.length) continue;
       const hp = horaPreferida(lead.remotejid, inicio, horas);
       if (horaAtual !== hp && horaAtual !== horas[horas.length - 1]) continue;
-      devidos.push({ lead, toque: t, resgate: false });
-    } else if (algumFallback && resgateCandidato(lead, inicio)) {
+      devidos.push({ lead, toque: t, resgate: false, conta });
+    } else if (toquesLead.some(temFallback) && resgateCandidato(lead, inicio)) {
       // Toque recente pode ter falhado ASSÍNCRONO (webhook marcou 'failed' depois do 200).
       const hp = horaPreferida(lead.remotejid, inicio);
       if (horaAtual !== hp && horaAtual !== ULTIMA_HORA_UTC) continue; // espalha por horário
-      devidos.push({ lead, toque: null, resgate: true });
+      devidos.push({ lead, toque: null, resgate: true, conta });
     }
     if (devidos.length >= cap) break;
   }
 
   let enviados = 0;
   await comConcorrencia(devidos, CONCORRENCIA, async (d) => {
-    if (await processarLead(supabase, d.lead, d.toque, toques, d.resgate, tel)) enviados++;
+    if (await processarLead(supabase, d.lead, d.toque, toques, d.resgate, tel, d.conta)) enviados++;
   });
 
   tel.registrar('followup_template_tick', {
