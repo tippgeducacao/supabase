@@ -40,7 +40,14 @@ import { contaDoLead } from './conta.ts';
 const CADENCIA_MIN = [15, 60, 120, 240, 420, 720, 1380];
 const JANELA_ABERTA_MIN = 1440;   // 24h Meta: fora disso é a esteira de template
 const LOCK_TTL_SEGUNDOS = 240;    // mesmo TTL do lock do inbound
-const MAX_LEADS_POR_TICK = 30;    // teto por varredura (worker timeout 5min); resto vem no próximo tick
+// ⚠️ Teto DIMENSIONADO PRO TIMEOUT do worker (5min): cada lead custa ~40-60s (geração LLM
+// + dribble de 2+ chunks com 12s de delay cada). Com 30 leads (6 ondas de 5) o tick passava
+// de 5min e o worker MORRIA no meio do dribble — mensagem gerada, toque JÁ consumido
+// (follow_up marca antes do envio, anti-duplicação) e NADA enviado, sem erro na telemetria
+// (caso Waleska, 2026-07-03, após o disparo encher a cadência: 1.931 avaliações → 163
+// envios em 6h). 10 leads = 2 ondas ≈ 2min, com folga; o tick roda a cada 2min → vazão
+// de ~300/h, de sobra. NÃO subir sem repensar o dribble.
+const MAX_LEADS_POR_TICK = 10;    // teto por varredura; resto vem no próximo tick
 const CONCORRENCIA = 5;           // leads processados em paralelo por tick
 
 // ── pausa noturna: NÃO reabre conversa de madrugada ─────────────────────────
