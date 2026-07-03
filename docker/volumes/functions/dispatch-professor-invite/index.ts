@@ -83,8 +83,10 @@ function formatPhone(raw: string | null | undefined): string | null {
   if (trimmed.startsWith("+")) return digits;
   // Já vem com o DDI do Brasil (55 + 10/11 dígitos).
   if (digits.startsWith("55") && (digits.length === 12 || digits.length === 13)) return digits;
-  // Número brasileiro sem DDI (DDD + 8/9 dígitos).
-  if (digits.length === 10 || digits.length === 11) return `55${digits}`;
+  // Número brasileiro sem DDI: DDD + 8 dígitos (fixo) ou DDD + 9xxxxxxxx (celular).
+  // Celular BR de 11 dígitos SEMPRE tem '9' no 3º dígito — 11 dígitos sem esse 9 é
+  // internacional sem DDI (ex.: wa_id dos EUA, 1+10) e NÃO pode ganhar 55.
+  if (digits.length === 10 || (digits.length === 11 && digits[2] === "9")) return `55${digits}`;
   // Não reconhecido: devolve os dígitos como estão (não corrompe internacional sem '+').
   return digits;
 }
