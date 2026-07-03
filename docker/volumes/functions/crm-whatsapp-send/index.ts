@@ -692,11 +692,28 @@ Deno.serve(async (req) => {
       if (histErr) console.error("[crm-whatsapp-send] hist sdr erro:", histErr.message);
     }
 
-    // NÃO semear histórico do agente em envio de documento: o histórico vira o array
-    // de messages da Claude API e um insert assistant aqui + a resposta do próprio
-    // agente = dois assistant seguidos -> 400 (roles devem alternar). O contexto do
-    // envio já chega ao agente pelo tool_result (cronograma_enviado) e pela própria
-    // resposta dele ("te enviei o cronograma"), que o n8n salva normalmente.
+    // Documento enviado por HUMANO (SDR no chat) → semeia o histórico do agente com um
+    // marcador (role=assistant), pra IA saber que o material JÁ FOI enviado e não
+    // reenviar/prometer de novo quando despausarem (pedido 2026-07-03: "eles pausam pra
+    // mandar o cronograma e a IA não fica sabendo"). Turnos assistant consecutivos são
+    // FUNDIDOS pelos sanitizadores do agente (limparParaRouter/sanitizarHistorico), então
+    // o marcador não quebra a alternância de roles da Claude API. Documento enviado pela
+    // PRÓPRIA IA (tool envia_informacoes) NÃO semeia aqui — o contexto já chega pelo
+    // tool_result (cronograma_enviado), semear de novo duplicaria.
+    if (tipo === "document" && r.ok && origemFinal === "humano") {
+      const remoteJid = `${canonicalBrPhone(telefone)}@s.whatsapp.net`;
+      const nomeDoc = docFilename || "documento";
+      const quem = enviadoPorNome ? `O atendente humano ${enviadoPorNome}` : "Um atendente humano";
+      const { error: histErr } = await admin.from("cliente_ppg_mensagens_sdr").insert({
+        remotejid: remoteJid,
+        conversation_history: {
+          role: "assistant",
+          content: `[${quem} enviou o documento "${nomeDoc}" ao lead pelo WhatsApp — material já entregue, não reenvie nem prometa enviar de novo]`,
+        },
+        timestamp: nowIso,
+      });
+      if (histErr) console.error("[crm-whatsapp-send] hist sdr (doc humano) erro:", histErr.message);
+    }
 
     if (!r.ok) {
       const errMsg =
