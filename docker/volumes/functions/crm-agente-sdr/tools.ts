@@ -556,7 +556,15 @@ async function enviaInformacoes(supabase: any, input: any, ctx: CtxConversa, too
   const chamar = async (p: string) => {
     const r = await sdrApi('envia-informacoes', {
       method: 'POST',
-      body: JSON.stringify({ whatsapp: ctx.telefone, pos: p, conteudo }),
+      // wa_account_id = conta da CONVERSA (ctx): sem ela o crm-whatsapp-send cai na
+      // primeira conta ativa (João) e o cronograma de lead atendido em OUTRO número
+      // sai fora da janela de 24h → falha assíncrona 131047 (a IA acha que enviou).
+      body: JSON.stringify({
+        whatsapp: ctx.telefone, pos: p, conteudo,
+        wa_account_id: ctx.waAccountId,
+        lead_id: ctx.leadId,
+        oportunidade_id: ctx.oportunidadeId,
+      }),
     });
     let b: any;
     try { b = await r.json(); } catch { b = { raw: await r.text().catch(() => '') }; }
