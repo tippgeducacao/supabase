@@ -76,6 +76,10 @@ type Toque = {
   fallback_lang: string;
   fallback_variaveis: VarMap[];
   wa_account_id: string | null;
+  /** Janela de HORÁRIO do toque (hora BRT 0-23, inclusivas; null = qualquer horário).
+   *  Ex.: template "Boa tarde…" com 12–18 só sai nos ticks da tarde. */
+  hora_inicio: number | null;
+  hora_fim: number | null;
 };
 
 const JANELA_FECHADA_MIN = 1440;            // 24h: antes disso é a esteira de janela aberta
@@ -120,7 +124,23 @@ async function carregarToques(supabase: any): Promise<Toque[]> {
       fallback_lang: String(r.fallback_template_lang || 'pt_BR'),
       fallback_variaveis: parseVars(r.fallback_variaveis),
       wa_account_id: r.wa_account_id ? String(r.wa_account_id) : null,
+      hora_inicio: Number.isFinite(Number(r.hora_inicio)) && r.hora_inicio !== null ? Number(r.hora_inicio) : null,
+      hora_fim: Number.isFinite(Number(r.hora_fim)) && r.hora_fim !== null ? Number(r.hora_fim) : null,
     }));
+}
+
+// ── janela de HORÁRIO do toque (hora BRT, inclusiva nas duas pontas) ─────────
+const horaBrtDe = (horaUtc: number) => (horaUtc + 21) % 24; // UTC-3
+function dentroDaJanelaHorario(t: Toque, horaUtc: number): boolean {
+  if (t.hora_inicio == null || t.hora_fim == null) return true;
+  const h = horaBrtDe(horaUtc);
+  return h >= t.hora_inicio && h <= t.hora_fim;
+}
+/** Ticks (horas UTC) em que este toque PODE sair — o espalhamento por lead roda
+ *  dentro deles. Janela sem nenhum tick elegível ⇒ o toque nunca envia (a tela
+ *  avisa que a janela precisa conter um dos horários de envio). */
+function horasElegiveis(t: Toque): number[] {
+  return HORAS_UTC.filter((hu) => dentroDaJanelaHorario(t, hu));
 }
 
 const envioPrincipal = (t: Toque): TemplateEnvio =>
@@ -156,13 +176,15 @@ function resgateCandidato(lead: any, now: number): boolean {
 }
 
 // Horário "sorteado" do lead pra hoje (estável no dia, varia dia a dia) — espalha
-// os envios entre os ticks em vez de empilhar todos no primeiro horário.
-function horaPreferida(remotejid: string, now: number): number {
+// os envios entre os ticks ELEGÍVEIS em vez de empilhar todos no primeiro horário.
+// `horas` = ticks permitidos (todos, ou os da janela do toque); vazio → null.
+function horaPreferida(remotejid: string, now: number, horas: number[] = HORAS_UTC): number | null {
+  if (!horas.length) return null;
   const epochDay = Math.floor(now / 86_400_000);
   const s = `${remotejid}:${epochDay}`;
   let h = 0;
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
-  return HORAS_UTC[h % HORAS_UTC.length];
+  return horas[h % horas.length];
 }
 
 // Resolve o valor de uma variável do template a partir do lead.
@@ -351,10 +373,37 @@ async function processarLead(
     if (!t || !toqueSel || t.toque !== toqueSel.toque) return false;
     if (!devido(lead, Date.now(), t)) return false;
 
+    // Janela de horário do toque (revalidada aqui com a hora ATUAL — o tick pode ter
+    // atrasado): fora da janela ⇒ não envia nem marca; o próximo tick elegível pega.
+    if (!dentroDaJanelaHorario(t, new Date().getUTCHours())) {
+      tel.registrar('followup_template_pulado', { motivo: 'fora_do_horario', toque: t.toque });
+      return false;
+    }
+
     const telefone = String(remotejid).split('@')[0];
     if (await templateNas24h(supabase, telefone)) {
       tel.registrar('followup_template_pulado', { motivo: 'trava_24h', toque: t.toque });
       return false;
+    }
+
+    // Guardas DURAS (cinto e suspensório — followup_ativado já deveria estar off nesses
+    // casos): lead ARQUIVADO ou com TEMPORIZADOR DE RECONTATO ativo NUNCA recebe template
+    // de follow-up. Em erro da RPC, NÃO envia (conservador, igual à trava 24h).
+    {
+      const { data: flags, error: flagsErr } = await supabase.rpc('crm_lead_flags_por_telefone', { p_telefone: telefone });
+      if (flagsErr) {
+        console.error(`[crm-agente-sdr][followup-template] flags ${telefone}: ${flagsErr.message}`);
+        return false;
+      }
+      const f = Array.isArray(flags) ? flags[0] : flags;
+      if (f?.arquivado === true) {
+        tel.registrar('followup_template_pulado', { motivo: 'lead_arquivado', toque: t.toque });
+        return false;
+      }
+      if (f?.timer_ativo === true) {
+        tel.registrar('followup_template_pulado', { motivo: 'timer_recontato', toque: t.toque });
+        return false;
+      }
     }
 
     // Template do toque usa {{curso}} mas o lead não tem curso na base → pula
@@ -439,13 +488,20 @@ export async function rodarEsteiraFollowupTemplate(
   const candidatos = await selecionarCandidatos(supabase);
   const devidos: { lead: any; toque: Toque | null; resgate: boolean }[] = [];
   for (const lead of candidatos) {
-    const hp = horaPreferida(lead.remotejid, inicio);
-    if (horaAtual !== hp && horaAtual !== ULTIMA_HORA_UTC) continue; // espalha por horário
     const t = proximoToque(lead, toques);
     if (t && devido(lead, inicio, t)) {
+      // Espalhamento por horário DENTRO da janela do toque (janela sem tick elegível
+      // ⇒ o toque nunca sai — a tela avisa na configuração). O catch-up do fim do dia
+      // é o ÚLTIMO tick elegível da janela (não o global, que pode estar fora dela).
+      const horas = horasElegiveis(t);
+      if (!horas.length) continue;
+      const hp = horaPreferida(lead.remotejid, inicio, horas);
+      if (horaAtual !== hp && horaAtual !== horas[horas.length - 1]) continue;
       devidos.push({ lead, toque: t, resgate: false });
     } else if (algumFallback && resgateCandidato(lead, inicio)) {
       // Toque recente pode ter falhado ASSÍNCRONO (webhook marcou 'failed' depois do 200).
+      const hp = horaPreferida(lead.remotejid, inicio);
+      if (horaAtual !== hp && horaAtual !== ULTIMA_HORA_UTC) continue; // espalha por horário
       devidos.push({ lead, toque: null, resgate: true });
     }
     if (devidos.length >= cap) break;
