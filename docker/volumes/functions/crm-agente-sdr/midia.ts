@@ -10,7 +10,10 @@ import { GEMINI_ANALISE_SCHEMA, GEMINI_ANALISE_SYSTEM } from './prompts.ts';
 import { resumir, type Telemetria } from './eventos.ts';
 
 const GEMINI_KEY = Deno.env.get('AGENTE_SDR_GEMINI_KEY') ?? Deno.env.get('GEMINI_API_KEY') ?? '';
-const MODELO_TRANSCRICAO = 'gemini-2.5-flash';
+// Alias oficial "lite mais recente" (quota própria, maior que a do flash cheio —
+// o 429 do caso Danilo 2026-07-03 estourou a quota do gemini-2.5-flash mesmo com
+// 5 retries). Alias em vez de ID fixo: ID errado = 404 em TODA transcrição.
+const MODELO_TRANSCRICAO = 'gemini-flash-lite-latest';
 const MODELO_ANALISE = 'gemini-flash-latest';
 
 export type MensagemTratada = {
@@ -27,7 +30,7 @@ async function gemini(model: string, body: Record<string, unknown>, tentativas =
     );
     if (res.ok) return await res.json();
     ultimoErro = `HTTP ${res.status}: ${await res.text()}`;
-    if (t < tentativas) await new Promise((r) => setTimeout(r, 3000));
+    if (t < tentativas) await new Promise((r) => setTimeout(r, 2000));
   }
   throw new Error(`Gemini ${model}: ${ultimoErro}`);
 }
