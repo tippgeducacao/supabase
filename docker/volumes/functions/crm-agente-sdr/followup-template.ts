@@ -8,6 +8,14 @@
 // 1 template por dia, em horário variável pra não parecer robô; trava DURA "nunca
 // < 24h entre templates" via crm_whatsapp_template_enviado_24h.
 //
+// ÂNCORA DUPLA (2026-07-04): lead que NUNCA respondeu (timestamp_mensagem NULL — só
+// recebeu o 1º template do webhook/automação/reconciliação) TAMBÉM entra na cadência,
+// ancorado em template_inicial_em (quando o 1º template SAIU; carimbado por trigger em
+// crm_whatsapp_messages + no seed do crm-lead-webhook — migration
+// 20260704120000_followup_template_inicial_em). Toque N fica devido N dias (dia da
+// régua) após o 1º template. Quando o lead responde, timestamp_mensagem passa a mandar
+// (o index zera os flags e a cadência recomeça ancorada na conversa, como sempre foi).
+//
 // CONFIG: os toques (template, dia, variáveis, ligado/desligado, NÚMERO de envio e
 // template de FALLBACK) vêm da tabela public.crm_agente_sdr_followup_toques, editada
 // pela tela (Config WhatsApp → Follow-up Janela Fechada). NÃO é hardcoded — cada tick
@@ -173,10 +181,22 @@ function proximoToque(lead: any, toques: Toque[]): Toque | null {
 }
 
 // Toque devido pelo calendário? (dias desde o fechamento da janela >= t.dia)
+// ÂNCORA DUPLA (2026-07-04): lead que JÁ conversou ancora na última msg dele
+// (timestamp_mensagem; fechamento = msg + 24h). Lead que NUNCA respondeu (timestamp
+// NULL) ancora no ENVIO do 1º template (template_inicial_em — carimbado por trigger
+// em crm_whatsapp_messages + seed do webhook): template não abre janela nenhuma,
+// então o próprio envio é o "fechamento" — toque N fica devido N dias (t.dia) após
+// o 1º template (com a régua padrão dia=1, o toque 1 sai 24h depois do 1º template).
 function devido(lead: any, now: number, t: Toque): boolean {
-  const ts = Date.parse(lead.timestamp_mensagem ?? '');
-  if (!Number.isFinite(ts)) return false;
-  const fechamento = ts + JANELA_FECHADA_MIN * 60_000;
+  const tsMsg = Date.parse(lead.timestamp_mensagem ?? '');
+  let fechamento: number;
+  if (Number.isFinite(tsMsg)) {
+    fechamento = tsMsg + JANELA_FECHADA_MIN * 60_000;
+  } else {
+    const tsTpl = Date.parse(lead.template_inicial_em ?? '');
+    if (!Number.isFinite(tsTpl)) return false; // sem âncora nenhuma: fora da esteira
+    fechamento = tsTpl;
+  }
   const elapsedDias = (now - fechamento) / 86_400_000;
   return elapsedDias >= t.dia;
 }
@@ -275,11 +295,13 @@ async function enviarTemplate(
 }
 
 // ── seleção grossa no banco (booleans + janela fechada) ─────────────────────
-async function selecionarCandidatos(supabase: any): Promise<any[]> {
-  const limiteJanela = new Date(Date.now() - JANELA_FECHADA_MIN * 60_000).toISOString(); // <= agora-24h
-  const { data, error } = await supabase
+const COLS_CANDIDATO =
+  'remotejid, nome, email, timestamp_mensagem, followup_ativado, iniciar_atendimento, agendado, pausa_ia, nao_perturbe, atendimento_finalizado, template_1_dia, template_2_dia, template_3_dia, template_4_dia, template_5_dia, template_6_dia, template_7_dia, template_followup_em, modo_recontato';
+
+function queryCandidatos(supabase: any, cols: string) {
+  return supabase
     .from('cliente_ppg_leads_sdr')
-    .select('remotejid, nome, email, timestamp_mensagem, followup_ativado, iniciar_atendimento, agendado, pausa_ia, nao_perturbe, atendimento_finalizado, template_1_dia, template_2_dia, template_3_dia, template_4_dia, template_5_dia, template_6_dia, template_7_dia, template_followup_em, modo_recontato')
+    .select(cols)
     .eq('followup_ativado', true)
     .eq('iniciar_atendimento', true)
     .not('modo_recontato', 'is', true) // lead em recontato (no-show) NÃO recebe a cadência de lead novo
@@ -287,11 +309,32 @@ async function selecionarCandidatos(supabase: any): Promise<any[]> {
     .or('pausa_ia.is.null,pausa_ia.eq.false')
     .or('nao_perturbe.is.null,nao_perturbe.eq.false')
     .or('atendimento_finalizado.is.null,atendimento_finalizado.eq.false')
-    .lt('timestamp_mensagem', limiteJanela)
+    // NULLS LAST no ascending: os nunca-respondentes entram DEPOIS dos que conversaram
+    // dentro do limite de 3000 (os toques deles não furam a fila de quem esfriou).
     .order('timestamp_mensagem', { ascending: true })
     .limit(3000);
-  if (error) throw new Error(`selecionarCandidatos: ${error.message}`);
-  return data ?? [];
+}
+
+async function selecionarCandidatos(supabase: any): Promise<any[]> {
+  const limiteJanela = new Date(Date.now() - JANELA_FECHADA_MIN * 60_000).toISOString(); // <= agora-24h
+  // Janela fechada por UMA das âncoras: última msg do lead há 24h+ (conversou e
+  // esfriou) OU — lead que NUNCA respondeu (timestamp NULL) — 1º template há 24h+
+  // (template_inicial_em, migration 20260704120000). Nunca respondeu E nunca recebeu
+  // template (ambas NULL) fica fora (sem âncora).
+  const { data, error } = await queryCandidatos(supabase, `${COLS_CANDIDATO}, template_inicial_em`)
+    .or(`timestamp_mensagem.lt."${limiteJanela}",and(timestamp_mensagem.is.null,template_inicial_em.lt."${limiteJanela}")`);
+  if (!error) return data ?? [];
+
+  // DEGRADAÇÃO pré-migration: se a coluna template_inicial_em ainda não existe no banco
+  // (edge deployado antes do apply), cai no comportamento antigo (só quem conversou) em
+  // vez de derrubar a esteira inteira.
+  if (String(error.message).includes('template_inicial_em')) {
+    console.error('[crm-agente-sdr][followup-template] template_inicial_em ausente (migration 20260704120000 pendente) — seleção legada');
+    const legado = await queryCandidatos(supabase, COLS_CANDIDATO).lt('timestamp_mensagem', limiteJanela);
+    if (legado.error) throw new Error(`selecionarCandidatos: ${legado.error.message}`);
+    return legado.data ?? [];
+  }
+  throw new Error(`selecionarCandidatos: ${error.message}`);
 }
 
 // Gates comuns (revalidados com o lead FRESCO, sob lock).
@@ -462,7 +505,10 @@ async function processarLead(
         template_principal: t.template_name, template_fallback: t.fallback_template_name,
       });
     } else {
-      tel.registrar('followup_template_enviado', { toque: t.toque, dia: t.dia, template: t.template_name, conta });
+      tel.registrar('followup_template_enviado', {
+        toque: t.toque, dia: t.dia, template: t.template_name, conta,
+        ancora: lead.timestamp_mensagem ? 'ultima_msg_lead' : 'template_inicial',
+      });
     }
     return true;
   } catch (e) {

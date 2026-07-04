@@ -1160,6 +1160,20 @@ Deno.serve(async (req) => {
           await admin.from("cliente_ppg_leads_sdr").update(patch).eq("id", ls.id);
         }
       }
+
+      // Âncora da esteira de template p/ lead que NUNCA responder (migration
+      // 20260704120000): AQUI o 1º template (ação 'enviar_mensagem_whatsapp') sai ANTES
+      // deste seed existir, então o trigger de carimbo em crm_whatsapp_messages não acha
+      // a linha — carimba em update SEPARADO, only-if-null, best-effort (se a migration
+      // ainda não foi aplicada, só loga e o seed segue intacto).
+      if (acoesAplicadas.includes("enviar_mensagem_whatsapp")) {
+        const { error: tplErr } = await admin
+          .from("cliente_ppg_leads_sdr")
+          .update({ template_inicial_em: new Date().toISOString() })
+          .eq("remotejid", remoteJid)
+          .is("template_inicial_em", null);
+        if (tplErr) console.error("[crm-lead-webhook] carimbo template_inicial_em:", tplErr.message);
+      }
     } catch (e: any) {
       console.error("[crm-lead-webhook] seed cliente_ppg_leads_sdr falhou:", e?.message);
     }
