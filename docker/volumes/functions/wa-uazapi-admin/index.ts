@@ -59,17 +59,6 @@ Deno.serve(async (req) => {
   const body = await req.json().catch(() => ({}));
   const action = String(body?.action ?? "");
 
-  // ── Gerar QR (criar/conectar) é restrito a ADMIN/DIRETOR (2026-07-02) ──────
-  // Pedido do TI: linha desconectada não pode ser reconectada por SDR/monitor
-  // sozinho — só admin/diretor gera QR novo. Desconectar/status/deletar seguem
-  // no gate amplo acima.
-  if (action === "criar" || action === "conectar") {
-    const { data: isAdminDiretor, error: adErr } = await userClient.rpc("is_admin_ou_diretor_user");
-    if (adErr || isAdminDiretor !== true) {
-      return json({ error: "gerar QR/conectar linha é restrito a admin/diretor" }, 403);
-    }
-  }
-
   // Resolve o token da instância (segredo) a partir do conexao_id.
   async function tokenDe(conexaoId: string): Promise<{ token: string; server: string } | null> {
     const { data: conex } = await admin.from("wa_conexoes").select("server_url").eq("id", conexaoId).maybeSingle();
