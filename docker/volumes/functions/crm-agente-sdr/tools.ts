@@ -382,8 +382,17 @@ async function remarcarAgendamento(supabase: any, input: any, ctx: CtxConversa, 
       console.error(`[crm-agente-sdr] remarcar: GCal não atualizado (segue): ${(e as Error).message}`);
     }
 
+    // Nome do monitor computado aqui — sem ele no retorno, o modelo reaproveita o nome
+    // antigo (caso real: slot da Letícia Tamara confirmado como "Leticia Carolina").
+    let vendedorNome = '';
+    try {
+      const { data: prof } = await supabase.from('profiles').select('name').eq('id', vendedorNovo).maybeSingle();
+      vendedorNome = prof?.name ?? '';
+    } catch { /* segue sem o nome */ }
     return {
-      resultado: `Reunião remarcada. Novo horário: ${formataBrasiliaDataHora(startBR)}. Link: ${link || '(o mesmo de antes)'}. Confirme o novo horário e o link pro lead.`,
+      resultado: `Reunião remarcada. Novo horário: ${formataBrasiliaDataHora(startBR)}. ` +
+        `Monitor: ${vendedorNome || vendedorNovo}. Link: ${link || '(o mesmo de antes)'}. ` +
+        `Confirme o novo horário, o monitor e o link pro lead (use exatamente estes dados).`,
       agendamento_id: alvo.id,
       id: toolUseId,
     };
