@@ -49,6 +49,14 @@ function sdrApi(path: string, init: RequestInit = {}): Promise<Response> {
 const BR_OFFSET_MS = 3 * 60 * 60 * 1000;
 const pad = (n: number) => String(n).padStart(2, '0');
 
+// Dia da semana computado em CÓDIGO e entregue pronto nas tools — o LLM erra conta de
+// calendário (caso real: confirmou "Segunda, 07/07/2026" sendo terça). Nunca deixar o
+// modelo derivar o dia da semana sozinho.
+const DIA_SEMANA_BR = [
+  'domingo', 'segunda-feira', 'terça-feira', 'quarta-feira',
+  'quinta-feira', 'sexta-feira', 'sábado',
+];
+
 function toBrasilia(isoUtc: string) {
   const br = new Date(new Date(isoUtc).getTime() - BR_OFFSET_MS);
   const hh = pad(br.getUTCHours());
@@ -57,6 +65,7 @@ function toBrasilia(isoUtc: string) {
     data: `${br.getUTCFullYear()}-${pad(br.getUTCMonth() + 1)}-${pad(br.getUTCDate())}`,
     horario: `${hh}:${mm}`,
     display: mm === '00' ? `${hh}h` : `${hh}h${mm}`,
+    diaSemana: DIA_SEMANA_BR[br.getUTCDay()],
   };
 }
 
@@ -68,7 +77,7 @@ function toBrasiliaISO(isoUtc: string): string {
 
 function formataBrasiliaDataHora(isoUtc: string): string {
   const br = new Date(new Date(isoUtc).getTime() - BR_OFFSET_MS);
-  return `${pad(br.getUTCDate())}/${pad(br.getUTCMonth() + 1)}/${br.getUTCFullYear()}` +
+  return `${DIA_SEMANA_BR[br.getUTCDay()]}, ${pad(br.getUTCDate())}/${pad(br.getUTCMonth() + 1)}/${br.getUTCFullYear()}` +
     ` às ${pad(br.getUTCHours())}:${pad(br.getUTCMinutes())}`;
 }
 
@@ -118,16 +127,17 @@ async function consultaDisponibilidade(input: any, toolUseId: string) {
   } else {
     const formatted = slots.map((s) => {
       const brt = toBrasilia(s.inicio);
-      return `- ${brt.display} do dia ${brt.data} (vendedor_id: ${s.vendedor_id}, nome: ${s.vendedor_nome})`;
+      return `- ${brt.display} de ${brt.diaSemana}, dia ${brt.data} (vendedor_id: ${s.vendedor_id}, nome: ${s.vendedor_nome})`;
     });
-    conteudo = `Horários disponíveis (Brasília):\n${formatted.join('\n')}`;
+    conteudo = `Horários disponíveis (Brasília):\n${formatted.join('\n')}\n` +
+      `(O dia da semana informado acima é o correto — use-o exatamente, não recalcule.)`;
   }
 
   return {
     resultado: conteudo,
     slots_raw: slots.map((s) => {
       const brt = toBrasilia(s.inicio);
-      return { data: brt.data, horario: brt.horario, vendedor_id: s.vendedor_id, vendedor_nome: s.vendedor_nome };
+      return { data: brt.data, dia_semana: brt.diaSemana, horario: brt.horario, vendedor_id: s.vendedor_id, vendedor_nome: s.vendedor_nome };
     }),
     id: toolUseId,
   };

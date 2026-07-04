@@ -264,6 +264,22 @@ function agoraBrasilia(): { dia: number; hora: number; minuto: number; dataForma
   };
 }
 
+// Calendário dos próximos 7 dias, computado em CÓDIGO — o LLM erra conta de
+// calendário (caso real 2026-07-04: achou que 07/07 era segunda, sendo terça, e
+// confirmou a reunião com o dia da semana errado pro lead). Com o mapa pronto no
+// contexto, o modelo nunca precisa derivar data↔dia-da-semana sozinho.
+function calendarioProximosDias(): string {
+  const pad2 = (n: number) => String(n).padStart(2, '0');
+  const linhas: string[] = [];
+  for (let i = 1; i <= 7; i++) {
+    const d = new Date(Date.now() - 3 * 60 * 60 * 1000 + i * 24 * 60 * 60 * 1000);
+    const data = `${pad2(d.getUTCDate())}/${pad2(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}`;
+    const iso = `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+    linhas.push(`• ${data} (${iso}) = ${DIAS_SEMANA[d.getUTCDay()]}`);
+  }
+  return linhas.join('\n');
+}
+
 export function montarContextoTemporal(): string {
   const { dia, hora, minuto, dataFormatada } = agoraBrasilia();
   const status = verificarDisponibilidade(dia, hora, minuto);
@@ -272,6 +288,9 @@ export function montarContextoTemporal(): string {
   return `**AGORA: ${dataFormatada} às ${fmt(hora, minuto)}**
 **DIA DA SEMANA: ${DIAS_SEMANA[dia]}**
 ${status.mensagem}
+
+**PRÓXIMOS DIAS (data = dia da semana — use ESTA tabela, NUNCA calcule de cabeça):**
+${calendarioProximosDias()}
 
 **HORÁRIOS DE ATENDIMENTO DA SEMANA:**
 • Segunda-feira: 09:30-11:30 e 14:30-20:30
