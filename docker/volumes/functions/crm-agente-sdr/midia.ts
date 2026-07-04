@@ -15,6 +15,10 @@ const GEMINI_KEY = Deno.env.get('AGENTE_SDR_GEMINI_KEY') ?? Deno.env.get('GEMINI
 // 5 retries). Alias em vez de ID fixo: ID errado = 404 em TODA transcrição.
 const MODELO_TRANSCRICAO = 'gemini-flash-lite-latest';
 const MODELO_ANALISE = 'gemini-flash-latest';
+// Fallback de transcrição = OpenAI Whisper, MESMO padrão do crm-transcrever-audio
+// (chave já presente na VPS). Entra quando o Gemini falha OU devolve vazio.
+const OPENAI_KEY = Deno.env.get('AGENTE_SDR_OPENAI_KEY') ?? Deno.env.get('OPENAI_API_KEY') ?? '';
+const MODELO_TRANSCRICAO_FALLBACK = Deno.env.get('OPENAI_TRANSCRIBE_MODEL') ?? 'whisper-1';
 
 export type MensagemTratada = {
   mensagem: string;     // o que entra no acúmulo/concatenação (texto, transcrição ou legenda)
@@ -35,7 +39,7 @@ async function gemini(model: string, body: Record<string, unknown>, tentativas =
   throw new Error(`Gemini ${model}: ${ultimoErro}`);
 }
 
-async function baixarBase64(url: string): Promise<{ b64: string; mime: string }> {
+async function baixarBase64(url: string): Promise<{ b64: string; mime: string; bytes: Uint8Array }> {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`download da mídia falhou: HTTP ${res.status}`);
   const mime = res.headers.get('content-type') ?? 'application/octet-stream';
@@ -45,7 +49,37 @@ async function baixarBase64(url: string): Promise<{ b64: string; mime: string }>
   for (let i = 0; i < buf.length; i += CHUNK) {
     bin += String.fromCharCode(...buf.subarray(i, i + CHUNK));
   }
-  return { b64: btoa(bin), mime };
+  return { b64: btoa(bin), mime, bytes: buf };
+}
+
+// Extensão a partir do mime (o Whisper exige nome de arquivo com extensão reconhecível) —
+// espelho do extDoMime do crm-transcrever-audio.
+function extDoMime(mime: string): string {
+  const m = (mime || '').toLowerCase();
+  if (m.includes('ogg') || m.includes('opus')) return 'ogg';
+  if (m.includes('mpeg') || m.includes('mp3')) return 'mp3';
+  if (m.includes('mp4') || m.includes('m4a') || m.includes('aac')) return 'm4a';
+  if (m.includes('wav')) return 'wav';
+  if (m.includes('webm')) return 'webm';
+  return 'ogg';
+}
+
+async function whisperTranscrever(bytes: Uint8Array, mime: string): Promise<string> {
+  if (!OPENAI_KEY) throw new Error('OPENAI key não configurada (fallback whisper)');
+  const form = new FormData();
+  form.append('file', new Blob([bytes], { type: mime }), `audio.${extDoMime(mime)}`);
+  form.append('model', MODELO_TRANSCRICAO_FALLBACK);
+  form.append('language', 'pt');
+  const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${OPENAI_KEY}` },
+    body: form,
+  });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`OpenAI HTTP ${res.status}: ${j?.error?.message ?? 'falha'}`);
+  const texto = String(j?.text ?? '').trim();
+  if (!texto) throw new Error('whisper: transcrição vazia');
+  return texto;
 }
 
 function urlAnexo(payload: any): { url: string; mime: string } | null {
@@ -61,30 +95,58 @@ async function transcreverAudio(payload: any, tel?: Telemetria): Promise<string>
     tel?.registrar('transcricao', { ok: false, motivo: 'áudio sem anexo disponível' });
     return payload.conteudo || '[áudio sem anexo disponível]';
   }
-  // Nó de endpoint: registra acerto/erro da transcrição (Gemini) com o corpo do
-  // erro — é aqui que aparece, p.ex., "API key expired". Mantém o throw original
-  // (em erro o áudio segue sendo descartado pelo catch do processarInbound).
+  // Nó de endpoint: registra acerto/erro da transcrição com o corpo do erro.
+  // Gemini primeiro; se falhar (429/erro) OU devolver VAZIO (caso Danilo
+  // 2026-07-03), cai pro Whisper (OpenAI). Só se OS DOIS falharem mantém o
+  // throw original (áudio descartado; o reconciliador religa como "[áudio]").
   const t0 = Date.now();
+  let baixado: { b64: string; mime: string; bytes: Uint8Array };
   try {
-    const { b64, mime } = await baixarBase64(anexo.url);
+    baixado = await baixarBase64(anexo.url);
+  } catch (e) {
+    tel?.registrar('transcricao', { ok: false, modelo: 'download', mime: anexo.mime }, Date.now() - t0, (e as Error).message);
+    throw e;
+  }
+  const { b64, mime, bytes } = baixado;
+  const mimeEfetivo = anexo.mime || mime;
+
+  let erroGemini: string | null = null;
+  try {
     const resp = await gemini(MODELO_TRANSCRICAO, {
       contents: [{
         parts: [
           { text: 'Transcreva esse audio.' },
-          { inlineData: { mimeType: anexo.mime || mime, data: b64 } },
+          { inlineData: { mimeType: mimeEfetivo, data: b64 } },
         ],
       }],
     });
-    const texto = resp.candidates?.[0]?.content?.parts?.[0]?.text ?? '[transcrição indisponível]';
-    tel?.registrar('transcricao', {
-      ok: true, modelo: MODELO_TRANSCRICAO, mime: anexo.mime || mime, texto: resumir(texto, 1500),
-    }, Date.now() - t0);
-    return texto;
+    const texto = String(resp.candidates?.[0]?.content?.parts?.[0]?.text ?? '').trim();
+    if (texto) {
+      tel?.registrar('transcricao', {
+        ok: true, modelo: MODELO_TRANSCRICAO, mime: mimeEfetivo, texto: resumir(texto, 1500),
+      }, Date.now() - t0);
+      return texto;
+    }
+    erroGemini = 'resposta vazia (sem texto nos candidates)';
   } catch (e) {
+    erroGemini = (e as Error).message;
+  }
+
+  // Fallback Whisper (OpenAI), mesmo caminho do crm-transcrever-audio.
+  const t1 = Date.now();
+  try {
+    const texto = await whisperTranscrever(bytes, mimeEfetivo);
+    tel?.registrar('transcricao', {
+      ok: true, modelo: MODELO_TRANSCRICAO_FALLBACK, fallback: true, mime: mimeEfetivo,
+      gemini_erro: resumir(erroGemini ?? '', 300), texto: resumir(texto, 1500),
+    }, Date.now() - t1);
+    return texto;
+  } catch (e2) {
     tel?.registrar('transcricao',
-      { ok: false, modelo: MODELO_TRANSCRICAO, mime: anexo.mime },
-      Date.now() - t0, (e as Error).message);
-    throw e;
+      { ok: false, modelo: `${MODELO_TRANSCRICAO} + ${MODELO_TRANSCRICAO_FALLBACK}`, mime: mimeEfetivo },
+      Date.now() - t0,
+      `gemini: ${erroGemini} | whisper: ${(e2 as Error).message}`);
+    throw new Error(`transcrição falhou nos dois provedores — gemini: ${erroGemini} | whisper: ${(e2 as Error).message}`);
   }
 }
 
