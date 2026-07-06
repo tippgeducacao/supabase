@@ -233,10 +233,17 @@ function resolverVariavel(v: VarMap, lead: any): string {
   }
 }
 
-// Toque cujo template usa a variável 'curso' e o lead não tem curso na base →
-// pular (a Meta rejeita parâmetro de body vazio; enviar '' queimaria o envio).
-function cursoVazio(variaveis: VarMap[], lead: any): boolean {
-  return variaveis.some((v) => v.tipo === 'curso' && !resolverVariavel(v, lead).trim());
+// Toque cujo template tem QUALQUER variável que resolve VAZIA pro lead (sem nome,
+// sem curso, sem email…) → pular (a Meta rejeita parâmetro de body vazio — 131008;
+// visto 06/07: 192 falhas do bom_dia_receber_cronograma, TODAS leads sem nome, e o
+// toque não marcado re-tentava a cada tick). Não marca o toque: se o dado for
+// preenchido depois, ele sai no próximo tick elegível. Devolve o tipo da variável
+// vazia (telemetria) ou null quando está tudo preenchido.
+function variavelVazia(variaveis: VarMap[], lead: any): string | null {
+  for (const v of variaveis) {
+    if (!resolverVariavel(v, lead).trim()) return v.tipo;
+  }
+  return null;
 }
 
 // ── trava dura: nenhum template (de qualquer origem) nas últimas 24h ─────────
@@ -476,10 +483,11 @@ async function processarLead(
       }
     }
 
-    // Template do toque usa {{curso}} mas o lead não tem curso na base → pula
-    // (não marca o toque; se o curso for preenchido depois, ele sai no próximo tick).
-    if (cursoVazio(t.variaveis, lead)) {
-      tel.registrar('followup_template_pulado', { motivo: 'curso_vazio', toque: t.toque });
+    // Template do toque com variável vazia pro lead (sem nome/curso/email na base) →
+    // pula (não marca o toque; se o dado for preenchido depois, sai no próximo tick).
+    const varVazia = variavelVazia(t.variaveis, lead);
+    if (varVazia) {
+      tel.registrar('followup_template_pulado', { motivo: 'variavel_vazia', variavel: varVazia, toque: t.toque });
       return false;
     }
 
