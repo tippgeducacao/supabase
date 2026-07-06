@@ -303,7 +303,7 @@ async function enviarTemplate(
 
 // ── seleção grossa no banco (booleans + janela fechada) ─────────────────────
 const COLS_CANDIDATO =
-  'remotejid, nome, email, timestamp_mensagem, followup_ativado, iniciar_atendimento, agendado, pausa_ia, nao_perturbe, atendimento_finalizado, template_1_dia, template_2_dia, template_3_dia, template_4_dia, template_5_dia, template_6_dia, template_7_dia, template_followup_em, modo_recontato';
+  'remotejid, nome, email, curso_interesse_original, timestamp_mensagem, followup_ativado, iniciar_atendimento, agendado, pausa_ia, nao_perturbe, atendimento_finalizado, template_1_dia, template_2_dia, template_3_dia, template_4_dia, template_5_dia, template_6_dia, template_7_dia, template_followup_em, modo_recontato';
 
 function queryCandidatos(supabase: any, cols: string) {
   return supabase
@@ -584,6 +584,11 @@ export async function rodarEsteiraFollowupTemplate(
 
     const t = proximoToque(lead, toquesLead);
     if (t && devido(lead, inicio, t)) {
+      // Variável do template vazia pro lead (sem nome/curso na base) → NEM entra nos
+      // devidos: o pulo tardio (processarLead) deixava esses leads OCUPANDO o cap de
+      // 300 do tick a cada rodada e afogando os demais (06/07: ticks com 300 devidos
+      // e só 59-82 enviados). O guard tardio continua como cinto (estado fresco).
+      if (variavelVazia(t.variaveis, lead)) continue;
       // Espalhamento por horário DENTRO da janela do toque (janela sem tick elegível
       // ⇒ o toque nunca sai — a tela avisa na configuração). O catch-up do fim do dia
       // é o ÚLTIMO tick elegível da janela (não o global, que pode estar fora dela).
