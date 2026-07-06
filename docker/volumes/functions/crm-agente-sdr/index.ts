@@ -419,7 +419,11 @@ Deno.serve(async (req) => {
       return json({ error: 'unauthorized' }, 401);
     }
     const limiteParam = Number(url.searchParams.get('limite'));
-    const horaParam = Number(url.searchParams.get('hora'));
+    // ⚠️ Number(null) === 0 — sem o guard de presença, tick SEM ?hora= rodava com
+    // hora forçada 0 (= 21h BRT, fora de toda janela) e os crons naturais nunca
+    // enviavam nada (bug pego em 2026-07-06, tarde inteira com devidos=0).
+    const horaRaw = url.searchParams.get('hora');
+    const horaParam = horaRaw === null ? NaN : Number(horaRaw);
     const trabalho = rodarEsteiraFollowupTemplate(supabase, {
       limite: Number.isFinite(limiteParam) && limiteParam > 0 ? limiteParam : undefined,
       horaUtc: Number.isFinite(horaParam) ? horaParam : undefined,
