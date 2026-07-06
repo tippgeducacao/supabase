@@ -7,6 +7,8 @@
 //   pausa_ia                  → RPC crm_set_pausa_ia + followup_ativado=false
 //   temporizador_proxima_turma→ RPC crm_agente_timer_proxima_turma (timer de recontato
 //                               com a data REAL da próxima turma) + pausa da IA
+//   consulta_pos_disponiveis  → catálogo de pós ativas (cursos) + troca do curso de
+//                               interesse do lead (fn_sdr_api_resolver_pos_graduacao)
 // Todo output inclui o id do tool_use (mesmo formato que o n8n devolvia ao Claude).
 
 // deno-lint-ignore-file no-explicit-any
@@ -691,6 +693,56 @@ async function temporizadorProximaTurma(supabase: any, input: any, ctx: CtxConve
   return sair(`Recontato agendado no temporizador (este curso ainda não tem turma futura cadastrada; o time vai retomar o lead em ${d.recontato_em}). Confirme pro lead que vai chamá-lo quando abrir a próxima turma, sem citar data, e despeça-se. A IA já foi pausada; não chame pausa_ia.`);
 }
 
+// ── consulta_pos_disponiveis ─────────────────────────────────────────────────
+// Catálogo de pós ativas (tabela cursos) + troca do curso de interesse do lead.
+// `trocar_para` resolve o nome oficial via fn_sdr_api_resolver_pos_graduacao (o
+// MESMO resolver do envia_informacoes/disponibilidade → o nome devolvido funciona
+// nas outras tools) e MATERIALIZA em cliente_ppg_leads_sdr.curso_interesse_original
+// (prompts e esteiras de follow-up passam a usar o curso novo sozinhos).
+async function consultaPosDisponiveis(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
+  const sair = (texto: string) => ({ resultado: texto, id: toolUseId });
+
+  const { data: cursos, error } = await supabase
+    .from('cursos')
+    .select('nome')
+    .eq('ativo', true)
+    .eq('modalidade', 'Pós-Graduação')
+    .order('nome');
+  if (error) return sair(`Erro ao listar as pós (${error.message}). Tente de novo; se persistir, siga a conversa sem citar o erro.`);
+  const lista = ((cursos ?? []) as { nome: string }[]).map((c) => `- ${c.nome}`).join('\n');
+
+  const alvo = String(input?.trocar_para ?? '').trim();
+  if (!alvo) {
+    return sair(
+      `Pós-graduações ATIVAS da PPG:\n${lista}\n` +
+      `Ao falar com o lead, cite só as relevantes pro contexto (máx. 3-4) e NUNCA use os prefixos "PÓS |"/"MBA |" — fale o nome natural.`,
+    );
+  }
+
+  const { data: resolved, error: eR } = await supabase.rpc('fn_sdr_api_resolver_pos_graduacao', { p_valor: alvo });
+  const cursoId = (resolved as any)?.id ?? null;
+  const nomeOficial = String((resolved as any)?.nome ?? '').trim();
+  if (eR || !cursoId) {
+    return sair(
+      `Não achei uma pós correspondente a "${alvo}". Catálogo ativo:\n${lista}\n` +
+      `Confirme com o lead qual dessas ele quer (cite as 2-3 mais próximas, sem os prefixos) e chame de novo com o nome escolhido.`,
+    );
+  }
+
+  // Nome natural pra conversa/registro (sem "PÓS |"; "MBA |" vira "MBA ").
+  const nomeConversa = nomeOficial.replace(/^p[oó]s\s*\|\s*/i, '').replace(/^mba\s*\|\s*/i, 'MBA ').trim();
+  try {
+    await atualizarLead(supabase, ctx.remotejid, { curso_interesse_original: nomeConversa });
+  } catch (e) {
+    console.error(`[crm-agente-sdr] consulta_pos: atualizar interesse falhou (segue): ${(e as Error).message}`);
+  }
+  return sair(
+    `Interesse do lead ATUALIZADO para: ${nomeConversa} (nome oficial: ${nomeOficial}). ` +
+    `Daqui em diante use "${nomeConversa}" como curso_escolhido em TODAS as chamadas (consulta_disponibilidade, envia_informacoes, verificar_compatibilidade_curso). ` +
+    `Pode enviar o cronograma/valor dessa pós normalmente se o lead pedir. Confirme a troca pro lead de forma natural e siga o fluxo.`,
+  );
+}
+
 // ── dispatcher ──────────────────────────────────────────────────────────────
 export async function executarTool(
   supabase: any,
@@ -708,6 +760,7 @@ export async function executarTool(
       case 'envia_informacoes': return await enviaInformacoes(supabase, input, ctx, id);
       case 'pausa_ia': return await pausaIa(supabase, input, ctx, id);
       case 'temporizador_proxima_turma': return await temporizadorProximaTurma(supabase, input, ctx, id);
+      case 'consulta_pos_disponiveis': return await consultaPosDisponiveis(supabase, input, ctx, id);
       default: return { resultado: `Tool desconhecida: ${name}`, id };
     }
   } catch (e) {
