@@ -66,7 +66,9 @@ const SEND_URL = (Deno.env.get('AGENTE_SDR_SEND_URL') ?? `${SUPABASE_URL}/functi
 // preenchido pelo seed do webhook/automação). Lead sem curso → o toque é PULADO
 // (Meta rejeita parâmetro vazio; ver guarda em processarLead).
 type VarTipo = 'primeiro_nome' | 'nome' | 'telefone' | 'email' | 'curso' | 'fixo';
-type VarMap = { tipo: VarTipo; valor?: string };
+// padrao: valor usado quando o dado do lead resolve VAZIO (ex.: "doutor(a)" pro nome,
+// "sua área de interesse" pro curso). Sem padrao, lead com variável vazia é PULADO.
+type VarMap = { tipo: VarTipo; valor?: string; padrao?: string };
 
 // Um "envio" concreto: template + idioma + variáveis + conta de saída.
 type TemplateEnvio = { template_name: string; lang: string; variaveis: VarMap[]; wa_account_id: string | null };
@@ -113,7 +115,11 @@ const colunaToque = (n: number) => `template_${n}_dia`;
 
 function parseVars(raw: unknown): VarMap[] {
   return Array.isArray(raw)
-    ? (raw as any[]).map((v) => ({ tipo: String(v?.tipo ?? 'fixo') as VarTipo, valor: v?.valor != null ? String(v.valor) : undefined }))
+    ? (raw as any[]).map((v) => ({
+        tipo: String(v?.tipo ?? 'fixo') as VarTipo,
+        valor: v?.valor != null ? String(v.valor) : undefined,
+        padrao: v?.padrao != null ? String(v.padrao) : undefined,
+      }))
     : [];
 }
 
@@ -220,17 +226,22 @@ function horaPreferida(remotejid: string, now: number, horas: number[] = HORAS_U
   return horas[h % horas.length];
 }
 
-// Resolve o valor de uma variável do template a partir do lead.
+// Resolve o valor de uma variável do template a partir do lead. Dado VAZIO com
+// `padrao` configurado na régua → usa o padrão (ex.: sem nome → "doutor(a)") em vez
+// de pular o lead; sem padrão, o vazio propaga e o guard variavelVazia pula o toque.
 function resolverVariavel(v: VarMap, lead: any): string {
-  switch (v.tipo) {
-    case 'primeiro_nome': return extrairPrimeiroNome(lead?.nome) || '';
-    case 'nome':          return String(lead?.nome ?? '').trim();
-    case 'telefone':      return String(lead?.remotejid ?? '').split('@')[0];
-    case 'email':         return String(lead?.email ?? '').trim();
-    case 'curso':         return String(lead?.curso_interesse_original ?? '').trim();
-    case 'fixo':          return String(v?.valor ?? '');
-    default:              return String(v?.valor ?? '');
-  }
+  const bruto = (() => {
+    switch (v.tipo) {
+      case 'primeiro_nome': return extrairPrimeiroNome(lead?.nome) || '';
+      case 'nome':          return String(lead?.nome ?? '').trim();
+      case 'telefone':      return String(lead?.remotejid ?? '').split('@')[0];
+      case 'email':         return String(lead?.email ?? '').trim();
+      case 'curso':         return String(lead?.curso_interesse_original ?? '').trim();
+      case 'fixo':          return String(v?.valor ?? '');
+      default:              return String(v?.valor ?? '');
+    }
+  })();
+  return bruto.trim() ? bruto : String(v?.padrao ?? '').trim() || bruto;
 }
 
 // Toque cujo template tem QUALQUER variável que resolve VAZIA pro lead (sem nome,
