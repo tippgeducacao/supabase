@@ -179,6 +179,7 @@ function normalizeBase(it: any, tipoData: string) {
     valor_parcela: parseNum(it.valorParcela),
     valor_pago: parseNum(it.valorPago),
     valor_previsto: parseNum(it.valorPrevisto),
+    valor_tarifa: parseNum(it.valorTarifa), // tarifa do gateway (SIGA incluiu 2026-07-06); líquido = pago - tarifa
     data_vencimento: brToIso(it.dataVencimento),
     data_pagamento: brToIso(it.dataPagamento ?? it.dataPagamentoAntecipado),
     data_recebimento: brToIso(it.dataRecebimento), // data REAL do crédito (PJBank); "" -> null
