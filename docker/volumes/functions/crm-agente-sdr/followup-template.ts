@@ -309,8 +309,6 @@ function queryCandidatos(supabase: any, cols: string) {
     .or('pausa_ia.is.null,pausa_ia.eq.false')
     .or('nao_perturbe.is.null,nao_perturbe.eq.false')
     .or('atendimento_finalizado.is.null,atendimento_finalizado.eq.false')
-    // NULLS LAST no ascending: os nunca-respondentes entram DEPOIS dos que conversaram
-    // dentro do limite de 3000 (os toques deles não furam a fila de quem esfriou).
     .order('timestamp_mensagem', { ascending: true })
     .limit(3000);
 }
@@ -319,22 +317,31 @@ async function selecionarCandidatos(supabase: any): Promise<any[]> {
   const limiteJanela = new Date(Date.now() - JANELA_FECHADA_MIN * 60_000).toISOString(); // <= agora-24h
   // Janela fechada por UMA das âncoras: última msg do lead há 24h+ (conversou e
   // esfriou) OU — lead que NUNCA respondeu (timestamp NULL) — 1º template há 24h+
-  // (template_inicial_em, migration 20260704120000). Nunca respondeu E nunca recebeu
-  // template (ambas NULL) fica fora (sem âncora).
-  const { data, error } = await queryCandidatos(supabase, `${COLS_CANDIDATO}, template_inicial_em`)
-    .or(`timestamp_mensagem.lt."${limiteJanela}",and(timestamp_mensagem.is.null,template_inicial_em.lt."${limiteJanela}")`);
-  if (!error) return data ?? [];
+  // (template_inicial_em, migration 20260704120000).
+  //
+  // ⚠️ DUAS consultas DE PROPÓSITO (uma por coorte): o PostgREST corta qualquer SELECT
+  // em 1000 linhas (max-rows), e com um SELECT só + NULLS LAST os nunca-respondentes
+  // ficavam SEMPRE depois do corte quando havia 1000+ conversados-esfriaram — foi o
+  // tick de 06/07 (candidatos=1000, zero âncora template_inicial). Separando, cada
+  // coorte tem seu próprio teto de 1000 e as duas entram no tick; os conversados
+  // continuam na frente da fila (prioridade preservada).
+  const conversados = await queryCandidatos(supabase, COLS_CANDIDATO)
+    .lt('timestamp_mensagem', limiteJanela);
+  if (conversados.error) throw new Error(`selecionarCandidatos (conversados): ${conversados.error.message}`);
 
-  // DEGRADAÇÃO pré-migration: se a coluna template_inicial_em ainda não existe no banco
-  // (edge deployado antes do apply), cai no comportamento antigo (só quem conversou) em
-  // vez de derrubar a esteira inteira.
-  if (String(error.message).includes('template_inicial_em')) {
-    console.error('[crm-agente-sdr][followup-template] template_inicial_em ausente (migration 20260704120000 pendente) — seleção legada');
-    const legado = await queryCandidatos(supabase, COLS_CANDIDATO).lt('timestamp_mensagem', limiteJanela);
-    if (legado.error) throw new Error(`selecionarCandidatos: ${legado.error.message}`);
-    return legado.data ?? [];
+  const mudos = await queryCandidatos(supabase, `${COLS_CANDIDATO}, template_inicial_em`)
+    .is('timestamp_mensagem', null)
+    .lt('template_inicial_em', limiteJanela);
+  if (mudos.error) {
+    // DEGRADAÇÃO pré-migration: coluna template_inicial_em ausente → segue só com quem
+    // conversou (comportamento antigo) em vez de derrubar a esteira inteira.
+    if (String(mudos.error.message).includes('template_inicial_em')) {
+      console.error('[crm-agente-sdr][followup-template] template_inicial_em ausente (migration 20260704120000 pendente) — seleção legada');
+      return conversados.data ?? [];
+    }
+    throw new Error(`selecionarCandidatos (mudos): ${mudos.error.message}`);
   }
-  throw new Error(`selecionarCandidatos: ${error.message}`);
+  return [...(conversados.data ?? []), ...(mudos.data ?? [])];
 }
 
 // Gates comuns (revalidados com o lead FRESCO, sob lock).
