@@ -60,6 +60,17 @@ function brData(isoUtc: string) {
 const primeiroNome = (nome: string | null | undefined) =>
   String(nome ?? '').trim().split(/\s+/)[0] ?? '';
 
+// FALLBACKS: a Meta REJEITA parâmetro de template vazio — sem o fallback a reunião
+// sem link ficava SEM lembrete nenhum (o send falhava e o claim retentava até a
+// janela passar). E o campo link_reuniao vem com lixo em ~7% das reuniões ("." ","
+// ou texto sem URL — atendente preenchendo qualquer coisa): só passa link que
+// COMEÇA com http(s); o resto vira o texto neutro abaixo.
+const LINK_FALLBACK = 'vou te enviar aqui na conversa';
+const linkDaReuniao = (raw: string | null | undefined): string => {
+  const link = String(raw ?? '').trim();
+  return /^https?:\/\//i.test(link) ? link : LINK_FALLBACK;
+};
+
 // ── Toques (crm_lembrete_toques) ────────────────────────────────────────────
 type Ctx = { nome: string; dia: string; hora: string; link: string };
 type Toque = {
@@ -230,7 +241,12 @@ async function rodar(): Promise<{ toques: number; candidatos: number; enviados: 
     const telefone = String(lead.whatsapp ?? '').trim();
     if (!telefone) continue;
     const { dia, hora } = brData(ag.data_agendamento);
-    const ctx: Ctx = { nome: primeiroNome(lead.nome), dia, hora, link: ag.link_reuniao ?? '' };
+    const ctx: Ctx = {
+      nome: primeiroNome(lead.nome) || 'doutor(a)', // param vazio = rejeição da Meta
+      dia,
+      hora,
+      link: linkDaReuniao(ag.link_reuniao),
+    };
 
     // Só resolve a rota (RPC do espelho + config) quando há toque DEVIDO nesta reunião.
     const devidos = toques.filter((t) => {
