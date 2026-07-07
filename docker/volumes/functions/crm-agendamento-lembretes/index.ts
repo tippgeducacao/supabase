@@ -1,30 +1,33 @@
-// crm-agendamento-lembretes — lembrete/confirmação de reunião (T-2h e T-30min).
+// crm-agendamento-lembretes — lembretes/confirmação de reunião ANTES do horário.
 //
-// Reuniões próximas recebem 2 toques antes da reunião: T-2h e T-30min. Disparado por
+// TOQUES CONFIGURÁVEIS (tabela crm_lembrete_toques, tela "Lembretes de Reunião" do
+// CRM): cada toque diz QUANTO TEMPO ANTES dispara (minutos_antes) e o CONTEÚDO por
+// canal — template Meta (template_name/lang/variaveis) e texto livre (linha Uazapi).
+// Padrão semeado: 2 horas e 30 minutos antes (comportamento histórico). Disparado por
 // cron (a cada ~10 min). NÃO passa pela trava de 24h de marketing — lembrete de
 // reunião é essencial e tem que sair sempre.
 //
 // NÚMERO QUE ENVIA — configurável POR RESPONSÁVEL (tabela crm_lembrete_numeros,
-// aba "Lembretes de reunião" da tela WhatsApp Cloud API do CRM):
+// mesma tela):
 //   • Responsável da reunião: origem IA ('API SDR'/'Agendamento por IA') →
 //     agendamento_responsavel_espelho() (o SDR que herdou o lead no SAC);
 //     demais reuniões → sdr_id (quem marcou).
-//   • Config canal='meta' → TEMPLATE pela conta Cloud API configurada (os templates
-//     de lembrete precisam estar APROVADOS na WABA dessa conta).
+//   • Config canal='meta' → TEMPLATE pela conta Cloud API configurada (o template do
+//     toque precisa estar APROVADO na WABA dessa conta).
 //   • Config canal='web'  → TEXTO LIVRE pela linha WhatsApp Web/Uazapi (sem janela
-//     24h/template) — os textos espelham o corpo dos templates (mudou o template na
-//     Meta → atualize textoLivre aqui).
+//     24h/template) — o texto_livre do toque, placeholders {nome} {hora} {dia} {link}.
 //   • SEM config ativa: comportamento ORIGINAL — reunião 'API SDR' sai pela conta
 //     padrão (João); reunião marcada por humano NÃO recebe lembrete (opt-in).
 //
-// Janelas (minutos restantes até a reunião) — largas o bastante p/ o cron de 10 min
-// sempre acertar; o claim atômico da coluna garante 1 envio só:
-//   • T-2h:    resta entre 90 e 120 min  → se a reunião foi marcada com MENOS de ~1h30
-//              de antecedência, esta janela já passou e só o de 30min sai.
-//   • T-30min: resta entre 10 e 35 min.
+// Janela de cada toque (minutos restantes até a reunião): dispara quando
+//   max(minutos_antes − 30, 10) <= resta <= minutos_antes + 5
+// — banda de 30 min garante que o cron de 10 min sempre acerta; piso de 10 min evita
+// lembrete em cima da hora; reunião marcada DEPOIS da banda do toque não recebe aquele
+// toque (igual ao comportamento histórico do T-2h).
 //
-// Dedup: claim atômico (UPDATE ... WHERE coluna IS NULL RETURNING) antes de enviar;
-// se o envio falhar, a coluna volta a NULL e tenta no próximo tick.
+// Dedup: claim atômico em crm_lembrete_envios (INSERT ON CONFLICT DO NOTHING por
+// reunião × toque) antes de enviar; falhou o envio → remove a linha e tenta no
+// próximo tick. (As colunas legadas agendamentos.lembrete_*_em viraram histórico.)
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3';
 
@@ -40,6 +43,11 @@ const json = (data: unknown, status = 200) =>
 // Reuniões da IA têm sdr_id = conta "IA SDR" → o responsável real vem do espelho.
 const IA_ORIGENS = ['API SDR', 'Agendamento por IA'];
 
+// Janela do toque (ver cabeçalho).
+const BANDA_MIN = 30; // largura da banda abaixo do alvo
+const PISO_MIN = 10;  // nunca lembrar com menos de 10 min de antecedência
+const FOLGA_MIN = 5;  // tolerância acima do alvo
+
 // Brasília = UTC-3 fixo.
 const BR_OFFSET_MS = 3 * 60 * 60 * 1000;
 const pad = (n: number) => String(n).padStart(2, '0');
@@ -52,40 +60,37 @@ function brData(isoUtc: string) {
 const primeiroNome = (nome: string | null | undefined) =>
   String(nome ?? '').trim().split(/\s+/)[0] ?? '';
 
-// ── CONFIG DOS 2 LEMBRETES ──────────────────────────────────────────────────
-// janelaMin = [piso, teto] de minutos restantes p/ o toque ficar devido.
-// params(ctx) = valores de {{1}},{{2}}… NA ORDEM do template.
-// textoLivre(ctx) = versão texto (linha Uazapi) — ESPELHA o body do template na Meta.
-//   ctx = { nome, dia, hora, link }
+// ── Toques (crm_lembrete_toques) ────────────────────────────────────────────
 type Ctx = { nome: string; dia: string; hora: string; link: string };
-type Lembrete = {
-  coluna: 'lembrete_2h_em' | 'lembrete_30min_em';
-  template_name: string;
-  lang: string;
-  janelaMin: [number, number];
-  params: (c: Ctx) => string[];
-  textoLivre: (c: Ctx) => string;
+type Toque = {
+  id: string;
+  minutos_antes: number;
+  rotulo: string | null;
+  template_name: string | null;
+  template_lang: string;
+  template_variaveis: string[]; // tokens NA ORDEM dos {{N}} do template
+  texto_livre: string;
 };
-const LEMBRETES: Lembrete[] = [
-  {
-    coluna: 'lembrete_2h_em',
-    template_name: 'lembrete_2_horas_antes_utility', // {{1}}=nome {{2}}=hora {{3}}=link
-    lang: 'pt_BR',
-    janelaMin: [90, 120],
-    params: (c) => [c.nome, c.hora, c.link],
-    textoLivre: (c) =>
-      `Oi ${c.nome}! Faltam só 2 horas para o nosso alinhamento das ${c.hora}. Já está tudo organizado por aqui.\n\nLink de acesso: ${c.link}\n\nÉ só entrar pelo link no horário. Te aguardamos lá!`,
-  },
-  {
-    coluna: 'lembrete_30min_em',
-    template_name: 'lembre_de_30_min_utility', // {{1}}=nome {{2}}=hora {{3}}=link
-    lang: 'pt_BR',
-    janelaMin: [10, 35],
-    params: (c) => [c.nome, c.hora, c.link],
-    textoLivre: (c) =>
-      `Olá ${c.nome}, tudo certo aqui, já me organizei aqui para o seu alinhamento das ${c.hora}.\n\nLink: ${c.link}\n\nTe espero no nosso link que enviei acima.`,
-  },
-];
+
+const TOKEN_VALOR: Record<string, (c: Ctx) => string> = {
+  nome: (c) => c.nome,
+  hora: (c) => c.hora,
+  dia: (c) => c.dia,
+  link: (c) => c.link,
+};
+const resolverToken = (token: string, c: Ctx) => TOKEN_VALOR[token]?.(c) ?? '';
+const resolverTextoLivre = (texto: string, c: Ctx) =>
+  texto.replace(/\{(nome|hora|dia|link)\}/g, (_, t) => resolverToken(t, c));
+
+async function carregarToques(): Promise<Toque[]> {
+  const { data, error } = await supabase
+    .from('crm_lembrete_toques')
+    .select('id, minutos_antes, rotulo, template_name, template_lang, template_variaveis, texto_livre')
+    .eq('ativo', true)
+    .order('minutos_antes', { ascending: false });
+  if (error) throw new Error(`select crm_lembrete_toques: ${error.message}`);
+  return (data ?? []) as Toque[];
+}
 
 // ── Roteamento do número que envia ──────────────────────────────────────────
 type Rota =
@@ -122,23 +127,24 @@ async function resolverRota(ag: { id: string; origem: string | null; sdr_id: str
   return origem === 'API SDR' ? { via: 'meta', wa_account_id: null } : null;
 }
 
-// Claim atômico: marca a coluna se ainda está NULL. true = consegui o claim (envio meu).
-async function claim(agId: string, coluna: string): Promise<boolean> {
+// Claim atômico: 1 linha por reunião × toque. true = consegui o claim (envio meu).
+async function claim(agId: string, toqueId: string): Promise<boolean> {
   const { data, error } = await supabase
-    .from('agendamentos')
-    .update({ [coluna]: new Date().toISOString() })
-    .eq('id', agId)
-    .is(coluna, null)
-    .select('id');
-  if (error) { console.error(`[lembretes] claim ${coluna} ${agId}: ${error.message}`); return false; }
+    .from('crm_lembrete_envios')
+    .upsert(
+      { agendamento_id: agId, toque_id: toqueId },
+      { onConflict: 'agendamento_id,toque_id', ignoreDuplicates: true },
+    )
+    .select('agendamento_id');
+  if (error) { console.error(`[lembretes] claim ${agId}×${toqueId}: ${error.message}`); return false; }
   return (data?.length ?? 0) > 0;
 }
-async function soltarClaim(agId: string, coluna: string): Promise<void> {
-  await supabase.from('agendamentos').update({ [coluna]: null }).eq('id', agId);
+async function soltarClaim(agId: string, toqueId: string): Promise<void> {
+  await supabase.from('crm_lembrete_envios').delete().eq('agendamento_id', agId).eq('toque_id', toqueId);
 }
 
-async function enviarTemplate(telefone: string, lem: Lembrete, ctx: Ctx, waAccountId: string | null): Promise<boolean> {
-  const valores = lem.params(ctx).filter((v) => v != null);
+async function enviarTemplate(telefone: string, toque: Toque, ctx: Ctx, waAccountId: string | null): Promise<boolean> {
+  const valores = (toque.template_variaveis ?? []).map((t) => resolverToken(t, ctx));
   const components = valores.length
     ? [{ type: 'body', parameters: valores.map((v) => ({ type: 'text', text: String(v) })) }]
     : [];
@@ -148,8 +154,8 @@ async function enviarTemplate(telefone: string, lem: Lembrete, ctx: Ctx, waAccou
     body: JSON.stringify({
       telefone,
       tipo: 'template',
-      template_name: lem.template_name,
-      template_lang: lem.lang,
+      template_name: toque.template_name,
+      template_lang: toque.template_lang || 'pt_BR',
       template_components: components,
       wa_account_id: waAccountId,
       // Lembrete é UTILITY (reunião iminente) → fura a trava de 24h de marketing. Sem isso o
@@ -185,20 +191,36 @@ async function enviarTexto(telefone: string, texto: string, waConexaoId: string)
   return true;
 }
 
-async function rodar(): Promise<{ candidatos: number; enviados: number }> {
-  // TODAS as reuniões nas próximas ~2h05 (não só as da IA — a config por responsável
-  // pode habilitar lembrete p/ reunião marcada por humano), não canceladas/realizadas/
+async function rodar(): Promise<{ toques: number; candidatos: number; enviados: number }> {
+  const toques = await carregarToques();
+  if (!toques.length) return { toques: 0, candidatos: 0, enviados: 0 };
+
+  // Busca reuniões até o MAIOR toque à frente (ex.: toque de 24h ⇒ janela de 24h).
+  const tetoMin = Math.max(...toques.map((t) => t.minutos_antes)) + FOLGA_MIN + 5;
+
+  // TODAS as reuniões na janela (não só as da IA — a config por responsável pode
+  // habilitar lembrete p/ reunião marcada por humano), não canceladas/realizadas/
   // já convertidas, com WhatsApp do lead. Quem NÃO tem rota (sem config e fora da IA)
   // é pulado em resolverRota().
   const { data, error } = await supabase
     .from('agendamentos')
-    .select('id, data_agendamento, status, origem, sdr_id, link_reuniao, lembrete_2h_em, lembrete_30min_em, lead:leads!agendamentos_lead_id_fkey(nome, whatsapp)')
+    .select('id, data_agendamento, status, origem, sdr_id, link_reuniao, lead:leads!agendamentos_lead_id_fkey(nome, whatsapp)')
     .gt('data_agendamento', new Date().toISOString())
-    .lt('data_agendamento', new Date(Date.now() + 125 * 60_000).toISOString())
+    .lt('data_agendamento', new Date(Date.now() + tetoMin * 60_000).toISOString())
     .not('status', 'in', '(cancelado,realizado,finalizado_venda)');
   if (error) throw new Error(`select agendamentos: ${error.message}`);
 
   const candidatos = data ?? [];
+  if (!candidatos.length) return { toques: toques.length, candidatos: 0, enviados: 0 };
+
+  // Envios já feitos (dedup) das reuniões da janela, numa consulta só.
+  const { data: envios, error: envErr } = await supabase
+    .from('crm_lembrete_envios')
+    .select('agendamento_id, toque_id')
+    .in('agendamento_id', candidatos.map((a) => a.id));
+  if (envErr) throw new Error(`select crm_lembrete_envios: ${envErr.message}`);
+  const jaEnviado = new Set((envios ?? []).map((e) => `${e.agendamento_id}:${e.toque_id}`));
+
   let enviados = 0;
   const agora = Date.now();
 
@@ -211,28 +233,37 @@ async function rodar(): Promise<{ candidatos: number; enviados: number }> {
     const ctx: Ctx = { nome: primeiroNome(lead.nome), dia, hora, link: ag.link_reuniao ?? '' };
 
     // Só resolve a rota (RPC do espelho + config) quando há toque DEVIDO nesta reunião.
-    const devidos = LEMBRETES.filter(
-      (lem) => lem.template_name && !(ag as any)[lem.coluna] && restaMin >= lem.janelaMin[0] && restaMin <= lem.janelaMin[1],
-    );
+    const devidos = toques.filter((t) => {
+      if (jaEnviado.has(`${ag.id}:${t.id}`)) return false;
+      const piso = Math.max(t.minutos_antes - BANDA_MIN, PISO_MIN);
+      const teto = t.minutos_antes + FOLGA_MIN;
+      return restaMin >= piso && restaMin <= teto;
+    });
     if (!devidos.length) continue;
 
     const rota = await resolverRota(ag as any);
     if (!rota) continue; // sem número configurado e fora do padrão da IA → não lembra
 
-    for (const lem of devidos) {
-      if (!(await claim(ag.id, lem.coluna))) continue; // outro tick pegou
+    for (const toque of devidos) {
+      // Canal Meta sem template cadastrado no toque: pula SEM claim (se o template
+      // for preenchido enquanto a janela do toque está aberta, ainda sai).
+      if (rota.via === 'meta' && !toque.template_name) {
+        console.log(`[lembretes] toque ${toque.minutos_antes}min sem template_name — pulado (canal meta) p/ ${ag.id}`);
+        continue;
+      }
+      if (!(await claim(ag.id, toque.id))) continue; // outro tick pegou
       const ok = rota.via === 'web'
-        ? await enviarTexto(telefone, lem.textoLivre(ctx), rota.wa_conexao_id)
-        : await enviarTemplate(telefone, lem, ctx, rota.wa_account_id);
+        ? await enviarTexto(telefone, resolverTextoLivre(toque.texto_livre, ctx), rota.wa_conexao_id)
+        : await enviarTemplate(telefone, toque, ctx, rota.wa_account_id);
       if (ok) {
         enviados++;
-        console.log(`[lembretes] ${lem.coluna} enviado p/ ${telefone} via ${rota.via} (reunião ${dia} ${hora})`);
+        console.log(`[lembretes] toque ${toque.minutos_antes}min enviado p/ ${telefone} via ${rota.via} (reunião ${dia} ${hora})`);
       } else {
-        await soltarClaim(ag.id, lem.coluna); // falhou: retenta no próximo tick
+        await soltarClaim(ag.id, toque.id); // falhou: retenta no próximo tick
       }
     }
   }
-  return { candidatos: candidatos.length, enviados };
+  return { toques: toques.length, candidatos: candidatos.length, enviados };
 }
 
 Deno.serve(async (req) => {
