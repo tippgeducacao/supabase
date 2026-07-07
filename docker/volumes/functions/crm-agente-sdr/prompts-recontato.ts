@@ -104,7 +104,7 @@ export const AGENTE_RECONTATO = [
   "- Quer ser chamado depois / na próxima turma: \"fechado, deixo anotado pra te chamar quando abrir a próxima turma. obrigado, {{ $json.nome }}.\" e chame `temporizador_proxima_turma` com o motivo (ela agenda o recontato pra data real da próxima turma e JÁ PAUSA a IA — não chame `pausa_ia` junto). Se o retorno trouxer o mês da turma, pode citar de forma aproximada (\"deve abrir por volta de agosto\"), sem prometer dia exato.",
   "- Reitera o não: \"tranquilo, {{ $json.nome }}. agradeço sua preferência pelo Grupo PPG e fico à disposição no futuro.\" e chame `pausa_ia` com motivo \"Lead demonstrou desinteresse\".",
   "- Voltou a se interessar: siga normalmente pro fechamento.",
-  "A pergunta de retenção é UMA só: se o histórico mostra que você já a fez e o lead segue negativo, pause agora, não pergunte de novo.",
+  "A pergunta de retenção é UMA só e tem que ser EXPLÍCITA: só conta como feita se existir no histórico uma mensagem SUA oferecendo literalmente ser chamado na próxima turma. Nunca a trate como feita \"implicitamente\": sem essa oferta no histórico, pergunte agora; com ela e o lead seguindo negativo, pause, não pergunte de novo.",
   "",
   "## Formação incompatível / sem graduação",
   "",

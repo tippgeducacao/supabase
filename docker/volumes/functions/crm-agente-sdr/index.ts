@@ -238,6 +238,14 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   }
   const renovar = lockRenovar(remotejid);
 
+  // Tools que pausam a IA por decisão do PRÓPRIO agente (pausa_ia, e o
+  // temporizador_proxima_turma, que pausa via RPC). A despedida que acompanha
+  // essas tools precisa sair MESMO com o flag de pausa já setado: o recheck de
+  // pausa existe pra honrar pausa de ATENDENTE durante a geração, não pra
+  // engolir a própria despedida do agente.
+  const TOOLS_QUE_PAUSAM = new Set(['pausa_ia', 'temporizador_proxima_turma']);
+  let pausouPorTool = false;
+
   // Loop agêntico: igual ao n8n, o histórico é relido do banco a cada volta.
   for (let rodada = 0; rodada < MAX_RODADAS_TOOLS; rodada++) {
     const messages = sanitizarHistorico(await carregarHistorico(supabase, remotejid));
@@ -281,6 +289,18 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
         outputs.push(output);
       }
       await gravarMensagem(supabase, remotejid, { role: 'user', content: montarToolResults(outputs) });
+      if (toolUses.some((tu: any) => TOOLS_QUE_PAUSAM.has(tu.name))) {
+        pausouPorTool = true;
+        // O prompt manda a despedida vir NA MESMA resposta da tool de pausa;
+        // sem este envio ela era descartada pelo `continue` e a rodada acabava
+        // muda pro lead (caso Claudia, 2026-07-06). Sem recheck de pausa aqui:
+        // a pausa é a que o próprio agente acabou de aplicar.
+        if (iaTexto) {
+          await enviarResposta(ctx, iaTexto, renovar, tel);
+          tel.registrar('rodada_fim', { voltas_llm: rodada + 1, respondeu: true }, Date.now() - inicioRodada);
+          return;
+        }
+      }
       continue;
     }
 
@@ -293,10 +313,12 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       // Última checagem antes de falar: a geração do LLM (com tools) pode ter levado
       // dezenas de segundos; se o atendente pausou nesse meio, NÃO envia. O recheck
       // entre chunks (passado a enviarResposta) cobre a pausa durante o dribble.
-      if (await iaPausada(remotejid)) {
+      // EXCEÇÃO: pausa aplicada pelo PRÓPRIO agente nesta rodada (pausouPorTool)
+      // não engole a despedida — o recheck é pra pausa de atendente.
+      if (!pausouPorTool && await iaPausada(remotejid)) {
         tel.registrar('envio_abortado_pausa', { onde: 'antes_envio', motivo: 'IA pausada durante a geração' });
       } else {
-        await enviarResposta(ctx, texto, renovar, tel, () => iaPausada(remotejid));
+        await enviarResposta(ctx, texto, renovar, tel, pausouPorTool ? undefined : () => iaPausada(remotejid));
       }
     }
     tel.registrar('rodada_fim', { voltas_llm: rodada + 1, respondeu: Boolean(texto) }, Date.now() - inicioRodada);
