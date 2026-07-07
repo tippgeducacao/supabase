@@ -1,4 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
+import { logPodcastConversaSac } from "../_shared/podcastSac.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -104,10 +105,12 @@ Deno.serve(async (req) => {
   // Roteamento: mensagens recebidas no número do PODCAST (convite de convidados) são
   // tratadas à parte — só qualificam INTERESSE, não entram no fluxo de convite de professor.
   let podcastPhoneId: string | null = null;
+  let podcastWaAccountId: string | null = null;
   try {
     const { data: pacc } = await supabase.rpc("get_wa_account_podcast");
     const acc = Array.isArray(pacc) ? pacc[0] : pacc;
     podcastPhoneId = acc?.phone_number_id ?? null;
+    podcastWaAccountId = acc?.id ?? null;
   } catch (_e) { /* conta do podcast ainda não cadastrada */ }
 
   let body: any = null;
@@ -132,7 +135,7 @@ Deno.serve(async (req) => {
         if (field === "messages") {
           // Número do PODCAST → só qualifica interesse (marca o candidato 'respondeu')
           if (podcastPhoneId && value?.metadata?.phone_number_id === podcastPhoneId) {
-            try { await handlePodcastInbound(supabase, value); } catch (e) {
+            try { await handlePodcastInbound(supabase, value, podcastWaAccountId); } catch (e) {
               console.error("[whatsapp-webhook] podcast inbound erro", String(e));
             }
             continue;
@@ -524,7 +527,7 @@ Deno.serve(async (req) => {
 // Qualquer resposta (botão "Tenho interesse"/"Quero saber mais" ou texto livre) marca o(s)
 // candidato(s) ativo(s) daquele convidado como 'respondeu' → responsáveis do pedagógico assumem
 // manualmente (SAC/e-mail). Não envia data/Calendly (automação só descobre interesse).
-async function handlePodcastInbound(supabase: any, value: any) {
+async function handlePodcastInbound(supabase: any, value: any, podcastWaAccountId: string | null) {
   const messages = Array.isArray(value?.messages) ? value.messages : [];
   for (const msg of messages) {
     const from: string = msg?.from || "";
@@ -562,6 +565,20 @@ async function handlePodcastInbound(supabase: any, value: any) {
         })
         .eq("id", c.id);
     }
+
+    // Espelha a RESPOSTA no SAC pedagógico (mensagem INBOUND → card fica "aguardando resposta").
+    // Best-effort; o mirror deduplica por wa_message_id. Se o convidado respondeu sem ter sido
+    // convidado por aqui (sem conversa), o helper cria a thread.
+    await logPodcastConversaSac(supabase, {
+      professorId: profRow.id,
+      telefone: from,
+      nome: profRow.nome ?? null,
+      waAccountId: podcastWaAccountId,
+      direcao: "inbound",
+      conteudo: resposta,
+      waMessageId: msg?.id ?? null,
+    });
+
     console.log("[whatsapp-webhook] podcast:", profRow.id, "respondeu:", resposta, "→", (cands ?? []).length, "cand.");
   }
 }

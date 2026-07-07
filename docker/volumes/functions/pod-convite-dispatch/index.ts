@@ -5,7 +5,8 @@
 // Silêncio após o 3º toque → 'silenciou' + convidado vira 'convidar_em_6m' (+6 meses).
 // NÃO envia enquanto: não houver conta WA do podcast (token) OU o template não estiver 'aprovado'.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
-import { ensureToken, base64UrlEncode } from "../_shared/gmail.ts";
+import { ensureToken, base64UrlEncode, encodeHeaderUtf8, encodeDisplayName } from "../_shared/gmail.ts";
+import { logPodcastConversaSac } from "../_shared/podcastSac.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -43,6 +44,12 @@ function formatPhone(raw?: string | null): string | null {
 }
 function htmlEscape(s: string): string {
   return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+// Renderiza o corpo do template ({{1}},{{2}}…) com os parâmetros — texto legível p/ o SAC.
+function renderTemplate(corpo: string | null | undefined, params: Array<{ text: string }>): string {
+  let t = String(corpo ?? "");
+  params.forEach((p, i) => { t = t.split(`{{${i + 1}}}`).join(p.text ?? ""); });
+  return t.trim();
 }
 // resolve o valor de uma variável do template pelo NOME semântico (variaveis_mapping)
 function resolverVar(nomeVar: string, ctx: { nome: string; podcast: string; youtube: string }): string {
@@ -151,6 +158,7 @@ async function handler(req: Request): Promise<Response> {
         // ---- WhatsApp (Meta template) ----
         const to = formatPhone(c.professor?.contato_whatsapp);
         let waOk = false;
+        let waMsgId: string | null = null;
         if (to) {
           const payload = {
             messaging_product: "whatsapp",
@@ -168,7 +176,28 @@ async function handler(req: Request): Promise<Response> {
             body: JSON.stringify(payload),
           });
           waOk = r.ok;
-          if (!r.ok) console.error("[pod-dispatch] wa fail", c.id, await r.text());
+          const waResp = await r.json().catch(() => ({} as any));
+          if (r.ok) {
+            waMsgId = waResp?.messages?.[0]?.id ?? null;
+            // Espelha o convite no SAC pedagógico (funil "Atendimento"): find-or-create da
+            // conversa do convidado + mensagem OUTBOUND. A resposta pela SAC sairá pelo
+            // número do podcast (metadata.wa_account_id). Best-effort — não derruba o disparo.
+            const textoConvite = renderTemplate(tpl.corpo, bodyParams) || `Convite ${podcastNome}`;
+            await logPodcastConversaSac(admin, {
+              professorId: c.professor_id,
+              telefone: c.professor?.contato_whatsapp ?? null,
+              nome: c.professor?.nome ?? null,
+              podcastId: c.podcast_id,
+              waAccountId: wa.id ?? null,
+              direcao: "outbound",
+              conteudo: textoConvite,
+              waMessageId: waMsgId,
+              templateName: tpl.nome,
+              enviadaEm: nowIso,
+            });
+          } else {
+            console.error("[pod-dispatch] wa fail", c.id, JSON.stringify(waResp));
+          }
         }
 
         // ---- E-mail (best-effort) ----
@@ -246,9 +275,9 @@ async function enviarEmail(ctx: any, to: string, nome: string, podcast: string, 
     const { assunto, html } = corpoEmail(nome, podcast, youtube, toque);
     const token = await ensureToken(ctx.admin, ctx.integ);
     const raw = [
-      `From: "${ctx.caixa.nome_exibicao || "PPGVET"}" <${ctx.caixa.email_caixa}>`,
+      `From: ${encodeDisplayName(ctx.caixa.nome_exibicao || "PPGVET")} <${ctx.caixa.email_caixa}>`,
       `To: ${to}`,
-      `Subject: ${assunto}`,
+      `Subject: ${encodeHeaderUtf8(assunto)}`,
       "MIME-Version: 1.0",
       'Content-Type: text/html; charset="UTF-8"',
       "",

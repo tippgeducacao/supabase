@@ -111,13 +111,31 @@ Deno.serve(async (req) => {
 
     const admin = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 
-    const { data: waRow, error: waErr } = await admin.rpc("get_wa_account_pedagogico");
-    if (waErr || !waRow) {
-      return new Response(JSON.stringify({ error: `WA account: ${waErr?.message ?? "vazio"}` }), {
-        status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+    // Conta que envia: se a conversa carrega uma wa_account_id no metadata (ex.: convite de
+    // PODCAST → responder pelo NÚMERO do podcast, não pelo pedagógico geral), usa essa conta;
+    // senão cai no número pedagógico padrão (get_wa_account_pedagogico).
+    let wa: any = null;
+    try {
+      const { data: convRow } = await admin
+        .from("ped_conversas_avulsas").select("metadata").eq("id", conversa_id).maybeSingle();
+      const waAccId = (convRow?.metadata as Record<string, unknown> | null)?.wa_account_id as string | undefined;
+      if (waAccId) {
+        const { data: acc } = await admin
+          .from("wa_accounts").select("phone_number_id, access_token")
+          .eq("id", waAccId).eq("is_active", true).maybeSingle();
+        if (acc?.phone_number_id && acc?.access_token) wa = acc;
+      }
+    } catch (_e) { /* cai no número pedagógico padrão */ }
+
+    if (!wa) {
+      const { data: waRow, error: waErr } = await admin.rpc("get_wa_account_pedagogico");
+      if (waErr || !waRow) {
+        return new Response(JSON.stringify({ error: `WA account: ${waErr?.message ?? "vazio"}` }), {
+          status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+      wa = Array.isArray(waRow) ? waRow[0] : waRow;
     }
-    const wa = Array.isArray(waRow) ? waRow[0] : waRow;
     const phoneNumberId = wa?.phone_number_id;
     const accessToken = wa?.access_token;
     if (!phoneNumberId || !accessToken) {

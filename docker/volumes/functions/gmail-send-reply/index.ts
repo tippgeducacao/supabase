@@ -1,6 +1,6 @@
 // gmail-send-reply: responde a uma thread pelo Gmail da caixa
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
-import { ensureToken, base64UrlEncode, validateEmailList, friendlyGmailError, isTokenRevokedError, markCaixaTokenRevoked } from '../_shared/gmail.ts';
+import { ensureToken, base64UrlEncode, validateEmailList, friendlyGmailError, isTokenRevokedError, markCaixaTokenRevoked, encodeHeaderUtf8, encodeDisplayName } from '../_shared/gmail.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -75,10 +75,10 @@ Deno.serve(async (req) => {
 
     const atts = Array.isArray(attachments) ? attachments : [];
     const baseHeaders = [
-      `From: "${fromNome}" <${fromEmail}>`,
+      `From: ${encodeDisplayName(fromNome)} <${fromEmail}>`,
       `To: ${to.join(', ')}`,
       cc.length ? `Cc: ${cc.join(', ')}` : null,
-      `Subject: ${subj}`,
+      `Subject: ${encodeHeaderUtf8(subj)}`,
       'MIME-Version: 1.0',
       inReplyTo ? `In-Reply-To: ${inReplyTo}` : null,
       references ? `References: ${references}` : null,

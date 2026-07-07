@@ -110,6 +110,23 @@ export function decodeText(data: string): string {
   return new TextDecoder('utf-8').decode(base64UrlDecode(data));
 }
 
+// RFC 2047: valor de header (Subject etc.) com acento vira encoded-word
+// =?UTF-8?B?...?= — header cru é lido como ASCII/Latin-1 pelos clientes
+// ("Rúmen" vira "RÃƒÂºmen"). ASCII puro passa reto (legível no raw).
+export function encodeHeaderUtf8(value: string): string {
+  const v = String(value ?? '').replace(/[\r\n]+/g, ' ').trim();
+  if (/^[\x20-\x7e]*$/.test(v)) return v;
+  return `=?UTF-8?B?${btoa(unescape(encodeURIComponent(v)))}?=`;
+}
+
+// Display name do From/To: ASCII → quoted-string; com acento → encoded-word
+// (encoded-word DENTRO de aspas não é decodificado pelos clientes).
+export function encodeDisplayName(name: string): string {
+  const v = String(name ?? '').replace(/[\r\n]+/g, ' ').trim();
+  if (/^[\x20-\x7e]*$/.test(v)) return `"${v.replace(/(["\\])/g, '\\$1')}"`;
+  return `=?UTF-8?B?${btoa(unescape(encodeURIComponent(v)))}?=`;
+}
+
 interface ParsedPayload {
   html: string;
   text: string;
