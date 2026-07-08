@@ -89,7 +89,9 @@ const TOKEN_VALOR: Record<string, (c: Ctx) => string> = {
   dia: (c) => c.dia,
   link: (c) => c.link,
 };
-const resolverToken = (token: string, c: Ctx) => TOKEN_VALOR[token]?.(c) ?? '';
+// Token dinâmico (nome/hora/dia/link) OU texto fixo `fixo:<valor>` (ex.: `fixo:1`).
+const resolverToken = (token: string, c: Ctx) =>
+  token.startsWith('fixo:') ? token.slice(5) : (TOKEN_VALOR[token]?.(c) ?? '');
 const resolverTextoLivre = (texto: string, c: Ctx) =>
   texto.replace(/\{(nome|hora|dia|link)\}/g, (_, t) => resolverToken(t, c));
 
@@ -104,38 +106,91 @@ async function carregarToques(): Promise<Toque[]> {
 }
 
 // ── Roteamento do número que envia ──────────────────────────────────────────
+// PRIORIDADE (fallback EM CADEIA — tenta a próxima se o envio falhar, ex.: template
+// não aprovado na WABA da conta): 1) conta que o SDR ESCOLHEU no agendamento
+// (agendamentos.lembrete_wa_account_id); 2) NÚMERO DA CONVERSA (conta do último inbound
+// do lead = "o número que foi agendado"); 3) config do responsável (crm_lembrete_numeros);
+// 4) conta padrão (só reunião do agente 'API SDR'). Assim o lembrete sai do número que o
+// lead conhece, mas NUNCA deixa de sair por causa de aprovação de template numa conta.
 type Rota =
   | { via: 'meta'; wa_account_id: string | null } // null = conta padrão (comportamento original)
   | { via: 'web'; wa_conexao_id: string };
 
-async function resolverRota(ag: { id: string; origem: string | null; sdr_id: string | null }): Promise<Rota | null> {
+const rotaKey = (r: Rota) => (r.via === 'web' ? `web:${r.wa_conexao_id}` : `meta:${r.wa_account_id ?? 'DEFAULT'}`);
+
+// Variantes do telefone com/sem 9º dígito (formato 55DDD + 8/9), p/ casar o inbound.
+function variantesTelefone(raw: string | null | undefined): string[] {
+  const d = String(raw ?? '').replace(/\D/g, '');
+  if (d.length < 12) return d ? [d] : [];
+  const set = new Set<string>([d]);
+  const m = d.match(/^(\d{2})(\d{2})(\d+)$/);
+  if (m) {
+    const [, pais, ddd, resto] = m;
+    if (resto.length === 9 && resto.startsWith('9')) set.add(`${pais}${ddd}${resto.slice(1)}`); // tira o 9
+    if (resto.length === 8) set.add(`${pais}${ddd}9${resto}`); // põe o 9
+  }
+  return [...set];
+}
+
+// Conta Meta da CONVERSA = número do último inbound do lead (usa idx_crm_wa_msg_telefone).
+async function contaDaConversa(telefone: string | null | undefined): Promise<string | null> {
+  const vars = variantesTelefone(telefone);
+  if (!vars.length) return null;
+  const { data, error } = await supabase
+    .from('crm_whatsapp_messages')
+    .select('wa_account_id')
+    .in('telefone', vars)
+    .eq('direcao', 'inbound')
+    .not('wa_account_id', 'is', null)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) { console.error(`[lembretes] conta conversa: ${error.message}`); return null; }
+  return (data?.wa_account_id as string | null) ?? null;
+}
+
+async function configResponsavel(ag: { id: string; origem: string | null; sdr_id: string | null }): Promise<Rota | null> {
   const origem = String(ag.origem ?? '');
   let responsavelId: string | null = null;
   if (IA_ORIGENS.includes(origem)) {
     // Reunião da IA: o responsável é o SDR-espelho (quem herdou o lead no SAC).
-    // Sem espelho (nenhum atendimento casou), cai no sdr_id = conta "IA SDR" —
-    // ou seja, dá pra configurar o próprio perfil IA SDR pra redirecionar o padrão.
     const { data, error } = await supabase.rpc('agendamento_responsavel_espelho', { p_ag_id: ag.id });
     if (error) console.error(`[lembretes] espelho ${ag.id}: ${error.message}`);
     responsavelId = (data as string | null) ?? ag.sdr_id ?? null;
   } else {
     responsavelId = ag.sdr_id ?? null;
   }
+  if (!responsavelId) return null;
+  const { data: cfg, error } = await supabase
+    .from('crm_lembrete_numeros')
+    .select('canal, wa_account_id, wa_conexao_id')
+    .eq('responsavel_id', responsavelId)
+    .eq('ativo', true)
+    .maybeSingle();
+  if (error) console.error(`[lembretes] config ${responsavelId}: ${error.message}`);
+  if (cfg?.canal === 'web' && cfg.wa_conexao_id) return { via: 'web', wa_conexao_id: cfg.wa_conexao_id };
+  if (cfg?.canal === 'meta' && cfg.wa_account_id) return { via: 'meta', wa_account_id: cfg.wa_account_id };
+  return null;
+}
 
-  if (responsavelId) {
-    const { data: cfg, error } = await supabase
-      .from('crm_lembrete_numeros')
-      .select('canal, wa_account_id, wa_conexao_id')
-      .eq('responsavel_id', responsavelId)
-      .eq('ativo', true)
-      .maybeSingle();
-    if (error) console.error(`[lembretes] config ${responsavelId}: ${error.message}`);
-    if (cfg?.canal === 'web' && cfg.wa_conexao_id) return { via: 'web', wa_conexao_id: cfg.wa_conexao_id };
-    if (cfg?.canal === 'meta' && cfg.wa_account_id) return { via: 'meta', wa_account_id: cfg.wa_account_id };
-  }
+async function resolverRotas(
+  ag: { id: string; origem: string | null; sdr_id: string | null; lembrete_wa_account_id: string | null },
+  telefone: string,
+): Promise<Rota[]> {
+  const rotas: Rota[] = [];
+  const push = (r: Rota | null) => { if (r && !rotas.some((x) => rotaKey(x) === rotaKey(r))) rotas.push(r); };
 
-  // Sem config: só a reunião do agente ('API SDR') mantém o lembrete, pela conta padrão.
-  return origem === 'API SDR' ? { via: 'meta', wa_account_id: null } : null;
+  // 1) Conta escolhida pelo SDR no agendamento.
+  if (ag.lembrete_wa_account_id) push({ via: 'meta', wa_account_id: ag.lembrete_wa_account_id });
+  // 2) Número da conversa (o número agendado).
+  const contaConv = await contaDaConversa(telefone);
+  if (contaConv) push({ via: 'meta', wa_account_id: contaConv });
+  // 3) Config do responsável.
+  push(await configResponsavel(ag));
+  // 4) Conta padrão — só p/ reunião do agente (mantém o opt-in de reunião humana).
+  if (String(ag.origem ?? '') === 'API SDR') push({ via: 'meta', wa_account_id: null });
+
+  return rotas;
 }
 
 // Claim atômico: 1 linha por reunião × toque. true = consegui o claim (envio meu).
@@ -215,7 +270,7 @@ async function rodar(): Promise<{ toques: number; candidatos: number; enviados: 
   // é pulado em resolverRota().
   const { data, error } = await supabase
     .from('agendamentos')
-    .select('id, data_agendamento, status, origem, sdr_id, link_reuniao, lead:leads!agendamentos_lead_id_fkey(nome, whatsapp)')
+    .select('id, data_agendamento, status, origem, sdr_id, link_reuniao, lembrete_wa_account_id, lead:leads!agendamentos_lead_id_fkey(nome, whatsapp)')
     .gt('data_agendamento', new Date().toISOString())
     .lt('data_agendamento', new Date(Date.now() + tetoMin * 60_000).toISOString())
     .not('status', 'in', '(cancelado,realizado,finalizado_venda)');
@@ -257,26 +312,34 @@ async function rodar(): Promise<{ toques: number; candidatos: number; enviados: 
     });
     if (!devidos.length) continue;
 
-    const rota = await resolverRota(ag as any);
-    if (!rota) continue; // sem número configurado e fora do padrão da IA → não lembra
+    const rotas = await resolverRotas(ag as any, telefone);
+    if (!rotas.length) continue; // sem número configurado e fora do padrão da IA → não lembra
 
     for (const toque of devidos) {
-      // Canal Meta sem template cadastrado no toque: pula SEM claim (se o template
-      // for preenchido enquanto a janela do toque está aberta, ainda sai).
-      if (rota.via === 'meta' && !toque.template_name) {
+      // Rotas viáveis p/ ESTE toque: canal Meta exige template_name; Web usa texto livre.
+      const viaveis = rotas.filter((r) => r.via === 'web' || !!toque.template_name);
+      if (!viaveis.length) {
+        // Só rotas Meta e toque sem template: pula SEM claim (se preencherem o template
+        // enquanto a janela do toque está aberta, ainda sai num tick futuro).
         console.log(`[lembretes] toque ${toque.minutos_antes}min sem template_name — pulado (canal meta) p/ ${ag.id}`);
         continue;
       }
       if (!(await claim(ag.id, toque.id))) continue; // outro tick pegou
-      const ok = rota.via === 'web'
-        ? await enviarTexto(telefone, resolverTextoLivre(toque.texto_livre, ctx), rota.wa_conexao_id)
-        : await enviarTemplate(telefone, toque, ctx, rota.wa_account_id);
-      if (ok) {
-        enviados++;
-        console.log(`[lembretes] toque ${toque.minutos_antes}min enviado p/ ${telefone} via ${rota.via} (reunião ${dia} ${hora})`);
-      } else {
-        await soltarClaim(ag.id, toque.id); // falhou: retenta no próximo tick
+
+      // Tenta a cadeia até um envio dar certo (conta escolhida → conversa → responsável → padrão).
+      let ok = false;
+      for (const rota of viaveis) {
+        ok = rota.via === 'web'
+          ? await enviarTexto(telefone, resolverTextoLivre(toque.texto_livre, ctx), rota.wa_conexao_id)
+          : await enviarTemplate(telefone, toque, ctx, rota.wa_account_id);
+        if (ok) {
+          enviados++;
+          console.log(`[lembretes] toque ${toque.minutos_antes}min enviado p/ ${telefone} via ${rotaKey(rota)} (reunião ${dia} ${hora})`);
+          break;
+        }
+        console.warn(`[lembretes] rota ${rotaKey(rota)} falhou p/ ${ag.id}×${toque.id} — tentando próxima`);
       }
+      if (!ok) await soltarClaim(ag.id, toque.id); // todas falharam: retenta no próximo tick
     }
   }
   return { toques: toques.length, candidatos: candidatos.length, enviados };
