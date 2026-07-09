@@ -392,6 +392,9 @@ Deno.serve(async (req) => {
 
     // Monta payload Meta
     let waPayload: Record<string, unknown>;
+    // Mídia do cabeçalho do template — capturada p/ persistir como anexo e a imagem
+    // do template APARECER no chat (CRM + SAC via mirror), não só o texto do corpo.
+    let templateHeaderMedia: { tipo: string; url: string; mime: string } | null = null;
     if (tipo === "text") {
       waPayload = {
         messaging_product: "whatsapp",
@@ -419,6 +422,18 @@ Deno.serve(async (req) => {
           const key = fmt === "VIDEO" ? "video" : fmt === "DOCUMENT" ? "document" : "image";
           comps.push({ type: "header", parameters: [{ type: key, [key]: { link: String(media.media_url) } }] });
         }
+      }
+      // Captura a mídia do cabeçalho (injetada acima OU já vinda do chamador) p/ o anexo.
+      const headerComp = comps.find((c: any) => String(c?.type ?? "").toLowerCase() === "header");
+      const hp: any = Array.isArray(headerComp?.parameters) ? headerComp.parameters[0] : null;
+      const ht = String(hp?.type ?? "").toLowerCase();
+      const hlink = ht ? hp?.[ht]?.link : null;
+      if (hlink && (ht === "image" || ht === "video" || ht === "document")) {
+        templateHeaderMedia = {
+          tipo: ht,
+          url: String(hlink),
+          mime: ht === "image" ? "image/jpeg" : ht === "video" ? "video/mp4" : "application/pdf",
+        };
       }
       waPayload = {
         messaging_product: "whatsapp",
@@ -672,8 +687,20 @@ Deno.serve(async (req) => {
             url: docUrl,
             filename: docFilename,
           }]
-        // text/template/reaction/interactive não têm anexo: [] (default da coluna,
-        // jsonb NOT NULL DEFAULT '[]') — nunca null, pra casar com o contrato da tabela.
+        // Template com cabeçalho de MÍDIA: persiste a imagem/vídeo/PDF do header como
+        // anexo pra ela APARECER no chat (CRM + SAC via mirror), além do texto do corpo.
+        : tipo === "template" && templateHeaderMedia
+        ? [{
+            tipo: templateHeaderMedia.tipo,
+            mime_type: templateHeaderMedia.mime,
+            url: templateHeaderMedia.url,
+            filename:
+              templateHeaderMedia.tipo === "image" ? "header.jpg"
+              : templateHeaderMedia.tipo === "video" ? "header.mp4"
+              : "header.pdf",
+          }]
+        // text/template(sem mídia)/reaction/interactive não têm anexo: [] (default da
+        // coluna, jsonb NOT NULL DEFAULT '[]') — nunca null, pra casar com o contrato.
         : [];
 
     // Persiste mensagem no CRM
