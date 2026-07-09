@@ -95,13 +95,12 @@ type Toque = {
   regua_wa_account_id: string | null;
 };
 
-/** Régua do lead: a da conta onde ele conversa (se tiver toques ativos), senão a padrão. */
+/** Régua do lead = SEMPRE a da conta onde ele conversa. A "régua padrão" (NULL) foi
+ * REMOVIDA (decisão diretor 2026-07-09): número sem régua própria NÃO envia cadência,
+ * e lead sem conta resolvível fica fora (sem fallback silencioso). */
 function reguaPara(toques: Toque[], conta: string | null): Toque[] {
-  if (conta) {
-    const daConta = toques.filter((t) => t.regua_wa_account_id === conta);
-    if (daConta.length) return daConta;
-  }
-  return toques.filter((t) => t.regua_wa_account_id === null);
+  if (!conta) return [];
+  return toques.filter((t) => t.regua_wa_account_id === conta);
 }
 
 const JANELA_FECHADA_MIN = 1440;            // 24h: antes disso é a esteira de janela aberta
