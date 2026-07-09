@@ -431,12 +431,12 @@ FORMATO DE SAÍDA (OBRIGATÓRIO):
 - Responda APENAS com um array JSON válido, sem markdown, sem cercas de código, sem texto antes ou depois.
 - Cada item é um objeto { "titulo": string, "texto": string }.
 - Gere de 5 a 6 tópicos, na ordem de prioridade abaixo. NUNCA invente dados: se uma informação não existir nas fontes, simplesmente pule o tópico correspondente.
-- "titulo": 1 a 3 palavras, capitalizado (ex.: "Formação", "Titulação", "Experiência", "Atuação em campo", "Nas aulas").
+- "titulo": 1 a 3 palavras, capitalizado (ex.: "Titulação", "Formação", "Experiência", "Atuação em campo", "Nas aulas").
 - "texto": MUITO SUCINTO — no máximo ~18 palavras, uma única ideia por tópico. Português do Brasil, tom técnico e confiante. SEM clichês ("vasta experiência", "amplo conhecimento", "renomado"), sem encher linguiça.
 
-CONTEÚDO DOS TÓPICOS (use os que tiverem dado real, nesta ordem):
-1) FORMAÇÃO — profissão de formação capitalizada, qualquer que seja (ex.: "Médico Veterinário", "Bióloga", "Zootecnista", "Engenheiro Agrônomo").
-2) TITULAÇÃO — título acadêmico mais alto, com área e instituição se houver (ex.: "Doutor em Reprodução Animal pela UFRGS"). Titulação em andamento conta e deve ser citada como tal (ex.: "Mestranda em Saúde Única e Zoonoses"). É o mais importante; nunca omita se existir.
+CONTEÚDO DOS TÓPICOS (use os que tiverem dado real, nesta ordem — TITULAÇÃO vem PRIMEIRO, antes da formação; decisão diretor 2026-07-09):
+1) TITULAÇÃO — título acadêmico mais alto, com área e instituição se houver (ex.: "Doutor em Reprodução Animal pela UFRGS"). Titulação em andamento conta e deve ser citada como tal (ex.: "Mestranda em Saúde Única e Zoonoses"). É o mais importante; nunca omita se existir.
+2) FORMAÇÃO — profissão de formação capitalizada, qualquer que seja (ex.: "Médico Veterinário", "Bióloga", "Zootecnista", "Engenheiro Agrônomo").
 3) EXPERIÊNCIA — anos de prática e/ou docência (ex.: "10 anos de prática a campo e 5 como docente").
 4) ATUAÇÃO EM CAMPO — destaque prático: consultorias, número de fazendas/granjas atendidas, indústria onde atua (ex.: "Consultor de nutrição, atende mais de 100 fazendas leiteiras").
 5) NAS AULAS — conecte EXATAMENTE o que o professor domina e vai ENSINAR nas aulas vinculadas com a experiência prática dele. Mostre por que a autoridade dele torna a aula valiosa para o aluno.
