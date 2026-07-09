@@ -400,6 +400,26 @@ Deno.serve(async (req) => {
         text: { body: String(conteudo).slice(0, 4096), preview_url: true },
       };
     } else if (tipo === "template") {
+      const comps = sanitizarComponentsTemplate(template_components);
+      // Template com CABEÇALHO DE MÍDIA (IMAGE/VIDEO/DOCUMENT) EXIGE, em todo envio, o
+      // componente de header com a mídia — senão a Meta recusa com 132012 ("header:
+      // Format mismatch, expected IMAGE, received UNKNOWN"). O nosso envio só monta o
+      // `body`; então injetamos aqui, no ponto ÚNICO, a mídia FIXA configurada por
+      // template (crm_whatsapp_template_media) quando o chamador não mandou um header.
+      // Cobre composer, automações e fluxos (o dispatcher reusa esta edge).
+      const jaTemHeader = comps.some((c: any) => String(c?.type ?? "").toLowerCase() === "header");
+      if (!jaTemHeader) {
+        const { data: media } = await admin
+          .from("crm_whatsapp_template_media")
+          .select("header_format, media_url")
+          .eq("template_name", template_name)
+          .maybeSingle();
+        if (media?.media_url && media?.header_format) {
+          const fmt = String(media.header_format).toUpperCase();
+          const key = fmt === "VIDEO" ? "video" : fmt === "DOCUMENT" ? "document" : "image";
+          comps.push({ type: "header", parameters: [{ type: key, [key]: { link: String(media.media_url) } }] });
+        }
+      }
       waPayload = {
         messaging_product: "whatsapp",
         to,
@@ -407,7 +427,7 @@ Deno.serve(async (req) => {
         template: {
           name: template_name,
           language: { code: template_lang || "pt_BR" },
-          components: sanitizarComponentsTemplate(template_components),
+          components: comps,
         },
       };
     } else if (tipo === "document") {
