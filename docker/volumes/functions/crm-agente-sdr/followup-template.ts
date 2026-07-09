@@ -5,8 +5,10 @@
 // (erro 131047). A partir daí a reabertura é por TEMPLATE aprovado.
 //
 // Régua: até 7 toques (dias contados desde o FECHAMENTO da janela = última msg + 24h).
-// 1 template por dia, em horário variável pra não parecer robô; trava DURA "nunca
-// < 24h entre templates" via crm_whatsapp_template_enviado_24h.
+// 1 FOLLOW-UP por dia (espaçamento entre TOQUES via template_followup_em/tocadoHoje).
+// ⚠️ A trava GLOBAL "nenhum template de QUALQUER origem em 24h" foi REMOVIDA em
+// 2026-07-09 (diretor): sempre há disparo/lembrete/chegada no meio e ela travava o
+// follow-up pra sempre. Agora só o espaçamento do próprio follow-up conta.
 //
 // ÂNCORA DUPLA (2026-07-04): lead que NUNCA respondeu (timestamp_mensagem NULL — só
 // recebeu o 1º template do webhook/automação/reconciliação) TAMBÉM entra na cadência,
@@ -261,15 +263,6 @@ function variavelVazia(variaveis: VarMap[], lead: any): string | null {
   return null;
 }
 
-// ── trava dura: nenhum template (de qualquer origem) nas últimas 24h ─────────
-async function templateNas24h(supabase: any, telefone: string): Promise<boolean> {
-  const { data, error } = await supabase.rpc('crm_whatsapp_template_enviado_24h', { p_telefone: telefone });
-  if (error) {
-    console.error(`[crm-agente-sdr][followup-template] trava 24h ${telefone}: ${error.message}`);
-    return true; // em erro, NÃO envia (conservador)
-  }
-  return data === true;
-}
 
 // ── lock por remotejid (mesmas RPCs do inbound/janela aberta) ───────────────
 async function lockClaim(supabase: any, remotejid: string): Promise<boolean> {
@@ -504,10 +497,15 @@ async function processarLead(
     }
 
     const telefone = String(remotejid).split('@')[0];
-    if (await templateNas24h(supabase, telefone)) {
-      tel.registrar('followup_template_pulado', { motivo: 'trava_24h', toque: t.toque });
-      return false;
-    }
+    // ⚠️ TRAVA GLOBAL DE 24h REMOVIDA (decisão diretor 2026-07-09): a esteira NÃO
+    // checa mais "qualquer template nas últimas 24h" (crm_whatsapp_template_enviado_24h).
+    // Motivo: SEMPRE há um template no meio — disparos em massa, lembretes de reunião,
+    // template de chegada — e a trava global bloqueava o follow-up pra SEMPRE (2.032 de
+    // 2.392 do toque 1 barrados em 09/07). O espaçamento do FOLLOW-UP entre si continua
+    // garantido pelo guard `tocadoHoje` na seleção (template_followup_em < 24h → pulado),
+    // então a esteira nunca manda 2 TOQUES no mesmo dia; ela só deixou de se bloquear por
+    // causa de templates de OUTRAS origens. Um follow-up pode agora cair no mesmo dia de
+    // um disparo/lembrete — aceito pelo diretor.
 
     // Guardas DURAS (cinto e suspensório — followup_ativado já deveria estar off nesses
     // casos): lead ARQUIVADO ou com TEMPORIZADOR DE RECONTATO ativo NUNCA recebe template
@@ -656,13 +654,10 @@ export async function rodarEsteiraFollowupTemplate(
     if (!toquesLead.length) continue;
 
     const t = proximoToque(lead, toquesLead);
-    // Lead que a PRÓPRIA esteira já tocou há <24h (rodada/tick anterior do dia) não
-    // entra nos devidos — sem isso, nas rodadas ENCADEADAS os mudos recém-enviados
-    // (cuja âncora antiga deixa o toque seguinte "devido" na hora) voltavam como
-    // pulados de trava-24h, enchiam o lote e cortavam a cadeia antes de drenar quem
-    // ainda não recebeu. A trava canônica (qualquer template, qualquer origem)
-    // continua em processarLead como cinto; o RESGATE segue no else-if (precisa do
-    // template recente por definição).
+    // Lead que a PRÓPRIA esteira já tocou há <24h (template_followup_em) não entra nos
+    // devidos: é o ÚNICO espaçamento agora (a trava global de 24h foi removida) —
+    // garante 1 FOLLOW-UP por dia (nunca 2 toques no mesmo dia), mas não bloqueia por
+    // causa de disparos/lembretes de outras origens. O RESGATE segue no else-if.
     const tocadoHoje = Number.isFinite(Date.parse(lead.template_followup_em ?? '')) &&
       inicio - Date.parse(lead.template_followup_em) < 24 * 3600_000;
     if (t && !tocadoHoje && devido(lead, inicio, t)) {
