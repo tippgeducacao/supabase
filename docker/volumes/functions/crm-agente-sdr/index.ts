@@ -446,9 +446,14 @@ Deno.serve(async (req) => {
     // enviavam nada (bug pego em 2026-07-06, tarde inteira com devidos=0).
     const horaRaw = url.searchParams.get('hora');
     const horaParam = horaRaw === null ? NaN : Number(horaRaw);
+    // ?cadeia=<n>: nº da rodada encadeada — a esteira se re-invoca em lotes de 300
+    // até drenar os devidos do tick (encadearProximaRodada no followup-template.ts).
+    const cadeiaRaw = url.searchParams.get('cadeia');
+    const cadeiaParam = cadeiaRaw === null ? NaN : Number(cadeiaRaw);
     const trabalho = rodarEsteiraFollowupTemplate(supabase, {
       limite: Number.isFinite(limiteParam) && limiteParam > 0 ? limiteParam : undefined,
       horaUtc: Number.isFinite(horaParam) ? horaParam : undefined,
+      cadeia: Number.isFinite(cadeiaParam) && cadeiaParam > 0 ? cadeiaParam : undefined,
     });
     if (url.searchParams.get('wait') === '1') {
       return json({ ok: true, esteira: 'followup-template', ...(await trabalho) });

@@ -105,7 +105,12 @@ function reguaPara(toques: Toque[], conta: string | null): Toque[] {
 }
 
 const JANELA_FECHADA_MIN = 1440;            // 24h: antes disso é a esteira de janela aberta
-const MAX_LEADS_POR_TICK = 300;             // teto por tick (worker timeout 5min)
+// 300 é o LOTE POR RODADA (o worker da edge morre em ~5min), NÃO um teto de envio:
+// rodada que estoura o lote re-invoca a esteira (encadearProximaRodada) até drenar
+// TODOS os devidos do tick — decisão diretor 2026-07-09 ("tem que mandar pra
+// quantidade que tem de leads no funil"). MAX_CADEIA é só freio de emergência.
+const MAX_LEADS_POR_TICK = 300;             // lote por rodada (worker timeout 5min)
+const MAX_CADEIA = 15;                       // teto de rodadas encadeadas por tick (15×300 = 4.500)
 const CONCORRENCIA = 5;                      // leads enviados em paralelo por tick
 const HORAS_UTC = [10, 11, 12, 15, 16, 18, 21]; // 07,08,09,12,13,15,18 BRT (UTC-3)
 const ULTIMA_HORA_UTC = 21;                  // rede de segurança: último tick do dia
@@ -316,7 +321,7 @@ async function enviarTemplate(
 const COLS_CANDIDATO =
   'remotejid, nome, email, curso_interesse_original, timestamp_mensagem, followup_ativado, iniciar_atendimento, agendado, pausa_ia, nao_perturbe, atendimento_finalizado, template_1_dia, template_2_dia, template_3_dia, template_4_dia, template_5_dia, template_6_dia, template_7_dia, template_followup_em, modo_recontato';
 
-function queryCandidatos(supabase: any, cols: string) {
+function queryCandidatos(supabase: any, cols: string, de: number, ate: number) {
   return supabase
     .from('cliente_ppg_leads_sdr')
     .select(cols)
@@ -328,7 +333,23 @@ function queryCandidatos(supabase: any, cols: string) {
     .or('nao_perturbe.is.null,nao_perturbe.eq.false')
     .or('atendimento_finalizado.is.null,atendimento_finalizado.eq.false')
     .order('timestamp_mensagem', { ascending: true })
-    .limit(3000);
+    .range(de, ate);
+}
+
+// O PostgREST corta qualquer SELECT em 1000 linhas (max-rows) — pagina por .range
+// até página curta. MAX_PAGINAS limita o scan (3k por coorte cobre o volume atual
+// com folga; a cadeia de rodadas re-seleciona a cada rodada de toda forma).
+const PAGINA_CANDIDATOS = 1000;
+const MAX_PAGINAS_CANDIDATOS = 3;
+async function todasPaginas(build: (de: number, ate: number) => any): Promise<any[]> {
+  const linhas: any[] = [];
+  for (let p = 0; p < MAX_PAGINAS_CANDIDATOS; p++) {
+    const { data, error } = await build(p * PAGINA_CANDIDATOS, (p + 1) * PAGINA_CANDIDATOS - 1);
+    if (error) throw new Error(String(error.message ?? error));
+    linhas.push(...(data ?? []));
+    if (!data || data.length < PAGINA_CANDIDATOS) break;
+  }
+  return linhas;
 }
 
 async function selecionarCandidatos(supabase: any): Promise<any[]> {
@@ -337,29 +358,44 @@ async function selecionarCandidatos(supabase: any): Promise<any[]> {
   // esfriou) OU — lead que NUNCA respondeu (timestamp NULL) — 1º template há 24h+
   // (template_inicial_em, migration 20260704120000).
   //
-  // ⚠️ DUAS consultas DE PROPÓSITO (uma por coorte): o PostgREST corta qualquer SELECT
-  // em 1000 linhas (max-rows), e com um SELECT só + NULLS LAST os nunca-respondentes
-  // ficavam SEMPRE depois do corte quando havia 1000+ conversados-esfriaram — foi o
-  // tick de 06/07 (candidatos=1000, zero âncora template_inicial). Separando, cada
-  // coorte tem seu próprio teto de 1000 e as duas entram no tick; os conversados
-  // continuam na frente da fila (prioridade preservada).
-  const conversados = await queryCandidatos(supabase, COLS_CANDIDATO)
-    .lt('timestamp_mensagem', limiteJanela);
-  if (conversados.error) throw new Error(`selecionarCandidatos (conversados): ${conversados.error.message}`);
+  // ⚠️ DUAS consultas DE PROPÓSITO (uma por coorte), cada uma PAGINADA (o corte de
+  // 1000 do PostgREST escondia o excedente — caso 06/07). Os mudos são ordenados
+  // pela âncora (mais antiga primeiro) pra paginação ser determinística.
+  let conversados: any[];
+  try {
+    conversados = await todasPaginas((de, ate) =>
+      queryCandidatos(supabase, COLS_CANDIDATO, de, ate).lt('timestamp_mensagem', limiteJanela));
+  } catch (e) {
+    throw new Error(`selecionarCandidatos (conversados): ${(e as Error).message}`);
+  }
 
-  const mudos = await queryCandidatos(supabase, `${COLS_CANDIDATO}, template_inicial_em`)
-    .is('timestamp_mensagem', null)
-    .lt('template_inicial_em', limiteJanela);
-  if (mudos.error) {
+  let mudos: any[] = [];
+  try {
+    mudos = await todasPaginas((de, ate) =>
+      queryCandidatos(supabase, `${COLS_CANDIDATO}, template_inicial_em`, de, ate)
+        .is('timestamp_mensagem', null)
+        .lt('template_inicial_em', limiteJanela)
+        .order('template_inicial_em', { ascending: true }));
+  } catch (e) {
     // DEGRADAÇÃO pré-migration: coluna template_inicial_em ausente → segue só com quem
     // conversou (comportamento antigo) em vez de derrubar a esteira inteira.
-    if (String(mudos.error.message).includes('template_inicial_em')) {
+    if (String((e as Error).message).includes('template_inicial_em')) {
       console.error('[crm-agente-sdr][followup-template] template_inicial_em ausente (migration 20260704120000 pendente) — seleção legada');
-      return conversados.data ?? [];
+      return conversados;
     }
-    throw new Error(`selecionarCandidatos (mudos): ${mudos.error.message}`);
+    throw new Error(`selecionarCandidatos (mudos): ${(e as Error).message}`);
   }
-  return [...(conversados.data ?? []), ...(mudos.data ?? [])];
+  // INTERCALA as coortes (1:1) — com o lote por rodada, o concat conversados-primeiro
+  // deixava os mudos sistematicamente no fim da lista: em 08/07 os ticks saturaram o
+  // lote só com toques 2/3/4 de quem conversou e o toque 1 saiu 7x no dia inteiro
+  // (fila de 2k). Intercalado, cada rodada divide o lote entre as duas coortes.
+  const saida: any[] = [];
+  const n = Math.max(conversados.length, mudos.length);
+  for (let i = 0; i < n; i++) {
+    if (i < conversados.length) saida.push(conversados[i]);
+    if (i < mudos.length) saida.push(mudos[i]);
+  }
+  return saida;
 }
 
 // Gates comuns (revalidados com o lead FRESCO, sob lock).
@@ -558,26 +594,53 @@ async function comConcorrencia<T>(itens: T[], limite: number, fn: (t: T) => Prom
   await Promise.all(workers);
 }
 
+// Re-invoca a esteira pra PRÓXIMA RODADA do mesmo tick (fire-and-forget via o próprio
+// endpoint, kong interno, com o segredo do banco). O worker da edge morre em ~5min —
+// drenar a fila inteira = encadear workers de 300, não subir o cap de um worker só.
+// A `hora` vai explícita pra rodada seguinte manter as MESMAS janelas/catch-up do tick.
+async function encadearProximaRodada(supabase: any, horaUtc: number, cadeia: number, limite?: number): Promise<void> {
+  try {
+    const { data: cfg } = await supabase
+      .from('crm_agente_sdr_config').select('followup_secret').eq('id', 1).maybeSingle();
+    const segredo = cfg?.followup_secret ?? '';
+    const base = Deno.env.get('SUPABASE_URL') ?? '';
+    if (!segredo || !base) { console.error('[followup-template] cadeia: sem segredo/URL'); return; }
+    const qs = new URLSearchParams({ mode: 'followup-template', hora: String(horaUtc), cadeia: String(cadeia) });
+    if (Number.isFinite(limite) && (limite as number) > 0) qs.set('limite', String(limite));
+    const resp = await fetch(`${base}/functions/v1/crm-agente-sdr?${qs.toString()}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-followup-key': segredo },
+      body: '{}',
+    });
+    if (!resp.ok) console.error(`[followup-template] cadeia: HTTP ${resp.status}`);
+  } catch (e) {
+    console.error('[followup-template] cadeia: falhou', e);
+  }
+}
+
 // ── entrada (chamada pelo index quando mode=followup-template) ──────────────
 // opts.horaUtc: força a hora do tick (default = hora UTC atual); útil pra teste.
-// opts.limite: teto de leads neste tick (default MAX_LEADS_POR_TICK).
+// opts.limite: lote por rodada (default MAX_LEADS_POR_TICK).
+// opts.cadeia: nº da rodada encadeada (0 = a do cron; usado só pra freio/telemetria).
 export async function rodarEsteiraFollowupTemplate(
   supabase: any,
-  opts?: { limite?: number; horaUtc?: number },
-): Promise<{ candidatos: number; devidos: number; enviados: number; hora_utc: number; toques_ativos: number }> {
+  opts?: { limite?: number; horaUtc?: number; cadeia?: number },
+): Promise<{ candidatos: number; devidos: number; enviados: number; hora_utc: number; toques_ativos: number; cadeia: number }> {
   const inicio = Date.now();
   const tel = criarTelemetria(supabase, 'followup-template-sweep');
   const horaAtual = Number.isFinite(opts?.horaUtc) ? (opts!.horaUtc as number) : new Date(inicio).getUTCHours();
   const cap = Number.isFinite(opts?.limite) && (opts!.limite as number) > 0 ? Math.floor(opts!.limite as number) : MAX_LEADS_POR_TICK;
+  const cadeia = Number.isFinite(opts?.cadeia) && (opts!.cadeia as number) > 0 ? Math.floor(opts!.cadeia as number) : 0;
 
   const toques = await carregarToques(supabase);
   if (!toques.length) {
     tel.registrar('followup_template_tick', { hora_utc: horaAtual, candidatos: 0, devidos: 0, enviados: 0, motivo: 'sem_toques_ativos' }, Date.now() - inicio);
-    return { candidatos: 0, devidos: 0, enviados: 0, hora_utc: horaAtual, toques_ativos: 0 };
+    return { candidatos: 0, devidos: 0, enviados: 0, hora_utc: horaAtual, toques_ativos: 0, cadeia };
   }
 
   const candidatos = await selecionarCandidatos(supabase);
   const devidos: { lead: any; toque: Toque | null; resgate: boolean; conta: string | null }[] = [];
+  let capEstourado = false;
   // Régua POR CONTA: resolve a conta onde cada candidato conversa (cache por telefone —
   // query indexada em crm_whatsapp_messages) e usa a régua daquela conta (fallback: padrão).
   const contaCache = new Map<string, string | null>();
@@ -594,7 +657,16 @@ export async function rodarEsteiraFollowupTemplate(
     if (!toquesLead.length) continue;
 
     const t = proximoToque(lead, toquesLead);
-    if (t && devido(lead, inicio, t)) {
+    // Lead que a PRÓPRIA esteira já tocou há <24h (rodada/tick anterior do dia) não
+    // entra nos devidos — sem isso, nas rodadas ENCADEADAS os mudos recém-enviados
+    // (cuja âncora antiga deixa o toque seguinte "devido" na hora) voltavam como
+    // pulados de trava-24h, enchiam o lote e cortavam a cadeia antes de drenar quem
+    // ainda não recebeu. A trava canônica (qualquer template, qualquer origem)
+    // continua em processarLead como cinto; o RESGATE segue no else-if (precisa do
+    // template recente por definição).
+    const tocadoHoje = Number.isFinite(Date.parse(lead.template_followup_em ?? '')) &&
+      inicio - Date.parse(lead.template_followup_em) < 24 * 3600_000;
+    if (t && !tocadoHoje && devido(lead, inicio, t)) {
       // Variável do template vazia pro lead (sem nome/curso na base) → NEM entra nos
       // devidos: o pulo tardio (processarLead) deixava esses leads OCUPANDO o cap de
       // 300 do tick a cada rodada e afogando os demais (06/07: ticks com 300 devidos
@@ -614,7 +686,7 @@ export async function rodarEsteiraFollowupTemplate(
       if (horaAtual !== hp && horaAtual !== ULTIMA_HORA_UTC) continue; // espalha por horário
       devidos.push({ lead, toque: null, resgate: true, conta });
     }
-    if (devidos.length >= cap) break;
+    if (devidos.length >= cap) { capEstourado = true; break; }
   }
 
   let enviados = 0;
@@ -628,6 +700,16 @@ export async function rodarEsteiraFollowupTemplate(
     devidos: devidos.length,
     enviados,
     toques_ativos: toques.length,
+    cadeia,
+    cap_estourado: capEstourado,
   }, Date.now() - inicio);
-  return { candidatos: candidatos.length, devidos: devidos.length, enviados, hora_utc: horaAtual, toques_ativos: toques.length };
+
+  // SEM teto diário: lote estourou E houve progresso → encadeia a próxima rodada do
+  // mesmo tick até drenar os devidos. enviados=0 corta a cadeia (rodada só de pulados
+  // não avança); MAX_CADEIA é freio de emergência contra loop.
+  if (capEstourado && enviados > 0 && cadeia < MAX_CADEIA) {
+    await encadearProximaRodada(supabase, horaAtual, cadeia + 1, opts?.limite);
+  }
+
+  return { candidatos: candidatos.length, devidos: devidos.length, enviados, hora_utc: horaAtual, toques_ativos: toques.length, cadeia };
 }
