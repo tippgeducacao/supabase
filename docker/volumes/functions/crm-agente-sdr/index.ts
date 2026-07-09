@@ -20,6 +20,7 @@ import { carregarTools, chamarAgentePrincipal, chamarRouter } from './agente.ts'
 import { type CtxConversa, executarTool, montarToolResults } from './tools.ts';
 import { prepararMensagem } from './midia.ts';
 import { enviarResposta } from './saida.ts';
+import { contaDoLead } from './conta.ts';
 import { rodarEsteiraFollowup } from './followup.ts';
 import { rodarEsteiraFollowupTemplate } from './followup-template.ts';
 import { criarTelemetria, resumir, type Telemetria } from './eventos.ts';
@@ -145,12 +146,23 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     arquivos: itens.filter((i: any) => i.arquivo).length,
   });
   const ultimo = itens[itens.length - 1];
+  // Contexto da CONVERSA: conta/lead/oportunidade vêm do último item do buffer QUE
+  // TEM o campo — o POST de drenagem do reconciliador (drenar_orfao) chegava SEM
+  // wa_account_id e, sendo o último do lote, zerava o ctx: a resposta caía na 1ª
+  // conta ativa (get_crm_wa_account(NULL) = João) e a Meta rejeitava com 131047,
+  // janela fechada NAQUELE número (caso Ananda, 2026-07-09). Fallback final da
+  // conta: último INBOUND do lead — é onde a janela de 24h está aberta
+  // (incluirRecontato: se o lead escreveu no número de recontato, sai por lá).
+  const doUltimoCom = (campo: string): any =>
+    [...itens].reverse().find((i: any) => i?.[campo] != null)?.[campo] ?? null;
+  const telefone = String(remotejid).split('@')[0];
   const ctx: CtxConversa = {
     remotejid,
-    telefone: String(remotejid).split('@')[0],
-    waAccountId: ultimo.wa_account_id ?? null,
-    leadId: ultimo.lead_id ?? null,
-    oportunidadeId: ultimo.oportunidade_id ?? null,
+    telefone,
+    waAccountId: doUltimoCom('wa_account_id') ??
+      (await contaDoLead(supabase, telefone, { direcao: 'inbound', incluirRecontato: true })),
+    leadId: doUltimoCom('lead_id'),
+    oportunidadeId: doUltimoCom('oportunidade_id'),
   };
 
   let lead = await buscarLead(supabase, remotejid);

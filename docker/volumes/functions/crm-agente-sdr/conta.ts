@@ -54,13 +54,18 @@ async function personasContas(supabase: any): Promise<Map<string, string | null>
  * da Meta está aberta; use no follow-up de texto livre). Sem direcao, considera
  * qualquer direção (o template da cadência também "gruda" o lead no número).
  *
+ * opts.incluirRecontato=true → NÃO pula o número da persona 'recontato'. Use ao
+ * RESPONDER uma conversa em andamento (rodada do agente): a resposta tem que sair
+ * pelo número onde o lead escreveu, seja qual for a persona — o skip só faz
+ * sentido pra esteira INICIANDO contato (cadência).
+ *
  * Retorna null quando o lead não tem mensagem em nenhum número qualificador —
  * o chamador decide o fallback (config do toque / conta ativa).
  */
 export async function contaDoLead(
   supabase: any,
   telefone: string,
-  opts?: { direcao?: 'inbound' | 'outbound' },
+  opts?: { direcao?: 'inbound' | 'outbound'; incluirRecontato?: boolean },
 ): Promise<string | null> {
   const variants = phoneVariants(telefone);
   if (!variants.length) return null;
@@ -82,7 +87,9 @@ export async function contaDoLead(
   const personas = await personasContas(supabase);
   for (const r of rows) {
     const id = String(r.wa_account_id);
-    if (personas.get(id) === 'recontato') continue; // número da persona de no-show: nunca
+    // número da persona de no-show: nunca INICIA contato por ele (cadência);
+    // respondendo conversa (incluirRecontato) ele vale — o lead escreveu lá.
+    if (!opts?.incluirRecontato && personas.get(id) === 'recontato') continue;
     return id;
   }
   return null;
