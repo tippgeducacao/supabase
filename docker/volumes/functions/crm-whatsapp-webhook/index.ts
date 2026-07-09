@@ -485,6 +485,29 @@ Deno.serve(async (req) => {
             console.log("[crm-whatsapp-webhook] mídia inbound sem access_token, inserindo sem anexos:", mediaInbound.id);
           }
 
+          // ── Reply/citação (WhatsApp "responder marcando a mensagem") ─────
+          // A Meta manda o wamid da mensagem CITADA em msg.context.id, mas o texto do
+          // lead vem só em text.body (às vezes um "." ou emoji). Sem a citação, o João
+          // não sabe A QUE o lead respondeu — ele chega a dizer "não consegui visualizar
+          // a marcação". Resolve o texto da mensagem citada e o embute no conteúdo, pra
+          // o agente (e o atendente no chat) ENTENDEREM. Espelha no SAC pelo mirror.
+          const quotedId: string | null = msg?.context?.id ?? null;
+          let quotedConteudo: string | null = null;
+          if (quotedId) {
+            try {
+              const { data: qrow } = await admin
+                .from("crm_whatsapp_messages")
+                .select("conteudo")
+                .eq("wa_message_id", quotedId)
+                .limit(1)
+                .maybeSingle();
+              quotedConteudo = (qrow?.conteudo ?? "").toString().trim() || null;
+            } catch (_qe) { /* citação não resolvida — segue sem ela */ }
+          }
+          const conteudoComQuote = quotedConteudo
+            ? `[Em resposta à mensagem: "${quotedConteudo}"] ${conteudo}`.trim()
+            : conteudo;
+
           // Busca lead pelo telefone normalizado
           const phoneDigits = (from ?? "").replace(/\D/g, "");
           const phoneVariants = [
@@ -520,7 +543,7 @@ Deno.serve(async (req) => {
             telefone: phoneDigits,
             direcao: "inbound",
             tipo: msgType,
-            conteudo,
+            conteudo: conteudoComQuote,
             anexos,
             wa_message_id: msgId,
             status_entrega: "delivered",
@@ -529,6 +552,7 @@ Deno.serve(async (req) => {
               original_type: msgType,
               timestamp: msg?.timestamp,
               ...(interactiveReply ? { interactive_reply: interactiveReply } : {}),
+              ...(quotedId ? { context: { id: quotedId, conteudo: quotedConteudo } } : {}),
             },
           });
 
@@ -554,7 +578,10 @@ Deno.serve(async (req) => {
                 direcao: "inbound", // relay só dispara p/ inbound; nunca p/ as próprias saídas
                 from_me: false,     // Meta Cloud API não ecoa mensagens do negócio -> sempre false
                 tipo: msgType,
-                conteudo,
+                // conteúdo JÁ com a citação embutida ("[Em resposta à mensagem: ...]"),
+                // pro agente entender a que o lead está respondendo (reply/quote).
+                conteudo: conteudoComQuote,
+                quoted: quotedId ? { id: quotedId, conteudo: quotedConteudo } : null,
                 caption,
                 mime_type: anexos[0]?.mime_type ?? mediaInbound?.mime_type ?? null,
                 anexos,
