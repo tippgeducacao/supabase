@@ -1,29 +1,28 @@
-// crm-webchat — chat ao vivo embedado nas landing pages (GreatPages) — FASE 1
+// crm-webchat — chat ao vivo embedado nas landing pages (GreatPages) — FASE 2
 // URL: POST https://api.ppgeducacao.site/functions/v1/crm-webchat
 // Chamado pelo widget public/webchat-widget.js (anônimo, CORS aberto — é página pública).
 //
 // Ações (body JSON { acao, ... }):
-//   iniciar → { nome, telefone, pagina?, origem_url? }  cria a sessão, devolve { sessao_id }
-//   enviar  → { sessao_id, conteudo }                    grava inbound + eco, devolve { mensagem_id }
-//   poll    → { sessao_id, apos }                        mensagens com id > apos (cursor do widget)
+//   iniciar → { nome, telefone, pagina?, curso?, origem_url? }  cria sessão + LEAD, devolve { sessao_id }
+//   enviar  → { sessao_id, conteudo }   grava inbound + resposta do João (IA), devolve { mensagem_id }
+//   poll    → { sessao_id, apos }       mensagens com id > apos (cursor do widget)
 //
-// FASE 1 = teste de recebimento: toda mensagem recebe uma resposta de ECO automática
-// (origem 'eco') pra validar o ciclo completo no widget. FASE 2 (declarada, NÃO feita):
-// plugar a IA SDR (persona/tools do crm-agente-sdr) + criar lead a partir da sessão.
+// FASE 2: o João (cérebro ISOLADO em agente.ts, reusa a sdr-api pra agenda/reunião —
+// NÃO toca o crm-agente-sdr de WhatsApp) atende no chat, qualifica e AGENDA; e a sessão
+// CRIA lead real no CRM (webchat_lead_upsert). Link do Meet fica p/ 2ª etapa.
+// (Fase 1 era só um eco de recebimento — substituído.)
 //
 // Anti-abuso (endpoint público): rate limit de sessão por IP (20/h), de mensagem por
 // sessão (15/min), conteúdo <= 2000 chars, sessão bloqueável (webchat_sessoes.bloqueada).
 // Escrita nas tabelas SÓ por aqui (service role); RLS não tem policy de escrita.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
+import { responderWebchat } from "./agente.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE);
-
-// FASE 1: resposta automática de eco (neutra — não assusta lead real se a LP for ao ar).
-const RESPOSTA_ECO = "Recebemos sua mensagem! 😊 Já já te respondemos por aqui.";
 
 const MAX_SESSOES_POR_IP_HORA = 20;
 const MAX_MSGS_POR_SESSAO_MIN = 15;
@@ -169,10 +168,10 @@ async function acaoIniciar(body: Record<string, unknown>, req: Request) {
 async function carregarSessao(sessaoId: string) {
   const { data } = await supabase
     .from("webchat_sessoes")
-    .select("id, bloqueada")
+    .select("id, bloqueada, nome, telefone")
     .eq("id", sessaoId)
     .maybeSingle();
-  return data as { id: string; bloqueada: boolean } | null;
+  return data as { id: string; bloqueada: boolean; nome: string | null; telefone: string | null } | null;
 }
 
 async function acaoEnviar(body: Record<string, unknown>) {
@@ -223,14 +222,41 @@ async function acaoEnviar(body: Record<string, unknown>) {
     .update({ ultima_atividade: new Date().toISOString() })
     .eq("id", sessaoId);
 
-  // FASE 1: eco automático (prova o ciclo ida-e-volta no widget).
-  // FASE 2: substituir este bloco pelo handoff à IA SDR.
-  await supabase.from("webchat_mensagens").insert({
-    sessao_id: sessaoId,
-    direcao: "outbound",
-    origem: "eco",
-    conteudo: RESPOSTA_ECO,
-  });
+  // FASE 2: o João responde (síncrono; o widget mostra "digitando" e faz polling).
+  // Carrega o histórico da thread e gera a resposta reusando a sdr-api (agenda/reunião).
+  try {
+    const { data: hist } = await supabase
+      .from("webchat_mensagens")
+      .select("direcao, conteudo")
+      .eq("sessao_id", sessaoId)
+      .order("id", { ascending: true })
+      .limit(40);
+    const history = (hist ?? []).map((m: any) => ({
+      role: (m.direcao === "inbound" ? "user" : "assistant") as "user" | "assistant",
+      text: String(m.conteudo ?? ""),
+    })).filter((m) => m.text);
+
+    const resposta = await responderWebchat(
+      sessao.nome ?? "",
+      sessao.telefone ?? "",
+      null,
+      history,
+    );
+    await supabase.from("webchat_mensagens").insert({
+      sessao_id: sessaoId,
+      direcao: "outbound",
+      origem: "ia",
+      conteudo: resposta,
+    });
+  } catch (e) {
+    console.error(`[crm-webchat] cerebro: ${(e as Error).message}`);
+    await supabase.from("webchat_mensagens").insert({
+      sessao_id: sessaoId,
+      direcao: "outbound",
+      origem: "sistema",
+      conteudo: "Tive uma instabilidade aqui, mas já já te respondo. 🙏",
+    });
+  }
 
   return json({ ok: true, mensagem_id: msg.id });
 }
