@@ -40,6 +40,10 @@ const MAX_MSGS_HORA_GLOBAL = Number(Deno.env.get("WEBCHAT_MAX_MSGS_HORA_GLOBAL")
 const ALLOWED_ORIGINS = (Deno.env.get("WEBCHAT_ALLOWED_ORIGINS") ?? "")
   .split(",").map((s) => s.trim().toLowerCase().replace(/\/$/, "")).filter(Boolean);
 
+// Cloudflare Turnstile (captcha invisível). Secret setado = exige token válido no 'iniciar'.
+// Vazio = desligado (passa direto). Sitekey (público) vai no widget via data-turnstile.
+const TURNSTILE_SECRET = Deno.env.get("WEBCHAT_TURNSTILE_SECRET") ?? "";
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "content-type, authorization, apikey",
@@ -92,6 +96,28 @@ function ipDe(req: Request): string {
   return partes[partes.length - 1] || "desconhecido";
 }
 
+// Verifica o token do Turnstile na siteverify da Cloudflare. Fail-CLOSED em token
+// inválido/ausente; fail-OPEN só se a PRÓPRIA siteverify cair (rede) — pra um soluço da
+// Cloudflare não zerar a captação de leads (rate limit + disjuntores seguem protegendo).
+async function turnstileOk(token: string, ip: string): Promise<boolean> {
+  if (!TURNSTILE_SECRET) return true; // captcha desligado
+  if (!token) return false;
+  try {
+    const form = new URLSearchParams({ secret: TURNSTILE_SECRET, response: token });
+    if (ip && ip !== "desconhecido") form.set("remoteip", ip);
+    const res = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: form.toString(),
+    });
+    const data = await res.json().catch(() => ({}));
+    return data?.success === true;
+  } catch (e) {
+    console.error(`[crm-webchat] turnstile siteverify caiu: ${(e as Error).message}`);
+    return true; // fail-open só no erro de REDE da verificação
+  }
+}
+
 // ── ações ────────────────────────────────────────────────────────────────────
 
 async function acaoIniciar(body: Record<string, unknown>, req: Request) {
@@ -101,6 +127,12 @@ async function acaoIniciar(body: Record<string, unknown>, req: Request) {
   if (!telefone) return json({ ok: false, erro: "telefone_invalido" }, 400);
 
   const ip = ipDe(req);
+
+  // captcha invisível (Turnstile) — só quando WEBCHAT_TURNSTILE_SECRET está setado
+  if (!(await turnstileOk(texto(body.turnstile_token, 5000), ip))) {
+    return json({ ok: false, erro: "captcha_falhou" }, 403);
+  }
+
   const umaHoraAtras = new Date(Date.now() - 3600_000).toISOString();
   const { count } = await supabase
     .from("webchat_sessoes")
