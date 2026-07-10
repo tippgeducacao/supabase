@@ -67,7 +67,7 @@ function systemPrompt(nome: string, curso: string | null): string {
   const rendered = render(base, {
     nome: (nome || "").trim(),
     curso_interesse_original: cursoLimpo || "(não informado — descubra na conversa, sem inventar)",
-    pergunta_formacao: "só antes de eu fechar esse horário me confirma: qual é o seu curso de graduação? e o que te levou a buscar a pós agora?",
+    pergunta_formacao: "me confirma rapidinho: qual é a sua formação (graduação)? e o que te levou a buscar essa pós agora?",
   });
   const notaCanal = [
     "", "---",
