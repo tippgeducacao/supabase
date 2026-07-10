@@ -139,6 +139,22 @@ async function acaoIniciar(body: Record<string, unknown>, req: Request) {
     return json({ ok: false, erro: "erro_interno" }, 500);
   }
 
+  // Fase 2: cria/vincula o LEAD real no CRM (find-or-create por telefone canônico).
+  // Best-effort — falha aqui não impede o chat de abrir.
+  try {
+    const { data: leadId } = await supabase.rpc("webchat_lead_upsert", {
+      p_nome: nome,
+      p_telefone: telefone,
+      p_pagina: texto(body.pagina, 200) || null,
+      p_curso: texto(body.curso, 120) || null,
+    });
+    if (leadId) {
+      await supabase.from("webchat_sessoes").update({ lead_id: leadId }).eq("id", data.id);
+    }
+  } catch (e) {
+    console.error(`[crm-webchat] lead_upsert: ${(e as Error).message}`);
+  }
+
   // mensagem de boas-vindas na thread (o widget a exibe via poll)
   await supabase.from("webchat_mensagens").insert({
     sessao_id: data.id,
