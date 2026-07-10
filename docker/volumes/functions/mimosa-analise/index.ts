@@ -403,8 +403,49 @@ serve(async (req) => {
         `- interesse / pos_graduacao: ${placeholders.interesse || "(não informado)"}\n\n` +
         `Regra: ao montar a seção "Perfil", cite o local_trabalho real acima. Ao montar "Dores e objetivos", use o por_que_pos real acima como ponto de partida (parafraseie, classifique e expanda). Só use "[Investigar na reunião]" para campos NÃO listados aqui.\n\n---\n\n`;
 
+      // ── Material de venda vinculado ao curso/pós (apresentação oficial) ──
+      // Vínculo: cursos (Gestão Acadêmica) ←curso_id← comercial_cursos (material) → comercial_programa_data (slides).
+      // A Mimosa recebe TODO o material do curso do lead p/ ancorar a análise (diferenciais, conteúdo, valores).
+      let materialBloco = "";
+      try {
+        const norm = (s: string) => (s || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/\s+/g, " ").trim();
+        const alvo = norm(interesseFinal);
+        if (alvo) {
+          const casa = (nome: string) => { const n = norm(nome); return !!n && (n === alvo || n.includes(alvo) || alvo.includes(n)); };
+          // 1) curso da Gestão Acadêmica por nome (traz também os valores exibidos ao lead)
+          const { data: cursosGA } = await adminFetch.from("cursos").select("id, nome, valor_integral, valor_matricula").eq("ativo", true);
+          const cursoGA: any = (cursosGA || []).find((c: any) => casa(c.nome)) || null;
+          // 2) material de venda vinculado (comercial_cursos.curso_id → cursos.id); fallback = match por nome do material
+          let material: any = null;
+          if (cursoGA) {
+            const { data } = await adminFetch.from("comercial_cursos").select("id, nome, slug, resumo_curto").eq("curso_id", cursoGA.id).eq("ativo", true).limit(1).maybeSingle();
+            material = data || null;
+          }
+          if (!material) {
+            const { data: comers } = await adminFetch.from("comercial_cursos").select("id, nome, slug, resumo_curto").eq("ativo", true);
+            material = (comers || []).find((c: any) => casa(c.nome)) || null;
+          }
+          if (material) {
+            const { data: prog } = await adminFetch.from("comercial_programa_data").select("program, script").eq("slug", material.slug).maybeSingle();
+            const { data: links } = await adminFetch.from("comercial_curso_links").select("tipo, titulo, url").eq("curso_id", material.id).eq("ativo", true);
+            let b = "\n\n---\nMATERIAL DE VENDA DO CURSO (apresentação oficial — use como fonte de verdade sobre o curso; NÃO invente diferenciais, conteúdo ou valores fora daqui):\n";
+            b += `- Curso/material: ${material.nome}\n`;
+            if (cursoGA?.valor_integral) b += `- Valor da pós: ${cursoGA.valor_integral}\n`;
+            if (cursoGA?.valor_matricula) b += `- Valor da matrícula: ${cursoGA.valor_matricula}\n`;
+            if (material.resumo_curto) b += `- Resumo: ${material.resumo_curto}\n`;
+            if (prog?.program) b += `\nConteúdo da apresentação (JSON):\n${JSON.stringify(prog.program)}\n`;
+            if (prog?.script) b += `\nScript de vendas (JSON):\n${JSON.stringify(prog.script)}\n`;
+            if (Array.isArray(links) && links.length) b += "\nLinks:\n" + links.map((l: any) => `- [${l.tipo}] ${l.titulo}: ${l.url}`).join("\n") + "\n";
+            materialBloco = b.length > 16000 ? b.slice(0, 16000) + "\n…(material truncado)…\n" : b;
+          }
+        }
+      } catch (e) {
+        console.warn("Falha buscando material de venda vinculado:", e);
+      }
+
       let userPrompt = dadosConfirmados + fillPlaceholders(promptTemplate, placeholders);
       userPrompt += contextoCompleto;
+      userPrompt += materialBloco;
       if (dados.informacoes_adicionais && dados.informacoes_adicionais.trim()) {
         userPrompt += `\n\n---\nINFORMAÇÕES ADICIONAIS FORNECIDAS PELO VENDEDOR (considere e incorpore na análise):\n${dados.informacoes_adicionais.trim()}`;
       }

@@ -201,17 +201,6 @@ Deno.serve(async (req) => {
       console.error("[crm-lead-webhook] logAtividade erro:", e?.message);
     }
   }
-  const segNomeCache = new Map<string, string>();
-  async function nomeSegmento(id: string): Promise<string> {
-    if (segNomeCache.has(id)) return segNomeCache.get(id)!;
-    let nome = "segmento";
-    try {
-      const { data } = await admin.from("crm_segmentos").select("nome").eq("id", id).maybeSingle();
-      nome = (data as any)?.nome ?? "segmento";
-    } catch { /* mantém fallback */ }
-    segNomeCache.set(id, nome);
-    return nome;
-  }
 
   // Captura query params (exceto int/segredo) e headers customizados (exceto auth/proxy/ruído).
   // Alimentam o "Mapeamento automático" (escuta) do builder, que detecta os campos das 3
@@ -961,17 +950,17 @@ Deno.serve(async (req) => {
   // Ligado por uma ação 'enviar_mensagem_whatsapp' com ativar_ia ≠ false → o seed de
   // cliente_ppg_leads_sdr (10a) marca iniciar_atendimento/followup p/ o agente João responder.
   let acaoAtivarIa = false;
-  // Loga "Adicionado ao segmento <nome>" para cada segmento REALMENTE inserido (a upsert
-  // com ignoreDuplicates só retorna as linhas novas) → sem ruído quando o lead já tinha.
+  // Insere os segmentos (upsert idempotente). O evento "Adicionado ao segmento <nome>"
+  // na timeline NÃO é mais logado aqui: quem loga é o gatilho de banco
+  // trg_crm_lead_segmento_atividade (AFTER INSERT em crm_lead_segmentos), que grava o
+  // SELO DE ORIGEM (Integração/Automático/Manual/Importação) para TODO caminho de
+  // atribuição — logar aqui também duplicaria a linha.
   async function logSegmentosAdicionados(ids: string[]) {
     if (!ids.length || !leadId) return;
-    const { data: inseridos } = await admin.from("crm_lead_segmentos").upsert(
+    await admin.from("crm_lead_segmentos").upsert(
       ids.map((segmento_id) => ({ lead_id: leadId, segmento_id, origem: "auto" })),
       { onConflict: "lead_id,segmento_id", ignoreDuplicates: true },
-    ).select("segmento_id");
-    for (const row of (inseridos ?? [])) {
-      await logAtividade(leadId, "segmento_add", "Adicionado ao segmento", await nomeSegmento((row as any).segmento_id));
-    }
+    );
   }
   const acaoChip = (tipo: string) => `${integration.nome ?? slug} - ${ACAO_LABELS[tipo] ?? tipo}`;
   for (const a of acoesExtras) {
