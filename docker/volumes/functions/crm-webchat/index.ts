@@ -28,12 +28,31 @@ const RESPOSTA_ECO = "Recebemos sua mensagem! 😊 Já já te respondemos por aq
 const MAX_SESSOES_POR_IP_HORA = 20;
 const MAX_MSGS_POR_SESSAO_MIN = 15;
 const MAX_CONTEUDO = 2000;
+const MAX_BODY_BYTES = 16_384;
+
+// Disjuntores GLOBAIS (protegem banco/custo mesmo com IPs distribuídos — botnet fura
+// limite por IP). Ajustáveis por env sem mexer em código (env do Dokploy/compose).
+const MAX_SESSOES_HORA_GLOBAL = Number(Deno.env.get("WEBCHAT_MAX_SESSOES_HORA_GLOBAL") ?? 300);
+const MAX_MSGS_HORA_GLOBAL = Number(Deno.env.get("WEBCHAT_MAX_MSGS_HORA_GLOBAL") ?? 3000);
+
+// Allowlist de Origin OPT-IN (CSV de origens, ex.: "https://lp1.com.br,https://lp2.com.br").
+// Vazia = aberto (default). Só barra navegador (curl forja Origin) — é fricção, não muro;
+// o muro são os rate limits + disjuntores.
+const ALLOWED_ORIGINS = (Deno.env.get("WEBCHAT_ALLOWED_ORIGINS") ?? "")
+  .split(",").map((s) => s.trim().toLowerCase().replace(/\/$/, "")).filter(Boolean);
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "content-type, authorization, apikey",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
+
+function origemBloqueada(req: Request): boolean {
+  if (ALLOWED_ORIGINS.length === 0) return false;
+  const origem = (req.headers.get("origin") ?? "").toLowerCase().replace(/\/$/, "");
+  // navegador sempre manda Origin em POST cross-origin; sem Origin (curl/server) barra também
+  return !ALLOWED_ORIGINS.includes(origem);
+}
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -57,9 +76,21 @@ function telefoneValido(raw: string): string | null {
   return semPais;
 }
 
+// IP do cliente SEM confiar no que o cliente manda: o PRIMEIRO valor do
+// x-forwarded-for é forjável (o atacante manda o header e o proxy só APÕE o IP real).
+// Estratégia: varre da DIREITA (o que os NOSSOS proxies apuseram) e pega o primeiro
+// IP público — furando XFF forjado à esquerda e IPs internos (Traefik/Kong) à direita.
+const IP_PRIVADO_RE = /^(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|::1$|f[cd][0-9a-f]{2}:)/i;
+
 function ipDe(req: Request): string {
-  const fwd = req.headers.get("x-forwarded-for") ?? "";
-  return fwd.split(",")[0].trim() || "desconhecido";
+  const cf = req.headers.get("cf-connecting-ip");
+  if (cf) return cf.trim();
+  const partes = (req.headers.get("x-forwarded-for") ?? "")
+    .split(",").map((s) => s.trim()).filter(Boolean);
+  for (let i = partes.length - 1; i >= 0; i--) {
+    if (!IP_PRIVADO_RE.test(partes[i])) return partes[i];
+  }
+  return partes[partes.length - 1] || "desconhecido";
 }
 
 // ── ações ────────────────────────────────────────────────────────────────────
@@ -79,6 +110,16 @@ async function acaoIniciar(body: Record<string, unknown>, req: Request) {
     .gte("criado_em", umaHoraAtras);
   if ((count ?? 0) >= MAX_SESSOES_POR_IP_HORA) {
     return json({ ok: false, erro: "limite_sessoes" }, 429);
+  }
+
+  // disjuntor global (botnet com IPs distribuídos fura o limite por IP)
+  const { count: totalHora } = await supabase
+    .from("webchat_sessoes")
+    .select("id", { count: "exact", head: true })
+    .gte("criado_em", umaHoraAtras);
+  if ((totalHora ?? 0) >= MAX_SESSOES_HORA_GLOBAL) {
+    console.error(`[crm-webchat] DISJUNTOR sessões/hora atingido (${totalHora})`);
+    return json({ ok: false, erro: "ocupado" }, 429);
   }
 
   const { data, error } = await supabase
@@ -139,6 +180,18 @@ async function acaoEnviar(body: Record<string, unknown>) {
     return json({ ok: false, erro: "limite_mensagens" }, 429);
   }
 
+  // disjuntor global de mensagens/hora (protege banco hoje; custo de LLM na Fase 2)
+  const umaHoraAtras = new Date(Date.now() - 3600_000).toISOString();
+  const { count: totalHora } = await supabase
+    .from("webchat_mensagens")
+    .select("id", { count: "exact", head: true })
+    .eq("direcao", "inbound")
+    .gte("criado_em", umaHoraAtras);
+  if ((totalHora ?? 0) >= MAX_MSGS_HORA_GLOBAL) {
+    console.error(`[crm-webchat] DISJUNTOR msgs/hora atingido (${totalHora})`);
+    return json({ ok: false, erro: "ocupado" }, 429);
+  }
+
   const { data: msg, error } = await supabase
     .from("webchat_mensagens")
     .insert({ sessao_id: sessaoId, direcao: "inbound", origem: "lead", conteudo })
@@ -195,10 +248,13 @@ async function acaoPoll(body: Record<string, unknown>) {
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return json({ ok: false, erro: "metodo" }, 405);
+  if (origemBloqueada(req)) return json({ ok: false, erro: "origem_nao_permitida" }, 403);
 
   let body: Record<string, unknown>;
   try {
-    body = await req.json();
+    const cru = await req.text();
+    if (cru.length > MAX_BODY_BYTES) return json({ ok: false, erro: "payload_grande" }, 413);
+    body = JSON.parse(cru);
   } catch {
     return json({ ok: false, erro: "json_invalido" }, 400);
   }
