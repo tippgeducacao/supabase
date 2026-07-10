@@ -127,6 +127,7 @@ async function acaoIniciar(body: Record<string, unknown>, req: Request) {
       nome,
       telefone,
       pagina: texto(body.pagina, 200) || null,
+      curso: texto(body.curso, 120) || null,
       origem_url: texto(body.origem_url, 500) || null,
       ip,
       user_agent: texto(req.headers.get("user-agent"), 300) || null,
@@ -168,10 +169,10 @@ async function acaoIniciar(body: Record<string, unknown>, req: Request) {
 async function carregarSessao(sessaoId: string) {
   const { data } = await supabase
     .from("webchat_sessoes")
-    .select("id, bloqueada, nome, telefone")
+    .select("id, bloqueada, nome, telefone, curso")
     .eq("id", sessaoId)
     .maybeSingle();
-  return data as { id: string; bloqueada: boolean; nome: string | null; telefone: string | null } | null;
+  return data as { id: string; bloqueada: boolean; nome: string | null; telefone: string | null; curso: string | null } | null;
 }
 
 async function acaoEnviar(body: Record<string, unknown>) {
@@ -239,7 +240,7 @@ async function acaoEnviar(body: Record<string, unknown>) {
     const resposta = await responderWebchat(
       sessao.nome ?? "",
       sessao.telefone ?? "",
-      null,
+      sessao.curso ?? null,
       history,
     );
     await supabase.from("webchat_mensagens").insert({
