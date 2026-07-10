@@ -6,11 +6,19 @@
 // O link do Google Meet fica pra uma 2ª etapa (o agendamento entra no fluxo normal de
 // lembretes por WhatsApp). Curso/Meet e mais tools (objeções, envia_informacoes) depois.
 
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
+// Reusa o PROMPT REAL do João de WhatsApp (byte-idêntico ao de produção) — sem drift.
+// Só o prompt é importado; se a resolução de import cross-function falhar no deploy, o
+// fallback embutido (PROMPT_FALLBACK) assume — degrada, não quebra.
+import { AGENTE_QUALIFICADOR } from "../crm-agente-sdr/prompts.ts";
+
 const ANTHROPIC_KEY = Deno.env.get("AGENTE_SDR_ANTHROPIC_KEY") ?? Deno.env.get("ANTHROPIC_API_KEY") ?? "";
 const MODELO = Deno.env.get("AGENTE_SDR_MODEL") ?? "claude-sonnet-4-6";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SDR_API_URL = (Deno.env.get("AGENTE_SDR_SDRAPI_URL") ?? `${SUPABASE_URL}/functions/v1/sdr-api`).replace(/\/$/, "");
 const SDR_API_KEY = Deno.env.get("AGENTE_SDR_SDRAPI_KEY") ?? "";
+
+const supabase = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "");
 
 const BR_OFFSET_MS = 3 * 60 * 60 * 1000;
 const pad = (n: number) => String(n).padStart(2, "0");
@@ -40,31 +48,46 @@ function sdrApi(path: string, init: RequestInit = {}): Promise<Response> {
   });
 }
 
-// ── persona do João (webchat) ────────────────────────────────────────────────
+// ── persona do João (webchat) = PROMPT REAL do WhatsApp + nota do canal ───────
+// Substitui os placeholders n8n mantidos no prompt ({{ $json.nome }} etc.) — mesmo
+// regex do renderPrompt de contexto.ts (replicado inline p/ não importar mais um módulo).
+function render(p: string, vars: Record<string, string>): string {
+  return p.replace(/\{\{\s*\$json\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g, (m, k) => vars[k] ?? m);
+}
+function limparCurso(c: string | null): string {
+  if (!c) return "";
+  return c.replace(/^p[oó]s\s*\|\s*/i, "").replace(/^mba\s*\|\s*/i, "MBA ").replace(/^curso\s*\|\s*/i, "").trim();
+}
+// Fallback caso o import cross-function do prompt real não resolva no deploy.
+const PROMPT_FALLBACK = "Você é o **João**, consultor (SDR) da **PPG Educação**, instituição especializada em pós-graduações e MBAs de **AGRONEGÓCIO e MEDICINA VETERINÁRIA**. Fale português brasileiro, tom acolhedor e consultivo. Missão: entender o interesse e a formação da pessoa, oferecer uma conversa rápida no Google Meet com um monitor especialista, e (se topar) usar as ferramentas p/ horários reais e marcar. NUNCA invente curso — catálogo só agro/vet; em dúvida use `consulta_pos_disponiveis`. NUNCA invente horário — só os de `consulta_disponibilidade`.";
+
 function systemPrompt(nome: string, curso: string | null): string {
-  return [
-    "Você é o **João**, SDR (consultor) da PPG Educação, atendendo pelo CHAT do site em português brasileiro.",
-    `Você está falando com **${nome || "o visitante"}**${curso ? `, que demonstrou interesse em: ${curso}.` : "."}`,
-    contextoTemporal(),
-    "",
-    "## Sua missão",
-    "1. Acolher e entender rápido o interesse da pessoa (qual pós/área, formação).",
-    "2. Oferecer uma **conversa rápida no Google Meet com um monitor especialista** para tirar dúvidas.",
-    "3. Se a pessoa topar, use a ferramenta `consulta_disponibilidade` para trazer HORÁRIOS REAIS e deixe ela escolher.",
-    "4. Quando ela escolher um horário, use `confirmar_agendamento` para marcar a reunião.",
-    "",
-    "## Regras de ouro (invioláveis)",
-    "- Envie só a mensagem final, natural e curta — NUNCA escreva seu raciocínio, plano ou 'a função retornou'.",
-    "- NUNCA invente horário. Só ofereça horários que vieram de `consulta_disponibilidade`.",
-    "- O dia da semana que a ferramenta devolve é o correto — use-o exatamente, não recalcule.",
-    "- Uma ideia por mensagem, tom acolhedor e consultivo, sem parecer robô. Emojis com moderação.",
-    "- Só chame `confirmar_agendamento` depois que a pessoa escolher explicitamente um dos horários oferecidos.",
-    "- Se a ferramenta de agenda falhar, NÃO diga que não há horários; diga que vai confirmar com o time e já retorna.",
-  ].join("\n");
+  const base = (typeof AGENTE_QUALIFICADOR === "string" && AGENTE_QUALIFICADOR) ? AGENTE_QUALIFICADOR : PROMPT_FALLBACK;
+  const cursoLimpo = limparCurso(curso);
+  const rendered = render(base, {
+    nome: (nome || "").trim(),
+    curso_interesse_original: cursoLimpo || "(não informado — descubra na conversa, sem inventar)",
+    pergunta_formacao: "só antes de eu fechar esse horário me confirma: qual é o seu curso de graduação? e o que te levou a buscar a pós agora?",
+  });
+  const notaCanal = [
+    "", "---",
+    "## ⚙️ ESTE CANAL É O CHAT DO SITE (não é WhatsApp)",
+    "- A pessoa está te vendo em TEMPO REAL na página — seja ágil e direto.",
+    "- As confirmações e lembretes da reunião chegam pelo WhatsApp dela (já temos o número).",
+    "- Ferramentas disponíveis AQUI: `consulta_pos_disponiveis` (catálogo REAL), `consulta_disponibilidade` (horários), `confirmar_agendamento` (marcar). Não há outras neste canal — se precisar de algo além, conduza pela conversa.",
+    "- ⛔ NUNCA invente um curso: o catálogo é SÓ agro/veterinária/agronegócio. Em dúvida, chame `consulta_pos_disponiveis`. Área fora do escopo (odontologia, direito, medicina humana…) → diga com gentileza que a PPG é especializada em agro/vet e redirecione, sem inventar curso.",
+    curso ? `- ⭐ Esta conversa veio da página da pós **"${cursoLimpo}"** — ancore nela.` : "",
+  ].filter(Boolean).join("\n");
+  return contextoTemporal() + "\n\n" + rendered + notaCanal;
 }
 
 // ── tools (schema Anthropic) ─────────────────────────────────────────────────
 const TOOLS = [
+  {
+    name: "consulta_pos_disponiveis",
+    description: "Lista as pós-graduações REAIS e ativas da PPG (agro/veterinária). Use SEMPRE que não tiver certeza de qual pós a pessoa quer, ou quando ela perguntar o que existe. NUNCA invente um curso — consulte aqui primeiro.",
+    input_schema: { type: "object", properties: {}, required: [] },
+  },
   {
     name: "consulta_disponibilidade",
     description: "Busca horários REAIS disponíveis para a reunião no Google Meet com um monitor. Use sempre que a pessoa topar conversar ou pedir horários. Nunca ofereça horário que não tenha vindo daqui.",
@@ -94,7 +117,25 @@ const TOOLS = [
   },
 ];
 
-// ── execução das tools (via sdr-api) ─────────────────────────────────────────
+// ── execução das tools ───────────────────────────────────────────────────────
+async function execCatalogo(): Promise<string> {
+  try {
+    const { data, error } = await supabase
+      .from("cursos")
+      .select("nome")
+      .eq("ativo", true)
+      .eq("modalidade", "Pós-Graduação")
+      .order("nome");
+    if (error || !data?.length) {
+      return "Não consegui puxar o catálogo agora. NÃO invente cursos — ofereça a conversa com o especialista pra detalhar.";
+    }
+    const lista = (data as { nome: string }[]).map((c) => `- ${c.nome}`).join("\n");
+    return `Pós-graduações ATIVAS da PPG (fale o nome NATURAL, sem os prefixos "PÓS |"/"MBA |"; cite só 2-4 relevantes ao interesse da pessoa):\n${lista}`;
+  } catch (_e) {
+    return "Não consegui puxar o catálogo agora. NÃO invente cursos — ofereça a conversa com o especialista.";
+  }
+}
+
 async function execDisponibilidade(input: any): Promise<string> {
   const qs = new URLSearchParams({ pos: input.curso_escolhido ?? "", limite: "6" });
   if (input.data_desejada) qs.set("data", input.data_desejada);
@@ -157,6 +198,34 @@ async function anthropic(system: string, messages: Msg[]): Promise<any> {
   return await res.json();
 }
 
+// Abertura PROATIVA: o João manda a 1ª mensagem já puxando conversa (pergunta de
+// qualificação + menção ao curso), em vez de um "oi" genérico. Sem tools.
+export async function aberturaWebchat(nome: string, curso: string | null): Promise<string> {
+  const primeiro = (nome || "").trim().split(/\s+/)[0] || "";
+  const fallback = `Oi${primeiro ? ", " + primeiro : ""}! 👋 Que bom te ver por aqui. Me conta: qual pós ou área você tem em mente?`;
+  if (!ANTHROPIC_KEY) return fallback;
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: MODELO,
+        max_tokens: 300,
+        system: systemPrompt(nome, curso),
+        messages: [{
+          role: "user",
+          content: "[SISTEMA — não é o visitante] O visitante acabou de abrir o chat e ainda NÃO escreveu nada. ABRA você a conversa: cumprimente pelo primeiro nome, mencione com naturalidade o curso de interesse (se houver) e faça UMA pergunta de qualificação (formação/área). Curto, caloroso, em português. Envie só a mensagem final.",
+        }],
+      }),
+    });
+    const data = await res.json();
+    const txt = (data.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n").trim();
+    return txt || fallback;
+  } catch (_e) {
+    return fallback;
+  }
+}
+
 // Recebe o histórico (mais antigo→recente) do webchat + gera a resposta do João.
 // history: [{ role:'user'|'assistant', text }]
 export async function responderWebchat(
@@ -184,7 +253,8 @@ export async function responderWebchat(
     const resultados: any[] = [];
     for (const tu of toolUses) {
       let out = "";
-      if (tu.name === "consulta_disponibilidade") out = await execDisponibilidade(tu.input);
+      if (tu.name === "consulta_pos_disponiveis") out = await execCatalogo();
+      else if (tu.name === "consulta_disponibilidade") out = await execDisponibilidade(tu.input);
       else if (tu.name === "confirmar_agendamento") out = await execAgendar(tu.input, telefone);
       else out = "Ferramenta desconhecida.";
       resultados.push({ type: "tool_result", tool_use_id: tu.id, content: out });

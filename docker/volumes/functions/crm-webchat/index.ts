@@ -17,7 +17,7 @@
 // Escrita nas tabelas SÓ por aqui (service role); RLS não tem policy de escrita.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
-import { responderWebchat } from "./agente.ts";
+import { responderWebchat, aberturaWebchat } from "./agente.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -187,12 +187,20 @@ async function acaoIniciar(body: Record<string, unknown>, req: Request) {
     console.error(`[crm-webchat] lead_upsert: ${(e as Error).message}`);
   }
 
-  // mensagem de boas-vindas na thread (o widget a exibe via poll)
+  // Abertura PROATIVA do João (já puxa conversa com uma pergunta, referenciando o curso
+  // da LP) — em vez de um "oi" genérico. Síncrona: quando o iniciar retorna, já está na
+  // thread e o 1º poll do widget a exibe.
+  let abertura = `Oi, ${nome.split(" ")[0]}! 👋 Que bom te ver por aqui. Me conta: qual pós ou área você tem em mente?`;
+  try {
+    abertura = await aberturaWebchat(nome, texto(body.curso, 120) || null);
+  } catch (e) {
+    console.error(`[crm-webchat] abertura: ${(e as Error).message}`);
+  }
   await supabase.from("webchat_mensagens").insert({
     sessao_id: data.id,
     direcao: "outbound",
-    origem: "sistema",
-    conteudo: `Oi, ${nome.split(" ")[0]}! Pode mandar sua mensagem por aqui. 👋`,
+    origem: "ia",
+    conteudo: abertura,
   });
 
   return json({ ok: true, sessao_id: data.id });
