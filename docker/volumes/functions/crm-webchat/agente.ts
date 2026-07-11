@@ -12,6 +12,10 @@ import { montarContextoTemporal, renderPrompt } from "../crm-agente-sdr/contexto
 import { carregarTools, chamarAgentePrincipal, chamarRouter } from "../crm-agente-sdr/agente.ts";
 import { executarTool, montarToolResults } from "../crm-agente-sdr/tools.ts";
 import { limparParaRouter, sanitizarHistorico } from "../crm-agente-sdr/historico.ts";
+// Fracionamento humanizado — o MESMO do João de WhatsApp (saida.ts): humaniza (tira "!"/
+// travessão) e quebra em 2-3 frases via gpt-4o-mini. Aqui só GERA os chunks; o espaçamento
+// temporal ("digitando" entre balões) é feito no widget (client-side), não no servidor.
+import { fracionarResposta, humanizarTexto } from "../crm-agente-sdr/saida.ts";
 
 const ANTHROPIC_KEY = Deno.env.get("AGENTE_SDR_ANTHROPIC_KEY") ?? Deno.env.get("ANTHROPIC_API_KEY") ?? "";
 const MODELO = Deno.env.get("AGENTE_SDR_MODEL") ?? "claude-sonnet-4-6";
@@ -65,6 +69,13 @@ function textoDe(blocos: any[]): string {
   return (blocos ?? []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
 }
 
+// Resposta final → balões (humaniza + fraciona). Fallback = balão único (resposta > silêncio).
+async function emChunks(texto: string): Promise<string[]> {
+  const limpo = humanizarTexto(texto);
+  const chunks = await fracionarResposta(limpo);
+  return chunks.length ? chunks : [limpo];
+}
+
 // envia_informacoes do WEBCHAT: roteia o cronograma por uma LINHA WEB (Uazapi) via
 // wa_conexao_id — o lead do site não tem janela de 24h no Cloud API. Reusa a MESMA
 // sdr-api/envia-informacoes (resolve curso, cronograma, valores); só troca o canal.
@@ -98,10 +109,11 @@ async function webchatEnviaInformacoes(tu: any, telefone: string, curso: string 
 }
 
 // ── Abertura PROATIVA (estágio validação): oferece o Meet, não pergunta formação ──────
-export async function aberturaWebchat(nome: string, curso: string | null): Promise<string> {
+// Devolve os BALÕES (chunks) da abertura — o widget mostra um a um com "digitando".
+export async function aberturaWebchat(nome: string, curso: string | null): Promise<string[]> {
   const primeiro = (nome || "").trim().split(/\s+/)[0] || "";
   const fallback = `Oi${primeiro ? ", " + primeiro : ""}! 👋 Vi seu interesse na nossa pós — que tal uma conversa rápida no Google Meet com um monitor especialista pra te mostrar tudo? Topa que eu já procuro um horário?`;
-  if (!ANTHROPIC_KEY) return fallback;
+  if (!ANTHROPIC_KEY) return [fallback];
   try {
     // sem tools na abertura (é só a saudação/oferta); usa o prompt real de validação +
     // o contexto temporal (pra não falar de horário fora da hora).
@@ -122,9 +134,10 @@ export async function aberturaWebchat(nome: string, curso: string | null): Promi
       }),
     });
     const data = await res.json();
-    return textoDe(data.content) || fallback;
+    const texto = textoDe(data.content);
+    return texto ? await emChunks(texto) : [fallback];
   } catch (_e) {
-    return fallback;
+    return [fallback];
   }
 }
 
@@ -136,10 +149,10 @@ export async function responderWebchat(
   history: { role: "user" | "assistant"; text: string }[],
   estagioSalvo: Estagio = "validacao",
   leadId: string | null = null,
-): Promise<{ texto: string; estagio: Estagio }> {
+): Promise<{ chunks: string[]; estagio: Estagio }> {
   const raw: Msg[] = history.map((m) => ({ role: m.role, content: m.text })).filter((m) => m.content);
   if (!ANTHROPIC_KEY || !raw.length) {
-    return { texto: "Pode me contar um pouco mais sobre o que você procura? 😊", estagio: estagioSalvo };
+    return { chunks: ["Pode me contar um pouco mais sobre o que você procura? 😊"], estagio: estagioSalvo };
   }
   // A conversa do webchat começa com a ABERTURA (assistant); a Anthropic exige início
   // 'user'. Prepende um marcador de abertura (o limparParaRouter/sanitizarHistorico do
@@ -169,7 +182,7 @@ export async function responderWebchat(
     const toolUses = blocos.filter((b) => b.type === "tool_use");
 
     if (!toolUses.length) {
-      return { texto: textoDe(blocos) || "Pode me contar um pouco mais? 😊", estagio };
+      return { chunks: await emChunks(textoDe(blocos) || "Pode me contar um pouco mais? 😊"), estagio };
     }
 
     // executa as tools REAIS (mesma implementação do WhatsApp) e continua o loop.
@@ -183,5 +196,5 @@ export async function responderWebchat(
     }
     messages.push({ role: "user", content: montarToolResults(outputs) });
   }
-  return { texto: "Deixa eu confirmar uma coisa aqui rapidinho e já te falo. 🙌", estagio };
+  return { chunks: ["Deixa eu confirmar uma coisa aqui rapidinho e já te falo. 🙌"], estagio };
 }

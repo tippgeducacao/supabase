@@ -28,6 +28,16 @@ const MAX_SESSOES_POR_IP_HORA = 20;
 const MAX_MSGS_POR_SESSAO_MIN = 15;
 const MAX_CONTEUDO = 2000;
 const MAX_BODY_BYTES = 16_384;
+// Áudio inbound chega inline (base64) → cap próprio, maior (o de texto é DoS guard).
+// ~3MB de payload ≈ ~2,2MB de áudio ≈ >1min de webm/opus — suficiente pra nota de voz.
+const MAX_BODY_AUDIO = 3_000_000;
+
+// Whisper (OpenAI) — mesma chave/modelo do crm-transcrever-audio / midia.ts (já no container).
+const OPENAI_KEY = Deno.env.get("AGENTE_SDR_OPENAI_KEY") ?? Deno.env.get("OPENAI_API_KEY") ?? "";
+const WHISPER_MODEL = Deno.env.get("OPENAI_TRANSCRIBE_MODEL") ?? "whisper-1";
+
+// Chave pública VAPID do Web Push (é PÚBLICA — o popup de opt-in a busca daqui pra subscrever).
+const VAPID_PUBLIC = Deno.env.get("WEBCHAT_VAPID_PUBLIC") ?? "";
 
 // Disjuntores GLOBAIS (protegem banco/custo mesmo com IPs distribuídos — botnet fura
 // limite por IP). Ajustáveis por env sem mexer em código (env do Dokploy/compose).
@@ -118,6 +128,121 @@ async function turnstileOk(token: string, ip: string): Promise<boolean> {
   }
 }
 
+// ── áudio (Whisper) ────────────────────────────────────────────────────────────
+function b64ToBytes(b64: string): Uint8Array {
+  const limpo = b64.includes(",") ? b64.slice(b64.indexOf(",") + 1) : b64; // tira "data:...;base64,"
+  const bin = atob(limpo);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+// Espelho do extDoMime do crm-transcrever-audio/midia.ts (Whisper exige nome com extensão).
+function extDoMime(mime: string): string {
+  const m = (mime || "").toLowerCase();
+  if (m.includes("ogg") || m.includes("opus")) return "ogg";
+  if (m.includes("mpeg") || m.includes("mp3")) return "mp3";
+  if (m.includes("mp4") || m.includes("m4a") || m.includes("aac")) return "m4a";
+  if (m.includes("wav")) return "wav";
+  if (m.includes("webm")) return "webm";
+  return "webm";
+}
+
+// Transcreve via OpenAI Whisper (mesmo endpoint/modelo do crm-transcrever-audio). Best-effort:
+// falha → "" (a mensagem entra como "[áudio]" e o João segue conduzindo).
+async function transcreverWhisper(bytes: Uint8Array, mime: string): Promise<string> {
+  if (!OPENAI_KEY) return "";
+  try {
+    const form = new FormData();
+    form.append("file", new Blob([bytes], { type: mime }), `audio.${extDoMime(mime)}`);
+    form.append("model", WHISPER_MODEL);
+    form.append("language", "pt");
+    const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${OPENAI_KEY}` },
+      body: form,
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      console.error(`[crm-webchat] whisper HTTP ${res.status}: ${j?.error?.message ?? "falha"}`);
+      return "";
+    }
+    return String(j?.text ?? "").trim();
+  } catch (e) {
+    console.error(`[crm-webchat] whisper: ${(e as Error).message}`);
+    return "";
+  }
+}
+
+// Rate limit de inbound (por sessão/min + disjuntor global/hora) — compartilhado por
+// 'enviar' e 'audio'. Retorna a Response de erro OU null (ok).
+async function checarLimitesInbound(sessaoId: string): Promise<Response | null> {
+  const umMinAtras = new Date(Date.now() - 60_000).toISOString();
+  const { count } = await supabase
+    .from("webchat_mensagens")
+    .select("id", { count: "exact", head: true })
+    .eq("sessao_id", sessaoId).eq("direcao", "inbound").gte("criado_em", umMinAtras);
+  if ((count ?? 0) >= MAX_MSGS_POR_SESSAO_MIN) return json({ ok: false, erro: "limite_mensagens" }, 429);
+
+  const umaHoraAtras = new Date(Date.now() - 3600_000).toISOString();
+  const { count: totalHora } = await supabase
+    .from("webchat_mensagens")
+    .select("id", { count: "exact", head: true })
+    .eq("direcao", "inbound").gte("criado_em", umaHoraAtras);
+  if ((totalHora ?? 0) >= MAX_MSGS_HORA_GLOBAL) {
+    console.error(`[crm-webchat] DISJUNTOR msgs/hora atingido (${totalHora})`);
+    return json({ ok: false, erro: "ocupado" }, 429);
+  }
+  return null;
+}
+
+// Gera a resposta do João e grava UM balão por chunk (+ espelho SAC). Compartilhado por
+// 'enviar' e 'audio'. O pacing temporal ("digitando" entre balões) é do widget.
+async function responderComoJoao(
+  sessao: NonNullable<Awaited<ReturnType<typeof carregarSessao>>>,
+  sessaoId: string,
+): Promise<void> {
+  try {
+    const { data: hist } = await supabase
+      .from("webchat_mensagens")
+      .select("direcao, conteudo")
+      .eq("sessao_id", sessaoId)
+      .order("id", { ascending: true })
+      .limit(40);
+    const history = (hist ?? []).map((m: any) => ({
+      role: (m.direcao === "inbound" ? "user" : "assistant") as "user" | "assistant",
+      text: String(m.conteudo ?? ""),
+    })).filter((m) => m.text);
+
+    const { chunks, estagio } = await responderWebchat(
+      sessao.nome ?? "",
+      sessao.telefone ?? "",
+      sessao.curso ?? null,
+      history,
+      sessao.estagio === "qualificador" ? "qualificador" : "validacao",
+      sessao.lead_id ?? null,
+    );
+    // ratchet: promoção validação→qualificador é persistida (nunca regride)
+    if (estagio === "qualificador" && sessao.estagio !== "qualificador") {
+      await supabase.from("webchat_sessoes").update({ estagio: "qualificador" }).eq("id", sessaoId);
+    }
+    // um balão por chunk (o widget mostra "digitando" entre eles)
+    for (const chunk of chunks) {
+      await supabase.from("webchat_mensagens").insert({
+        sessao_id: sessaoId, direcao: "outbound", origem: "ia", conteudo: chunk,
+      });
+      await syncSac(sessaoId, "outbound", "ia", chunk);
+    }
+  } catch (e) {
+    console.error(`[crm-webchat] cerebro: ${(e as Error).message}`);
+    const fb = "Tive uma instabilidade aqui, mas já já te respondo. 🙏";
+    await supabase.from("webchat_mensagens").insert({
+      sessao_id: sessaoId, direcao: "outbound", origem: "sistema", conteudo: fb,
+    });
+    await syncSac(sessaoId, "outbound", "sistema", fb);
+  }
+}
+
 // ── ações ────────────────────────────────────────────────────────────────────
 
 async function acaoIniciar(body: Record<string, unknown>, req: Request) {
@@ -189,20 +314,19 @@ async function acaoIniciar(body: Record<string, unknown>, req: Request) {
 
   // Abertura PROATIVA do João (já puxa conversa com uma pergunta, referenciando o curso
   // da LP) — em vez de um "oi" genérico. Síncrona: quando o iniciar retorna, já está na
-  // thread e o 1º poll do widget a exibe.
-  let abertura = `Oi, ${nome.split(" ")[0]}! 👋 Que bom te ver por aqui. Me conta: qual pós ou área você tem em mente?`;
+  // thread e o 1º poll do widget a exibe. Vem FRACIONADA em balões (o widget espaça).
+  let chunks: string[] = [`Oi, ${nome.split(" ")[0]}! 👋 Que bom te ver por aqui. Me conta: qual pós ou área você tem em mente?`];
   try {
-    abertura = await aberturaWebchat(nome, texto(body.curso, 120) || null);
+    chunks = await aberturaWebchat(nome, texto(body.curso, 120) || null);
   } catch (e) {
     console.error(`[crm-webchat] abertura: ${(e as Error).message}`);
   }
-  await supabase.from("webchat_mensagens").insert({
-    sessao_id: data.id,
-    direcao: "outbound",
-    origem: "ia",
-    conteudo: abertura,
-  });
-  await syncSac(data.id, "outbound", "ia", abertura);
+  for (const chunk of chunks) {
+    await supabase.from("webchat_mensagens").insert({
+      sessao_id: data.id, direcao: "outbound", origem: "ia", conteudo: chunk,
+    });
+    await syncSac(data.id, "outbound", "ia", chunk);
+  }
 
   return json({ ok: true, sessao_id: data.id });
 }
@@ -210,17 +334,19 @@ async function acaoIniciar(body: Record<string, unknown>, req: Request) {
 async function carregarSessao(sessaoId: string) {
   const { data } = await supabase
     .from("webchat_sessoes")
-    .select("id, bloqueada, nome, telefone, curso, estagio")
+    .select("id, bloqueada, nome, telefone, curso, estagio, lead_id")
     .eq("id", sessaoId)
     .maybeSingle();
-  return data as { id: string; bloqueada: boolean; nome: string | null; telefone: string | null; curso: string | null; estagio: "validacao" | "qualificador" | null } | null;
+  return data as { id: string; bloqueada: boolean; nome: string | null; telefone: string | null; curso: string | null; estagio: "validacao" | "qualificador" | null; lead_id: string | null } | null;
 }
 
 // Espelha a mensagem no SAC (funil "Webchat") — a conversa aparece no Contato 360 /
 // atendimentos do lead. Best-effort: falha aqui NÃO derruba o chat.
-async function syncSac(sessaoId: string, direcao: string, origem: string, conteudo: string): Promise<void> {
+async function syncSac(sessaoId: string, direcao: string, origem: string, conteudo: string, anexos: unknown[] = []): Promise<void> {
   try {
-    await supabase.rpc("webchat_sac_sync", { p_sessao_id: sessaoId, p_direcao: direcao, p_origem: origem, p_conteudo: conteudo });
+    await supabase.rpc("webchat_sac_sync", {
+      p_sessao_id: sessaoId, p_direcao: direcao, p_origem: origem, p_conteudo: conteudo, p_anexos: anexos,
+    });
   } catch (e) {
     console.error(`[crm-webchat] sac_sync: ${(e as Error).message}`);
   }
@@ -236,28 +362,8 @@ async function acaoEnviar(body: Record<string, unknown>) {
   if (!sessao) return json({ ok: false, erro: "sessao_nao_encontrada" }, 404);
   if (sessao.bloqueada) return json({ ok: false, erro: "sessao_bloqueada" }, 403);
 
-  const umMinAtras = new Date(Date.now() - 60_000).toISOString();
-  const { count } = await supabase
-    .from("webchat_mensagens")
-    .select("id", { count: "exact", head: true })
-    .eq("sessao_id", sessaoId)
-    .eq("direcao", "inbound")
-    .gte("criado_em", umMinAtras);
-  if ((count ?? 0) >= MAX_MSGS_POR_SESSAO_MIN) {
-    return json({ ok: false, erro: "limite_mensagens" }, 429);
-  }
-
-  // disjuntor global de mensagens/hora (protege banco hoje; custo de LLM na Fase 2)
-  const umaHoraAtras = new Date(Date.now() - 3600_000).toISOString();
-  const { count: totalHora } = await supabase
-    .from("webchat_mensagens")
-    .select("id", { count: "exact", head: true })
-    .eq("direcao", "inbound")
-    .gte("criado_em", umaHoraAtras);
-  if ((totalHora ?? 0) >= MAX_MSGS_HORA_GLOBAL) {
-    console.error(`[crm-webchat] DISJUNTOR msgs/hora atingido (${totalHora})`);
-    return json({ ok: false, erro: "ocupado" }, 429);
-  }
+  const limite = await checarLimitesInbound(sessaoId);
+  if (limite) return limite;
 
   const { data: msg, error } = await supabase
     .from("webchat_mensagens")
@@ -276,48 +382,98 @@ async function acaoEnviar(body: Record<string, unknown>) {
     .eq("id", sessaoId);
 
   // FASE 2: o João responde (síncrono; o widget mostra "digitando" e faz polling).
-  // Carrega o histórico da thread e gera a resposta reusando a sdr-api (agenda/reunião).
-  try {
-    const { data: hist } = await supabase
-      .from("webchat_mensagens")
-      .select("direcao, conteudo")
-      .eq("sessao_id", sessaoId)
-      .order("id", { ascending: true })
-      .limit(40);
-    const history = (hist ?? []).map((m: any) => ({
-      role: (m.direcao === "inbound" ? "user" : "assistant") as "user" | "assistant",
-      text: String(m.conteudo ?? ""),
-    })).filter((m) => m.text);
-
-    const { texto: resposta, estagio } = await responderWebchat(
-      sessao.nome ?? "",
-      sessao.telefone ?? "",
-      sessao.curso ?? null,
-      history,
-      sessao.estagio === "qualificador" ? "qualificador" : "validacao",
-    );
-    // ratchet: promoção validação→qualificador é persistida (nunca regride)
-    if (estagio === "qualificador" && sessao.estagio !== "qualificador") {
-      await supabase.from("webchat_sessoes").update({ estagio: "qualificador" }).eq("id", sessaoId);
-    }
-    await supabase.from("webchat_mensagens").insert({
-      sessao_id: sessaoId,
-      direcao: "outbound",
-      origem: "ia",
-      conteudo: resposta,
-    });
-    await syncSac(sessaoId, "outbound", "ia", resposta);
-  } catch (e) {
-    console.error(`[crm-webchat] cerebro: ${(e as Error).message}`);
-    await supabase.from("webchat_mensagens").insert({
-      sessao_id: sessaoId,
-      direcao: "outbound",
-      origem: "sistema",
-      conteudo: "Tive uma instabilidade aqui, mas já já te respondo. 🙏",
-    });
-  }
+  await responderComoJoao(sessao, sessaoId);
 
   return json({ ok: true, mensagem_id: msg.id });
+}
+
+// Áudio do lead: base64 → Storage (whatsapp-anexos/webchat) → Whisper → vira a mensagem
+// inbound (conteudo=transcrição, anexos=[áudio]) → o João responde ao que foi falado.
+async function acaoAudio(body: Record<string, unknown>, req: Request) {
+  const sessaoId = texto(body.sessao_id, 40);
+  if (!UUID_RE.test(sessaoId)) return json({ ok: false, erro: "sessao_invalida" }, 400);
+  const b64 = typeof body.audio_base64 === "string" ? body.audio_base64 : "";
+  if (!b64) return json({ ok: false, erro: "audio_vazio" }, 400);
+  const mime = texto(body.mime, 60) || "audio/webm";
+
+  const sessao = await carregarSessao(sessaoId);
+  if (!sessao) return json({ ok: false, erro: "sessao_nao_encontrada" }, 404);
+  if (sessao.bloqueada) return json({ ok: false, erro: "sessao_bloqueada" }, 403);
+
+  const limite = await checarLimitesInbound(sessaoId);
+  if (limite) return limite;
+
+  let bytes: Uint8Array;
+  try {
+    bytes = b64ToBytes(b64);
+  } catch {
+    return json({ ok: false, erro: "audio_invalido" }, 400);
+  }
+  if (!bytes.length) return json({ ok: false, erro: "audio_vazio" }, 400);
+
+  // sobe pro Storage (mesmo bucket público do WhatsApp; pasta webchat/)
+  let url: string | null = null;
+  try {
+    const ext = extDoMime(mime);
+    const path = `webchat/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}.${ext}`;
+    const { error: stErr } = await supabase.storage.from("whatsapp-anexos").upload(path, bytes, { contentType: mime, upsert: false });
+    if (stErr) console.error(`[crm-webchat] storage upload: ${stErr.message}`);
+    else url = supabase.storage.from("whatsapp-anexos").getPublicUrl(path).data.publicUrl;
+  } catch (e) {
+    console.error(`[crm-webchat] storage: ${(e as Error).message}`);
+  }
+
+  // transcreve (Whisper); vazio → "[áudio]" (a conversa segue mesmo sem transcrição)
+  const transcricao = await transcreverWhisper(bytes, mime);
+  const conteudo = transcricao || "[áudio]";
+  const anexos = url ? [{ tipo: "audio", mime_type: mime, url, url_storage: url }] : [];
+
+  const { data: msg, error } = await supabase
+    .from("webchat_mensagens")
+    .insert({ sessao_id: sessaoId, direcao: "inbound", origem: "lead", conteudo, anexos, transcricao: transcricao || null })
+    .select("id")
+    .single();
+  if (error) {
+    console.error(`[crm-webchat] audio insert: ${error.message}`);
+    return json({ ok: false, erro: "erro_interno" }, 500);
+  }
+  await syncSac(sessaoId, "inbound", "lead", conteudo, anexos);
+
+  await supabase
+    .from("webchat_sessoes")
+    .update({ ultima_atividade: new Date().toISOString() })
+    .eq("id", sessaoId);
+
+  await responderComoJoao(sessao, sessaoId);
+
+  return json({ ok: true, mensagem_id: msg.id, transcricao });
+}
+
+// Grava a subscription de Web Push do navegador do lead (opt-in vindo do popup na nossa
+// origem). endpoint é UNIQUE → upsert (renova as chaves se o navegador re-subscrever).
+async function acaoPushSubscribe(body: Record<string, unknown>, req: Request) {
+  const sessaoId = texto(body.sessao_id, 40);
+  if (!UUID_RE.test(sessaoId)) return json({ ok: false, erro: "sessao_invalida" }, 400);
+  const sub = (body.subscription ?? {}) as any;
+  const endpoint = texto(sub.endpoint, 1000);
+  const p256dh = texto(sub?.keys?.p256dh, 300);
+  const auth = texto(sub?.keys?.auth, 300);
+  if (!endpoint || !p256dh || !auth) return json({ ok: false, erro: "subscription_invalida" }, 400);
+
+  const sessao = await carregarSessao(sessaoId);
+  if (!sessao) return json({ ok: false, erro: "sessao_nao_encontrada" }, 404);
+
+  const { error } = await supabase
+    .from("webchat_push_subscriptions")
+    .upsert({
+      sessao_id: sessaoId, endpoint, p256dh, auth,
+      user_agent: texto(req.headers.get("user-agent"), 300) || null,
+    }, { onConflict: "endpoint" });
+  if (error) {
+    console.error(`[crm-webchat] push_subscribe: ${error.message}`);
+    return json({ ok: false, erro: "erro_interno" }, 500);
+  }
+  return json({ ok: true });
 }
 
 async function acaoPoll(body: Record<string, unknown>) {
@@ -331,7 +487,7 @@ async function acaoPoll(body: Record<string, unknown>) {
 
   const { data, error } = await supabase
     .from("webchat_mensagens")
-    .select("id, direcao, origem, conteudo, criado_em")
+    .select("id, direcao, origem, conteudo, anexos, criado_em")
     .eq("sessao_id", sessaoId)
     .gt("id", cursor)
     .order("id", { ascending: true })
@@ -354,8 +510,13 @@ Deno.serve(async (req) => {
   let body: Record<string, unknown>;
   try {
     const cru = await req.text();
-    if (cru.length > MAX_BODY_BYTES) return json({ ok: false, erro: "payload_grande" }, 413);
+    // Teto duro (áudio inline base64); depois de parsear, só a ação 'audio' pode passar
+    // do cap de texto — as demais ficam no limite pequeno (anti-DoS).
+    if (cru.length > MAX_BODY_AUDIO) return json({ ok: false, erro: "payload_grande" }, 413);
     body = JSON.parse(cru);
+    if (body.acao !== "audio" && cru.length > MAX_BODY_BYTES) {
+      return json({ ok: false, erro: "payload_grande" }, 413);
+    }
   } catch {
     return json({ ok: false, erro: "json_invalido" }, 400);
   }
@@ -366,8 +527,14 @@ Deno.serve(async (req) => {
         return await acaoIniciar(body, req);
       case "enviar":
         return await acaoEnviar(body);
+      case "audio":
+        return await acaoAudio(body, req);
       case "poll":
         return await acaoPoll(body);
+      case "push_vapid":
+        return json({ ok: true, chave: VAPID_PUBLIC });
+      case "push_subscribe":
+        return await acaoPushSubscribe(body, req);
       default:
         return json({ ok: false, erro: "acao_invalida" }, 400);
     }
