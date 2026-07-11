@@ -16,6 +16,11 @@ import { limparParaRouter, sanitizarHistorico } from "../crm-agente-sdr/historic
 const ANTHROPIC_KEY = Deno.env.get("AGENTE_SDR_ANTHROPIC_KEY") ?? Deno.env.get("ANTHROPIC_API_KEY") ?? "";
 const MODELO = Deno.env.get("AGENTE_SDR_MODEL") ?? "claude-sonnet-4-6";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
+const SDR_API_URL = (Deno.env.get("AGENTE_SDR_SDRAPI_URL") ?? `${SUPABASE_URL}/functions/v1/sdr-api`).replace(/\/$/, "");
+const SDR_API_KEY = Deno.env.get("AGENTE_SDR_SDRAPI_KEY") ?? "";
+// Linha Web (Uazapi, wa_conexoes.id) por onde o WEBCHAT envia o cronograma — o lead do
+// site não tem janela de 24h no Cloud API. Vazio = cai no comportamento padrão (Cloud).
+const WEBCHAT_WA_CONEXAO_ID = Deno.env.get("WEBCHAT_WA_CONEXAO_ID") ?? "";
 const supabase = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "");
 
 const MAX_RODADAS = 6;
@@ -58,6 +63,38 @@ function ctxDe(telefone: string, leadId: string | null): CtxConversa {
 
 function textoDe(blocos: any[]): string {
   return (blocos ?? []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+}
+
+// envia_informacoes do WEBCHAT: roteia o cronograma por uma LINHA WEB (Uazapi) via
+// wa_conexao_id — o lead do site não tem janela de 24h no Cloud API. Reusa a MESMA
+// sdr-api/envia-informacoes (resolve curso, cronograma, valores); só troca o canal.
+async function webchatEnviaInformacoes(tu: any, telefone: string, curso: string | null): Promise<Record<string, unknown>> {
+  const input = tu.input ?? {};
+  const conteudo = input.conteudo || "cronograma";
+  const pos = String(input.curso_escolhido ?? "").trim() || limparCurso(curso);
+  if (!pos) return { resultado: "Curso não informado — diga que envia em seguida e conduza a conversa.", id: tu.id };
+  try {
+    const r = await fetch(`${SDR_API_URL}/envia-informacoes`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SDR_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ whatsapp: telefone, pos, conteudo, wa_conexao_id: WEBCHAT_WA_CONEXAO_ID || null }),
+    });
+    const b: any = await r.json().catch(() => ({}));
+    const d = b?.data ?? {};
+    if (r.status < 200 || r.status >= 300) {
+      const code = d.code || b?.code || "";
+      if (code === "cronograma_nao_cadastrado") return { resultado: "Cronograma ainda não cadastrado pra esse curso. Diga que manda o material em seguida e conduza a conversa.", id: tu.id };
+      return { resultado: `Não consegui enviar agora (${d.error || b?.error || r.status}). Diga que vai enviar em seguida e conduza, sem citar o erro.`, id: tu.id };
+    }
+    const partes: string[] = [];
+    if (d.cronograma_enviado) partes.push("Cronograma ENVIADO no WhatsApp do lead — confirme pra ele com naturalidade.");
+    else if (d.cronograma_erro) partes.push(`Cronograma NÃO enviado (${d.cronograma_erro}) — diga que manda em seguida, sem citar erro técnico.`);
+    if (d.valor_integral) partes.push(`Valor integral da pós: ${d.valor_integral}.`);
+    if (d.valor_matricula) partes.push(`Valor da matrícula (garante a vaga): ${d.valor_matricula}.`);
+    return { resultado: partes.join(" ") || "Feito.", id: tu.id };
+  } catch (e) {
+    return { resultado: `Erro técnico ao enviar (${(e as Error).message}). Diga que envia em seguida e conduza.`, id: tu.id };
+  }
 }
 
 // ── Abertura PROATIVA (estágio validação): oferece o Meet, não pergunta formação ──────
@@ -135,11 +172,14 @@ export async function responderWebchat(
       return { texto: textoDe(blocos) || "Pode me contar um pouco mais? 😊", estagio };
     }
 
-    // executa as tools REAIS (mesma implementação do WhatsApp) e continua o loop
+    // executa as tools REAIS (mesma implementação do WhatsApp) e continua o loop.
+    // ÚNICA exceção: envia_informacoes é interceptado pra rotear o cronograma pela
+    // linha WEB (Uazapi), já que o lead do site não tem janela de 24h no Cloud.
     messages.push({ role: "assistant", content: blocos });
     const outputs: Record<string, unknown>[] = [];
     for (const tu of toolUses) {
-      outputs.push(await executarTool(supabase, tu, ctx));
+      if (tu.name === "envia_informacoes") outputs.push(await webchatEnviaInformacoes(tu, telefone, curso));
+      else outputs.push(await executarTool(supabase, tu, ctx));
     }
     messages.push({ role: "user", content: montarToolResults(outputs) });
   }

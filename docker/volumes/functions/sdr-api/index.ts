@@ -420,6 +420,10 @@ async function handleEnviaInformacoes(_sdrId: string, body: any): Promise<Respon
           anexo_url: info.cronograma.url,
           filename: info.cronograma.nome_arquivo || undefined,
           wa_account_id: body?.wa_account_id ?? null,
+          // wa_conexao_id (opcional): força uma LINHA Uazapi/Web (sem janela 24h). Usado
+          // pelo WEBCHAT — o lead do site nunca abriu janela no Cloud API. Quando presente,
+          // o crm-whatsapp-send roteia por enviarViaConexao. WhatsApp não passa → null.
+          wa_conexao_id: body?.wa_conexao_id ?? null,
           lead_id: body?.lead_id ?? null,
           oportunidade_id: body?.oportunidade_id ?? null,
         }),
