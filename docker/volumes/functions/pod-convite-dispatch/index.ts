@@ -130,14 +130,19 @@ async function handler(req: Request): Promise<Response> {
 
         // esgotou os 3 toques → silenciou + convidado 'convidar_em_6m'
         if (proxToque > 3) {
-          await admin.from("pod_convite_candidatos")
-            .update({ status: "silenciou" }).eq("id", c.id);
-          const seis = new Date(); seis.setMonth(seis.getMonth() + 6);
-          await admin.from("ped_professores")
-            .update({ status_podcast: "convidar_em_6m", reconvidar_a_partir_de: seis.toISOString().slice(0, 10) })
-            .eq("id", c.professor_id)
-            .eq("status_podcast", "a_convidar"); // só rebaixa quem ainda está 'a_convidar'
-          silenciados++;
+          // guarda anti-corrida: se respondeu (webhook/e-mail/manual) entre o SELECT da fila
+          // e aqui, NÃO sobrescreve nem rebaixa o convidado
+          const { data: sil } = await admin.from("pod_convite_candidatos")
+            .update({ status: "silenciou" }).eq("id", c.id)
+            .in("status", ["na_fila", "convidando"]).select("id");
+          if ((sil ?? []).length > 0) {
+            const seis = new Date(); seis.setMonth(seis.getMonth() + 6);
+            await admin.from("ped_professores")
+              .update({ status_podcast: "convidar_em_6m", reconvidar_a_partir_de: seis.toISOString().slice(0, 10) })
+              .eq("id", c.professor_id)
+              .eq("status_podcast", "a_convidar"); // só rebaixa quem ainda está 'a_convidar'
+            silenciados++;
+          }
           continue;
         }
 
@@ -215,7 +220,10 @@ async function handler(req: Request): Promise<Response> {
         };
         if (waOk) upd.wpp_enviado_em = nowIso;
         if (emailOk) upd.email_enviado_em = nowIso;
-        await admin.from("pod_convite_candidatos").update(upd).eq("id", c.id);
+        // .in(status): se o convidado respondeu DURANTE esta rodada (webhook do WhatsApp,
+        // trigger de e-mail ou marcação manual), não volta o status pra 'convidando'
+        await admin.from("pod_convite_candidatos").update(upd)
+          .eq("id", c.id).in("status", ["na_fila", "convidando"]);
         if (waOk || emailOk) enviados++; else erros++;
       } catch (e) {
         erros++;
