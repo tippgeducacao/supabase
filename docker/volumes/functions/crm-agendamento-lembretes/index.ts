@@ -28,6 +28,15 @@
 // Dedup: claim atômico em crm_lembrete_envios (INSERT ON CONFLICT DO NOTHING por
 // reunião × toque) antes de enviar; falhou o envio → remove a linha e tenta no
 // próximo tick. (As colunas legadas agendamentos.lembrete_*_em viraram histórico.)
+//
+// TEMPLATE POR NÚMERO (crm_lembrete_toque_contas, 2026-07-11): o nome do template
+// muda de WABA pra WABA (ex.: 30min é 'lembre_de_30_min_utility' no João e
+// 'lembre_30_min_utility' na PPGVET - Pós-graduação IA). Cada toque pode ter um
+// template PRÓPRIO por conta Meta: ao enviar pela conta X, usa o override
+// (toque × X) se existir; senão o template padrão do toque; sem nenhum dos dois a
+// rota Meta não é viável pra esse toque (cai pra próxima rota da cadeia). Assim o
+// lembrete sai pelo número da conversa com o template certo daquela WABA, em vez de
+// falhar (132001) e cair no fallback pelo João.
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3';
 
@@ -103,6 +112,60 @@ async function carregarToques(): Promise<Toque[]> {
     .order('minutos_antes', { ascending: false });
   if (error) throw new Error(`select crm_lembrete_toques: ${error.message}`);
   return (data ?? []) as Toque[];
+}
+
+// ── Template por NÚMERO (override toque × conta Meta) ───────────────────────
+type TplResolvido = { template_name: string; template_lang: string; template_variaveis: string[] };
+
+// Mapa `${toque_id}:${wa_account_id}` → template daquela conta.
+async function carregarTemplatesPorConta(toqueIds: string[]): Promise<Map<string, TplResolvido>> {
+  const mapa = new Map<string, TplResolvido>();
+  if (!toqueIds.length) return mapa;
+  const { data, error } = await supabase
+    .from('crm_lembrete_toque_contas')
+    .select('toque_id, wa_account_id, template_name, template_lang, template_variaveis')
+    .in('toque_id', toqueIds);
+  if (error) { console.error(`[lembretes] select toque_contas: ${error.message}`); return mapa; }
+  for (const r of data ?? []) {
+    mapa.set(`${r.toque_id}:${r.wa_account_id}`, {
+      template_name: r.template_name,
+      template_lang: r.template_lang || 'pt_BR',
+      template_variaveis: (r.template_variaveis ?? []) as string[],
+    });
+  }
+  return mapa;
+}
+
+// Conta padrão = a MESMA resolução do crm-whatsapp-send (get_crm_wa_account com NULL):
+// primeira conta ativa por created_at. Necessária p/ aplicar override na rota "padrão".
+async function contaPadraoId(): Promise<string | null> {
+  const { data, error } = await supabase
+    .from('crm_whatsapp_accounts')
+    .select('id')
+    .eq('ativo', true)
+    .order('created_at', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (error) { console.error(`[lembretes] conta padrão: ${error.message}`); return null; }
+  return (data?.id as string | null) ?? null;
+}
+
+// Template do toque PARA a conta: override da conta > padrão do toque > null (rota inviável).
+function tplParaConta(
+  toque: Toque,
+  accountId: string | null,
+  overrides: Map<string, TplResolvido>,
+): TplResolvido | null {
+  const override = accountId ? overrides.get(`${toque.id}:${accountId}`) : undefined;
+  if (override) return override;
+  if (toque.template_name) {
+    return {
+      template_name: toque.template_name,
+      template_lang: toque.template_lang || 'pt_BR',
+      template_variaveis: toque.template_variaveis ?? [],
+    };
+  }
+  return null;
 }
 
 // ── Roteamento do número que envia ──────────────────────────────────────────
@@ -209,8 +272,8 @@ async function soltarClaim(agId: string, toqueId: string): Promise<void> {
   await supabase.from('crm_lembrete_envios').delete().eq('agendamento_id', agId).eq('toque_id', toqueId);
 }
 
-async function enviarTemplate(telefone: string, toque: Toque, ctx: Ctx, waAccountId: string | null): Promise<boolean> {
-  const valores = (toque.template_variaveis ?? []).map((t) => resolverToken(t, ctx));
+async function enviarTemplate(telefone: string, tpl: TplResolvido, ctx: Ctx, waAccountId: string | null): Promise<boolean> {
+  const valores = (tpl.template_variaveis ?? []).map((t) => resolverToken(t, ctx));
   const components = valores.length
     ? [{ type: 'body', parameters: valores.map((v) => ({ type: 'text', text: String(v) })) }]
     : [];
@@ -220,8 +283,8 @@ async function enviarTemplate(telefone: string, toque: Toque, ctx: Ctx, waAccoun
     body: JSON.stringify({
       telefone,
       tipo: 'template',
-      template_name: toque.template_name,
-      template_lang: toque.template_lang || 'pt_BR',
+      template_name: tpl.template_name,
+      template_lang: tpl.template_lang || 'pt_BR',
       template_components: components,
       wa_account_id: waAccountId,
       // Lembrete é UTILITY (reunião iminente) → fura a trava de 24h de marketing. Sem isso o
@@ -260,6 +323,10 @@ async function enviarTexto(telefone: string, texto: string, waConexaoId: string)
 async function rodar(): Promise<{ toques: number; candidatos: number; enviados: number }> {
   const toques = await carregarToques();
   if (!toques.length) return { toques: 0, candidatos: 0, enviados: 0 };
+
+  // Template por número + conta padrão (p/ resolver o override da rota "padrão").
+  const overrides = await carregarTemplatesPorConta(toques.map((t) => t.id));
+  const padraoId = overrides.size ? await contaPadraoId() : null;
 
   // Busca reuniões até o MAIOR toque à frente (ex.: toque de 24h ⇒ janela de 24h).
   const tetoMin = Math.max(...toques.map((t) => t.minutos_antes)) + FOLGA_MIN + 5;
@@ -316,22 +383,29 @@ async function rodar(): Promise<{ toques: number; candidatos: number; enviados: 
     if (!rotas.length) continue; // sem número configurado e fora do padrão da IA → não lembra
 
     for (const toque of devidos) {
-      // Rotas viáveis p/ ESTE toque: canal Meta exige template_name; Web usa texto livre.
-      const viaveis = rotas.filter((r) => r.via === 'web' || !!toque.template_name);
+      // Rotas viáveis p/ ESTE toque: canal Meta exige um template RESOLVÍVEL pra conta
+      // da rota (override da conta OU o padrão do toque); Web usa texto livre.
+      const viaveis = rotas.filter((r) =>
+        r.via === 'web' || !!tplParaConta(toque, r.wa_account_id ?? padraoId, overrides),
+      );
       if (!viaveis.length) {
-        // Só rotas Meta e toque sem template: pula SEM claim (se preencherem o template
+        // Nenhuma rota com conteúdo: pula SEM claim (se preencherem o template
         // enquanto a janela do toque está aberta, ainda sai num tick futuro).
-        console.log(`[lembretes] toque ${toque.minutos_antes}min sem template_name — pulado (canal meta) p/ ${ag.id}`);
+        console.log(`[lembretes] toque ${toque.minutos_antes}min sem template resolvível — pulado p/ ${ag.id}`);
         continue;
       }
       if (!(await claim(ag.id, toque.id))) continue; // outro tick pegou
 
-      // Tenta a cadeia até um envio dar certo (conta escolhida → conversa → responsável → padrão).
+      // Tenta a cadeia até um envio dar certo (conta escolhida → conversa → responsável → padrão),
+      // cada rota Meta com o TEMPLATE da própria conta (override > padrão do toque).
       let ok = false;
       for (const rota of viaveis) {
-        ok = rota.via === 'web'
-          ? await enviarTexto(telefone, resolverTextoLivre(toque.texto_livre, ctx), rota.wa_conexao_id)
-          : await enviarTemplate(telefone, toque, ctx, rota.wa_account_id);
+        if (rota.via === 'web') {
+          ok = await enviarTexto(telefone, resolverTextoLivre(toque.texto_livre, ctx), rota.wa_conexao_id);
+        } else {
+          const tpl = tplParaConta(toque, rota.wa_account_id ?? padraoId, overrides)!;
+          ok = await enviarTemplate(telefone, tpl, ctx, rota.wa_account_id);
+        }
         if (ok) {
           enviados++;
           console.log(`[lembretes] toque ${toque.minutos_antes}min enviado p/ ${telefone} via ${rotaKey(rota)} (reunião ${dia} ${hora})`);
