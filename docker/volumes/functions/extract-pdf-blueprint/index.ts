@@ -93,8 +93,9 @@ Deno.serve(async (req) => {
 
     if (!aiResp.ok) {
       const txt = await aiResp.text();
+      // 422 (nunca 502/504): o Cloudflare engole 502/504 da origem sem headers CORS.
       return new Response(JSON.stringify({ ok: false, error: `AI Gateway ${aiResp.status}: ${txt}` }), {
-        status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 

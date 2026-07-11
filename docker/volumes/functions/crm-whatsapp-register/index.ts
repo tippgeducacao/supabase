@@ -64,7 +64,8 @@ Deno.serve(async (req) => {
         : e?.code === 133010
           ? "Número ainda não verificado — verifique (OTP) antes de registrar."
           : undefined,
-    }, 502);
+      // 422 (nunca 502/504): o Cloudflare engole 502/504 da origem sem headers CORS.
+    }, 422);
   }
   return json({ ok: true, success: (resp as any)?.success ?? true });
 });

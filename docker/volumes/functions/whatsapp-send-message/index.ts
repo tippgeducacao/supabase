@@ -208,8 +208,9 @@ Deno.serve(async (req) => {
       } catch (logErr) {
         console.log("[whatsapp-send-message] não foi possível salvar mensagem de erro:", (logErr as Error).message);
       }
+      // 422 (nunca 502/504): o Cloudflare engole 502/504 da origem sem headers CORS.
       return new Response(JSON.stringify({ error: errMsg, status: r.status, detalhes: waResp }), {
-        status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 

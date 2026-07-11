@@ -54,7 +54,8 @@ Deno.serve(async (req) => {
       const text = String(body?.text ?? "").trim();
       if (!text) return json({ error: "text obrigatório para editar" }, 400);
       const r = await provider.editMessage(conex.server_url, sec.token, waMessageId, text);
-      if (!r.ok) return json({ error: "provider recusou a edição", provider_response: r.raw }, 502);
+      // 422 (nunca 502/504): o Cloudflare engole 502/504 da origem sem headers CORS.
+      if (!r.ok) return json({ error: "provider recusou a edição", provider_response: r.raw }, 422);
       await admin.from("crm_whatsapp_messages").update({ conteudo: text }).eq("wa_message_id", waMessageId);
       await admin.from("sac_mensagens").update({ conteudo: text }).eq("wa_message_id", waMessageId);
       return json({ ok: true, action, conteudo: text });
@@ -62,7 +63,7 @@ Deno.serve(async (req) => {
 
     // delete (para todos)
     const r = await provider.deleteMessage(conex.server_url, sec.token, waMessageId);
-    if (!r.ok) return json({ error: "provider recusou a exclusão", provider_response: r.raw }, 502);
+    if (!r.ok) return json({ error: "provider recusou a exclusão", provider_response: r.raw }, 422);
     await admin.from("crm_whatsapp_messages")
       .update({ conteudo: TOMBSTONE, anexos: [] }).eq("wa_message_id", waMessageId);
     await admin.from("sac_mensagens")

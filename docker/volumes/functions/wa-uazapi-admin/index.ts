@@ -79,7 +79,8 @@ Deno.serve(async (req) => {
 
         // 1) cria a instância no servidor Uazapi
         const inst = await provider.createInstance(UAZAPI_SERVER_URL, UAZAPI_ADMIN_TOKEN, nome);
-        if (!inst.token) return json({ error: "Uazapi não retornou token da instância" }, 502);
+        // 422 (nunca 502/504): o Cloudflare engole 502/504 da origem sem headers CORS.
+        if (!inst.token) return json({ error: "Uazapi não retornou token da instância" }, 422);
 
         // 2) grava conexão (metadata) + segredo (token)
         const { data: userInfo } = await userClient.auth.getUser();

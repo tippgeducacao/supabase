@@ -97,7 +97,8 @@ Deno.serve(async (req) => {
       console.error("Gemini transcribe error:", aiRes.status, errText);
       return new Response(
         JSON.stringify({ error: `Erro Gemini ${aiRes.status}: ${errText.slice(0, 200)}` }),
-        { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        // 422 (nunca 502/504): o Cloudflare engole 502/504 da origem sem headers CORS.
+        { status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
@@ -113,7 +114,7 @@ Deno.serve(async (req) => {
     const msg = e?.message || "Erro desconhecido";
     const isTimeout = /Timeout/i.test(msg);
     return new Response(JSON.stringify({ error: msg }), {
-      status: isTimeout ? 504 : 500,
+      status: isTimeout ? 422 : 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }

@@ -165,7 +165,8 @@ IMPORTANTE:
         401: [401, "Chave Anthropic inválida. Atualize em /ia-config."],
         429: [429, "Limite de uso da Anthropic atingido. Tente novamente em alguns segundos."],
       };
-      const [status, msg] = map[aiResp.status] ?? [502, `Anthropic error ${aiResp.status}: ${t.slice(0, 200)}`];
+      // 422 (nunca 502/504): o Cloudflare engole 502/504 da origem sem headers CORS.
+      const [status, msg] = map[aiResp.status] ?? [422, `Anthropic error ${aiResp.status}: ${t.slice(0, 200)}`];
       return new Response(JSON.stringify({ error: msg }), {
         status, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -182,7 +183,7 @@ IMPORTANTE:
       return new Response(JSON.stringify({
         error: "A IA retornou em formato inesperado. Tente regerar.",
         debug_raw: fullJsonText.slice(0, 300),
-      }), { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }), { status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
     return new Response(JSON.stringify(parsed), {

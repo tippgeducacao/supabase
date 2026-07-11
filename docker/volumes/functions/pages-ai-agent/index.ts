@@ -170,7 +170,8 @@ Deno.serve(async (req) => {
     if (!aiRes.ok) {
       const errText = await aiRes.text();
       console.error("Anthropic error:", aiRes.status, errText);
-      return json({ error: `Erro da IA (${aiRes.status}). Tente novamente.` }, 502);
+      // 422 (nunca 502/504): o Cloudflare engole 502/504 da origem sem headers CORS.
+      return json({ error: `Erro da IA (${aiRes.status}). Tente novamente.` }, 422);
     }
 
     const data = await aiRes.json();

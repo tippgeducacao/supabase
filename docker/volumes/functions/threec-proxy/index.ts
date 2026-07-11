@@ -239,9 +239,10 @@ Deno.serve(async (req) => {
         },
       })
     }
+    // 422 (nunca 502/504): o Cloudflare engole 502/504 da origem sem headers CORS.
     return new Response(
       JSON.stringify({ error: 'Failed to reach 3C API', detail: String(err) }),
-      { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+      { status: 422, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
     )
   }
 

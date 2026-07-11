@@ -74,7 +74,9 @@ Deno.serve(async (req) => {
 
     // Baixa o áudio e manda pro OpenAI (multipart).
     const audioRes = await fetch(audioUrl);
-    if (!audioRes.ok) return json({ error: `download do áudio falhou (HTTP ${audioRes.status})` }, 502);
+    // 422 (nunca 502/504): o Cloudflare na frente da api. troca 502/504 da origem
+    // pela página dele sem headers CORS → o navegador vê "Failed to send a request".
+    if (!audioRes.ok) return json({ error: `download do áudio falhou (HTTP ${audioRes.status})` }, 422);
     const mime = audio?.mime_type ?? audioRes.headers.get("content-type") ?? "audio/ogg";
     const blob = await audioRes.blob();
 
@@ -90,10 +92,10 @@ Deno.serve(async (req) => {
     });
     const oaJson = await oa.json().catch(() => ({}));
     if (!oa.ok) {
-      return json({ error: `OpenAI HTTP ${oa.status}: ${oaJson?.error?.message ?? "falha"}` }, 502);
+      return json({ error: `OpenAI HTTP ${oa.status}: ${oaJson?.error?.message ?? "falha"}` }, 422);
     }
     const transcricao = String(oaJson?.text ?? "").trim();
-    if (!transcricao) return json({ error: "transcrição vazia" }, 502);
+    if (!transcricao) return json({ error: "transcrição vazia" }, 422);
 
     // Cacheia.
     await admin.from("sac_mensagens").update({ transcricao }).eq("id", mensagemId);

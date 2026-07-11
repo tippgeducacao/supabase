@@ -158,7 +158,8 @@ Deno.serve(async (req) => {
         error: upJson?.error?.message || `Falha no upload Meta (${upRes.status})`,
         status: upRes.status,
         detalhes: upJson,
-      }, 502);
+        // 422 (nunca 502/504): o Cloudflare engole 502/504 da origem sem headers CORS.
+      }, 422);
     }
     const mediaId: string = upJson.id;
 
@@ -235,7 +236,7 @@ Deno.serve(async (req) => {
       }
       return jsonResp(
         { error: errMsg, status: sendRes.status, detalhes: sendJson },
-        502,
+        422,
       );
     }
 

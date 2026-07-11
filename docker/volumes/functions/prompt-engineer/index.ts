@@ -128,7 +128,8 @@ Deno.serve(async (req) => {
             ? "A IA demorou demais para responder. Tente reformular ou clique em INICIAR para reiniciar a conversa."
             : `Falha ao chamar Claude: ${fetchErr?.message ?? "erro desconhecido"}`,
         }),
-        { status: 504, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        // 422 (nunca 502/504): o Cloudflare engole 502/504 da origem sem headers CORS.
+        { status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
     clearTimeout(timeoutId);

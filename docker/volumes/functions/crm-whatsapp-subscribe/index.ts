@@ -64,7 +64,8 @@ Deno.serve(async (req) => {
       error: e?.error_user_msg || e?.message || `Meta ${r.status}`,
       meta_code: e?.code ?? null,
       before,
-    }, 502);
+      // 422 (nunca 502/504): o Cloudflare engole 502/504 da origem sem headers CORS.
+    }, 422);
   }
 
   // Confirma.

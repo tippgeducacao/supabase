@@ -193,7 +193,10 @@ async function enviarViaConexao(admin: any, p: {
   if (msgErr) console.error("[crm-whatsapp-send] insert (conexao) erro:", msgErr.message);
 
   if (!result.ok) {
-    return json({ error: "provider recusou o envio", provider_response: result.raw }, 502);
+    // 422 (NUNCA 502/504): o Cloudflare na frente da api. substitui 502/504 da
+    // origem pela página de erro dele SEM headers CORS → o navegador bloqueia e
+    // o front só vê "Failed to send a request to the Edge Function".
+    return json({ error: "provider recusou o envio", provider_response: result.raw }, 422);
   }
   return json({ success: true, wa_message_id: result.externalId, sent_at: nowIso, wa_conexao_id: p.conexaoId });
 }
@@ -770,12 +773,13 @@ Deno.serve(async (req) => {
       console.error("[crm-whatsapp-send] Meta erro:", r.status, JSON.stringify(waResp));
       // meta_code permite ao front traduzir o erro pra uma mensagem específica
       // (190 = token, 131047 = janela 24h, 1 = instabilidade da Meta, etc.)
+      // 422 (NUNCA 502/504): o Cloudflare engole 502/504 da origem sem CORS.
       return json({
         error: errMsg,
         meta_code: waResp?.error?.code ?? null,
         meta_subcode: waResp?.error?.error_subcode ?? null,
         status: r.status,
-      }, 502);
+      }, 422);
     }
 
     return json({

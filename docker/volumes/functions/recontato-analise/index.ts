@@ -297,9 +297,10 @@ serve(async (req) => {
       } catch (e) {
         const msg = (e as Error).message || "";
         if (msg.includes("aborted") || (e as Error).name === "AbortError") {
-          return errorResponse("TIMEOUT", "A Mimosa demorou demais para responder. Tente novamente.", 504);
+          // 422 (nunca 502/504): o Cloudflare engole 502/504 da origem sem headers CORS.
+          return errorResponse("TIMEOUT", "A Mimosa demorou demais para responder. Tente novamente.", 422);
         }
-        return errorResponse("NETWORK", "Sem conexão com a Mimosa. Verifique sua internet.", 502);
+        return errorResponse("NETWORK", "Sem conexão com a Mimosa. Verifique sua internet.", 422);
       }
 
       if (!res.ok) {
@@ -308,7 +309,7 @@ serve(async (req) => {
         if (res.status === 429) return errorResponse("RATE_LIMIT", "A Mimosa está sobrecarregada. Aguarde alguns segundos e tente novamente.", 429);
         if (res.status === 402) return errorResponse("CREDITS", "Créditos da Mimosa esgotados. Avise o TI para recarregar.", 402);
         if (res.status === 401 || res.status === 403) return errorResponse("MISSING_API_KEY", "Chave da Mimosa inválida ou expirada. Avise o TI.", 401);
-        return errorResponse("UPSTREAM_ERROR", `Falha ao gerar a abordagem (${provider} ${res.status}). Tente de novo.`, 502, { upstream_status: res.status });
+        return errorResponse("UPSTREAM_ERROR", `Falha ao gerar a abordagem (${provider} ${res.status}). Tente de novo.`, 422, { upstream_status: res.status });
       }
 
       const data = await res.json();
@@ -324,7 +325,7 @@ serve(async (req) => {
       conteudo = stripFences(conteudo);
 
       if (!conteudo) {
-        return errorResponse("EMPTY", "A Mimosa retornou uma resposta vazia. Tente regenerar.", 502);
+        return errorResponse("EMPTY", "A Mimosa retornou uma resposta vazia. Tente regenerar.", 422);
       }
 
       const userId = await getUserId(req);
