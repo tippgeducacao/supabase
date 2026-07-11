@@ -77,14 +77,25 @@ Deno.serve(async (req) => {
         const accountResult: Record<string, unknown> = { ad_account_id: db_account_id, account_name: account.account_name };
 
         try {
-          // 1. Campaigns
-          const campRes = await fetch(
-            `${META_API}/${ad_account_id}/campaigns?fields=id,name,status,objective,daily_budget,lifetime_budget,created_time,updated_time&limit=100`,
-            { headers: h }
-          );
-          const campData = await campRes.json();
-          console.log("Campaigns response keys:", Object.keys(campData), "count:", campData.data?.length || 0);
-          if (campData.error) console.log("Campaigns error:", JSON.stringify(campData.error));
+          // 1. Campaigns — SEGUE a paginação (a CA-01 tem 600+ campanhas; sem o loop
+          // só as 100 primeiras entravam e campanha nova ficava invisível pro vínculo
+          // campanha→curso E podia quebrar o upsert de insights por FK).
+          const allCampaigns: any[] = [];
+          let campUrl: string | null =
+            `${META_API}/${ad_account_id}/campaigns?fields=id,name,status,objective,daily_budget,lifetime_budget,created_time,updated_time&limit=200`;
+          while (campUrl) {
+            const currentCampUrl = campUrl;
+            const campRes: Response = await fetch(currentCampUrl, { headers: h });
+            const pageData: any = await campRes.json();
+            if (pageData.error) {
+              console.log("Campaigns error:", JSON.stringify(pageData.error));
+              break;
+            }
+            if (pageData.data) allCampaigns.push(...pageData.data);
+            campUrl = pageData.paging?.next || null;
+          }
+          const campData: any = { data: allCampaigns };
+          console.log("Campaigns count:", campData.data?.length || 0);
           if (campData.data) {
             const campaigns = campData.data.map((c: any) => ({
               id: c.id,
@@ -104,14 +115,27 @@ Deno.serve(async (req) => {
             accountResult.campaigns = error ? { error: error.message } : { synced: campaigns.length };
           }
 
-          // 2. Campaign Insights
+          // 2. Campaign Insights — SEGUE a paginação da Graph API.
+          // ⚠️ Com time_increment=1 a resposta tem campanhas×dias linhas (30d × ~25
+          // campanhas ≈ 750 > limit) em ordem ASC de data: ler só a 1ª página fazia o
+          // sync gravar apenas os ~21 primeiros dias da janela e os insights ficavam
+          // permanentemente ~10 dias atrasados (CPL de mês corrente = R$ 0).
           const timeRange = JSON.stringify({ since: date_from, until: date_to });
-          const insRes = await fetch(
-            `${META_API}/${ad_account_id}/insights?fields=campaign_id,spend,impressions,clicks,ctr,cpc,cpm,reach,frequency,actions,action_values&time_range=${encodeURIComponent(timeRange)}&time_increment=1&level=campaign&limit=500`,
-            { headers: h }
-          );
-          const insData = await insRes.json();
-          if (insData.error) console.log("Insights error:", JSON.stringify(insData.error));
+          const allInsights: any[] = [];
+          let insUrl: string | null =
+            `${META_API}/${ad_account_id}/insights?fields=campaign_id,spend,impressions,clicks,ctr,cpc,cpm,reach,frequency,actions,action_values&time_range=${encodeURIComponent(timeRange)}&time_increment=1&level=campaign&limit=500`;
+          while (insUrl) {
+            const currentInsUrl = insUrl;
+            const insRes: Response = await fetch(currentInsUrl, { headers: h });
+            const pageData: any = await insRes.json();
+            if (pageData.error) {
+              console.log("Insights error:", JSON.stringify(pageData.error));
+              break;
+            }
+            if (pageData.data) allInsights.push(...pageData.data);
+            insUrl = pageData.paging?.next || null;
+          }
+          const insData: any = { data: allInsights };
           console.log("Insights count:", insData.data?.length || 0, "URL time_range:", timeRange);
           if (insData.data && insData.data.length > 0) {
             // Log all unique action types for debugging
