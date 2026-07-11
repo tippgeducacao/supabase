@@ -7,7 +7,8 @@ const corsHeaders = {
 };
 
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
-const MODEL = "claude-sonnet-4-20250514";
+// claude-sonnet-4-20250514 (Sonnet 4.0) foi descontinuado em 15/06/2026 → 404.
+const MODEL = "claude-sonnet-4-6";
 
 const SYSTEM_PROMPT = `<system>
 Você é um engenheiro de prompts sênior com especialização em modelos da Anthropic (Claude),

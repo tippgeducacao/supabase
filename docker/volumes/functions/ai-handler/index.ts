@@ -53,7 +53,8 @@ serve(async (req) => {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
+          // claude-sonnet-4-20250514 (Sonnet 4.0) foi descontinuado em 15/06/2026 → 404.
+          model: "claude-sonnet-4-6",
           max_tokens: 50,
           messages: [{ role: "user", content: "Responda apenas: OK" }],
         }),
@@ -83,7 +84,8 @@ serve(async (req) => {
     }
 
     const body: Record<string, unknown> = {
-      model: "claude-sonnet-4-20250514",
+      // claude-sonnet-4-20250514 (Sonnet 4.0) foi descontinuado em 15/06/2026 → 404.
+      model: "claude-sonnet-4-6",
       max_tokens: 4096,
       messages,
     };

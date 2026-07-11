@@ -7,7 +7,8 @@ const corsHeaders = {
 };
 
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
-const ANTHROPIC_MODEL = "claude-sonnet-4-20250514";
+// claude-sonnet-4-20250514 (Sonnet 4.0) foi descontinuado em 15/06/2026 → 404.
+const ANTHROPIC_MODEL = "claude-sonnet-4-6";
 const MAX_TOOL_LOOPS = 5;
 // Hard deadline (ms) to stay safely under Supabase Edge Runtime ~150s wall limit
 const SOFT_DEADLINE_MS = 80_000;
