@@ -28,6 +28,7 @@ const MAX_SESSOES_POR_IP_HORA = 20;
 const MAX_MSGS_POR_SESSAO_MIN = 15;
 const MAX_CONTEUDO = 2000;
 const MAX_BODY_BYTES = 16_384;
+const MAX_AUDIOS_POR_CHAT = 4; // teto de áudios por conversa (decisão diretor)
 // Áudio inbound chega inline (base64) → cap próprio, maior (o de texto é DoS guard).
 // ~3MB de payload ≈ ~2,2MB de áudio ≈ >1min de webm/opus — suficiente pra nota de voz.
 const MAX_BODY_AUDIO = 3_000_000;
@@ -381,10 +382,31 @@ async function acaoEnviar(body: Record<string, unknown>) {
     .update({ ultima_atividade: new Date().toISOString() })
     .eq("id", sessaoId);
 
-  // FASE 2: o João responde (síncrono; o widget mostra "digitando" e faz polling).
-  await responderComoJoao(sessao, sessaoId);
-
+  // A resposta do João roda numa 2ª requisição (acao 'responder') — Whisper/LLM pesados numa
+  // requisição só estouravam o limite de CPU do edge. O widget chama 'responder' na sequência.
   return json({ ok: true, mensagem_id: msg.id });
+}
+
+// Roda o cérebro do João (1 balão por chunk). Separado de 'enviar'/'audio' p/ caber no limite
+// de CPU/wall-clock do edge. Só responde se a última mensagem for do lead (anti-spam do LLM).
+async function acaoResponder(body: Record<string, unknown>) {
+  const sessaoId = texto(body.sessao_id, 40);
+  if (!UUID_RE.test(sessaoId)) return json({ ok: false, erro: "sessao_invalida" }, 400);
+  const sessao = await carregarSessao(sessaoId);
+  if (!sessao) return json({ ok: false, erro: "sessao_nao_encontrada" }, 404);
+  if (sessao.bloqueada) return json({ ok: false, erro: "sessao_bloqueada" }, 403);
+
+  const { data: ult } = await supabase
+    .from("webchat_mensagens")
+    .select("direcao")
+    .eq("sessao_id", sessaoId)
+    .order("id", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (!ult || (ult as any).direcao !== "inbound") return json({ ok: true, skip: "sem_pendencia" });
+
+  await responderComoJoao(sessao, sessaoId);
+  return json({ ok: true });
 }
 
 // Áudio do lead: base64 → Storage (whatsapp-anexos/webchat) → Whisper → vira a mensagem
@@ -402,6 +424,15 @@ async function acaoAudio(body: Record<string, unknown>, req: Request) {
 
   const limite = await checarLimitesInbound(sessaoId);
   if (limite) return limite;
+
+  // teto de áudios POR CHAT (conta mensagens do lead que TÊM anexo — 1 áudio = 1 anexo)
+  const { count: audiosCt } = await supabase
+    .from("webchat_mensagens")
+    .select("id", { count: "exact", head: true })
+    .eq("sessao_id", sessaoId)
+    .eq("direcao", "inbound")
+    .not("anexos->0", "is", null);
+  if ((audiosCt ?? 0) >= MAX_AUDIOS_POR_CHAT) return json({ ok: false, erro: "limite_audios" }, 429);
 
   let bytes: Uint8Array;
   try {
@@ -444,8 +475,7 @@ async function acaoAudio(body: Record<string, unknown>, req: Request) {
     .update({ ultima_atividade: new Date().toISOString() })
     .eq("id", sessaoId);
 
-  await responderComoJoao(sessao, sessaoId);
-
+  // resposta do João vem na 2ª requisição ('responder') — ver acaoEnviar/acaoResponder.
   return json({ ok: true, mensagem_id: msg.id, transcricao });
 }
 
@@ -529,6 +559,8 @@ Deno.serve(async (req) => {
         return await acaoEnviar(body);
       case "audio":
         return await acaoAudio(body, req);
+      case "responder":
+        return await acaoResponder(body);
       case "poll":
         return await acaoPoll(body);
       case "push_vapid":

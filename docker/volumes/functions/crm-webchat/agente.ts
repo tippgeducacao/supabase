@@ -47,6 +47,8 @@ function notaCanal(curso: string | null): string {
     "## ⚙️ CANAL: CHAT DO SITE (não é WhatsApp)",
     "- O visitante te vê em TEMPO REAL na página; seja ágil. Confirmações/lembretes da reunião chegam pelo WhatsApp dele (já temos o número).",
     "- ⛔ Catálogo é SÓ agro/veterinária/agronegócio. Em dúvida do curso, use `consulta_pos_disponiveis`. Área fora do escopo (odontologia, direito, medicina humana…) → diga com gentileza que a PPG é especializada em agro/vet, sem inventar curso.",
+    "- ⛔ NUNCA REPITA o que você JÁ disse nesta conversa. Antes de responder, RELEIA suas mensagens anteriores: valor integral, link de matrícula, condição especial da secretaria e a oferta do Meet só podem aparecer UMA vez cada — depois disso, apenas REFERENCIE em meia frase ('o valor é o que te passei acima'). Se o lead insistir num ponto já respondido, responda SÓ o que há de NOVO na mensagem dele, em 1-2 frases curtas, com outras palavras — re-enviar o mesmo bloco soa robótico e irrita.",
+    "- Cada resposta sua deve ser CURTA (1 a 3 frases) e reagir à ÚLTIMA mensagem do lead — não re-apresente o pitch inteiro a cada turno.",
     cursoLimpo ? `- ⭐ Esta conversa veio da página da pós **"${cursoLimpo}"** — ancore nela.` : "",
   ].filter(Boolean).join("\n");
 }
@@ -74,6 +76,18 @@ async function emChunks(texto: string): Promise<string[]> {
   const limpo = humanizarTexto(texto);
   const chunks = await fracionarResposta(limpo);
   return chunks.length ? chunks : [limpo];
+}
+
+// Abertura → SEMPRE 2 balões, de forma DETERMINÍSTICA (sem o fracionador/LLM): quebra pelos
+// parágrafos (saudação + oferta) ou, se vier num parágrafo só, na 1ª fronteira de frase.
+function dividirAberturaEm2(texto: string): string[] {
+  const t = humanizarTexto(texto || "").trim();
+  if (!t) return [t];
+  const paras = t.split(/\n\s*\n/).map((s) => s.trim()).filter(Boolean);
+  if (paras.length >= 2) return [paras[0], paras.slice(1).join("\n\n")];
+  const m = t.match(/^(.+?[.?!])\s+(.+)$/s);
+  if (m && m[1].length >= 15 && m[2].length >= 10) return [m[1].trim(), m[2].trim()];
+  return [t];
 }
 
 // envia_informacoes do WEBCHAT: roteia o cronograma por uma LINHA WEB (Uazapi) via
@@ -135,7 +149,8 @@ export async function aberturaWebchat(nome: string, curso: string | null): Promi
     });
     const data = await res.json();
     const texto = textoDe(data.content);
-    return texto ? await emChunks(texto) : [fallback];
+    // abertura em 2 balões MANUAIS (sem fracionador) — pedido do diretor
+    return texto ? dividirAberturaEm2(texto) : [fallback];
   } catch (_e) {
     return [fallback];
   }
