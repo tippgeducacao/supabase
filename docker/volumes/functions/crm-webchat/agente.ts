@@ -7,10 +7,11 @@
 // lembretes por WhatsApp). Curso/Meet e mais tools (objeções, envia_informacoes) depois.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
-// Reusa o PROMPT REAL do João de WhatsApp (byte-idêntico ao de produção) — sem drift.
-// Só o prompt é importado; se a resolução de import cross-function falhar no deploy, o
-// fallback embutido (PROMPT_FALLBACK) assume — degrada, não quebra.
-import { AGENTE_QUALIFICADOR } from "../crm-agente-sdr/prompts.ts";
+// Reusa os PROMPTS REAIS do João de WhatsApp (byte-idênticos ao de produção) — sem drift.
+// São dois estágios + router (igual ao agente real): VALIDACAO (abertura/qualificação/
+// horários) → o router detecta que o lead escolheu um horário → QUALIFICADOR (fecha:
+// formação + agendamento). Se o cross-import falhar no deploy, o fallback assume.
+import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO, PROMPT_ROUTER } from "../crm-agente-sdr/prompts.ts";
 
 const ANTHROPIC_KEY = Deno.env.get("AGENTE_SDR_ANTHROPIC_KEY") ?? Deno.env.get("ANTHROPIC_API_KEY") ?? "";
 const MODELO = Deno.env.get("AGENTE_SDR_MODEL") ?? "claude-sonnet-4-6";
@@ -61,8 +62,11 @@ function limparCurso(c: string | null): string {
 // Fallback caso o import cross-function do prompt real não resolva no deploy.
 const PROMPT_FALLBACK = "Você é o **João**, consultor (SDR) da **PPG Educação**, instituição especializada em pós-graduações e MBAs de **AGRONEGÓCIO e MEDICINA VETERINÁRIA**. Fale português brasileiro, tom acolhedor e consultivo. Missão: entender o interesse e a formação da pessoa, oferecer uma conversa rápida no Google Meet com um monitor especialista, e (se topar) usar as ferramentas p/ horários reais e marcar. NUNCA invente curso — catálogo só agro/vet; em dúvida use `consulta_pos_disponiveis`. NUNCA invente horário — só os de `consulta_disponibilidade`.";
 
-function systemPrompt(nome: string, curso: string | null): string {
-  const base = (typeof AGENTE_QUALIFICADOR === "string" && AGENTE_QUALIFICADOR) ? AGENTE_QUALIFICADOR : PROMPT_FALLBACK;
+type Estagio = "validacao" | "qualificador";
+
+function systemPrompt(nome: string, curso: string | null, estagio: Estagio): string {
+  const real = estagio === "qualificador" ? AGENTE_QUALIFICADOR : AGENTE_VALIDACAO;
+  const base = (typeof real === "string" && real) ? real : PROMPT_FALLBACK;
   const cursoLimpo = limparCurso(curso);
   const rendered = render(base, {
     nome: (nome || "").trim(),
@@ -211,7 +215,7 @@ export async function aberturaWebchat(nome: string, curso: string | null): Promi
       body: JSON.stringify({
         model: MODELO,
         max_tokens: 300,
-        system: systemPrompt(nome, curso),
+        system: systemPrompt(nome, curso, "validacao"), // abertura é sempre validação
         messages: [{
           role: "user",
           content: "[SISTEMA — não é o visitante] O visitante acabou de abrir o chat e ainda NÃO escreveu nada. ABRA você a conversa: cumprimente pelo primeiro nome, mencione com naturalidade o curso de interesse (se houver) e faça UMA pergunta de qualificação (formação/área). Curto, caloroso, em português. Envie só a mensagem final.",
@@ -226,8 +230,50 @@ export async function aberturaWebchat(nome: string, curso: string | null): Promi
   }
 }
 
+// Router: decide validação × qualificador pelo MESMO critério do agente real
+// (PROMPT_ROUTER: o lead já escolheu um horário concreto? → qualificador). Tool forçada,
+// temp 0. Falha/sem-chave → 'validacao' (estágio seguro de abertura).
+async function roteador(messages: Msg[]): Promise<Estagio> {
+  if (!ANTHROPIC_KEY || typeof PROMPT_ROUTER !== "string" || !PROMPT_ROUTER) return "validacao";
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": ANTHROPIC_KEY,
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "structured-outputs-2025-11-13",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: MODELO,
+        max_tokens: 512,
+        temperature: 0,
+        system: PROMPT_ROUTER,
+        messages,
+        tools: [{
+          name: "router_output",
+          description: "Seleciona o agente correto para responder a mensagem.",
+          input_schema: {
+            type: "object",
+            properties: { agent: { type: "string", enum: ["agente_validacao", "agente_qualificador"] } },
+            required: ["agent"],
+            additionalProperties: false,
+          },
+        }],
+        tool_choice: { type: "tool", name: "router_output" },
+      }),
+    });
+    const data = await res.json();
+    const bloco = (data.content ?? []).find((b: any) => b.type === "tool_use");
+    return bloco?.input?.agent === "agente_qualificador" ? "qualificador" : "validacao";
+  } catch (_e) {
+    return "validacao";
+  }
+}
+
 // Recebe o histórico (mais antigo→recente) do webchat + gera a resposta do João.
-// history: [{ role:'user'|'assistant', text }]
+// Roteia validação×qualificador a cada turno (como o agente real). history:
+// [{ role:'user'|'assistant', text }]
 export async function responderWebchat(
   nome: string,
   telefone: string,
@@ -235,8 +281,9 @@ export async function responderWebchat(
   history: { role: "user" | "assistant"; text: string }[],
 ): Promise<string> {
   if (!ANTHROPIC_KEY) return "Estou com uma instabilidade aqui, já te respondo. 🙏";
-  const system = systemPrompt(nome, curso);
   const messages: Msg[] = history.map((m) => ({ role: m.role, content: m.text }));
+  const estagio = await roteador(messages);
+  const system = systemPrompt(nome, curso, estagio);
 
   for (let passo = 0; passo < 4; passo++) {
     const resp = await anthropic(system, messages);
