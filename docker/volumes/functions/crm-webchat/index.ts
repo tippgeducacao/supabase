@@ -202,6 +202,7 @@ async function acaoIniciar(body: Record<string, unknown>, req: Request) {
     origem: "ia",
     conteudo: abertura,
   });
+  await syncSac(data.id, "outbound", "ia", abertura);
 
   return json({ ok: true, sessao_id: data.id });
 }
@@ -213,6 +214,16 @@ async function carregarSessao(sessaoId: string) {
     .eq("id", sessaoId)
     .maybeSingle();
   return data as { id: string; bloqueada: boolean; nome: string | null; telefone: string | null; curso: string | null; estagio: "validacao" | "qualificador" | null } | null;
+}
+
+// Espelha a mensagem no SAC (funil "Webchat") — a conversa aparece no Contato 360 /
+// atendimentos do lead. Best-effort: falha aqui NÃO derruba o chat.
+async function syncSac(sessaoId: string, direcao: string, origem: string, conteudo: string): Promise<void> {
+  try {
+    await supabase.rpc("webchat_sac_sync", { p_sessao_id: sessaoId, p_direcao: direcao, p_origem: origem, p_conteudo: conteudo });
+  } catch (e) {
+    console.error(`[crm-webchat] sac_sync: ${(e as Error).message}`);
+  }
 }
 
 async function acaoEnviar(body: Record<string, unknown>) {
@@ -257,6 +268,7 @@ async function acaoEnviar(body: Record<string, unknown>) {
     console.error(`[crm-webchat] enviar: ${error.message}`);
     return json({ ok: false, erro: "erro_interno" }, 500);
   }
+  await syncSac(sessaoId, "inbound", "lead", conteudo);
 
   await supabase
     .from("webchat_sessoes")
@@ -294,6 +306,7 @@ async function acaoEnviar(body: Record<string, unknown>) {
       origem: "ia",
       conteudo: resposta,
     });
+    await syncSac(sessaoId, "outbound", "ia", resposta);
   } catch (e) {
     console.error(`[crm-webchat] cerebro: ${(e as Error).message}`);
     await supabase.from("webchat_mensagens").insert({
