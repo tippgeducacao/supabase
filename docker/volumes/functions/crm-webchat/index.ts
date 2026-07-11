@@ -40,6 +40,13 @@ const WHISPER_MODEL = Deno.env.get("OPENAI_TRANSCRIBE_MODEL") ?? "whisper-1";
 // Chave pública VAPID do Web Push (é PÚBLICA — o popup de opt-in a busca daqui pra subscrever).
 const VAPID_PUBLIC = Deno.env.get("WEBCHAT_VAPID_PUBLIC") ?? "";
 
+// getPublicUrl dentro do container devolve o host INTERNO (http://kong:8000 / supabase-kong)
+// — o navegador do lead não alcança. Troca pela URL pública (padrão do whatsapp-webhook).
+const PUBLIC_SUPABASE_URL = Deno.env.get("PUBLIC_SUPABASE_URL") || "https://api.ppgeducacao.site";
+function toPublicUrl(internalUrl: string): string {
+  return internalUrl.replace(/^https?:\/\/(supabase-)?kong:8000/i, PUBLIC_SUPABASE_URL);
+}
+
 // Disjuntores GLOBAIS (protegem banco/custo mesmo com IPs distribuídos — botnet fura
 // limite por IP). Ajustáveis por env sem mexer em código (env do Dokploy/compose).
 const MAX_SESSOES_HORA_GLOBAL = Number(Deno.env.get("WEBCHAT_MAX_SESSOES_HORA_GLOBAL") ?? 300);
@@ -449,7 +456,7 @@ async function acaoAudio(body: Record<string, unknown>, req: Request) {
     const path = `webchat/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}.${ext}`;
     const { error: stErr } = await supabase.storage.from("whatsapp-anexos").upload(path, bytes, { contentType: mime, upsert: false });
     if (stErr) console.error(`[crm-webchat] storage upload: ${stErr.message}`);
-    else url = supabase.storage.from("whatsapp-anexos").getPublicUrl(path).data.publicUrl;
+    else url = toPublicUrl(supabase.storage.from("whatsapp-anexos").getPublicUrl(path).data.publicUrl);
   } catch (e) {
     console.error(`[crm-webchat] storage: ${(e as Error).message}`);
   }
