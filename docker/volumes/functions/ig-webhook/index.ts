@@ -25,9 +25,14 @@ const corsHeaders = {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const VERIFY_TOKEN = Deno.env.get("IG_WEBHOOK_VERIFY_TOKEN") ?? "";
-// App Secret do app do Instagram (Meta). Quando definido, valida a assinatura
-// X-Hub-Signature-256 e rejeita payloads não assinados. Setar no Dokploy.
-const APP_SECRET = Deno.env.get("IG_META_APP_SECRET") ?? "";
+// App Secrets (Meta). A assinatura X-Hub-Signature-256 é testada contra TODOS
+// os secrets configurados (o app tem DUAS chaves: a "Chave secreta do app do
+// Instagram" e a do app principal — a Meta pode assinar com qualquer uma
+// dependendo do fluxo). Nenhum setado = validação desligada (com warning).
+const APP_SECRETS = [
+  Deno.env.get("IG_META_APP_SECRET") ?? "",
+  Deno.env.get("IG_META_APP_SECRET_ALT") ?? "",
+].filter(Boolean);
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -212,10 +217,13 @@ Deno.serve(async (req) => {
   // Corpo cru: necessário p/ validar a assinatura HMAC sobre os bytes exatos.
   const rawBody = await req.text();
   const signature = req.headers.get("x-hub-signature-256");
-  if (APP_SECRET) {
-    const ok = await validMetaSignature(rawBody, signature, APP_SECRET);
+  if (APP_SECRETS.length) {
+    let ok = false;
+    for (const s of APP_SECRETS) {
+      if (await validMetaSignature(rawBody, signature, s)) { ok = true; break; }
+    }
     if (!ok) {
-      console.warn("[ig-webhook] assinatura X-Hub-Signature-256 inválida — rejeitado");
+      console.warn("[ig-webhook] assinatura X-Hub-Signature-256 inválida — rejeitado (testados", APP_SECRETS.length, "secrets)");
       return json({ error: "assinatura inválida" }, 401);
     }
   } else {
