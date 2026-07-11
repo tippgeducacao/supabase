@@ -202,11 +202,12 @@ async function anthropic(system: string, messages: Msg[]): Promise<any> {
   return await res.json();
 }
 
-// Abertura PROATIVA: o João manda a 1ª mensagem já puxando conversa (pergunta de
-// qualificação + menção ao curso), em vez de um "oi" genérico. Sem tools.
+// Abertura PROATIVA: o João manda a 1ª mensagem já puxando conversa. ALINHADA AO ROTEIRO
+// DE VALIDAÇÃO real: cumprimenta + menciona o curso + OFERECE a conversa no Meet (não
+// pergunta formação/graduação aqui — isso é do fechamento/qualificador). Sem tools.
 export async function aberturaWebchat(nome: string, curso: string | null): Promise<string> {
   const primeiro = (nome || "").trim().split(/\s+/)[0] || "";
-  const fallback = `Oi${primeiro ? ", " + primeiro : ""}! 👋 Que bom te ver por aqui. Me conta: qual pós ou área você tem em mente?`;
+  const fallback = `Oi${primeiro ? ", " + primeiro : ""}! 👋 Que bom te ver por aqui. Vi seu interesse na nossa pós — que tal uma conversa rápida no Google Meet com um monitor especialista pra te mostrar tudo? Topa que eu já procuro um horário?`;
   if (!ANTHROPIC_KEY) return fallback;
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -218,7 +219,7 @@ export async function aberturaWebchat(nome: string, curso: string | null): Promi
         system: systemPrompt(nome, curso, "validacao"), // abertura é sempre validação
         messages: [{
           role: "user",
-          content: "[SISTEMA — não é o visitante] O visitante acabou de abrir o chat e ainda NÃO escreveu nada. ABRA você a conversa: cumprimente pelo primeiro nome, mencione com naturalidade o curso de interesse (se houver) e faça UMA pergunta de qualificação (formação/área). Curto, caloroso, em português. Envie só a mensagem final.",
+          content: "[SISTEMA — não é o visitante] O visitante acabou de abrir o chat vindo da página da pós de interesse e ainda NÃO escreveu nada. Faça a ABERTURA conforme o SEU roteiro de validação: cumprimente pelo primeiro nome, diga que viu o interesse na pós (mencione o curso) e conduza OFERECENDO a conversa rápida no Google Meet com um monitor especialista (condição especial + metodologia + cronograma + professores). Termine com uma pergunta convidando a marcar. ⛔ NÃO pergunte a formação/graduação agora — isso é do fechamento, depois de escolher o horário. Curto, caloroso, português. Envie só a mensagem final.",
         }],
       }),
     });
