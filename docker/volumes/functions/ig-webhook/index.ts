@@ -56,6 +56,59 @@ async function validMetaSignature(raw: string, header: string | null, appSecret:
   return diff === 0;
 }
 
+// ── Perfil do contato (foto + @) — cache em ig_perfis ────────────────────────
+// User Profile API: GET graph.instagram.com/<IGSID>?fields=name,username,profile_pic
+// (exige o access token da conta em ig_contas_secrets; só funciona p/ quem já
+// mandou DM). BEST-EFFORT: erro nunca derruba o webhook. A profile_pic expira,
+// então refresh quando o cache passa de 7 dias.
+const PERFIL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+async function enriquecerPerfis(admin: any, contaId: string | null, igsids: Set<string>) {
+  if (!contaId || igsids.size === 0) return;
+  try {
+    const ids = [...igsids];
+    const { data: existentes } = await admin
+      .from("ig_perfis").select("igsid, updated_at").in("igsid", ids);
+    const frescos = new Set(
+      (existentes ?? [])
+        .filter((p: any) => Date.now() - new Date(p.updated_at).getTime() < PERFIL_TTL_MS)
+        .map((p: any) => p.igsid),
+    );
+    const pendentes = ids.filter((id) => !frescos.has(id));
+    if (!pendentes.length) return;
+
+    const { data: secret } = await admin
+      .from("ig_contas_secrets").select("access_token").eq("conta_id", contaId).maybeSingle();
+    const token = secret?.access_token;
+    if (!token) return; // sem token guardado -> segue sem foto (degrada)
+
+    for (const igsid of pendentes.slice(0, 10)) {
+      try {
+        const resp = await fetch(
+          `https://graph.instagram.com/v23.0/${igsid}?fields=name,username,profile_pic&access_token=${encodeURIComponent(token)}`,
+        );
+        if (!resp.ok) {
+          console.warn("[ig-webhook] perfil falhou", igsid, resp.status, (await resp.text()).slice(0, 200));
+          continue;
+        }
+        const p = await resp.json();
+        await admin.from("ig_perfis").upsert({
+          igsid,
+          conta_id: contaId,
+          username: p?.username ?? null,
+          nome: p?.name ?? null,
+          foto_url: p?.profile_pic ?? null,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: "igsid" });
+      } catch (e) {
+        console.warn("[ig-webhook] perfil erro", igsid, e instanceof Error ? e.message : String(e));
+      }
+    }
+  } catch (e) {
+    console.warn("[ig-webhook] enriquecerPerfis:", e instanceof Error ? e.message : String(e));
+  }
+}
+
 // Mapeia os attachments do IG p/ o nosso formato + resolve o tipo da mensagem.
 function mapAttachments(atts: any[]): { tipo: string; anexos: any[] } {
   const anexos = (atts ?? []).map((a: any) => ({
@@ -199,6 +252,13 @@ Deno.serve(async (req) => {
       // DMs (Instagram Messaging entrega em entry.messaging[])
       if (Array.isArray(entry?.messaging)) {
         await processarMensagens(admin, contaId, igUserId, entry.messaging);
+        // foto + @ do contato: só INBOUND (a API de perfil vale p/ quem mandou DM)
+        const inboundIds = new Set<string>(
+          entry.messaging
+            .filter((ev: any) => ev?.message && !ev.message.is_echo && ev?.sender?.id && ev.sender.id !== igUserId)
+            .map((ev: any) => String(ev.sender.id)),
+        );
+        await enriquecerPerfis(admin, contaId, inboundIds);
       }
       // Comentários / menções (entry.changes[])
       if (Array.isArray(entry?.changes)) {
