@@ -209,10 +209,10 @@ async function acaoIniciar(body: Record<string, unknown>, req: Request) {
 async function carregarSessao(sessaoId: string) {
   const { data } = await supabase
     .from("webchat_sessoes")
-    .select("id, bloqueada, nome, telefone, curso")
+    .select("id, bloqueada, nome, telefone, curso, estagio")
     .eq("id", sessaoId)
     .maybeSingle();
-  return data as { id: string; bloqueada: boolean; nome: string | null; telefone: string | null; curso: string | null } | null;
+  return data as { id: string; bloqueada: boolean; nome: string | null; telefone: string | null; curso: string | null; estagio: "validacao" | "qualificador" | null } | null;
 }
 
 async function acaoEnviar(body: Record<string, unknown>) {
@@ -277,12 +277,17 @@ async function acaoEnviar(body: Record<string, unknown>) {
       text: String(m.conteudo ?? ""),
     })).filter((m) => m.text);
 
-    const resposta = await responderWebchat(
+    const { texto: resposta, estagio } = await responderWebchat(
       sessao.nome ?? "",
       sessao.telefone ?? "",
       sessao.curso ?? null,
       history,
+      sessao.estagio === "qualificador" ? "qualificador" : "validacao",
     );
+    // ratchet: promoção validação→qualificador é persistida (nunca regride)
+    if (estagio === "qualificador" && sessao.estagio !== "qualificador") {
+      await supabase.from("webchat_sessoes").update({ estagio: "qualificador" }).eq("id", sessaoId);
+    }
     await supabase.from("webchat_mensagens").insert({
       sessao_id: sessaoId,
       direcao: "outbound",

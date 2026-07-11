@@ -272,17 +272,19 @@ async function roteador(messages: Msg[]): Promise<Estagio> {
 }
 
 // Recebe o histórico (mais antigo→recente) do webchat + gera a resposta do João.
-// Roteia validação×qualificador a cada turno (como o agente real). history:
-// [{ role:'user'|'assistant', text }]
+// Roteia validação×qualificador com RATCHET persistido (como o agente real): a edge
+// passa o estágio salvo da sessão; se já é 'qualificador', nem chama o router (não
+// regride); senão roteia e devolve o estágio usado pra edge persistir a promoção.
 export async function responderWebchat(
   nome: string,
   telefone: string,
   curso: string | null,
   history: { role: "user" | "assistant"; text: string }[],
-): Promise<string> {
-  if (!ANTHROPIC_KEY) return "Estou com uma instabilidade aqui, já te respondo. 🙏";
+  estagioSalvo: Estagio = "validacao",
+): Promise<{ texto: string; estagio: Estagio }> {
+  if (!ANTHROPIC_KEY) return { texto: "Estou com uma instabilidade aqui, já te respondo. 🙏", estagio: estagioSalvo };
   const messages: Msg[] = history.map((m) => ({ role: m.role, content: m.text }));
-  const estagio = await roteador(messages);
+  const estagio: Estagio = estagioSalvo === "qualificador" ? "qualificador" : await roteador(messages);
   const system = systemPrompt(nome, curso, estagio);
 
   for (let passo = 0; passo < 4; passo++) {
@@ -292,7 +294,7 @@ export async function responderWebchat(
     const texto = blocos.filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
 
     if (!toolUses.length) {
-      return texto || "Pode me contar um pouco mais sobre o que você procura? 😊";
+      return { texto: texto || "Pode me contar um pouco mais sobre o que você procura? 😊", estagio };
     }
 
     // executa as tools e devolve os resultados
@@ -310,5 +312,5 @@ export async function responderWebchat(
   }
 
   // salvaguarda: estourou o nº de passos com tools — pede continuidade
-  return "Deixa eu confirmar uma coisa aqui rapidinho e já te falo. 🙌";
+  return { texto: "Deixa eu confirmar uma coisa aqui rapidinho e já te falo. 🙌", estagio };
 }
