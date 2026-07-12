@@ -8,18 +8,181 @@ const corsHeaders = {
 
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 // claude-sonnet-4-20250514 (Sonnet 4.0) foi descontinuado em 15/06/2026 → 404.
-const ANTHROPIC_MODEL = "claude-sonnet-4-6";
+// 2026-07-12: claude-sonnet-4-6 → claude-sonnet-5 (mais rápido/inteligente, mesmo preço).
+// ⚠️ Sonnet 5 liga thinking ADAPTATIVO por default quando `thinking` é omitido — aqui vai
+// explicitamente DISABLED (paridade com o comportamento do 4.6 e latência mínima de chat).
+const ANTHROPIC_MODEL = "claude-sonnet-5";
 const MAX_TOOL_LOOPS = 5;
-// Hard deadline (ms) to stay safely under Supabase Edge Runtime ~150s wall limit
-const SOFT_DEADLINE_MS = 80_000;
+// Hard deadline (ms) to stay safely under Supabase Edge Runtime ~150s wall limit.
+// Como a chamada Anthropic agora é STREAMING (não morre mais num abort de 55s), o
+// orçamento total pode chegar mais perto do teto do worker — MAS SÓ NO MODO SSE, em que
+// bytes fluem pro cliente desde o início.
+const SOFT_DEADLINE_SSE_MS = 130_000;
+// ⚠️ No modo JSON (front antigo, ReportsPage, call_agent) NENHUM byte sai até o fim, e o
+// Cloudflare na frente de api.ppgeducacao.site corta resposta sem 1º byte em ~100s (524
+// SEM headers CORS → erro genérico no navegador). O deadline JSON fica abaixo disso.
+const SOFT_DEADLINE_JSON_MS = 85_000;
 // Per-tool timeout to prevent any single tool from stalling the loop
 const TOOL_TIMEOUT_MS = 25_000;
+// Aborta a chamada Anthropic se NENHUM byte chegar nesse intervalo (stream travado).
+const STREAM_IDLE_TIMEOUT_MS = 30_000;
 
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
     p.then(v => { clearTimeout(t); resolve(v); }).catch(e => { clearTimeout(t); reject(e); });
   });
+}
+
+// ─── Anthropic streaming call ───
+// Consome a Messages API com stream:true e remonta os content blocks. O streaming é o
+// que permite gerações longas (material didático, relatórios) sem o antigo abort de 55s
+// na chamada única: saúde = bytes chegando (watchdog de inatividade), e o corte real é o
+// deadline global — que, se estourar, ainda preserva o TEXTO PARCIAL já recebido.
+type AnthropicStreamResult = {
+  content: any[];
+  stopReason: string | null;
+  aborted: boolean; // true = interrompido por deadline/inatividade (parcial preservado)
+};
+
+async function streamAnthropicMessage(opts: {
+  body: any;
+  apiKey: string;
+  deadlineAt: number;
+  onTextDelta?: (t: string) => void;
+}): Promise<AnthropicStreamResult> {
+  const { body, apiKey, deadlineAt, onTextDelta } = opts;
+  const controller = new AbortController();
+  let idleTimer: number | undefined;
+  const armIdle = () => {
+    if (idleTimer !== undefined) clearTimeout(idleTimer);
+    const msLeft = deadlineAt - Date.now();
+    idleTimer = setTimeout(
+      () => controller.abort(),
+      Math.max(1, Math.min(STREAM_IDLE_TIMEOUT_MS, msLeft)),
+    ) as unknown as number;
+  };
+  armIdle();
+
+  let res: Response;
+  try {
+    res = await fetch(ANTHROPIC_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({ ...body, stream: true }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(idleTimer);
+    if ((err as any)?.name === "AbortError") return { content: [], stopReason: null, aborted: true };
+    throw err;
+  }
+
+  if (!res.ok) {
+    clearTimeout(idleTimer);
+    const errText = await res.text().catch(() => "");
+    if (res.status === 429) throw new Error("Rate limit excedido. Tente novamente em alguns segundos.");
+    if (res.status === 401) throw new Error("Chave API da Anthropic inválida. Verifique nas configurações.");
+    throw new Error(`Anthropic API error ${res.status}: ${errText}`);
+  }
+
+  const content: any[] = [];
+  let stopReason: string | null = null;
+  let aborted = false;
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+
+  const handleEvent = (ev: any) => {
+    switch (ev.type) {
+      case "content_block_start": {
+        const b = ev.content_block || {};
+        if (b.type === "tool_use") {
+          content[ev.index] = { type: "tool_use", id: b.id, name: b.name, input: b.input || {}, _json: "" };
+        } else if (b.type === "thinking") {
+          content[ev.index] = { type: "thinking", thinking: b.thinking || "", signature: b.signature || "" };
+        } else if (b.type === "text") {
+          content[ev.index] = { type: "text", text: b.text || "" };
+          if (b.text) onTextDelta?.(b.text);
+        } else {
+          content[ev.index] = b; // redacted_thinking etc. — repassa intacto
+        }
+        break;
+      }
+      case "content_block_delta": {
+        const blk = content[ev.index];
+        if (!blk) break;
+        const d = ev.delta || {};
+        if (d.type === "text_delta" && typeof d.text === "string") {
+          blk.text = (blk.text || "") + d.text;
+          onTextDelta?.(d.text);
+        } else if (d.type === "input_json_delta") {
+          blk._json = (blk._json || "") + (d.partial_json || "");
+        } else if (d.type === "thinking_delta") {
+          blk.thinking = (blk.thinking || "") + (d.thinking || "");
+        } else if (d.type === "signature_delta") {
+          blk.signature = (blk.signature || "") + (d.signature || "");
+        }
+        break;
+      }
+      case "content_block_stop": {
+        const blk = content[ev.index];
+        if (blk?.type === "tool_use") {
+          try { blk.input = blk._json ? JSON.parse(blk._json) : (blk.input || {}); } catch { blk.input = {}; }
+          delete blk._json;
+        }
+        break;
+      }
+      case "message_delta":
+        if (ev.delta?.stop_reason) stopReason = ev.delta.stop_reason;
+        break;
+      case "error":
+        throw new Error(`Anthropic stream error: ${ev.error?.message || "unknown"}`);
+    }
+  };
+
+  try {
+    while (true) {
+      if (Date.now() > deadlineAt) { aborted = true; controller.abort(); break; }
+      const { done, value } = await reader.read();
+      if (done) break;
+      armIdle();
+      buf += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buf.indexOf("\n\n")) !== -1) {
+        const rawEvent = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        for (const line of rawEvent.split("\n")) {
+          if (!line.startsWith("data:")) continue;
+          let ev: any;
+          try { ev = JSON.parse(line.slice(5).trim()); } catch { continue; }
+          handleEvent(ev);
+        }
+      }
+    }
+  } catch (err) {
+    if ((err as any)?.name === "AbortError") aborted = true;
+    else { clearTimeout(idleTimer); throw err; }
+  } finally {
+    clearTimeout(idleTimer);
+    try { reader.releaseLock(); } catch (_) { /* noop */ }
+  }
+
+  // Remove buracos do array esparso + resíduo de tool_use interrompido no meio.
+  // ⚠️ Bloco text VAZIO não pode voltar pra API no turno seguinte (400 "text content
+  // blocks must be non-empty") — filtra aqui.
+  const blocks = content
+    .filter(Boolean)
+    .filter((b) => !(b?.type === "text" && !(b.text || "").trim()))
+    .map((b) => {
+      if (b?.type === "tool_use" && "_json" in b) { const { _json, ...rest } = b; return rest; }
+      return b;
+    });
+  return { content: blocks, stopReason, aborted };
 }
 
 // ─── Tool definitions (Anthropic native format) ───
@@ -173,6 +336,19 @@ const TOOL_DEFINITIONS: Record<string, any> = {
       required: ["agent_slug", "task"]
     }
   }
+};
+
+// Mensagens de progresso exibidas no chat enquanto cada ferramenta roda (modo SSE)
+const TOOL_STATUS: Record<string, string> = {
+  generate_image: "Gerando imagem…",
+  generate_video: "Gerando vídeo…",
+  web_search: "Pesquisando na web…",
+  query_instagram: "Consultando métricas do Instagram…",
+  query_ads: "Consultando métricas de anúncios…",
+  query_whatsapp: "Consultando métricas do WhatsApp…",
+  generate_report: "Montando o relatório…",
+  save_content: "Salvando conteúdo…",
+  call_agent: "Acionando agente especialista…",
 };
 
 // ─── Helpers ───
@@ -822,7 +998,7 @@ serve(async (req) => {
   );
 
   try {
-    const { userMessage, sessionId, agentSlug, brandId, userId, attachments } = await req.json();
+    const { userMessage, sessionId, agentSlug, brandId, userId, attachments, stream: streamToClient } = await req.json();
 
     if (!userId || !userMessage || !agentSlug) {
       return new Response(JSON.stringify({ error: "userId, userMessage, and agentSlug are required" }), {
@@ -971,195 +1147,276 @@ serve(async (req) => {
       return { role: m.role, content: m.content };
     });
 
-    let currentMessages = [...anthropicMessages];
-    let finalResponse = "";
-    let mediaUrls: string[] = [];
-    let reportHtml: string | null = null;
-    let reportId: string | null = null;
-    const startedAt = Date.now();
-    let hitDeadline = false;
+    // ─── Loop do agente ───
+    // `emitir` (só no modo SSE) recebe eventos de progresso: `delta` {text} = pedaço de
+    // texto gerado; `status` {message} = ferramenta em execução. O retorno é o payload
+    // final (mesmo shape do modo JSON legado).
+    const executar = async (
+      emitir: ((event: string, data: any) => void) | null,
+    ) => {
+      const currentMessages = [...anthropicMessages];
+      const mediaUrls: string[] = [];
+      let reportHtml: string | null = null;
+      let reportId: string | null = null;
+      const startedAt = Date.now();
+      // SSE aguenta 130s (bytes fluindo); JSON precisa responder antes dos ~100s do CF
+      const deadlineAt = startedAt + (emitir ? SOFT_DEADLINE_SSE_MS : SOFT_DEADLINE_JSON_MS);
+      let hitDeadline = false;
 
-    for (let loop = 0; loop < MAX_TOOL_LOOPS; loop++) {
-      // Soft deadline guard — leave time to persist session and respond
-      if (Date.now() - startedAt > SOFT_DEADLINE_MS) {
-        console.warn(`ai-orchestrator: soft deadline reached at loop ${loop}, breaking out.`);
-        hitDeadline = true;
-        break;
-      }
-
-      // Orçamento de tokens generoso: a tool `generate_report` recebe as seções do
-      // relatório como INPUT do modelo (markdown rico, várias seções) — ou seja, é uma
-      // saída grande. Com o teto antigo (2048) o modelo escrevia o preâmbulo
-      // ("Agora vou gerar o relatório...") e era CORTADO por max_tokens ANTES de emitir
-      // o bloco tool_use. Aí stop_reason virava "max_tokens", caía no else como se fosse
-      // resposta final e salvava só o preâmbulo → relatório vazio e PDF em branco.
-      const body: any = {
-        model: ANTHROPIC_MODEL,
-        system: systemPrompt,
-        messages: currentMessages,
-        // 8192 é suficiente p/ o relatório (seções do generate_report ≈ poucos milhares de
-        // tokens) e MUITO mais rápido que 16384 — o teto alto fazia uma única chamada gerar
-        // texto demais e estourar o wall-clock do worker (5xx "cancelled by supervisor").
-        max_tokens: 8192,
+      // O texto final é acumulado a partir dos DELTAS do stream (fonte única): o texto
+      // de TODAS as voltas entra (preâmbulo antes da tool + continuação depois), separado
+      // por parágrafo — exatamente o que o usuário vê chegando no modo SSE.
+      let acc = "";
+      let precisaSeparador = false;
+      const onTextDelta = (t: string) => {
+        if (precisaSeparador) {
+          acc += "\n\n";
+          emitir?.("delta", { text: "\n\n" });
+          precisaSeparador = false;
+        }
+        acc += t;
+        emitir?.("delta", { text: t });
       };
 
-      if (tools.length > 0) {
-        body.tools = tools;
-      }
+      // Erro da Anthropic (429/529/event:error) DEPOIS de já ter texto transmitido: não
+      // joga fora o que o usuário já leu — degrada pro mesmo fechamento parcial do
+      // deadline. Sem texto nenhum, propaga (vira erro de verdade, como antes).
+      let erroMeio: string | null = null;
 
-      // Timeout por chamada: uma única chamada Anthropic lenta não pode rodar até o limite
-      // duro do worker e ser morta pelo supervisor (vira 5xx). Se passar, abortamos e
-      // encerramos com o que já temos (resposta graciosa em vez de 500).
-      const callController = new AbortController();
-      const callTimer = setTimeout(() => callController.abort(), 55_000);
-      let aiRes: Response;
       try {
-        aiRes = await fetch(ANTHROPIC_API_URL, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-api-key": anthropicKey.api_key,
-            "anthropic-version": "2023-06-01",
-          },
-          body: JSON.stringify(body),
-          signal: callController.signal,
+      for (let loop = 0; loop < MAX_TOOL_LOOPS; loop++) {
+        // Soft deadline guard — leave time to persist session and respond
+        if (Date.now() > deadlineAt) {
+          console.warn(`ai-orchestrator: soft deadline reached at loop ${loop}, breaking out.`);
+          hitDeadline = true;
+          break;
+        }
+
+        // Orçamento de tokens generoso: a tool `generate_report` recebe as seções do
+        // relatório como INPUT do modelo (markdown rico, várias seções) — ou seja, é uma
+        // saída grande. Com um teto baixo (2048) o modelo escrevia o preâmbulo
+        // ("Agora vou gerar o relatório...") e era CORTADO por max_tokens ANTES de emitir
+        // o bloco tool_use → relatório vazio. Com a chamada em STREAMING não há mais o
+        // risco de a chamada única estourar timeout de HTTP — o limite real é o deadline.
+        const body: any = {
+          model: ANTHROPIC_MODEL,
+          system: systemPrompt,
+          messages: currentMessages,
+          // O tokenizer do Sonnet 5 gasta ~30% mais tokens pro MESMO texto que o 4.6 —
+          // 12000 ≈ os antigos 8192 em capacidade de texto. O limite REAL de duração é o
+          // deadline (a chamada é streaming; max_tokens é só o teto).
+          max_tokens: 12000,
+          // Sonnet 5 liga thinking ADAPTATIVO quando `thinking` é omitido — desligado de
+          // propósito (paridade com o 4.6 e latência mínima de chat).
+          thinking: { type: "disabled" },
+        };
+
+        if (tools.length > 0) {
+          body.tools = tools;
+        }
+
+        if (acc) precisaSeparador = true;
+
+        const result = await streamAnthropicMessage({
+          body,
+          apiKey: anthropicKey.api_key,
+          deadlineAt,
+          onTextDelta,
         });
-      } catch (err) {
-        clearTimeout(callTimer);
-        console.warn(`ai-orchestrator: chamada Anthropic abortada/erro no loop ${loop}: ${err instanceof Error ? err.message : err}`);
-        hitDeadline = true;
-        break;
-      }
-      clearTimeout(callTimer);
 
-      if (!aiRes.ok) {
-        const errText = await aiRes.text();
-        if (aiRes.status === 429) throw new Error("Rate limit excedido. Tente novamente em alguns segundos.");
-        if (aiRes.status === 401) throw new Error("Chave API da Anthropic inválida. Verifique nas configurações.");
-        throw new Error(`Anthropic API error ${aiRes.status}: ${errText}`);
-      }
+        if (result.aborted) {
+          // Deadline/stream travado no meio da geração — o texto parcial já está em `acc`.
+          console.warn(`ai-orchestrator: geração interrompida por deadline/inatividade no loop ${loop}.`);
+          hitDeadline = true;
+          break;
+        }
 
-      const result = await aiRes.json();
-      const stopReason = result.stop_reason;
-      const contentArray = result.content || [];
+        const stopReason = result.stopReason;
+        const contentArray = result.content;
 
-      // Add assistant response to messages
-      currentMessages.push({ role: "assistant", content: contentArray });
+        // Add assistant response to messages
+        currentMessages.push({ role: "assistant", content: contentArray });
 
-      if (stopReason === "tool_use") {
-        // Process tool calls
-        const toolResults: any[] = [];
-        for (const block of contentArray) {
-          if (block.type === "tool_use") {
-            const toolName = block.name;
-            const toolInput = block.input || {};
+        if (stopReason === "tool_use") {
+          // Process tool calls
+          const toolResults: any[] = [];
+          for (const block of contentArray) {
+            if (block.type === "tool_use") {
+              const toolName = block.name;
+              const toolInput = block.input || {};
 
-            console.log(`Executing tool: ${toolName}`, JSON.stringify(toolInput).substring(0, 200));
+              console.log(`Executing tool: ${toolName}`, JSON.stringify(toolInput).substring(0, 200));
+              emitir?.("status", { message: TOOL_STATUS[toolName] || `Executando ${toolName}…` });
 
-            let toolResult: string;
-            try {
-              toolResult = await withTimeout(
-                executeTool(toolName, toolInput, supabase, userId, brandId, session?.id),
-                TOOL_TIMEOUT_MS,
-                `tool ${toolName}`
-              );
-            } catch (toolErr: any) {
-              console.error(`Tool ${toolName} failed:`, toolErr?.message || toolErr);
-              toolResult = JSON.stringify({
-                success: false,
-                error: toolErr?.message || "Tool execution failed",
-                tool: toolName,
+              let toolResult: string;
+              try {
+                // Clampa o timeout da tool ao tempo restante do deadline: perto do fim, a
+                // tool falha rápido (vira tool_result de erro) e o topo do loop encerra com
+                // hitDeadline — sem estourar o wall-clock do worker (~150s) na fase de tools.
+                // call_agent roda um agente INTEIRO por dentro (loop próprio) — 25s não
+                // bastam; ganha teto maior, ainda limitado pelo deadline do pai.
+                const toolBudget = toolName === "call_agent" ? 60_000 : TOOL_TIMEOUT_MS;
+                toolResult = await withTimeout(
+                  executeTool(toolName, toolInput, supabase, userId, brandId, session?.id),
+                  Math.max(1, Math.min(toolBudget, deadlineAt - Date.now())),
+                  `tool ${toolName}`
+                );
+              } catch (toolErr: any) {
+                console.error(`Tool ${toolName} failed:`, toolErr?.message || toolErr);
+                toolResult = JSON.stringify({
+                  success: false,
+                  error: toolErr?.message || "Tool execution failed",
+                  tool: toolName,
+                });
+              }
+
+              // Strip large payloads (HTML) from what is sent BACK to the model:
+              // they explode token usage and latency. Keep them only on our side.
+              let toolResultForModel = toolResult;
+              try {
+                const parsed = JSON.parse(toolResult);
+                if (parsed.image_url) mediaUrls.push(parsed.image_url);
+                if (parsed.video_url) mediaUrls.push(parsed.video_url);
+                if (parsed.html_content) reportHtml = parsed.html_content;
+                if (parsed.report_id) reportId = parsed.report_id;
+
+                if (parsed.html_content) {
+                  const stripped = { ...parsed };
+                  delete stripped.html_content;
+                  stripped.message = stripped.message || "Relatório gerado com sucesso. HTML omitido aqui para economizar tokens.";
+                  toolResultForModel = JSON.stringify(stripped);
+                }
+              } catch (_) { }
+
+              toolResults.push({
+                type: "tool_result",
+                tool_use_id: block.id,
+                content: toolResultForModel,
               });
             }
-
-            // Strip large payloads (HTML) from what is sent BACK to the model:
-            // they explode token usage and latency. Keep them only on our side.
-            let toolResultForModel = toolResult;
-            try {
-              const parsed = JSON.parse(toolResult);
-              if (parsed.image_url) mediaUrls.push(parsed.image_url);
-              if (parsed.video_url) mediaUrls.push(parsed.video_url);
-              if (parsed.html_content) reportHtml = parsed.html_content;
-              if (parsed.report_id) reportId = parsed.report_id;
-
-              if (parsed.html_content) {
-                const stripped = { ...parsed };
-                delete stripped.html_content;
-                stripped.message = stripped.message || "Relatório gerado com sucesso. HTML omitido aqui para economizar tokens.";
-                toolResultForModel = JSON.stringify(stripped);
-              }
-            } catch (_) { }
-
-            toolResults.push({
-              type: "tool_result",
-              tool_use_id: block.id,
-              content: toolResultForModel,
-            });
           }
-        }
 
-        // Add tool results as a user message
-        currentMessages.push({ role: "user", content: toolResults });
-      } else {
-        // Extract text from content blocks
-        finalResponse = contentArray
-          .filter((b: any) => b.type === "text")
-          .map((b: any) => b.text)
-          .join("\n");
-        // Se o modelo foi cortado por max_tokens (resposta truncada), registra para
-        // diagnóstico. O front trata reportHtml=null como falha e pede para tentar de novo,
-        // evitando salvar um relatório só com o preâmbulo.
-        if (stopReason === "max_tokens") {
-          console.warn(`ai-orchestrator: stop_reason=max_tokens no loop ${loop} — resposta possivelmente truncada (reportHtml=${reportHtml ? "ok" : "null"}).`);
+          // Add tool results as a user message
+          currentMessages.push({ role: "user", content: toolResults });
+        } else {
+          // Se o modelo foi cortado por max_tokens (resposta truncada), registra para
+          // diagnóstico. O front trata reportHtml=null como falha e pede para tentar de
+          // novo, evitando salvar um relatório só com o preâmbulo.
+          if (stopReason === "max_tokens") {
+            console.warn(`ai-orchestrator: stop_reason=max_tokens no loop ${loop} — resposta possivelmente truncada (reportHtml=${reportHtml ? "ok" : "null"}).`);
+          }
+          break;
         }
-        break;
       }
-    }
+      } catch (loopErr) {
+        if (!acc.trim()) throw loopErr;
+        console.error(`ai-orchestrator: erro no meio do loop com texto parcial preservado: ${loopErr instanceof Error ? loopErr.message : loopErr}`);
+        erroMeio = loopErr instanceof Error ? loopErr.message : String(loopErr);
+      }
 
-    if (hitDeadline && !finalResponse) {
-      finalResponse =
-        "Cheguei perto do limite de tempo de processamento antes de concluir a resposta. " +
-        "Tente reformular a pergunta de forma mais específica (por exemplo, foque em um único canal, período curto ou uma seção do relatório).";
-    }
+      let finalResponse = acc.trim();
+      // Nunca persistir/devolver resposta VAZIA (ex.: loops esgotados só com tool calls)
+      if (!finalResponse && !hitDeadline) {
+        finalResponse = reportHtml
+          ? "Relatório gerado com sucesso!"
+          : "Não consegui gerar a resposta desta vez — tente novamente em instantes.";
+      }
+      if (erroMeio) {
+        const aviso = "\n\n_⚠ A geração foi interrompida por uma instabilidade na IA — o texto acima pode estar incompleto. Envie \"continue\" para eu prosseguir._";
+        finalResponse += aviso;
+        emitir?.("delta", { text: aviso });
+      } else if (hitDeadline) {
+        if (finalResponse) {
+          const aviso = "\n\n_⏱ A resposta foi interrompida pelo limite de tempo — envie \"continue\" para eu prosseguir de onde parei._";
+          finalResponse += aviso;
+          emitir?.("delta", { text: aviso });
+        } else {
+          finalResponse =
+            "Cheguei perto do limite de tempo de processamento antes de concluir a resposta. " +
+            "Tente reformular a pergunta de forma mais específica (por exemplo, foque em um único canal, período curto ou uma seção do relatório).";
+        }
+      }
 
-    messages.push({ role: "assistant", content: finalResponse });
+      messages.push({ role: "assistant", content: finalResponse });
 
-    await supabase.from("ai_sessions").update({
-      messages: messages.slice(-60),
-      updated_at: new Date().toISOString(),
-    }).eq("id", session.id);
+      await supabase.from("ai_sessions").update({
+        messages: messages.slice(-60),
+        updated_at: new Date().toISOString(),
+      }).eq("id", session.id);
 
-    // Cost tracking
-    const costUsd = 0.005;
-    const monthStr = new Date().toISOString().slice(0, 7) + "-01";
-    const { data: existing } = await supabase.from("ai_cost_tracking")
-      .select("*").eq("user_id", userId).eq("month", monthStr).eq("provider", "anthropic").maybeSingle();
+      // Cost tracking
+      const costUsd = 0.005;
+      const monthStr = new Date().toISOString().slice(0, 7) + "-01";
+      const { data: existing } = await supabase.from("ai_cost_tracking")
+        .select("*").eq("user_id", userId).eq("month", monthStr).eq("provider", "anthropic").maybeSingle();
 
-    if (existing) {
-      await supabase.from("ai_cost_tracking").update({
-        total_generations: (existing.total_generations || 0) + 1,
-        total_cost_usd: (existing.total_cost_usd || 0) + costUsd,
-        total_cost_brl: (existing.total_cost_brl || 0) + costUsd * 5.5,
-      }).eq("id", existing.id);
-    } else {
-      await supabase.from("ai_cost_tracking").insert({
-        user_id: userId, month: monthStr, provider: "anthropic",
-        model: ANTHROPIC_MODEL, total_generations: 1,
-        total_cost_usd: costUsd, total_cost_brl: costUsd * 5.5,
+      if (existing) {
+        await supabase.from("ai_cost_tracking").update({
+          total_generations: (existing.total_generations || 0) + 1,
+          total_cost_usd: (existing.total_cost_usd || 0) + costUsd,
+          total_cost_brl: (existing.total_cost_brl || 0) + costUsd * 5.5,
+        }).eq("id", existing.id);
+      } else {
+        await supabase.from("ai_cost_tracking").insert({
+          user_id: userId, month: monthStr, provider: "anthropic",
+          model: ANTHROPIC_MODEL, total_generations: 1,
+          total_cost_usd: costUsd, total_cost_brl: costUsd * 5.5,
+        });
+      }
+
+      return {
+        success: true,
+        sessionId: session.id,
+        agentName: agent.name,
+        agentIcon: agent.icon,
+        response: finalResponse,
+        mediaUrls,
+        reportHtml,
+        reportId,
+      };
+    };
+
+    // ─── Modo JSON (legado): front antigo + chamadas internas (call_agent) ───
+    if (!streamToClient) {
+      const payload = await executar(null);
+      return new Response(JSON.stringify(payload), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    return new Response(JSON.stringify({
-      success: true,
-      sessionId: session.id,
-      agentName: agent.name,
-      agentIcon: agent.icon,
-      response: finalResponse,
-      mediaUrls,
-      reportHtml,
-      reportId,
-    }), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    // ─── Modo SSE: o front pediu streaming (body.stream = true) ───
+    // A Response sai IMEDIATAMENTE com o stream aberto; o loop roda em paralelo
+    // escrevendo eventos. Erros depois deste ponto viram evento `error` (não 500).
+    const { readable, writable } = new TransformStream();
+    const writer = writable.getWriter();
+    const encoder = new TextEncoder();
+    const enviar = (event: string, data: any) => {
+      // fire-and-forget: falha de write = cliente desconectou; o catch evita unhandled rejection
+      writer.write(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)).catch(() => { });
+    };
+
+    (async () => {
+      try {
+        // 1º byte imediato: destrava o buffer do proxy (TTFB p/ Cloudflare/Kong) e dá
+        // feedback instantâneo no chat enquanto o modelo começa a gerar.
+        enviar("status", { message: "Pensando…" });
+        const payload = await executar(enviar);
+        enviar("done", payload);
+      } catch (e) {
+        console.error("ai-orchestrator (stream) error:", e);
+        enviar("error", { error: e instanceof Error ? e.message : "Unknown error" });
+      } finally {
+        try { await writer.close(); } catch (_) { /* cliente já fechou */ }
+      }
+    })();
+
+    return new Response(readable, {
+      headers: {
+        ...corsHeaders,
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+      },
     });
 
   } catch (e) {
