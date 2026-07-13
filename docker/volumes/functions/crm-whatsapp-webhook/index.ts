@@ -376,6 +376,8 @@ Deno.serve(async (req) => {
           let mediaInbound: { tipo: string; id?: string; mime_type?: string; filename?: string } | null = null;
           // Resposta a uma mensagem interativa (clique em botão/lista) — guarda id+título p/ roteamento.
           let interactiveReply: { tipo: string; id: string | null; title: string | null; description: string | null } | null = null;
+          // Cartões de contato compartilhados (msg.contacts[]) — guardados crus na metadata.
+          let contactCards: any[] | null = null;
           if (msgType === "text") {
             conteudo = msg?.text?.body ?? "";
           } else if (msgType === "interactive") {
@@ -419,6 +421,26 @@ Deno.serve(async (req) => {
           } else if (msgType === "sticker") {
             conteudo = "[sticker]";
             mediaInbound = { tipo: "sticker", id: msg?.sticker?.id, mime_type: msg?.sticker?.mime_type ?? "image/webp" };
+          } else if (msgType === "contacts") {
+            // Cartão(ões) de contato compartilhado(s). Sem este branch caía no default
+            // "[contacts]" e nome/telefones eram DESCARTADOS (caso Thamires 2026-07-13) —
+            // o chat mostrava "Mensagem não suportada" e o dado se perdia pra sempre.
+            const cards: any[] = Array.isArray(msg?.contacts) ? msg.contacts : [];
+            const linhas = cards.map((c: any) => {
+              const nome =
+                c?.name?.formatted_name ||
+                [c?.name?.first_name, c?.name?.last_name].filter(Boolean).join(" ") ||
+                "Contato";
+              const fones = (Array.isArray(c?.phones) ? c.phones : [])
+                .map((p: any) => p?.phone || p?.wa_id)
+                .filter(Boolean)
+                .join(", ");
+              return fones ? `${nome} (${fones})` : nome;
+            });
+            conteudo = linhas.length
+              ? `Contato compartilhado: ${linhas.join(" · ")}`
+              : "[contacts]";
+            contactCards = cards.length ? cards : null;
           } else if (msgType === "location") {
             conteudo = `[localização: ${msg?.location?.latitude}, ${msg?.location?.longitude}]`;
           } else if (msgType === "reaction") {
@@ -552,6 +574,7 @@ Deno.serve(async (req) => {
               original_type: msgType,
               timestamp: msg?.timestamp,
               ...(interactiveReply ? { interactive_reply: interactiveReply } : {}),
+              ...(contactCards ? { contacts: contactCards } : {}),
               ...(quotedId ? { context: { id: quotedId, conteudo: quotedConteudo } } : {}),
             },
           });

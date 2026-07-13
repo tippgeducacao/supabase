@@ -438,6 +438,32 @@ function normalizeUazapiMessageType(m: any, tipoRaw: string): {
     const lng = pick(m, ["longitude", "message.locationMessage.degreesLongitude"]);
     return { tipo: "location", conteudo: `[localização: ${lat}, ${lng}]`, caption: "", mediaUrl: null, mediaBase64: null, mediaMime: null, mediaFilename: null };
   }
+  if (tipoRaw.includes("contact")) {
+    // Cartão de contato (contactMessage/contactsArrayMessage): sem este branch caía
+    // no default "text" com conteúdo VAZIO e nome/telefones eram descartados.
+    // Tolerante a formatos: junta os vCards achados e extrai nome + TEL/waid.
+    const cands: any[] = [
+      pick<any>(m, ["message.contactMessage"]),
+      ...(pick<any[]>(m, ["message.contactsArrayMessage.contacts"]) ?? []),
+      pick<any>(m, ["content"]),
+    ].filter((c) => c && typeof c === "object" && (c.vcard || c.displayName));
+    const linhas = cands.map((c: any) => {
+      const nome = c?.displayName || "Contato";
+      const fones = Array.from(
+        new Set(
+          Array.from(String(c?.vcard ?? "").matchAll(/waid=(\d+)|TEL[^:]*:([+\d\s()./-]{6,})/gi))
+            .map((mm) => (mm[1] || mm[2] || "").trim())
+            .filter(Boolean),
+        ),
+      ).join(", ");
+      return fones ? `${nome} (${fones})` : nome;
+    });
+    return {
+      tipo: "contacts",
+      conteudo: linhas.length ? `Contato compartilhado: ${linhas.join(" · ")}` : "[contato]",
+      caption: "", mediaUrl: null, mediaBase64: null, mediaMime: null, mediaFilename: null,
+    };
+  }
   if (tipoRaw.includes("reaction")) {
     const emoji = pick<string>(m, ["reaction", "text", "message.reactionMessage.text"]) ?? "";
     return { tipo: "reaction", conteudo: `[reacao]${emoji}`, caption: "", mediaUrl: null, mediaBase64: null, mediaMime: null, mediaFilename: null };
