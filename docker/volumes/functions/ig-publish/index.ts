@@ -9,6 +9,16 @@ const META_API = "https://graph.facebook.com/v21.0";
 
 const getErrorMessage = (err: unknown) => err instanceof Error ? err.message : String(err);
 
+// Extrai a mensagem MAIS ÚTIL do erro da Graph API. `message` costuma ser genérico
+// ("Invalid parameter"); é `error_user_title`/`error_user_msg` que trazem o motivo real
+// (ex.: "Faltam posições de marcação de usuário para a imagem"). Inclui o subcode p/ rastreio.
+function graphErrorMessage(error: any): string {
+  if (!error) return "Erro desconhecido do Instagram";
+  const partes = [error.error_user_title, error.error_user_msg].filter(Boolean);
+  const base = partes.length ? partes.join(" — ") : (error.message || "Erro do Instagram");
+  return error.error_subcode ? `${base} (subcode ${error.error_subcode})` : base;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
@@ -129,11 +139,34 @@ Deno.serve(async (req) => {
   }
 });
 
-function parseUserTags(tagsStr: string | null): string | undefined {
+// Posições x/y determinísticas e distintas p/ N marcações. Foto de FEED (IMAGE e itens de
+// imagem de carrossel) EXIGE x/y em cada user_tag — sem elas a Graph recusa com
+// "Invalid parameter" (subcode 2207063: "Faltam posições de marcação de usuário para a imagem").
+// A UI não deixa o usuário posicionar, então distribuímos numa grade dentro da imagem.
+function tagPositions(n: number): { x: number; y: number }[] {
+  if (n <= 1) return [{ x: 0.5, y: 0.5 }];
+  const cols = Math.ceil(Math.sqrt(n));
+  const rows = Math.ceil(n / cols);
+  const clamp = (v: number) => Math.min(0.95, Math.max(0.05, +v.toFixed(3)));
+  return Array.from({ length: n }, (_, i) => ({
+    x: clamp(((i % cols) + 0.5) / cols),
+    y: clamp((Math.floor(i / cols) + 0.5) / rows),
+  }));
+}
+
+// withCoords=true para foto de feed (x/y obrigatórios); false para vídeo/REELS (só username).
+function parseUserTags(tagsStr: string | null, withCoords: boolean): string | undefined {
   if (!tagsStr?.trim()) return undefined;
-  const usernames = tagsStr.split(",").map((t) => t.trim().replace(/^@/, "")).filter(Boolean);
+  // Instagram aceita no máx. 20 marcações por foto.
+  const usernames = tagsStr.split(",").map((t) => t.trim().replace(/^@/, "")).filter(Boolean).slice(0, 20);
   if (!usernames.length) return undefined;
-  // Format: [{username:'user1'},{username:'user2'}]
+  if (withCoords) {
+    const pos = tagPositions(usernames.length);
+    // Format: [{username:'user1',x:0.5,y:0.5}, ...]
+    const tags = usernames.map((u, i) => `{username:'${u}',x:${pos[i].x},y:${pos[i].y}}`);
+    return `[${tags.join(",")}]`;
+  }
+  // Vídeo/REELS: só o username. Format: [{username:'user1'},{username:'user2'}]
   const tags = usernames.map((u) => `{username:'${u}'}`);
   return `[${tags.join(",")}]`;
 }
@@ -199,8 +232,9 @@ async function preflightMedia(post: any) {
 async function publishPost(supabase: any, post: any, account: any) {
   try {
     const { ig_user_id, access_token } = account;
-    const userTags = parseUserTags(post.user_tags);
     const collaborators = parseCollaborators(post.collaborators);
+    // user_tags é parseado DENTRO de cada builder (createSingleContainer/publishCarousel),
+    // porque o formato depende do tipo de CADA mídia: foto de feed exige x/y, vídeo/REELS não.
 
     // PRÉ-VALIDAÇÃO da mídia ANTES de gastar processamento no Instagram: confirma que cada
     // URL existe (HTTP ok) e é do tipo certo (imagem/vídeo). Falha aqui vira uma mensagem
@@ -211,9 +245,9 @@ async function publishPost(supabase: any, post: any, account: any) {
     let containerId: string;
 
     if (post.media_type === "CAROUSEL") {
-      containerId = await publishCarousel(ig_user_id, access_token, post, userTags, collaborators);
+      containerId = await publishCarousel(ig_user_id, access_token, post, collaborators);
     } else {
-      containerId = await createSingleContainer(ig_user_id, access_token, post, userTags, collaborators);
+      containerId = await createSingleContainer(ig_user_id, access_token, post, collaborators);
     }
 
     // Aguarda o container ficar FINISHED antes de publicar — vale para TODOS os tipos,
@@ -237,7 +271,7 @@ async function publishPost(supabase: any, post: any, account: any) {
     });
     const publishData = await publishRes.json();
 
-    if (publishData.error) throw new Error(publishData.error.message);
+    if (publishData.error) throw new Error(graphErrorMessage(publishData.error));
 
     await supabase
       .from("ig_scheduled_posts")
@@ -270,31 +304,34 @@ function applyOptionalParams(params: URLSearchParams, userTags?: string, collabo
 
 async function createSingleContainer(
   igUserId: string, accessToken: string, post: any,
-  userTags?: string, collaborators?: string
+  collaborators?: string
 ): Promise<string> {
   const params = new URLSearchParams({
     access_token: accessToken,
     caption: post.caption || "",
   });
 
-  if (post.media_type === "VIDEO" || post.media_type === "REELS") {
+  const isVideo = post.media_type === "VIDEO" || post.media_type === "REELS";
+  if (isVideo) {
     params.set("media_type", post.media_type);
     params.set("video_url", post.media_url);
   } else {
     params.set("image_url", post.media_url);
   }
 
+  // Foto de feed exige x/y nas marcações; vídeo/REELS usa só o username.
+  const userTags = parseUserTags(post.user_tags, !isVideo);
   applyOptionalParams(params, userTags, collaborators);
 
   const res = await fetch(`${META_API}/${igUserId}/media`, { method: "POST", body: params });
   const data = await res.json();
-  if (data.error) throw new Error(data.error.message);
+  if (data.error) throw new Error(graphErrorMessage(data.error));
   return data.id;
 }
 
 async function publishCarousel(
   igUserId: string, accessToken: string, post: any,
-  userTags?: string, collaborators?: string
+  collaborators?: string
 ): Promise<string> {
   let mediaUrls: string[];
   try {
@@ -323,12 +360,13 @@ async function publishCarousel(
       params.set("image_url", url);
     }
 
-    // user_tags can be set on individual carousel items too
-    if (userTags) params.set("user_tags", userTags);
+    // user_tags também valem nos itens do carrossel — item de imagem exige x/y, item de vídeo não.
+    const itemUserTags = parseUserTags(post.user_tags, !isVideo);
+    if (itemUserTags) params.set("user_tags", itemUserTags);
 
     const res = await fetch(`${META_API}/${igUserId}/media`, { method: "POST", body: params });
     const data = await res.json();
-    if (data.error) throw new Error(`Carousel item error: ${data.error.message}`);
+    if (data.error) throw new Error(`Carousel item error: ${graphErrorMessage(data.error)}`);
     childIds.push(data.id);
 
     if (isVideo) {
@@ -348,7 +386,7 @@ async function publishCarousel(
 
   const res = await fetch(`${META_API}/${igUserId}/media`, { method: "POST", body: carouselParams });
   const data = await res.json();
-  if (data.error) throw new Error(data.error.message);
+  if (data.error) throw new Error(graphErrorMessage(data.error));
   return data.id;
 }
 
