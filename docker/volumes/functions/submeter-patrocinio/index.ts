@@ -191,6 +191,14 @@ function formatValor(v: string): string {
   return v
 }
 
+// Telefone BR -> dígitos com DDI 55 (p/ link wa.me). '' se não parecer válido.
+function telefoneWa(v: string): string {
+  let d = (v || '').replace(/\D/g, '').replace(/^0+/, '')
+  if (!d) return ''
+  if (!d.startsWith('55') && (d.length === 10 || d.length === 11)) d = '55' + d
+  return d.length === 12 || d.length === 13 ? d : ''
+}
+
 // acha o 1º campo cujo nome (normalizado) casa um dos aliases; devolve [valor, chaveOriginal]
 function pick(campos: Record<string, string>, aliases: string[]): [string, string | null] {
   const mapa = new Map<string, string>() // normKey -> chaveOriginal
@@ -325,13 +333,16 @@ Deno.serve(async (req) => {
     const recebidoEm = agora.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })
     const prazoBR = prazo.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' })
 
-    // campos já usados no cabeçalho — não repetir na lista
+    // campos já usados no bloco Solicitante — não repetir na lista de dados
     const usados = new Set<string>([nomeKey, telKey, emailKey].filter(Boolean) as string[])
 
-    const contatoLinha =
-      nome
-        ? `Contato: ${escapeHtml(nome)}${telefone ? ' - ' + escapeHtml(telefone) : ''}${email ? ' · ' + escapeHtml(email) : ''}`
-        : ''
+    // Bloco SOLICITANTE (nome, telefone e e-mail em linhas separadas).
+    const solicitanteHtml =
+      `<p><strong>👤 Solicitante</strong></p><ul>` +
+      (nome ? `<li><strong>Nome:</strong> ${escapeHtml(nome)}</li>` : '') +
+      (telefone ? `<li><strong>Telefone / WhatsApp:</strong> ${escapeHtml(telefone)}</li>` : '') +
+      (email ? `<li><strong>E-mail:</strong> ${escapeHtml(email)}</li>` : '') +
+      `</ul>`
 
     const camposHtml = Object.keys(campos)
       .filter((k) => !usados.has(k))
@@ -355,12 +366,51 @@ Deno.serve(async (req) => {
       })
       .join('\n')
 
+    // Mensagens PRONTAS para o WhatsApp (dados já preenchidos): link "Abrir no
+    // WhatsApp" (wa.me — abre a conversa no número do apoiador com o texto) + botão
+    // "Copiar" (data-gt-copy, tratado por delegação no front do Gestor de Tarefas).
+    const primeiroNome = (nome || '').trim().split(/\s+/)[0] || ''
+    const saud = primeiroNome ? `, ${primeiroNome}` : ''
+    const evNome = evento || tituloAlvo
+    const msgRecebimento =
+      `Olá${saud}! Tudo bem? Aqui é da equipe da PPGVET. 😊\n\n` +
+      `Recebemos a sua solicitação de apoio para o "${evNome}" e já encaminhamos para análise. ` +
+      `Em breve retornamos com um posicionamento.\n\n` +
+      `Qualquer dúvida, estou à disposição!`
+    const msgProposta =
+      `Olá${saud}! Tudo bem? 😊\n\n` +
+      `Sobre o apoio da PPGVET para o "${evNome}":\n\n` +
+      `[ESCREVA AQUI A PROPOSTA — cota / contrapartidas / valores]\n\n` +
+      `Lembrando que enviamos, junto com o brinde, folders institucionais da PPGVET ` +
+      `para serem distribuídos a todos os participantes do evento.\n\n` +
+      `Fico no aguardo do seu retorno!`
+
+    const telWa = telefoneWa(telefone)
+    const waLink = (msg: string) => (telWa ? `https://wa.me/${telWa}?text=${encodeURIComponent(msg)}` : '')
+    const attrCopy = (msg: string) => escapeHtml(msg).replace(/\n/g, '&#10;')
+    const blocoMsg = (titulo: string, msg: string, nota = '') => {
+      const link = waLink(msg)
+      const acoes = [
+        link ? `<a href="${escapeHtml(link)}" target="_blank" rel="noopener">📲 Abrir no WhatsApp</a>` : '',
+        `<a href="#" class="gt-copy-btn" data-gt-copy="${attrCopy(msg)}">📋 Copiar mensagem</a>`,
+      ].filter(Boolean).join(' &nbsp;·&nbsp; ')
+      return (
+        `<p><strong>${escapeHtml(titulo)}</strong>${nota ? ` — <em>${escapeHtml(nota)}</em>` : ''}</p>` +
+        `<blockquote>${escapeHtml(msg).replace(/\n/g, '<br/>')}</blockquote>` +
+        `<p>${acoes}</p>`
+      )
+    }
+    const mensagensHtml =
+      `<hr/><p><strong>💬 Mensagens prontas para o WhatsApp</strong></p>` +
+      blocoMsg('1) Recebimento', msgRecebimento) +
+      blocoMsg('2) Proposta', msgProposta, 'edite a proposta antes de enviar')
+
     const descricao = [
-      contatoLinha,
-      `<p><strong>Protocolo:</strong> ${escapeHtml(protocolo)} · <strong>Recebido em:</strong> ${escapeHtml(recebidoEm)} · <strong>Prazo de retorno:</strong> até ${escapeHtml(prazoBR)} (${PRAZO_DIAS} dias)</p>`,
-      camposHtml ? `<p><strong>Dados da solicitação</strong></p><ul>${camposHtml}</ul>` : '',
-      enviados.length ? `<p><strong>Anexos enviados</strong></p>\n${anexosHtml}` : '',
-      `<p><em>Origem: formulário público de apoio a eventos · Status inicial: A Fazer.</em></p>`,
+      solicitanteHtml,
+      camposHtml ? `<p><strong>📋 Dados do evento</strong></p><ul>${camposHtml}</ul>` : '',
+      enviados.length ? `<p><strong>📎 Anexos enviados</strong></p>\n${anexosHtml}` : '',
+      mensagensHtml,
+      `<hr/><p><em><strong>Protocolo:</strong> ${escapeHtml(protocolo)} · <strong>Recebido em:</strong> ${escapeHtml(recebidoEm)} · <strong>Prazo de retorno:</strong> até ${escapeHtml(prazoBR)} (${PRAZO_DIAS} dias) · Origem: formulário público de apoio a eventos.</em></p>`,
     ].filter(Boolean).join('\n')
 
     // 6) Cria a tarefa em "A Fazer" com prazo = now + 7 dias.
