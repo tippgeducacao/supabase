@@ -46,7 +46,7 @@ Deno.serve(async (req) => {
 
     const body = await req.json().catch(() => ({}));
     const {
-      creative_id, variation_number, prompt,
+      creative_id, ad_id, variation_number, prompt,
       brand_profile_id, edit_variation_id, edit_instruction,
       ad_name, original_caption, original_metrics,
     } = body || {};
@@ -89,7 +89,7 @@ Deno.serve(async (req) => {
       srcMime = r.headers.get("content-type") || "image/png";
       srcB64 = bytesParaDataUrl({ bytes: new Uint8Array(await r.arrayBuffer()), contentType: srcMime, urlUsada: "" }).split(",")[1];
     } else {
-      const img = await resolverImagemCriativo(sb, creative_id);
+      const img = await resolverImagemCriativo(sb, { creativeId: creative_id, adId: ad_id });
       if (!img) {
         return new Response(JSON.stringify({ error: "Sem imagem base para este criativo (não foi possível resolver na Meta)." }), {
           status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -100,7 +100,7 @@ Deno.serve(async (req) => {
       // sobe a imagem base uma vez (caminho estável, idempotente) p/ referência durável
       try {
         const ext = extDe(img.contentType);
-        const path = `variacoes/${creative_id}/_original.${ext}`;
+        const path = `variacoes/${creative_id || ad_id}/_original.${ext}`;
         await sb.storage.from(BUCKET).upload(path, img.bytes, { contentType: img.contentType, upsert: true });
         originalUrl = sb.storage.from(BUCKET).getPublicUrl(path).data.publicUrl;
       } catch { /* referência é best-effort */ }
@@ -142,7 +142,12 @@ Deno.serve(async (req) => {
     });
     if (!aiRes.ok) {
       const t = await aiRes.text();
-      if (aiRes.status === 429) throw new Error("Limite de uso da API do Google atingido. Tente em alguns segundos.");
+      if (aiRes.status === 429) {
+        const semCota = /limit:\s*0|free_tier/i.test(t);
+        throw new Error(semCota
+          ? "A chave da API do Google está sem cota para gerar imagens (tier gratuito = 0). Ative o faturamento (billing) do projeto no Google Cloud e habilite a Gemini API paga — é a MESMA chave do Gerador de Imagens."
+          : "Limite de uso da API do Google atingido no momento. Tente novamente em alguns segundos.");
+      }
       if (aiRes.status === 403) throw new Error("Chave do Google sem permissão. Ative a Generative Language API no Google Cloud.");
       throw new Error(`Google API ${aiRes.status}: ${t.slice(0, 300)}`);
     }
@@ -174,7 +179,7 @@ Deno.serve(async (req) => {
       const { data, error } = await sb.from("content_variations").insert({
         user_id,
         brand_profile_id: brand_profile_id || null,
-        original_creative_id: creative_id,
+        original_creative_id: creative_id || ad_id,
         original_image_url: originalUrl,
         original_caption: original_caption || null,
         original_post_type: "paid",
