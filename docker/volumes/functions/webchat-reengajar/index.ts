@@ -27,16 +27,18 @@ const MAX = Number(Deno.env.get("WEBCHAT_REENGAJAR_MAX") ?? 100);
 // runtime, o reengajamento degrada pro fallback WhatsApp em vez de derrubar a função.
 let webpush: any = null;
 let webpushTentado = false;
+let webpushErro: string | null = null; // exposto no response (push_debug) p/ diagnóstico
 async function getWebpush(): Promise<any> {
   if (webpushTentado) return webpush;
   webpushTentado = true;
-  if (!(VAPID_PUBLIC && VAPID_PRIVATE)) return null;
+  if (!(VAPID_PUBLIC && VAPID_PRIVATE)) { webpushErro = "vapid_env_ausente"; return null; }
   try {
     const mod: any = await import("npm:web-push@3.6.7");
     webpush = mod.default ?? mod;
     webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC, VAPID_PRIVATE);
   } catch (e) {
-    console.error(`[webchat-reengajar] web-push indisponível (usando fallback WhatsApp): ${(e as Error).message}`);
+    webpushErro = (e as Error).message?.slice(0, 300) ?? "erro desconhecido";
+    console.error(`[webchat-reengajar] web-push indisponível (usando fallback WhatsApp): ${webpushErro}`);
     webpush = null;
   }
   return webpush;
@@ -157,5 +159,5 @@ Deno.serve(async (req) => {
     }
   }
 
-  return json({ ok: true, total: (sessoes ?? []).length, push: porPush, whatsapp: porWhatsapp, sem_sucesso: semSucesso });
+  return json({ ok: true, total: (sessoes ?? []).length, push: porPush, whatsapp: porWhatsapp, sem_sucesso: semSucesso, push_debug: webpushErro });
 });
