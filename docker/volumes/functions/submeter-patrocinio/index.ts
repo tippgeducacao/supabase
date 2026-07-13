@@ -76,6 +76,7 @@ const NOME_KEYS = [
 ]
 const TELEFONE_KEYS = ['telefone', 'whatsapp', 'celular', 'fone', 'phone', 'tel', 'contatotelefone']
 const EMAIL_KEYS = ['email', 'emailcontato', 'emailresponsavel', 'emailsolicitante']
+const DATA_EVENTO_KEYS = ['dataevento', 'datadoevento', 'datarealizacao', 'data']
 
 // Rótulos "bonitos" p/ campos comuns; qualquer outro cai na humanização da chave.
 const LABELS: Record<string, string> = {
@@ -189,6 +190,13 @@ function formatValor(v: string): string {
   if (['true', 'on', 'sim', 'yes'].includes(s)) return 'Sim'
   if (['false', 'off', 'nao', 'não', 'no'].includes(s)) return 'Não'
   return v
+}
+
+// Data do evento p/ o título: "2026-10-01" -> "01/10/2026"; qualquer outro formato fica igual.
+function formatarDataEvento(v: string): string {
+  const s = (v || '').trim()
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/)
+  return iso ? `${iso[3]}/${iso[2]}/${iso[1]}` : s
 }
 
 // Telefone BR -> dígitos com DDI 55 (p/ link wa.me). '' se não parecer válido.
@@ -323,10 +331,12 @@ Deno.serve(async (req) => {
       })
     }
 
-    // 4) Título: "Solicitação de Apoio - {evento}" (fallback no contato/data).
+    // 4) Título: "Solicitação de Apoio - {evento} - {data do evento}" (fallback no contato/data).
     const dataBR = agora.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' })
+    const [dataEventoRaw] = pick(campos, DATA_EVENTO_KEYS)
+    const dataEventoFmt = formatarDataEvento(dataEventoRaw)
     const tituloAlvo = evento || nome || `Nova solicitação (${dataBR})`
-    const titulo = `Solicitação de Apoio - ${tituloAlvo}`.slice(0, 240)
+    const titulo = `Solicitação de Apoio - ${tituloAlvo}${dataEventoFmt ? ` - ${dataEventoFmt}` : ''}`.slice(0, 240)
 
     // 5) Descrição HTML. Cabeçalho "Contato: ..." (estilo das tarefas atuais),
     //    depois TODOS os demais campos (genérico) e os anexos.
