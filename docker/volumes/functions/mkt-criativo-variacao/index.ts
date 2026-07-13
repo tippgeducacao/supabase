@@ -16,6 +16,13 @@ const corsHeaders = {
 const getErr = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const BUCKET = "mkt-criativos-ia";
 
+// getPublicUrl dentro do container devolve o host INTERNO (http://kong:8000 /
+// http://supabase-kong:8000), que o NAVEGADOR não resolve → imagem quebrada.
+// Troca pelo domínio público, mesmo padrão de whatsapp-send-media/crm-webchat.
+const PUBLIC_SUPABASE_URL = Deno.env.get("PUBLIC_SUPABASE_URL") || "https://api.ppgeducacao.site";
+const toPublicUrl = (internalUrl: string): string =>
+  internalUrl.replace(/^https?:\/\/(supabase-)?kong:8000/i, PUBLIC_SUPABASE_URL);
+
 function b64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
   const out = new Uint8Array(bin.length);
@@ -102,7 +109,7 @@ Deno.serve(async (req) => {
         const ext = extDe(img.contentType);
         const path = `variacoes/${creative_id || ad_id}/_original.${ext}`;
         await sb.storage.from(BUCKET).upload(path, img.bytes, { contentType: img.contentType, upsert: true });
-        originalUrl = sb.storage.from(BUCKET).getPublicUrl(path).data.publicUrl;
+        originalUrl = toPublicUrl(sb.storage.from(BUCKET).getPublicUrl(path).data.publicUrl);
       } catch { /* referência é best-effort */ }
     }
 
@@ -131,32 +138,37 @@ Deno.serve(async (req) => {
     instrucao += "\n\nKeep any text legible and correctly spelled in Brazilian Portuguese. Output a single high-resolution image.";
 
     // ---- Google Gemini (imagem) ----
+    // 1 RETRY quando a resposta vem SEM imagem: o modelo às vezes devolve só texto
+    // (foi o "1/10 falhou — A IA não devolveu imagem"). Erro HTTP (429/403/…) NÃO
+    // retenta — estoura a mensagem amigável na hora. Retry é barato e reduz a flaky.
     const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=${keyRow.api_key}`;
-    const aiRes = await fetch(geminiUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: instrucao }, { inline_data: { mime_type: srcMime, data: srcB64 } }] }],
-        generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
-      }),
-    });
-    if (!aiRes.ok) {
-      const t = await aiRes.text();
-      if (aiRes.status === 429) {
-        const semCota = /limit:\s*0|free_tier/i.test(t);
-        throw new Error(semCota
-          ? "A chave da API do Google está sem cota para gerar imagens (tier gratuito = 0). Ative o faturamento (billing) do projeto no Google Cloud e habilite a Gemini API paga — é a MESMA chave do Gerador de Imagens."
-          : "Limite de uso da API do Google atingido no momento. Tente novamente em alguns segundos.");
-      }
-      if (aiRes.status === 403) throw new Error("Chave do Google sem permissão. Ative a Generative Language API no Google Cloud.");
-      throw new Error(`Google API ${aiRes.status}: ${t.slice(0, 300)}`);
-    }
-    const result = await aiRes.json();
     let outMime = "image/png";
     let outB64: string | null = null;
-    for (const part of result?.candidates?.[0]?.content?.parts || []) {
-      const inl = part.inlineData || part.inline_data;
-      if (inl?.data) { outMime = inl.mimeType || inl.mime_type || "image/png"; outB64 = inl.data; break; }
+    for (let tentativa = 0; tentativa < 2 && !outB64; tentativa++) {
+      const aiRes = await fetch(geminiUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: instrucao }, { inline_data: { mime_type: srcMime, data: srcB64 } }] }],
+          generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
+        }),
+      });
+      if (!aiRes.ok) {
+        const t = await aiRes.text();
+        if (aiRes.status === 429) {
+          const semCota = /limit:\s*0|free_tier/i.test(t);
+          throw new Error(semCota
+            ? "A chave da API do Google está sem cota para gerar imagens (tier gratuito = 0). Ative o faturamento (billing) do projeto no Google Cloud e habilite a Gemini API paga — é a MESMA chave do Gerador de Imagens."
+            : "Limite de uso da API do Google atingido no momento. Tente novamente em alguns segundos.");
+        }
+        if (aiRes.status === 403) throw new Error("Chave do Google sem permissão. Ative a Generative Language API no Google Cloud.");
+        throw new Error(`Google API ${aiRes.status}: ${t.slice(0, 300)}`);
+      }
+      const result = await aiRes.json();
+      for (const part of result?.candidates?.[0]?.content?.parts || []) {
+        const inl = part.inlineData || part.inline_data;
+        if (inl?.data) { outMime = inl.mimeType || inl.mime_type || "image/png"; outB64 = inl.data; break; }
+      }
     }
     if (!outB64) throw new Error("A IA não devolveu imagem. Tente novamente.");
 
@@ -165,7 +177,7 @@ Deno.serve(async (req) => {
     const path = `variacoes/${cid || "avulso"}/${crypto.randomUUID()}.${ext}`;
     const { error: upErr } = await sb.storage.from(BUCKET).upload(path, b64ToBytes(outB64), { contentType: outMime, upsert: true });
     if (upErr) throw new Error(`Falha ao salvar a imagem: ${upErr.message}`);
-    const publicUrl = sb.storage.from(BUCKET).getPublicUrl(path).data.publicUrl;
+    const publicUrl = toPublicUrl(sb.storage.from(BUCKET).getPublicUrl(path).data.publicUrl);
 
     // ---- Persiste em content_variations ----
     let row;
