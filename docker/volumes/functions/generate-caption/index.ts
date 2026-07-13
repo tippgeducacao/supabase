@@ -12,6 +12,70 @@ const corsHeaders = {
 const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504, 529]);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// Host INTERNO do storage (kong) visto de dentro do container. O navegador manda a
+// URL PÚBLICA (api.ppgeducacao.site); baixar do host interno evita o hairpin do
+// Cloudflare (443 travada nos IPs do CF) e é o caminho confiável para o edge.
+const INTERNAL_SUPABASE_URL = Deno.env.get("SUPABASE_URL") || "";
+function internalizeStorageUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    if (u.pathname.startsWith("/storage/v1/") && INTERNAL_SUPABASE_URL) {
+      const base = new URL(INTERNAL_SUPABASE_URL);
+      u.protocol = base.protocol;
+      u.host = base.host;
+      return u.toString();
+    }
+  } catch { /* URL inválida → devolve como veio */ }
+  return url;
+}
+
+// media_type aceito pela Claude Vision (jpeg/png/gif/webp). Deriva do content-type e,
+// na falta, da extensão da URL. HEIC/AVIF/BMP não são suportados pela Claude.
+const IMG_MIME_OK = /^image\/(jpeg|png|gif|webp)$/;
+function guessImageMime(url: string, contentType?: string | null): string {
+  const ct = (contentType || "").split(";")[0].trim().toLowerCase();
+  if (IMG_MIME_OK.test(ct)) return ct;
+  if (ct === "image/jpg") return "image/jpeg";
+  const u = url.toLowerCase();
+  if (/\.jpe?g(\?|$)/.test(u)) return "image/jpeg";
+  if (/\.png(\?|$)/.test(u)) return "image/png";
+  if (/\.gif(\?|$)/.test(u)) return "image/gif";
+  if (/\.webp(\?|$)/.test(u)) return "image/webp";
+  return "image/jpeg";
+}
+
+// Baixa uma imagem (por URL) SERVER-SIDE e devolve o bloco de imagem base64 da Claude.
+// Tenta o host interno primeiro e cai na URL pública; 2 tentativas cada, com backoff.
+// Assim a legenda não depende do fetch/FileReader do navegador (onde vinha falhando).
+async function fetchImageBlock(url: string): Promise<any> {
+  const candidates = [internalizeStorageUrl(url), url].filter((v, i, a) => a.indexOf(v) === i);
+  let lastErr: unknown = null;
+  for (const cand of candidates) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const r = await fetch(cand);
+        if (!r.ok) {
+          lastErr = new Error(`HTTP ${r.status}`);
+          if (attempt < 2) { await sleep(300 * attempt); continue; }
+          break;
+        }
+        const buf = new Uint8Array(await r.arrayBuffer());
+        if (buf.byteLength > 4.5 * 1024 * 1024) {
+          throw new Error("imagem muito grande para análise (máx. ~4,5 MB).");
+        }
+        return {
+          type: "image",
+          source: { type: "base64", media_type: guessImageMime(url, r.headers.get("content-type")), data: base64Encode(buf) },
+        };
+      } catch (e) {
+        lastErr = e;
+        if (attempt < 2) { await sleep(300 * attempt); continue; }
+      }
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error("falha ao baixar a imagem.");
+}
+
 /**
  * fetch com retry + backoff exponencial para chamadas de IA. Em sucesso retorna a
  * Response SEM consumir o corpo (o chamador lê o JSON). Em erro transitório (ou
@@ -62,7 +126,7 @@ serve(async (req) => {
   );
 
   try {
-    const { user_id, brand_profile_id, context, tom_de_voz, post_type, original_caption, image_description, reference_images, operator_name, video_url, video_data, video_mime, ig_handle } = await req.json();
+    const { user_id, brand_profile_id, context, tom_de_voz, post_type, original_caption, image_description, reference_images, reference_image_urls, operator_name, video_url, video_data, video_mime, ig_handle } = await req.json();
     if (!user_id) {
       return new Response(JSON.stringify({ error: "user_id is required" }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
@@ -158,7 +222,9 @@ Gere APENAS a legenda, sem explicações adicionais. A legenda deve estar pronta
     // ===== VÍDEO → análise NATIVA via Gemini (sem STT/Whisper) =====
     // Quando há vídeo (e nenhuma imagem), o Gemini analisa o vídeo diretamente,
     // usando o MESMO system prompt (modelos aprovados + persona/tom do brand_profile).
-    const hasImages = Array.isArray(reference_images) && reference_images.length > 0;
+    const hasImages =
+      (Array.isArray(reference_images) && reference_images.length > 0) ||
+      (Array.isArray(reference_image_urls) && reference_image_urls.length > 0);
     if (!hasImages && (video_url || video_data)) {
       const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
       if (!GEMINI_API_KEY) {
@@ -175,7 +241,7 @@ Gere APENAS a legenda, sem explicações adicionais. A legenda deve estar pronta
           mime = m[1];
           b64 = m[2];
         } else {
-          const vr = await fetch(video_url);
+          const vr = await fetch(internalizeStorageUrl(String(video_url)));
           if (!vr.ok) throw new Error(`Não consegui baixar o vídeo (HTTP ${vr.status}).`);
           const ct = vr.headers.get("content-type");
           if (ct && ct.startsWith("video/")) mime = ct.split(";")[0];
@@ -246,6 +312,27 @@ Gere APENAS a legenda, sem explicações adicionais. A legenda deve estar pronta
             source: { type: "base64", media_type: match[1], data: match[2] },
           });
         }
+      }
+    }
+    // Imagens por URL (prefill do Agendar Post): o EDGE baixa server-side — evita o
+    // fetch/FileReader do navegador, que é onde a geração vinha falhando.
+    if (Array.isArray(reference_image_urls) && reference_image_urls.length > 0) {
+      const antes = contentBlocks.length;
+      let ultimoErro = "";
+      for (const url of reference_image_urls.slice(0, 4)) {
+        try {
+          contentBlocks.push(await fetchImageBlock(String(url)));
+        } catch (e) {
+          ultimoErro = e instanceof Error ? e.message : String(e);
+          console.warn(`generate-caption: falha ao baixar imagem ${url}: ${ultimoErro}`);
+        }
+      }
+      // Só pediram URLs e NENHUMA baixou → erro claro (não gera legenda "no escuro").
+      if (contentBlocks.length === antes && !(reference_images?.length)) {
+        return new Response(
+          JSON.stringify({ error: `Não consegui baixar a mídia para análise${ultimoErro ? ` (${ultimoErro})` : ""}. Tente novamente.` }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
       }
     }
     contentBlocks.push({ type: "text", text: userMessage });
