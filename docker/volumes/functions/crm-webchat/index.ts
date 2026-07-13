@@ -18,6 +18,7 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { responderWebchat, aberturaWebchat } from "./agente.ts";
+import { pushParaSessao } from "../_shared/webchatPush.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -241,6 +242,32 @@ async function responderComoJoao(
       });
       await syncSac(sessaoId, "outbound", "ia", chunk);
     }
+
+    // NOVA MENSAGEM em SEGUNDO PLANO → push imediato no navegador (com som do sistema).
+    // Dispara quando a aba está OCULTA (widget avisa via acao 'presenca') OU quando o
+    // sinal de presença é velho (>2min = navegador fechado sem o pagehide chegar).
+    // Best-effort: sem subscription/lib, simplesmente não notifica (o cutucão de 20min
+    // do cron segue como rede de segurança).
+    try {
+      const { data: pres } = await supabase
+        .from("webchat_sessoes")
+        .select("chat_visivel, presenca_em, origem_url, nome")
+        .eq("id", sessaoId)
+        .maybeSingle();
+      const presencaVelha = !pres?.presenca_em ||
+        (Date.now() - new Date(pres.presenca_em).getTime()) > 120_000;
+      if (pres && (pres.chat_visivel === false || presencaVelha)) {
+        const primeiro = (pres.nome ?? "").trim().split(/\s+/)[0];
+        await pushParaSessao(supabase, sessaoId, {
+          title: "💬 João te respondeu",
+          body: `${primeiro ? primeiro + ", a" : "A"} resposta chegou — volte pra conversa quando puder.`,
+          url: pres.origem_url || "/",
+          tag: "ppgwc-nova-mensagem",
+        });
+      }
+    } catch (e) {
+      console.error(`[crm-webchat] push nova mensagem: ${(e as Error).message}`);
+    }
   } catch (e) {
     console.error(`[crm-webchat] cerebro: ${(e as Error).message}`);
     const fb = "Tive uma instabilidade aqui, mas já já te respondo. 🙏";
@@ -342,10 +369,10 @@ async function acaoIniciar(body: Record<string, unknown>, req: Request) {
 async function carregarSessao(sessaoId: string) {
   const { data } = await supabase
     .from("webchat_sessoes")
-    .select("id, bloqueada, nome, telefone, curso, estagio, lead_id")
+    .select("id, bloqueada, nome, telefone, curso, estagio, lead_id, chat_visivel, presenca_em, origem_url")
     .eq("id", sessaoId)
     .maybeSingle();
-  return data as { id: string; bloqueada: boolean; nome: string | null; telefone: string | null; curso: string | null; estagio: "validacao" | "qualificador" | null; lead_id: string | null } | null;
+  return data as { id: string; bloqueada: boolean; nome: string | null; telefone: string | null; curso: string | null; estagio: "validacao" | "qualificador" | null; lead_id: string | null; chat_visivel: boolean | null; presenca_em: string | null; origem_url: string | null } | null;
 }
 
 // Espelha a mensagem no SAC (funil "Webchat") — a conversa aparece no Contato 360 /
@@ -486,6 +513,19 @@ async function acaoAudio(body: Record<string, unknown>, req: Request) {
   return json({ ok: true, mensagem_id: msg.id, transcricao });
 }
 
+// Presença da aba do lead (visibilitychange/pagehide do widget, via sendBeacon).
+// Governa o push imediato de "nova mensagem" (só notifica quem está em segundo plano).
+async function acaoPresenca(body: Record<string, unknown>) {
+  const sessaoId = texto(body.sessao_id, 40);
+  if (!UUID_RE.test(sessaoId)) return json({ ok: false, erro: "sessao_invalida" }, 400);
+  const visivel = body.visivel === true;
+  await supabase
+    .from("webchat_sessoes")
+    .update({ chat_visivel: visivel, presenca_em: new Date().toISOString() })
+    .eq("id", sessaoId);
+  return json({ ok: true });
+}
+
 // Grava a subscription de Web Push do navegador do lead (opt-in vindo do popup na nossa
 // origem). endpoint é UNIQUE → upsert (renova as chaves se o navegador re-subscrever).
 async function acaoPushSubscribe(body: Record<string, unknown>, req: Request) {
@@ -521,6 +561,12 @@ async function acaoPoll(body: Record<string, unknown>) {
 
   const sessao = await carregarSessao(sessaoId);
   if (!sessao) return json({ ok: false, erro: "sessao_nao_encontrada" }, 404);
+
+  // heartbeat de presença: poll rodando = página aberta (aba oculta segue pollando
+  // throttled, mas o chat_visivel=false do 'presenca' é quem governa o push nesse caso).
+  // NÃO toca chat_visivel aqui — senão o poll de aba oculta apagaria o sinal.
+  supabase.from("webchat_sessoes").update({ presenca_em: new Date().toISOString() }).eq("id", sessaoId)
+    .then(() => {}, () => {});
 
   const { data, error } = await supabase
     .from("webchat_mensagens")
@@ -574,6 +620,8 @@ Deno.serve(async (req) => {
         return json({ ok: true, chave: VAPID_PUBLIC });
       case "push_subscribe":
         return await acaoPushSubscribe(body, req);
+      case "presenca":
+        return await acaoPresenca(body);
       default:
         return json({ ok: false, erro: "acao_invalida" }, 400);
     }
