@@ -1,7 +1,8 @@
-// Edge function pública: recebe a inscrição do EDITAL DE PATROCÍNIO / apoio a
-// eventos (Semanas Acadêmicas etc.) do formulário público (Lovable) e cria uma
-// tarefa em PROJETOS INTERSETORIAIS → PATROCÍNIOS → lista "Tarefas", etapa
-// "A Fazer", atribuída a Adriane + Laura. Espelha o padrão de `submeter-tcc`.
+// Edge function pública: recebe a inscrição do EDITAL DE APOIO a eventos
+// (Semanas Acadêmicas etc. — "apoiador", nunca "patrocínio", p/ não soar
+// marketing) do formulário público (Lovable) e cria uma tarefa em PROJETOS
+// INTERSETORIAIS → PATROCÍNIOS (nome interno do projeto) → lista "Tarefas",
+// etapa "A Fazer", atribuída a Adriane + Laura. Espelha `submeter-tcc`.
 //
 // >>> TOLERANTE A CAMPOS NOVOS <<<
 // O formulário ainda vai ganhar campos. Esta função NÃO tem um schema fixo do
@@ -48,7 +49,7 @@ const PRAZO_DIAS = 7 // due_date = recebimento + 7 dias corridos
 
 // ── Anexos: mesmo esquema dos anexos nativos do gestor de tarefas
 const BUCKET = 'gt-doc-assets'
-const STORAGE_FOLDER = 'gt-task-attachments/patrocinio'
+const STORAGE_FOLDER = 'gt-task-attachments/apoio'
 const PUBLIC_SUPABASE_URL =
   Deno.env.get('PUBLIC_SUPABASE_URL') || 'https://api.ppgeducacao.site'
 const toPublicUrl = (u: string) => u.replace(/^https?:\/\/kong:8000/i, PUBLIC_SUPABASE_URL)
@@ -87,17 +88,28 @@ const LABELS: Record<string, string> = {
   cidade: 'Cidade',
   uf: 'UF',
   estado: 'Estado',
+  nomedoevento: 'Nome do evento',
   dataevento: 'Data do evento',
   datadoevento: 'Data do evento',
   data: 'Data',
   periodo: 'Período',
+  tipoevento: 'Tipo de evento',
+  tipodeevento: 'Tipo de evento',
+  tipoapoio: 'Tipo de apoio',
+  tipodeapoio: 'Tipo de apoio',
+  tipopatrocinio: 'Tipo de apoio',
   local: 'Local',
+  localizacao: 'Localização',
+  endereco: 'Endereço',
   publico: 'Público estimado',
   participantes: 'Nº de participantes',
   quantidadeparticipantes: 'Nº de participantes',
   numeroparticipantes: 'Nº de participantes',
-  tipopatrocinio: 'Tipo de patrocínio',
-  tipodeapoio: 'Tipo de apoio',
+  numerodeparticipantes: 'Nº de participantes',
+  folder: 'Folder para os participantes',
+  folderparticipantes: 'Folder para todos os participantes',
+  distribuirfolder: 'Compromete-se a distribuir o folder',
+  compromissofolder: 'Compromete-se a distribuir o folder',
   valor: 'Valor solicitado',
   valorsolicitado: 'Valor solicitado',
   orcamento: 'Orçamento',
@@ -254,7 +266,7 @@ Deno.serve(async (req) => {
     }
     const agora = new Date()
     const prazo = new Date(agora.getTime() + PRAZO_DIAS * 24 * 60 * 60 * 1000)
-    const protocolo = `PATR-${agora.getTime().toString(36).toUpperCase()}`
+    const protocolo = `APOIO-${agora.getTime().toString(36).toUpperCase()}`
 
     const enviados: { field: string; url: string; fileName: string; type: string; size: number; isImage: boolean }[] = []
     for (const [i, { field, file }] of arquivos.entries()) {
@@ -293,10 +305,10 @@ Deno.serve(async (req) => {
       })
     }
 
-    // 4) Título: "Solicitação de Patrocínio - {evento}" (fallback no contato/data).
+    // 4) Título: "Solicitação de Apoio - {evento}" (fallback no contato/data).
     const dataBR = agora.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' })
     const tituloAlvo = evento || nome || `Nova solicitação (${dataBR})`
-    const titulo = `Solicitação de Patrocínio - ${tituloAlvo}`.slice(0, 240)
+    const titulo = `Solicitação de Apoio - ${tituloAlvo}`.slice(0, 240)
 
     // 5) Descrição HTML. Cabeçalho "Contato: ..." (estilo das tarefas atuais),
     //    depois TODOS os demais campos (genérico) e os anexos.
@@ -338,7 +350,7 @@ Deno.serve(async (req) => {
       `<p><strong>Protocolo:</strong> ${escapeHtml(protocolo)} · <strong>Recebido em:</strong> ${escapeHtml(recebidoEm)} · <strong>Prazo de retorno:</strong> até ${escapeHtml(prazoBR)} (${PRAZO_DIAS} dias)</p>`,
       camposHtml ? `<p><strong>Dados da solicitação</strong></p><ul>${camposHtml}</ul>` : '',
       enviados.length ? `<p><strong>Anexos enviados</strong></p>\n${anexosHtml}` : '',
-      `<p><em>Origem: formulário público de patrocínio · Status inicial: A Fazer.</em></p>`,
+      `<p><em>Origem: formulário público de apoio a eventos · Status inicial: A Fazer.</em></p>`,
     ].filter(Boolean).join('\n')
 
     // 6) Cria a tarefa em "A Fazer" com prazo = now + 7 dias.
@@ -356,7 +368,7 @@ Deno.serve(async (req) => {
         due_at: prazo.toISOString(),
         assignee_id: ASSIGNEE_PRINCIPAL,
         reporter_id: ASSIGNEE_PRINCIPAL,
-        tags: ['patrocinio'],
+        tags: ['apoio'],
       })
       .select('id')
       .single()
