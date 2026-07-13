@@ -82,9 +82,29 @@ async function enviarWhatsapp(telefone: string, texto: string): Promise<boolean>
   }
 }
 
+// Gate: o cron manda a service key do VAULT (public._get_service_role_key()), que é
+// VÁLIDA mas é OUTRA STRING que a env do container (duas chaves service_role coexistem
+// no self-hosted) — comparação exata só com a env devolvia 401 e o reengajamento nunca
+// rodava. Aceita QUALQUER uma das duas (a do vault é buscada 1x via RPC, com a env).
+let vaultKey: string | null = null;
+let vaultKeyTentado = false;
+async function chaveAutorizada(token: string): Promise<boolean> {
+  if (!token) return false;
+  if (token === SERVICE_ROLE) return true;
+  if (!vaultKeyTentado) {
+    vaultKeyTentado = true;
+    try {
+      const { data } = await supabase.rpc("_get_service_role_key");
+      vaultKey = typeof data === "string" && data ? data : null;
+    } catch { vaultKey = null; }
+  }
+  return !!vaultKey && token === vaultKey;
+}
+
 Deno.serve(async (req) => {
-  // gate: só o cron (Bearer service role)
-  if ((req.headers.get("authorization") ?? "") !== `Bearer ${SERVICE_ROLE}`) {
+  // gate: só o cron (Bearer service role — env do container OU a do vault)
+  const token = (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "");
+  if (!(await chaveAutorizada(token))) {
     return json({ ok: false, erro: "nao_autorizado" }, 401);
   }
 
