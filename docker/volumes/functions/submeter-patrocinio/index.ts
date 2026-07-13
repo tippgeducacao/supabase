@@ -95,6 +95,7 @@ const LABELS: Record<string, string> = {
   periodo: 'Período',
   tipoevento: 'Tipo de evento',
   tipodeevento: 'Tipo de evento',
+  tipoeventooutro: 'Tipo de evento (outro)',
   tipoapoio: 'Tipo de apoio',
   tipodeapoio: 'Tipo de apoio',
   tipopatrocinio: 'Tipo de apoio',
@@ -179,6 +180,15 @@ function humanizeKey(k: string): string {
 function labelFor(originalKey: string): string {
   const n = normKey(originalKey)
   return LABELS[n] || humanizeKey(originalKey)
+}
+
+// Valor de checkbox (true/on/sim/false/off/não) vira "Sim"/"Não" p/ leitura;
+// qualquer outro valor fica intacto.
+function formatValor(v: string): string {
+  const s = v.trim().toLowerCase()
+  if (['true', 'on', 'sim', 'yes'].includes(s)) return 'Sim'
+  if (['false', 'off', 'nao', 'não', 'no'].includes(s)) return 'Não'
+  return v
 }
 
 // acha o 1º campo cujo nome (normalizado) casa um dos aliases; devolve [valor, chaveOriginal]
@@ -328,7 +338,7 @@ Deno.serve(async (req) => {
       .map((k) => {
         const val = (campos[k] ?? '').toString().trim()
         if (!val) return ''
-        return `<li><strong>${escapeHtml(labelFor(k))}:</strong> ${escapeHtml(val)}</li>`
+        return `<li><strong>${escapeHtml(labelFor(k))}:</strong> ${escapeHtml(formatValor(val))}</li>`
       })
       .filter(Boolean)
       .join('')
