@@ -257,7 +257,7 @@ Deno.serve(async (req) => {
     const protocolo = `PATR-${agora.getTime().toString(36).toUpperCase()}`
 
     const enviados: { field: string; url: string; fileName: string; type: string; size: number; isImage: boolean }[] = []
-    for (const { field, file } of arquivos) {
+    for (const [i, { field, file }] of arquivos.entries()) {
       const original = file.name || `${field}.pdf`
       const ext = getExt(original)
       if (file.size > MAX_FILE_BYTES) {
@@ -269,7 +269,10 @@ Deno.serve(async (req) => {
           400,
         )
       }
-      const path = `${STORAGE_FOLDER}/${protocolo}/${sanitizeName(original)}`
+      // Prefixo com o índice do loop garante path ÚNICO por arquivo: sem ele, dois
+      // arquivos com o mesmo nome (ex.: dois "orcamento.pdf" ou fotos "image.jpg") caíam
+      // no MESMO path e, com upsert:true, o 2º sobrescrevia o 1º (anexo perdido em silêncio).
+      const path = `${STORAGE_FOLDER}/${protocolo}/${i}-${sanitizeName(original)}`
       const buf = new Uint8Array(await file.arrayBuffer())
       const { error: upErr } = await supabase.storage.from(BUCKET).upload(path, buf, {
         contentType: file.type || 'application/octet-stream',
