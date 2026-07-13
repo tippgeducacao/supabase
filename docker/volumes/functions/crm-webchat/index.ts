@@ -513,6 +513,24 @@ async function acaoAudio(body: Record<string, unknown>, req: Request) {
   return json({ ok: true, mensagem_id: msg.id, transcricao });
 }
 
+// Telemetria do opt-in de push (página /webchat-push reporta cada etapa) — diagnóstico
+// de falha silenciosa de subscribe no navegador do lead. Append em webchat_sessoes.push_log.
+async function acaoPushLog(body: Record<string, unknown>) {
+  const sessaoId = texto(body.sessao_id, 40);
+  if (!UUID_RE.test(sessaoId)) return json({ ok: false, erro: "sessao_invalida" }, 400);
+  const etapa = texto(body.etapa, 200);
+  if (!etapa) return json({ ok: false, erro: "etapa_vazia" }, 400);
+  try {
+    const { data } = await supabase.from("webchat_sessoes").select("push_log").eq("id", sessaoId).maybeSingle();
+    const log = Array.isArray((data as any)?.push_log) ? (data as any).push_log : [];
+    log.push({ t: new Date().toISOString(), etapa });
+    await supabase.from("webchat_sessoes").update({ push_log: log.slice(-40) }).eq("id", sessaoId);
+  } catch (e) {
+    console.error(`[crm-webchat] push_log: ${(e as Error).message}`);
+  }
+  return json({ ok: true });
+}
+
 // Presença da aba do lead (visibilitychange/pagehide do widget, via sendBeacon).
 // Governa o push imediato de "nova mensagem" (só notifica quem está em segundo plano).
 async function acaoPresenca(body: Record<string, unknown>) {
@@ -622,6 +640,8 @@ Deno.serve(async (req) => {
         return await acaoPushSubscribe(body, req);
       case "presenca":
         return await acaoPresenca(body);
+      case "push_log":
+        return await acaoPushLog(body);
       default:
         return json({ ok: false, erro: "acao_invalida" }, 400);
     }
