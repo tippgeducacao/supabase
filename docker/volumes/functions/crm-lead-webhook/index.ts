@@ -865,29 +865,51 @@ Deno.serve(async (req) => {
       try {
         const p: any = a.params ?? {};
 
-        // dedup por acao: se ja ha card aberto no funil p/ o lead, pula (e reaproveita o id).
+        const tituloResolved =
+          resolveWebhookVar(p.titulo, dados).trim() || cursoInteresse || integration.nome || "Oportunidade";
+        const nowIso = new Date().toISOString();
+        const acaoId = typeof a.id === "string" && a.id ? a.id : null;
+
+        // "Nao criar repetidas" = por WEBHOOK, NAO por funil. Toda webhook de pos aponta pro
+        // MESMO funil (1.0 SDR), entao o dedup por funil fazia um card de Producao de Suinos
+        // BLOQUEAR o card de Sanidade Avicola: o 2o interesse sumia sem deixar rastro. Agora
+        // casa a ACAO que criou o card (fallback: a integracao, p/ cards backfillados sem
+        // acao). Regras: card ABERTO desta webhook -> nao cria outro, marca RECADASTRO
+        // (moldura dourada no kanban + o novo interesse no tooltip) e sobe a atividade;
+        // card desta webhook ja FECHADO (ganha/perdida) -> cria de novo; cadastro em OUTRA
+        // webhook -> card novo, mesmo no mesmo funil.
         if (p.naoCriarRepetidas === true) {
+          const orFilter = acaoId
+            ? `origem_acao_id.eq.${acaoId},and(origem_acao_id.is.null,origem_integracao_id.eq.${integration.id})`
+            : `origem_integracao_id.eq.${integration.id}`;
           const { data: existe } = await admin
             .from("crm_oportunidades")
-            .select("id")
+            .select("id, recadastros")
             .eq("lead_id", leadId)
-            .eq("funil_id", p.funilId)
             .eq("status", "aberta")
+            .or(orFilter)
+            .order("criada_em", { ascending: false })
             .limit(1)
             .maybeSingle();
           if (existe?.id) {
+            await admin
+              .from("crm_oportunidades")
+              .update({
+                recadastro_em: nowIso,
+                recadastro_titulo: tituloResolved,
+                recadastros: (existe.recadastros ?? 0) + 1,
+                ultima_atividade_em: nowIso,
+              })
+              .eq("id", existe.id);
             if (!oportunidadeId) oportunidadeId = existe.id;
             continue;
           }
         }
 
-        const tituloResolved =
-          resolveWebhookVar(p.titulo, dados).trim() || cursoInteresse || integration.nome || "Oportunidade";
         const rawValor = resolveWebhookVar(p.valor, dados).replace(",", ".").replace(/[^0-9.\-]/g, "").trim();
         const valorNum = rawValor !== "" && Number.isFinite(Number(rawValor)) ? Number(rawValor) : null;
         const statusOp = (p.status === "ganha" || p.status === "perdida") ? p.status : "aberta";
         const { id: responsavelId, logId } = await resolverResponsavel(a.id, p.responsavel);
-        const nowIso = new Date().toISOString();
 
         const { data: op, error: opErr } = await admin
           .from("crm_oportunidades")
@@ -908,6 +930,9 @@ Deno.serve(async (req) => {
             ultima_atividade_em: nowIso,
             reativado_de_arquivo: leadArquivadoReativado,
             reativado_em: leadArquivadoReativado ? nowIso : null,
+            // De qual webhook/acao o card nasceu — e o escopo do "nao criar repetidas".
+            origem_integracao_id: integration.id,
+            origem_acao_id: acaoId,
           })
           .select("id")
           .single();
