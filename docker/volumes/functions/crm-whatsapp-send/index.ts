@@ -122,6 +122,7 @@ async function enviarViaConexao(admin: any, p: {
   lead_id?: string | null; oportunidade_id?: string | null; origemFinal: string | null;
   reaction_message_id?: string | null;
   enviadoPorId?: string | null; enviadoPorNome?: string | null;
+  fluxoId?: string | null;
 }): Promise<Response> {
   const { data: conex } = await admin
     .from("wa_conexoes")
@@ -187,6 +188,7 @@ async function enviarViaConexao(admin: any, p: {
     metadata: {
       provider: conex.provider,
       ...(p.origemFinal ? { origem: p.origemFinal } : {}),
+      ...(p.fluxoId ? { fluxo_id: p.fluxoId } : {}),
       ...(p.enviadoPorId ? { enviado_por_id: p.enviadoPorId, enviado_por_nome: p.enviadoPorNome } : {}),
     },
   });
@@ -226,6 +228,10 @@ Deno.serve(async (req) => {
       // Quem disparou: 'humano' (composer/atendente). Ausente = IA/automação (o
       // espelho trata template à parte). Guardado em metadata.origem p/ colorir o chat.
       origem,
+      // Fluxo (crm_fluxos) que originou o envio. Vai pra metadata.fluxo_id e é o que permite
+      // a aba Entregas contar mensagem SEM template (texto/mídia) — que não tem template_name
+      // por onde casar. Só o motor do fluxo manda (crm_fluxo_exec_acao).
+      fluxo_id,
       // tipo=reaction: wamid da mensagem alvo (emoji vai em `conteudo`)
       reaction_message_id,
       // tipo=interactive (mensagem de SESSÃO — só dentro da janela de 24h aberta):
@@ -346,6 +352,7 @@ Deno.serve(async (req) => {
       return await enviarViaConexao(admin, {
         conexaoId: conexaoIdRota, to, tipo, conteudo, anexo_url, filename, mime_type,
         lead_id, oportunidade_id, origemFinal, reaction_message_id, enviadoPorId, enviadoPorNome,
+        fluxoId: fluxo_id ? String(fluxo_id) : null,
       });
     }
 
@@ -723,6 +730,7 @@ Deno.serve(async (req) => {
       metadata: {
         payload_enviado: waPayload,
         ...(origemFinal ? { origem: origemFinal } : {}),
+        ...(fluxo_id ? { fluxo_id: String(fluxo_id) } : {}),
         ...(enviadoPorId ? { enviado_por_id: enviadoPorId, enviado_por_nome: enviadoPorNome } : {}),
       },
     });

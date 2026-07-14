@@ -10,6 +10,11 @@
 //
 // Janela de 24h (Meta): template é sempre permitido; texto livre fora da janela é
 // recusado pela própria Meta (131047) e o erro é registrado no agendamento.
+//
+// tipo_mensagem = 'texto' | 'template' | 'midia'. A MÍDIA é enfileirada pela ação "Enviar
+// texto livre" do FLUXO no modo "mensagens separadas" (o texto sai na hora por net.http_post
+// e a mídia vem por aqui) — é o que garante que o vídeo chegue DEPOIS do texto, já que o
+// pg_net dispara as requisições em paralelo, sem ordem.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 
 const corsHeaders = {
@@ -34,13 +39,29 @@ type Agendada = {
   telefone: string;
   lead_id: string | null;
   oportunidade_id: string | null;
-  tipo_mensagem: "texto" | "template";
+  tipo_mensagem: "texto" | "template" | "midia";
   conteudo: string | null;
   template_name: string | null;
   template_lang: string | null;
   template_components: unknown;
   automacao_id: string | null;
+  anexo_url: string | null;
+  filename: string | null;
+  mime_type: string | null;
 };
+
+// Tipo Meta da mídia: do mime_type e, na falta dele, da extensão do arquivo.
+function tipoDaMidia(mime: string | null, url: string, filename: string | null): string {
+  const m = (mime ?? "").toLowerCase();
+  if (m.startsWith("image/")) return "image";
+  if (m.startsWith("video/")) return "video";
+  if (m.startsWith("audio/")) return "audio";
+  const ext = (filename || url).toLowerCase().split("?")[0].split(".").pop() ?? "";
+  if (["jpg", "jpeg", "png", "webp", "gif"].includes(ext)) return "image";
+  if (["mp4", "3gp", "mov"].includes(ext)) return "video";
+  if (["ogg", "opus", "mp3", "m4a"].includes(ext)) return "audio";
+  return "document";
+}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
@@ -130,6 +151,18 @@ async function processarUma(
       sendBody.template_name = row.template_name;
       sendBody.template_lang = row.template_lang || "pt_BR";
       sendBody.template_components = Array.isArray(row.template_components) ? row.template_components : [];
+    } else if (row.tipo_mensagem === "midia") {
+      // MÍDIA (imagem/vídeo/documento). Quem enfileira hoje é a ação "Enviar texto livre" do
+      // FLUXO no modo "mensagens separadas": o texto já saiu por net.http_post e a mídia vem
+      // pela fila — é o que garante a ORDEM (o pg_net envia em paralelo, sem ordem).
+      const url = String(row.anexo_url ?? "").trim();
+      if (!url) return await falhar("Mídia sem URL");
+      sendBody.tipo = tipoDaMidia(row.mime_type, url, row.filename);
+      sendBody.anexo_url = url;
+      if (row.filename) sendBody.filename = row.filename;
+      if (row.mime_type) sendBody.mime_type = row.mime_type;
+      const legenda = String(row.conteudo ?? "").trim();
+      if (legenda) sendBody.conteudo = legenda;
     } else {
       const texto = String(row.conteudo ?? "").trim();
       if (!texto) return await falhar("Conteúdo vazio");
