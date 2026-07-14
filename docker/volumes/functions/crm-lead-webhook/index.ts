@@ -9,6 +9,8 @@
 //   (2) valida secret
 //   (3) aplica field_mapping na CHAVE recebida (Corpo + Query + Headers — body tem
 //       prioridade); resolve lead.* e campo:<alias> (coluna física ou EAV)
+//   (3.5) MODO MAPEAMENTO: se a integracao tem escuta ativa (crm_webhook_escutas), a chamada
+//       e' SO LOGADA (status='escuta') e NADA e' processado — ver secao "escuta" no CLAUDE.md
 //   (4) find-or-create lead (dedup OR email/whatsapp)
 //   (5) DEDUP por (telefone, curso, lote) via crm_saudacao_guard (ON CONFLICT DO NOTHING):
 //       gateia a CRIACAO da captacao/card. Lote repetido -> nao recria.
@@ -322,6 +324,34 @@ Deno.serve(async (req) => {
       erro: "corpo nao reconhecido (esperado JSON, form-urlencoded ou multipart)", ip_origem: ipOrigem, ...reqMeta,
     });
     return json({ error: "invalid_body" }, 400);
+  }
+
+  // (3.5) MODO MAPEAMENTO ("escuta" do builder) — DRY-RUN.
+  // Se ESTA integração está com uma escuta ATIVA (linha não expirada em crm_webhook_escutas),
+  // o que chega aqui é payload PARA MAPEAR CAMPOS, não um lead: apenas REGISTRAMOS a chamada
+  // (status='escuta', com corpo/query/headers) e devolvemos 200 SEM processar NADA — sem
+  // contato, sem captação, sem oportunidade, sem segmento, sem template/ações. É o modal do
+  // builder que lê esse log e detecta os campos.
+  // Escopo = a integração (o link daquela webhook). Integração sem escuta ativa segue normal;
+  // a escuta expira sozinha (expira_em), então o webhook nunca fica "mudo" por esquecimento.
+  try {
+    const { data: escuta } = await admin
+      .from("crm_webhook_escutas")
+      .select("token, expira_em")
+      .eq("integration_id", integration.id)
+      .gt("expira_em", new Date().toISOString())
+      .maybeSingle();
+    if (escuta) {
+      await admin.from("crm_webhook_logs").insert({
+        integration_id: integration.id, slug, payload, status: "escuta",
+        erro: null, ip_origem: ipOrigem, ...reqMeta,
+        resultado: { modo: "mapeamento", processado: false, escuta_token: escuta.token },
+      });
+      return json({ ok: true, modo: "mapeamento", processado: false }, 200);
+    }
+  } catch (e: any) {
+    // Falha ao checar a escuta NÃO pode derrubar o intake: segue o fluxo normal de produção.
+    console.error("[crm-lead-webhook] escuta check erro:", e?.message);
   }
 
   const mapping = (integration.field_mapping ?? {}) as Record<string, string>;
