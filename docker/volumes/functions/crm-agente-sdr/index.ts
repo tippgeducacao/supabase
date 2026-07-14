@@ -258,6 +258,28 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   const TOOLS_QUE_PAUSAM = new Set(['pausa_ia', 'temporizador_proxima_turma']);
   let pausouPorTool = false;
 
+  // ── RETENÇÃO PENDENTE ⇒ DESLIGA AS ESTEIRAS (2026-07-14) ──────────────────
+  // Quando o lead demonstra desinteresse, o prompt manda fazer UMA pergunta de
+  // retenção (a oferta da PRÓXIMA TURMA) antes de pausar — e o agente fica
+  // esperando a resposta, sem pausar. Só que, sem resposta, o lead continuava
+  // elegível às esteiras: o follow-up de janela aberta cutucava em 15 min (caso
+  // Lucas, 2026-07-14: o lead mandou áudio dizendo que não é o momento — "tô com
+  // a neném pequena" — e 16 min depois recebeu "a neném foi crescendo um pouco e
+  // vc conseguiu respirar mais?"). Enquanto a retenção estiver pendente, NINGUÉM
+  // cutuca: `followup_ativado=false` desliga a esteira de janela aberta E a de
+  // template (as duas gateiam por esse flag). A conversa segue normal se o lead
+  // responder — o inbound não é bloqueado (isso é esteira, não pausa).
+  // Espelho da guarda determinística em followup.ts (`retencaoPendente`).
+  // ⚠️ Casa a OFERTA de retenção ("te chame quando abrir a próxima turma"), NUNCA
+  // "próxima turma" solta — o template de abertura do disparo fala em "vagas da
+  // próxima turma" e um regex frouxo desligaria a esteira de lead normal.
+  const RE_RETENCAO = /(te cham\w*|te avis\w*)[^.?!]{0,40}pr[óo]xima turma/i;
+  const suspenderEsteirasSeRetencao = async (texto: string) => {
+    if (!RE_RETENCAO.test(texto)) return;
+    await atualizarLead(supabase, remotejid, { followup_ativado: false });
+    tel.registrar('esteiras_suspensas', { motivo: 'retencao_pendente' });
+  };
+
   // Loop agêntico: igual ao n8n, o histórico é relido do banco a cada volta.
   for (let rodada = 0; rodada < MAX_RODADAS_TOOLS; rodada++) {
     const messages = sanitizarHistorico(await carregarHistorico(supabase, remotejid));
@@ -330,6 +352,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       if (!pausouPorTool && await iaPausada(remotejid)) {
         tel.registrar('envio_abortado_pausa', { onde: 'antes_envio', motivo: 'IA pausada durante a geração' });
       } else {
+        await suspenderEsteirasSeRetencao(texto);
         await enviarResposta(ctx, texto, renovar, tel, pausouPorTool ? undefined : () => iaPausada(remotejid));
       }
     }

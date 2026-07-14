@@ -197,6 +197,42 @@ function contarTentativas(history: Msg[]): number {
   return n;
 }
 
+// ── GUARDA DE DESINTERESSE: retenção pendente = SILÊNCIO (2026-07-14) ───────
+// Caso real (lead Lucas): o lead mandou um áudio dizendo que não é o momento
+// ("tô com a neném pequena, gasta bastante"), o João fez a pergunta de retenção
+// ("prefere que eu te chame quando abrir a próxima turma?") — e 16 MINUTOS depois
+// esta esteira cutucou ("a neném foi crescendo um pouco e vc conseguiu respirar
+// mais?"). Insistir com quem acabou de dizer que não é o momento é o pior
+// movimento possível: o lead já demonstrou desinteresse e o João está ESPERANDO a
+// resposta dele — a esteira não pode falar por cima disso.
+//
+// A pergunta de retenção é uma frase FIXA dos prompts (a oferta da PRÓXIMA TURMA),
+// então a detecção é determinística: se, DEPOIS da última mensagem real do lead,
+// o João ofereceu a próxima turma, a retenção está pendente → não manda follow e
+// DESLIGA as esteiras (followup_ativado=false cobre janela aberta E template; a
+// conversa segue normal se o lead responder — o inbound não é bloqueado).
+// ⚠️ O regex TEM que casar a OFERTA de retenção ("te chame quando abrir a próxima
+// turma"), não a expressão "próxima turma" solta: o template de abertura do disparo
+// fala em "vagas da próxima turma" e um regex frouxo desligaria a esteira de milhares
+// de leads normais (medido: 3.248 falsos positivos contra 44 retenções reais).
+const RE_RETENCAO = /(te cham\w*|te avis\w*)[^.?!]{0,40}pr[óo]xima turma/i;
+
+function ehMensagemRealDoLead(m: Msg): boolean {
+  if (m.role !== 'user') return false;
+  if (Array.isArray(m.content)) return false;            // tool_result, não é fala do lead
+  const t = blocosParaTexto(m.content);
+  return Boolean(t) && !t.includes(MARCADOR_FOLLOWUP);   // marcador de follow não é fala do lead
+}
+
+export function retencaoPendente(history: Msg[]): boolean {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const m = history[i];
+    if (ehMensagemRealDoLead(m)) return false;           // o lead falou depois: retenção respondida
+    if (m.role === 'assistant' && RE_RETENCAO.test(blocosParaTexto(m.content))) return true;
+  }
+  return false;
+}
+
 // Parser do JSON {steps, final_answer, message} (port de "Processa Resposta do Claude").
 function parseResposta(resp: any): { message: string; final_answer: string } {
   const content = resp?.content ?? [];
@@ -222,9 +258,9 @@ async function gerarFollowup(
   lead: any,
   stage: number,
   tel: Telemetria,
+  history: Msg[],
 ): Promise<{ message: string; final_answer: string }> {
   const remotejid = lead.remotejid;
-  const history = await carregarHistorico(supabase, remotejid);
   const tentativaAtual = contarTentativas(history) + 1;
 
   const nome = extrairPrimeiroNome(lead.nome);
@@ -295,7 +331,18 @@ async function processarFollowupLead(supabase: any, leadSel: any, stageSel: numb
 
     tel.registrar('followup_avaliacao', { stage, elapsed_min: Math.round(elapsedMin), ja_enviado: stageDoFollowUp(lead.follow_up) });
 
-    const { message, final_answer } = await gerarFollowup(supabase, lead, stage, tel);
+    // GUARDA DE DESINTERESSE (ver retencaoPendente): o João ofereceu a próxima
+    // turma e o lead ainda não respondeu → silêncio, e as esteiras são desligadas
+    // (janela aberta E template). Insistir com quem acabou de dizer que não é o
+    // momento é o pior movimento possível.
+    const history = await carregarHistorico(supabase, remotejid);
+    if (retencaoPendente(history)) {
+      await atualizarLead(supabase, remotejid, { followup_ativado: false });
+      tel.registrar('followup_pulado', { motivo: 'retencao_pendente', stage, esteiras: 'desligadas' });
+      return false;
+    }
+
+    const { message, final_answer } = await gerarFollowup(supabase, lead, stage, tel, history);
     if (!message) {
       // Modelo julgou que não cabe follow agora: consome o toque pra não reavaliar todo tick.
       await atualizarLead(supabase, remotejid, { follow_up: followUpDoStage(stage) });
