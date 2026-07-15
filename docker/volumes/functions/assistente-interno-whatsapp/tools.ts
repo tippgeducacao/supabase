@@ -54,6 +54,20 @@ export const FERRAMENTAS = [
     },
   },
   {
+    name: "enviar_mensagem",
+    description:
+      "Propõe enviar uma mensagem no CHAT INTERNO do Gestor de Tarefas, para uma PESSOA (chat direto) ou para um CANAL/grupo. NÃO envia de imediato — registra a proposta e devolve um resumo para o dono confirmar. Use quando o dono pedir para 'mandar mensagem/avisar/falar com' alguém ou postar num canal.",
+    input_schema: {
+      type: "object",
+      properties: {
+        destino_tipo: { type: "string", enum: ["pessoa", "canal"], description: "pessoa = chat direto; canal = canal/grupo" },
+        destino_nome: { type: "string", description: "nome da pessoa (ex.: Laura) ou do canal (ex.: Comercial)" },
+        texto: { type: "string", description: "conteúdo da mensagem" },
+      },
+      required: ["destino_tipo", "destino_nome", "texto"],
+    },
+  },
+  {
     name: "confirmar",
     description:
       "Executa a ação que está aguardando confirmação (criar tarefa OU criar reunião). Só chame quando o dono confirmar explicitamente (sim, pode, confirmo, isso).",
@@ -72,6 +86,7 @@ export async function executarFerramenta(nome: string, input: any, ctx: Ctx): Pr
       case "criar_tarefa": return await proporTarefa(input, ctx);
       case "ver_agenda": return await verAgenda(input, ctx);
       case "criar_reuniao": return await proporReuniao(input, ctx);
+      case "enviar_mensagem": return await proporMensagem(input, ctx);
       case "confirmar": return await confirmarPendente(ctx);
       case "cancelar": return await cancelarPendente(ctx);
       default: return { erro: `ferramenta desconhecida: ${nome}` };
@@ -113,6 +128,47 @@ async function proporTarefa(input: any, ctx: Ctx) {
     status: "aguardando_confirmacao", resumo,
     instrucao: "Mostre o resumo ao dono e peça confirmação. NÃO chame 'confirmar' até ele responder que sim.",
   };
+}
+
+async function resolverCanal(admin: any, nome: string) {
+  const { data } = await admin
+    .from("gt_chat_channels")
+    .select("id, name, type")
+    .in("type", ["channel", "group", "announcement", "department", "project"])
+    .is("archived_at", null)
+    .ilike("name", `%${String(nome).trim()}%`)
+    .limit(6);
+  return data ?? [];
+}
+
+async function proporMensagem(input: any, ctx: Ctx) {
+  const texto = String(input.texto ?? "").trim();
+  if (!texto) return { status: "sem_texto", mensagem: "Qual é a mensagem que devo enviar?" };
+  const tipo = input.destino_tipo === "canal" ? "canal" : "pessoa";
+
+  if (tipo === "pessoa") {
+    const cands = await resolverColaborador(ctx.admin, input.destino_nome);
+    if (cands.length === 0) return { status: "nao_encontrado", mensagem: `Não achei um colaborador ativo chamado "${input.destino_nome}".` };
+    if (cands.length > 1) return { status: "ambiguo", opcoes: cands.map((c: any) => c.name),
+      mensagem: `Achei mais de um: ${cands.map((c: any) => c.name).join(", ")}. Qual deles?` };
+    const alvo = cands[0];
+    const resumo = `💬 Mensagem no chat interno para *${alvo.name}*:\n"${texto}"`;
+    await criarPendente(ctx.admin, ctx.canon, "enviar_mensagem", {
+      actor: ctx.dono.profile_id, tipo: "pessoa", pessoa_id: alvo.id, destino_nome: alvo.name, texto,
+    }, resumo);
+    return { status: "aguardando_confirmacao", resumo, instrucao: "Mostre o resumo e peça confirmação antes de 'confirmar'." };
+  }
+
+  const canais = await resolverCanal(ctx.admin, input.destino_nome);
+  if (canais.length === 0) return { status: "nao_encontrado", mensagem: `Não achei um canal chamado "${input.destino_nome}" no Gestor.` };
+  if (canais.length > 1) return { status: "ambiguo", opcoes: canais.map((c: any) => c.name),
+    mensagem: `Achei mais de um canal: ${canais.map((c: any) => c.name).join(", ")}. Qual?` };
+  const canal = canais[0];
+  const resumo = `💬 Mensagem no canal *${canal.name}*:\n"${texto}"`;
+  await criarPendente(ctx.admin, ctx.canon, "enviar_mensagem", {
+    actor: ctx.dono.profile_id, tipo: "canal", canal_id: canal.id, destino_nome: canal.name, texto,
+  }, resumo);
+  return { status: "aguardando_confirmacao", resumo, instrucao: "Mostre o resumo e peça confirmação antes de 'confirmar'." };
 }
 
 async function verAgenda(input: any, ctx: Ctx) {
@@ -176,6 +232,16 @@ async function confirmarPendente(ctx: Ctx) {
       if (error) throw new Error(error.message);
       return { status: "criada", tipo: "tarefa", task_id: data?.task_id,
         mensagem: `✅ Tarefa criada e ${pl.assignee_nome} foi avisada no Gestor.` };
+    }
+    if (p.tipo === "enviar_mensagem") {
+      const pl = p.payload;
+      const { error } = await ctx.admin.rpc("assistente_enviar_chat_mensagem", {
+        p_actor: pl.actor, p_tipo: pl.tipo, p_pessoa_id: pl.pessoa_id ?? null,
+        p_canal_id: pl.canal_id ?? null, p_content: pl.texto, p_mentions: [],
+      });
+      if (error) throw new Error(error.message);
+      return { status: "enviada", tipo: "mensagem",
+        mensagem: `✅ Mensagem enviada no chat interno para ${pl.destino_nome}.` };
     }
     if (p.tipo === "criar_reuniao") {
       const pl = p.payload;

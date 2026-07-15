@@ -27,6 +27,18 @@ export const FERRAMENTAS_CONSULTA = [
     },
   },
   {
+    name: "consultar_vendas_por_origem",
+    description:
+      "Vendas/matrículas por ORIGEM (de onde veio a venda: Meta Ads, Google, Indicação, Orgânico, Formulário direto, GreatPages…), com quebra por produto (pós/curso/módulo) e total, num período. Use para 'de onde vieram as vendas', 'vendas por fonte/canal', 'origem das matrículas'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        periodo: { type: "string", enum: ["hoje", "ontem", "semana", "semana_passada", "mes", "mes_passado"] },
+        de: { type: "string" }, ate: { type: "string" },
+      },
+    },
+  },
+  {
     name: "consultar_cursos_matriculados",
     description: "Lista quais CURSOS tiveram matrícula no período (com a contagem por curso). Use para 'quais cursos venderam/tiveram matrícula'.",
     input_schema: {
@@ -123,6 +135,7 @@ export async function executarConsulta(nome: string, input: any, ctx: Ctx): Prom
       case "consultar_financeiro": return await cFinanceiro(input, ctx);
       case "consultar_vendas": return await cVendas(input, ctx);
       case "consultar_cursos_matriculados": return await cCursos(input, ctx);
+      case "consultar_vendas_por_origem": return await cVendasPorOrigem(input, ctx);
       case "consultar_faturamento_por_curso": return await cFaturamentoPorCurso(input, ctx);
       case "consultar_cobranca": return await cCobranca(input, ctx);
       case "consultar_cobranca_periodo": return await cCobrancaPeriodo(input, ctx);
@@ -204,6 +217,23 @@ async function cFaturamentoPorCurso(input: any, ctx: Ctx) {
   return {
     periodo: p.label, total_faturamento: r2(total), cursos: lista.slice(0, 30),
     _nota: "Faturamento por curso = valor cheio da venda (pós = contrato + matrícula), por data de assinatura/envio. Cursos gêmeos somam no principal.",
+  };
+}
+
+async function cVendasPorOrigem(input: any, ctx: Ctx) {
+  const p = resolverPeriodo(input);
+  const { data, error } = await ctx.admin.rpc("assist_vendas_por_origem", { p_de: p.de, p_ate: p.ate });
+  if (error) throw new Error(error.message);
+  const rows = Array.isArray(data) ? data : [];
+  const totalQtd = rows.reduce((a: number, r: any) => a + Number(r.qtd_total || 0), 0);
+  const totalFat = rows.reduce((a: number, r: any) => a + Number(r.fat_total || 0), 0);
+  return {
+    periodo: p.label, matriculas: totalQtd, faturamento_total: r2(totalFat),
+    por_origem: rows.map((r: any) => ({
+      origem: r.origem, matriculas: Number(r.qtd_total || 0), faturamento: r2(r.fat_total),
+      pos: Number(r.qtd_pos || 0), curso: Number(r.qtd_curso || 0), modulo: Number(r.qtd_modulo || 0),
+    })),
+    _nota: "Origem = fonte do lead que converteu (Meta/mídia, Google, Indicação, Orgânico, Formulário direto, GreatPages…). 'Origem desconhecida' = matrícula sem lead casado. Formulário direto = sem UTM de mídia (não é mídia paga).",
   };
 }
 
