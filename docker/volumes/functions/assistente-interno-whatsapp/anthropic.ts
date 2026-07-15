@@ -6,8 +6,12 @@
 export const MODELO = Deno.env.get("ASSIST_MODEL") || "claude-opus-4-8";
 
 export async function getAnthropicKey(admin: any): Promise<string | null> {
-  const env = Deno.env.get("ASSIST_ANTHROPIC_KEY") || Deno.env.get("ANTHROPIC_API_KEY");
-  if (env) return env;
+  // Chave DEDICADA (isolamento futuro) só se explicitamente setada p/ ESTE bot.
+  // ⚠️ NÃO usar a env genérica ANTHROPIC_API_KEY do container: ela está com uma
+  // chave stale/inválida (compartilhada com mimosa/ai-internal-agent) e venceria
+  // a do banco. Fonte canônica = ai_api_keys (opção B do dono, chave validada).
+  const dedicada = Deno.env.get("ASSIST_ANTHROPIC_KEY");
+  if (dedicada) return dedicada;
   const { data } = await admin
     .from("ai_api_keys")
     .select("api_key")
