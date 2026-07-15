@@ -219,6 +219,11 @@ Deno.serve(async (req) => {
       template_name,
       template_lang,
       template_components,
+      // Override da IMAGEM do cabeçalho do template POR ENVIO (fluxo/automação): quando
+      // presente, usa esta URL no header em vez da imagem FIXA (crm_whatsapp_template_media).
+      // É só o PARÂMETRO do envio — NÃO altera o template na Meta, então não há re-aprovação.
+      header_media_url,
+      header_media_format,
       anexo_url,
       filename,
       mime_type,
@@ -422,15 +427,31 @@ Deno.serve(async (req) => {
       // Cobre composer, automações e fluxos (o dispatcher reusa esta edge).
       const jaTemHeader = comps.some((c: any) => String(c?.type ?? "").toLowerCase() === "header");
       if (!jaTemHeader) {
-        const { data: media } = await admin
-          .from("crm_whatsapp_template_media")
-          .select("header_format, media_url")
-          .eq("template_name", template_name)
-          .maybeSingle();
-        if (media?.media_url && media?.header_format) {
-          const fmt = String(media.header_format).toUpperCase();
+        const overrideUrl = String(header_media_url ?? "").trim();
+        if (overrideUrl) {
+          // Override por envio: usa a URL passada (fluxo/automação escolheu a imagem).
+          // Formato vem explícito ou é derivado da extensão (default IMAGE).
+          const fmt =
+            String(header_media_format ?? "").toUpperCase() ||
+            (/\.(mp4|3gp|mov)(\?|$)/i.test(overrideUrl)
+              ? "VIDEO"
+              : /\.(pdf)(\?|$)/i.test(overrideUrl)
+                ? "DOCUMENT"
+                : "IMAGE");
           const key = fmt === "VIDEO" ? "video" : fmt === "DOCUMENT" ? "document" : "image";
-          comps.push({ type: "header", parameters: [{ type: key, [key]: { link: String(media.media_url) } }] });
+          comps.push({ type: "header", parameters: [{ type: key, [key]: { link: overrideUrl } }] });
+        } else {
+          // Sem override: imagem FIXA configurada por template (crm_whatsapp_template_media).
+          const { data: media } = await admin
+            .from("crm_whatsapp_template_media")
+            .select("header_format, media_url")
+            .eq("template_name", template_name)
+            .maybeSingle();
+          if (media?.media_url && media?.header_format) {
+            const fmt = String(media.header_format).toUpperCase();
+            const key = fmt === "VIDEO" ? "video" : fmt === "DOCUMENT" ? "document" : "image";
+            comps.push({ type: "header", parameters: [{ type: key, [key]: { link: String(media.media_url) } }] });
+          }
         }
       }
       // Captura a mídia do cabeçalho (injetada acima OU já vinda do chamador) p/ o anexo.
