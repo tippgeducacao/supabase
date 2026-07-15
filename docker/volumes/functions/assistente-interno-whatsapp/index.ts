@@ -9,7 +9,7 @@ import {
   makeAdmin, canon, resolverDono, claimInbound, atualizarConteudoInbound, logMensagem, historicoRecente, tel,
   type Ctx,
 } from "./db.ts";
-import { carregarLinha, enviarTexto, type LinhaWa } from "./wa.ts";
+import { carregarLinha, enviarTexto, baixarImagem, type LinhaWa } from "./wa.ts";
 import { transcreverAudio } from "./transcrever.ts";
 import { pensar } from "./brain.ts";
 
@@ -93,6 +93,7 @@ async function processarMensagem(admin: any, linha: LinhaWa | null, msg: any) {
   const rodada = crypto.randomUUID();
   let texto: string = msg.conteudo || "";
   let tipo = tipoIn;
+  let imagem: { base64: string; mime: string } | null = null;
 
   if (msg.tipo === "audio") {
     if (!linha) return;
@@ -105,10 +106,23 @@ async function processarMensagem(admin: any, linha: LinhaWa | null, msg: any) {
       await enviar(admin, linha, msg.fromDigits, c, "Não consegui transcrever esse áudio 😕. Pode mandar por texto?");
       return;
     }
-  } else if (msg.tipo === "image" || msg.tipo === "document") {
-    // Fase 1: só acusa (o inbound já foi logado no claim). Foto→planejamento e áudio-longo→reunião = Fase 2.
+  } else if (msg.tipo === "image") {
+    if (!linha) return;
+    try {
+      imagem = await baixarImagem(linha, msg.externalId);
+      if (!imagem) throw new Error("download vazio");
+      texto = (msg.conteudo || "").trim() || "(imagem sem legenda)";
+      tipo = "image";
+      await atualizarConteudoInbound(admin, claim.id, msg.conteudo?.trim() ? msg.conteudo : "[imagem]", "image");
+    } catch (e) {
+      await tel(admin, c, rodada, "erro_imagem", null, null, String(e));
+      await enviar(admin, linha, msg.fromDigits, c, "Não consegui abrir essa imagem 😕. Pode reenviar?");
+      return;
+    }
+  } else if (msg.tipo === "document") {
+    // Documento/PDF (planejamento e reunião) = Fase 2. Imagem já funciona.
     await enviar(admin, linha, msg.fromDigits, c,
-      "Recebi seu arquivo! 📎 Por enquanto eu trabalho com texto e áudio; ler foto/documento (planejamento e reunião) chega na próxima fase.");
+      "Recebi seu documento! 📎 Por enquanto leio texto, áudio e IMAGEM; documento/PDF (planejamento e reunião) chega na próxima fase.");
     return;
   } else if (msg.tipo !== "text") {
     return; // reaction/location/etc.
@@ -121,7 +135,7 @@ async function processarMensagem(admin: any, linha: LinhaWa | null, msg: any) {
   const t0 = Date.now();
   try {
     const historico = await historicoRecente(admin, c);
-    resposta = await pensar(ctx, historico);
+    resposta = await pensar(ctx, historico, imagem);
     await tel(admin, c, rodada, "resposta", { chars: resposta.length }, Date.now() - t0, null);
   } catch (e) {
     await tel(admin, c, rodada, "erro", null, Date.now() - t0, String(e));

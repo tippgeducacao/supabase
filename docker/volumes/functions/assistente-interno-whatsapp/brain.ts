@@ -26,6 +26,8 @@ O que você pode fazer:
   Formulário), comissão/premiação e atingimento de meta (vendedores E SDRs), cobrança (inadimplência/
   recuperado/premiação), leads (por fonte/curso/mídia×orgânico), investimento de mídia, aulas não
   confirmadas, e analisar uma tarefa (descrição+comentários).
+- Ver e INTERPRETAR IMAGENS que ${dono.nome} enviar (fotos, prints de tela, quadros, planilhas fotografadas):
+  descreva o que vê e responda o que ele pedir sobre a imagem.
 
 Ao informar valores em R$ ou porcentagens, use 2 casas decimais e NÃO arredonde para inteiro.
 Se uma consulta trouxer uma nota (_nota) explicando a régua, incorpore o essencial na resposta.
@@ -46,13 +48,28 @@ Se ${dono.nome} confirmar, chame "confirmar". Se recusar ou pedir ajuste, chame 
   return s;
 }
 
-export async function pensar(ctx: Ctx, mensagens: any[]): Promise<string> {
+export async function pensar(
+  ctx: Ctx, mensagens: any[], imagem?: { base64: string; mime: string } | null,
+): Promise<string> {
   const key = await getAnthropicKey(ctx.admin);
   if (!key) return "⚠️ Estou sem a chave de IA configurada. Avise o TI 🙏";
 
   const pend = await pendenteAtual(ctx.admin, ctx.canon);
   const system = montarSystem(ctx.dono, pend);
   const msgs = [...mensagens];
+
+  // Visão: injeta a imagem no ÚLTIMO turno do usuário (o inbound atual).
+  if (imagem && msgs.length > 0) {
+    const ult = msgs[msgs.length - 1];
+    const txt = typeof ult?.content === "string" ? ult.content : "";
+    msgs[msgs.length - 1] = {
+      role: "user",
+      content: [
+        { type: "image", source: { type: "base64", media_type: imagem.mime, data: imagem.base64 } },
+        { type: "text", text: txt || "Interprete esta imagem, por favor." },
+      ],
+    };
+  }
 
   for (let i = 0; i < 6; i++) {
     const data = await chamarOpus(key, { max_tokens: 1500, system, messages: msgs, tools: [...FERRAMENTAS, ...FERRAMENTAS_CONSULTA] });

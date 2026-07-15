@@ -18,6 +18,7 @@ export const FERRAMENTAS = [
         descricao: { type: "string", description: "Detalhes/observações (opcional)" },
         prazo: { type: "string", description: "Prazo YYYY-MM-DD (opcional)" },
         prioridade: { type: "string", enum: ["urgent", "high", "normal", "low"], description: "opcional, padrão normal" },
+        espaco: { type: "string", enum: ["diretores", "inbox"], description: "onde criar: 'diretores' (PADRÃO, a lista de Direção do setor) ou 'inbox' (lista de novas tarefas do setor). Use 'inbox' só se o dono pedir explicitamente." },
       },
       required: ["responsavel_nome", "titulo"],
     },
@@ -116,13 +117,15 @@ async function proporTarefa(input: any, ctx: Ctx) {
       mensagem: `Achei mais de um: ${cands.map((c: any) => c.name).join(", ")}. Qual deles?` };
   }
   const alvo = cands[0];
+  const paraDiretores = input.espaco !== "inbox";
   const prazoTxt = input.prazo ? ` · prazo ${fmtData(input.prazo)}` : "";
   const prioTxt = input.prioridade && input.prioridade !== "normal" ? ` · ${input.prioridade}` : "";
-  const resumo = `📋 Tarefa: "${input.titulo}" para *${alvo.name}*${prazoTxt}${prioTxt}`;
+  const espacoTxt = paraDiretores ? "" : " · na lista de novas tarefas do setor";
+  const resumo = `📋 Tarefa: "${input.titulo}" para *${alvo.name}*${prazoTxt}${prioTxt}${espacoTxt}`;
   await criarPendente(ctx.admin, ctx.canon, "criar_tarefa", {
     actor: ctx.dono.profile_id, assignee: alvo.id, assignee_nome: alvo.name,
     titulo: input.titulo, descricao: input.descricao ?? "", prazo: input.prazo ?? null,
-    prioridade: input.prioridade ?? "normal",
+    prioridade: input.prioridade ?? "normal", para_diretores: paraDiretores,
   }, resumo);
   return {
     status: "aguardando_confirmacao", resumo,
@@ -228,6 +231,7 @@ async function confirmarPendente(ctx: Ctx) {
         p_actor: pl.actor, p_assignee: pl.assignee, p_title: pl.titulo,
         p_description: pl.descricao ?? "", p_due_date: pl.prazo ?? null,
         p_priority: pl.prioridade ?? "normal", p_list_id: null,
+        p_para_diretores: pl.para_diretores ?? true,
       });
       if (error) throw new Error(error.message);
       return { status: "criada", tipo: "tarefa", task_id: data?.task_id,

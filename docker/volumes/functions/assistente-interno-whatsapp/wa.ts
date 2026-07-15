@@ -39,3 +39,27 @@ export async function baixarAudio(linha: LinhaWa, externalId: string) {
   const provider = getWaProvider(linha.provider || "uazapi");
   return await provider.downloadMedia(linha.server_url, linha.token, externalId, { audioMp3: true });
 }
+
+/** Baixa a imagem e devolve base64 + mime (para o Opus interpretar — visão). */
+export async function baixarImagem(
+  linha: LinhaWa, externalId: string,
+): Promise<{ base64: string; mime: string } | null> {
+  const provider = getWaProvider(linha.provider || "uazapi");
+  const media = await provider.downloadMedia(linha.server_url, linha.token, externalId, { audioMp3: false });
+  const mimeOk = (m: string | null): string => {
+    const t = (m || "").toLowerCase();
+    if (t.includes("png")) return "image/png";
+    if (t.includes("webp")) return "image/webp";
+    if (t.includes("gif")) return "image/gif";
+    return "image/jpeg";
+  };
+  if (media.base64) return { base64: media.base64, mime: mimeOk(media.mime) };
+  if (!media.url) return null;
+  const res = await fetch(media.url);
+  if (!res.ok) return null;
+  const buf = new Uint8Array(await res.arrayBuffer());
+  let bin = "";
+  const chunk = 0x8000; // fatia p/ não estourar o limite de argumentos do fromCharCode
+  for (let i = 0; i < buf.length; i += chunk) bin += String.fromCharCode(...buf.subarray(i, i + chunk));
+  return { base64: btoa(bin), mime: mimeOk(media.mime || res.headers.get("content-type")) };
+}
