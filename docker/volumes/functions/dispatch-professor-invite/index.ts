@@ -187,14 +187,7 @@ function pickNextFase2Marco(aula: { data: string; horario: string | null }): Sma
       marco: "lembrete_30d",
     };
   }
-  if (dias > 14) {
-    return {
-      status: "fase2_reconfirmacao_14d",
-      proxima_acao_em: dateMinusDays(aula.data, 14),
-      dias,
-      marco: "lembrete_14d",
-    };
-  }
+  // Toque de 14 dias REMOVIDO do fluxo (decisão 2026-07-16): régua = 30 → 7 → 1 → dia da aula.
   if (dias > 7) {
     return {
       status: "fase2_reconfirmacao_7d",
