@@ -137,14 +137,19 @@ async function proporTarefa(input: any, ctx: Ctx) {
 }
 
 async function resolverCanal(admin: any, nome: string) {
+  const q = String(nome).trim();
   const { data } = await admin
     .from("gt_chat_channels")
     .select("id, name, type")
     .in("type", ["channel", "group", "announcement", "department", "project"])
     .is("archived_at", null)
-    .ilike("name", `%${String(nome).trim()}%`)
-    .limit(6);
-  return data ?? [];
+    .ilike("name", `%${q}%`)
+    .limit(8);
+  const lista = data ?? [];
+  // Nome EXATO vence: "Pedagógico" → canal "PEDAGÓGICO" (e não "SUPORTE X PEDAGÓGICO"),
+  // senão o dono teria de desambiguar em todo pedido.
+  const exato = lista.filter((c: any) => String(c.name).trim().toLowerCase() === q.toLowerCase());
+  return exato.length === 1 ? exato : lista;
 }
 
 async function proporMensagem(input: any, ctx: Ctx) {
