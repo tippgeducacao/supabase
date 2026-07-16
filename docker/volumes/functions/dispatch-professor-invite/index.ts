@@ -260,6 +260,78 @@ function buildVariableValue(
   }
 }
 
+// ── Consolidação de disparos por PROFESSOR ────────────────────────────────
+// Problema: um professor com N aulas na MESMA fase de confirmação recebia N
+// mensagens no mesmo dia (uma por convite). A partir daqui, quando um professor
+// tem >1 convite de FASE 1 (confirmação inicial) vencendo no mesmo run, enviamos
+// UMA mensagem consolidada (template 'convite_semestre_lote', que lista as aulas
+// e cujo botão "Confirmo todas as datas" o webhook já resolve confirmando todas).
+// O caminho individual (fase2 lembretes 30/14/7/1d, link do dia, pós-aula) segue
+// intacto — essas cadências dependem da DATA de cada aula e não geram o spam.
+const FASE1_CONSOLIDAVEL = new Set([
+  "fase1_titular_aguardando",
+  "fase1b_reserva_aguardando",
+]);
+
+// "DD/MM/YYYY" em SP — item da lista consolidada de aulas.
+function formatDataCurta(dataYmd: string | null | undefined): string {
+  if (!dataYmd) return "";
+  const parts = new Intl.DateTimeFormat("pt-BR", {
+    timeZone: TZ, day: "2-digit", month: "2-digit", year: "numeric",
+  }).formatToParts(dateOnlyToDate(dataYmd));
+  const dd = parts.find((p) => p.type === "day")?.value ?? "";
+  const mm = parts.find((p) => p.type === "month")?.value ?? "";
+  const yy = parts.find((p) => p.type === "year")?.value ?? "";
+  return `${dd}/${mm}/${yy}`;
+}
+
+// Meta rejeita quebra de linha / tab / 4+ espaços em PARÂMETRO de template (132000).
+function sanitizeWaParam(s: string | null | undefined): string {
+  return (s ?? "").replace(/[\r\n\t]+/g, " ").replace(/ {4,}/g, "   ").trim();
+}
+
+// Avanço de estado da FASE 1 (titular/reserva). Extraído do loop individual SEM
+// mudança de comportamento — usado pelo caminho CONSOLIDADO (o individual mantém
+// a lógica inline própria, para zero regressão no caso de 1 aula).
+function computeFase1Update(convite: any, aula: any): Record<string, any> {
+  const update: Record<string, any> = { ultima_mensagem_enviada_em: new Date().toISOString() };
+  const fc = convite.followup_count ?? 0;
+  const status = convite.status;
+  if (status === "fase1_titular_aguardando") {
+    const nextFc = fc + 1;
+    if (fc >= FOLLOWUP_MAX) {
+      if (convite.papel === "titular" && aula?.professor_reserva_id) {
+        update.status = "fase1b_reserva_aguardando";
+        update.professor_atual_id = aula.professor_reserva_id;
+        update.followup_count = 0;
+        update.proxima_acao_em = new Date().toISOString();
+        update.papel = "reserva";
+        update.decisao_fase1_em = new Date().toISOString();
+      } else {
+        update.status = "esgotado_sem_titular";
+        update.followup_count = nextFc;
+        update.proxima_acao_em = null;
+        update.decisao_fase1_em = new Date().toISOString();
+      }
+    } else {
+      update.followup_count = nextFc;
+      update.proxima_acao_em = nowPlus(2 * 24 * 3600 * 1000);
+    }
+  } else if (status === "fase1b_reserva_aguardando") {
+    const nextFc = fc + 1;
+    if (fc >= FOLLOWUP_MAX) {
+      update.status = "esgotado_sem_titular_nem_reserva";
+      update.followup_count = nextFc;
+      update.proxima_acao_em = null;
+      update.decisao_fase1b_em = new Date().toISOString();
+    } else {
+      update.followup_count = nextFc;
+      update.proxima_acao_em = nowPlus(2 * 24 * 3600 * 1000);
+    }
+  }
+  return update;
+}
+
 function getMeetSlug(aula: any, pos: any): string {
   const override = aula?.link_sala_override as string | null | undefined;
   const base = override || pos?.link_sala_meet || "";
@@ -361,7 +433,201 @@ Deno.serve(async (req) => {
     const { data: convites, error: cErr } = await convitesQuery;
     if (cErr) throw cErr;
 
-    for (const convite of convites ?? []) {
+    // ── SPLIT: agrupa convites de FASE 1 do mesmo professor (mesmo status) que
+    // vencem neste run; o resto segue individual. Grupo com >1 aula → 1 mensagem
+    // consolidada. force_live (1 convite) cai naturalmente em `individuais`.
+    const gruposFase1 = new Map<string, any[]>();
+    const individuais: any[] = [];
+    for (const c of convites ?? []) {
+      if (FASE1_CONSOLIDAVEL.has(c.status) && c.professor_atual_id) {
+        const key = `${c.professor_atual_id}|${c.status}`;
+        const arr = gruposFase1.get(key) ?? [];
+        arr.push(c);
+        gruposFase1.set(key, arr);
+      } else {
+        individuais.push(c);
+      }
+    }
+
+    // Template plural (já aprovado e com botão "Confirmo todas as datas" tratado
+    // pelo webhook via metadata.disparo_inicial_lote). Sem ele → cai no individual.
+    const { data: loteTpl } = await supabase
+      .from("ped_wa_templates")
+      .select("*")
+      .eq("uso_cadencia", "convite_semestre_lote")
+      .eq("status", "aprovado")
+      .eq("ativo", true)
+      .maybeSingle();
+
+    for (const [key, grupoRaw] of gruposFase1.entries()) {
+      // grupos de 1 aula, ou sem template de lote → processa individualmente.
+      if (grupoRaw.length < 2 || !loteTpl) {
+        individuais.push(...grupoRaw);
+        continue;
+      }
+
+      // Carrega as aulas do grupo; filtra as MUITO ANTIGAS (>7d passadas) — mesma
+      // guarda do caminho individual (marca 2099 pra nunca reprocessar).
+      const grupo: any[] = [];
+      let profId = grupoRaw[0].professor_atual_id;
+      for (const c of grupoRaw) {
+        const { data: aula } = await supabase
+          .from("ped_aulas")
+          .select("id,data,horario,titulo,pos_graduacao_id,professor_reserva_id")
+          .eq("id", c.aula_id)
+          .maybeSingle();
+        if (!aula) { individuais.push(c); continue; }
+        const diasDesde = -daysUntilAula(aula.data);
+        if (diasDesde > 7) {
+          await supabase.from("ped_convites").update({
+            proxima_acao_em: "2099-12-31T23:59:59Z",
+            metadata: { ...((c.metadata as Record<string, unknown>) ?? {}), pulado_por_aula_antiga: true, pulado_em: new Date().toISOString(), pulado_dias_desde_aula: diasDesde },
+          }).eq("id", c.id);
+          processed++;
+          details.push({ convite_id: c.id, status: c.status, skipped: "aula_muito_antiga", dias_desde_aula: diasDesde });
+          continue;
+        }
+        c.__aula = aula;
+        grupo.push(c);
+      }
+      // Depois do filtro: sobrou 1 (ou 0) → individual (o single tem template com escalonamento).
+      if (grupo.length < 2) { individuais.push(...grupo); continue; }
+
+      processed += grupo.length;
+      const detailG: any = { grupo: key, professor_id: profId, aulas: grupo.length, consolidado: true };
+      try {
+        const { data: professor } = await supabase
+          .from("ped_professores").select("id,nome,contato_whatsapp").eq("id", profId).maybeSingle();
+        if (!professor) throw new Error("professor não encontrado");
+        const to = formatPhone(professor.contato_whatsapp);
+        if (!to) throw new Error("whatsapp do professor inválido");
+
+        // Lista INLINE (Meta rejeita \n em parâmetro): "Título — DD/MM/YYYY  •  ..."
+        const aulasOrd = [...grupo].sort((a, b) => (a.__aula?.data ?? "").localeCompare(b.__aula?.data ?? ""));
+        const listaAulas = sanitizeWaParam(
+          aulasOrd.map((c) => `${(c.__aula?.titulo ?? "aula").trim()} — ${formatDataCurta(c.__aula?.data)}`).join("   •   ")
+        );
+
+        // {{1}}=primeiro nome, {{2}}=lista de aulas (mapeamento do convite_semestre_lote)
+        const components = [{
+          type: "body",
+          parameters: [
+            { type: "text", text: sanitizeWaParam(firstName(professor.nome)) },
+            { type: "text", text: listaAulas },
+          ],
+        }];
+        const wapayload = {
+          messaging_product: "whatsapp", to, type: "template",
+          template: { name: loteTpl.nome, language: { code: loteTpl.idioma || "pt_BR" }, components },
+        };
+
+        const r = await fetch(`${META_GRAPH}/${phoneNumberId}/messages`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+          body: JSON.stringify(wapayload),
+        });
+        const waResp = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(waResp?.error?.message ?? `Meta API ${r.status}`);
+        const waMsgId = waResp?.messages?.[0]?.id ?? null;
+
+        // Corpo renderizado p/ persistir (uma mensagem no SAC cobrindo o lote).
+        let corpoRender = String(loteTpl.corpo ?? "");
+        corpoRender = corpoRender.split("{{1}}").join(firstName(professor.nome)).split("{{2}}").join(listaAulas);
+        const nowIso2 = new Date().toISOString();
+
+        // Persiste UMA mensagem outbound na conversa do professor (variantes ±9º dígito).
+        let conversaId: string | null = null;
+        for (const tel of phoneVariants(to)) {
+          const { data } = await supabase.from("ped_conversas_avulsas").select("id")
+            .contains("metadata", { telefone: tel }).order("ultima_atividade_em", { ascending: false }).limit(1);
+          if (data?.[0]?.id) { conversaId = data[0].id; break; }
+        }
+        if (conversaId) {
+          await supabase.from("ped_conversas_avulsas").update({ ultima_atividade_em: nowIso2 }).eq("id", conversaId);
+        } else {
+          const { data: novaConv } = await supabase.from("ped_conversas_avulsas").insert({
+            tipo: "outbound_template", assunto: loteTpl.nome, professores_alvo: [profId], status: "enviada",
+            primeira_mensagem_em: nowIso2, ultima_atividade_em: nowIso2,
+            metadata: { telefone: to, profile_name: professor.nome, prof_id: profId },
+          }).select("id").single();
+          conversaId = novaConv?.id ?? null;
+        }
+        if (conversaId) {
+          await supabase.from("ped_conversas_mensagens").insert({
+            conversa_id: conversaId, direcao: "outbound", conteudo: corpoRender,
+            template_name: loteTpl.nome, professor_id: profId, wa_message_id: waMsgId,
+            enviada_em: nowIso2, status_envio: "enviada",
+          });
+          // SAC: garante 1 atendimento por contato (mesma lógica do batch)
+          try {
+            const { data: contatosMatch } = await supabase.from("sac_contatos")
+              .select("id, tipo").in("telefone", phoneVariants(to)).limit(1);
+            let contatoId = contatosMatch?.[0]?.id ?? null;
+            if (contatoId) {
+              await supabase.from("sac_contatos").update({ tipo: "professor", professor_id_ref: profId }).eq("id", contatoId);
+            } else {
+              const { data: novoContato } = await supabase.from("sac_contatos")
+                .insert({ nome: professor.nome, telefone: to, tipo: "professor", professor_id_ref: profId }).select("id").single();
+              contatoId = novoContato?.id ?? null;
+            }
+            if (contatoId) {
+              const { data: atendAberto } = await supabase.from("sac_atendimentos")
+                .select("id, status").eq("contato_id", contatoId).maybeSingle();
+              const { data: funilRow } = await supabase.from("sac_funis").select("id").order("created_at", { ascending: true }).limit(1).maybeSingle();
+              const funilId = funilRow?.id;
+              let etapaInicialId: string | null = null;
+              if (funilId) {
+                const { data: etapaRow } = await supabase.from("sac_funis_etapas").select("id")
+                  .eq("funil_id", funilId).eq("comportamento_entrada", "auto_template_enviado").eq("ativo", true)
+                  .order("ordem", { ascending: true }).limit(1).maybeSingle();
+                etapaInicialId = etapaRow?.id ?? null;
+              }
+              if (atendAberto?.id) {
+                await supabase.from("sac_atendimentos").update({
+                  ped_conversa_id_legacy: conversaId, ultima_mensagem_preview: corpoRender.slice(0, 140), ultima_mensagem_em: nowIso2,
+                  ...(atendAberto.status !== "ativo" ? { status: "ativo", resolvido_em: null } : {}),
+                }).eq("id", atendAberto.id);
+              } else if (funilId && etapaInicialId) {
+                await supabase.from("sac_atendimentos").insert({
+                  contato_id: contatoId, funil_id: funilId, etapa_id: etapaInicialId, status: "ativo", nao_lido: false,
+                  ultima_mensagem_preview: corpoRender.slice(0, 140), ultima_mensagem_em: nowIso2, entrou_na_etapa_em: nowIso2,
+                  ped_conversa_id_legacy: conversaId,
+                });
+              }
+            }
+          } catch (sacErr: any) { console.log("[dispatch] consolidado SAC erro:", sacErr?.message ?? sacErr); }
+        }
+
+        // Avança cada convite do grupo (mesma máquina de estado da fase1) e loga.
+        for (const c of aulasOrd) {
+          const update = computeFase1Update(c, c.__aula);
+          // marca que o disparo saiu consolidado (o botão "Confirmo todas" já casa
+          // por disparo_inicial_lote; garantimos a flag caso venha de convite antigo).
+          const meta = { ...((c.metadata as Record<string, unknown>) ?? {}), disparo_inicial_lote: true, ultimo_disparo_consolidado_em: nowIso2, lote_wa_message_id: waMsgId };
+          await supabase.from("ped_convites").update({ ...update, metadata: meta }).eq("id", c.id);
+          await supabase.from("ped_convites_eventos").insert({
+            convite_id: c.id, aula_id: c.aula_id, tipo: "mensagem_enviada", template_name: loteTpl.nome, ator: "system",
+            payload: { template: loteTpl.nome, modo: "consolidado_fase1", wa_message_id: waMsgId, aulas_no_lote: aulasOrd.length, next_status: update.status ?? c.status },
+          });
+        }
+
+        await supabase.from("ped_wa_templates").update({
+          total_disparos: (loteTpl.total_disparos ?? 0) + 1, ultimo_disparo_em: nowIso2,
+        }).eq("id", loteTpl.id);
+
+        sent++;
+        detailG.wa_message_id = waMsgId;
+        details.push(detailG);
+      } catch (e) {
+        errors++;
+        detailG.error = e instanceof Error ? e.message : String(e);
+        details.push(detailG);
+        // convites do grupo NÃO são avançados → reentram no próximo run (nada perdido).
+      }
+      if (!forceLive) await sleep(SEND_DELAY_MS);
+    }
+
+    for (const convite of individuais) {
       processed++;
       const detail: any = { convite_id: convite.id, status: convite.status };
       try {
