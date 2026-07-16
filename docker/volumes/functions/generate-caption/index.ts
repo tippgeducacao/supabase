@@ -226,9 +226,16 @@ Gere APENAS a legenda, sem explicações adicionais. A legenda deve estar pronta
       (Array.isArray(reference_images) && reference_images.length > 0) ||
       (Array.isArray(reference_image_urls) && reference_image_urls.length > 0);
     if (!hasImages && (video_url || video_data)) {
-      const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
+      // Chave do Google (Gemini): prioriza a de `ai_api_keys` provider `google` — a MESMA
+      // do Gerador de Imagens, gerenciável na UI (Chaves de API IA) e rotacionável sem
+      // Dokploy —, com fallback na env `GEMINI_API_KEY` (legado). A env estava inválida
+      // ("API key not valid") e quebrava a legenda de TODO vídeo; a do banco é a fonte única.
+      const { data: gKeyRow } = await supabase
+        .from("ai_api_keys").select("api_key")
+        .eq("provider", "google").eq("is_active", true).limit(1).maybeSingle();
+      const GEMINI_API_KEY = gKeyRow?.api_key || Deno.env.get("GEMINI_API_KEY");
       if (!GEMINI_API_KEY) {
-        return new Response(JSON.stringify({ error: "GEMINI_API_KEY não configurada (necessária para analisar vídeo)." }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        return new Response(JSON.stringify({ error: "Chave do Google (Gemini) não configurada em ai_api_keys (provider google) nem na env GEMINI_API_KEY." }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
       }
 
       // Obter bytes + mime do vídeo (de dataURL local ou baixando a URL).
