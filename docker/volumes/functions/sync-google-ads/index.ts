@@ -23,7 +23,10 @@ const json = (b: unknown, status = 200) =>
   new Response(JSON.stringify(b), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 const err = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-const API_VERSION = Deno.env.get("GOOGLE_ADS_API_VERSION") || "v18";
+// ⚠️ Versão da API do Google Ads. O Google descontinua versões antigas (~1x/ano) →
+// versão fora de suporte devolve 404 (página HTML), não erro JSON. Mantenha atual.
+// Override sem deploy: env GOOGLE_ADS_API_VERSION no edge-runtime (Dokploy).
+const API_VERSION = Deno.env.get("GOOGLE_ADS_API_VERSION") || "v24";
 const ADS_BASE = `https://googleads.googleapis.com/${API_VERSION}`;
 
 // digits-only (customer_id vem às vezes como 123-456-7890)
