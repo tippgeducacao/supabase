@@ -39,6 +39,18 @@ export const FERRAMENTAS_CONSULTA = [
     },
   },
   {
+    name: "consultar_vendas_por_vendedor",
+    description:
+      "Vendas por VENDEDOR num período: quantas vendas CADA vendedor fez (lançou), com quebra por STATUS (matriculada = já assinada/aprovada; pendente = aguardando aprovação da secretaria; outras = rejeitada/cancelada) e por produto (pós/curso/módulo). Ancorado na data de ENVIO (quando o vendedor lançou), então mostra TAMBÉM as pendentes do dia — dá pra saber quem fechou as vendas de hoje mesmo antes de assinarem o contrato. Use para 'quantas vendas cada vendedor fez hoje/no período', 'quem vendeu o quê', 'ranking de vendedores', 'quem fechou as pós de hoje'. (Para premiação/atingimento use consultar_comissao.)",
+    input_schema: {
+      type: "object",
+      properties: {
+        periodo: { type: "string", enum: ["hoje", "ontem", "semana", "semana_passada", "mes", "mes_passado"] },
+        de: { type: "string" }, ate: { type: "string" },
+      },
+    },
+  },
+  {
     name: "consultar_cursos_matriculados",
     description: "Lista quais CURSOS tiveram matrícula no período (com a contagem por curso). Use para 'quais cursos venderam/tiveram matrícula'.",
     input_schema: {
@@ -155,6 +167,7 @@ export async function executarConsulta(nome: string, input: any, ctx: Ctx): Prom
       case "consultar_vendas": return await cVendas(input, ctx);
       case "consultar_cursos_matriculados": return await cCursos(input, ctx);
       case "consultar_vendas_por_origem": return await cVendasPorOrigem(input, ctx);
+      case "consultar_vendas_por_vendedor": return await cVendasPorVendedor(input, ctx);
       case "consultar_faturamento_por_curso": return await cFaturamentoPorCurso(input, ctx);
       case "consultar_cobranca": return await cCobranca(input, ctx);
       case "consultar_cobranca_periodo": return await cCobrancaPeriodo(input, ctx);
@@ -287,6 +300,29 @@ async function cVendasPorOrigem(input: any, ctx: Ctx) {
       pos: Number(r.qtd_pos || 0), curso: Number(r.qtd_curso || 0), modulo: Number(r.qtd_modulo || 0),
     })),
     _nota: "Origem = fonte do lead que converteu (Meta/mídia, Google, Indicação, Orgânico, Formulário direto, GreatPages…). 'Origem desconhecida' = matrícula sem lead casado. Formulário direto = sem UTM de mídia (não é mídia paga).",
+  };
+}
+
+async function cVendasPorVendedor(input: any, ctx: Ctx) {
+  const p = resolverPeriodo(input);
+  const { data, error } = await ctx.admin.rpc("assist_vendas_por_vendedor", { p_de: p.de, p_ate: p.ate });
+  if (error) throw new Error(error.message);
+  const rows = Array.isArray(data) ? data : [];
+  const soma = (k: string) => rows.reduce((a: number, r: any) => a + Number(r[k] || 0), 0);
+  return {
+    periodo: p.label, de: p.de, ate: p.ate,
+    total_vendas: soma("total"),
+    total_matriculadas: soma("matriculadas"),
+    total_pendentes: soma("pendentes"),
+    vendedores: rows.map((r: any) => ({
+      vendedor: r.vendedor, total: Number(r.total || 0),
+      matriculadas: Number(r.matriculadas || 0), pendentes: Number(r.pendentes || 0), outras: Number(r.outras || 0),
+      pos: Number(r.pos || 0), curso: Number(r.curso || 0), modulo: Number(r.modulo || 0),
+    })),
+    _nota:
+      "Vendas por vendedor, ancoradas na data de ENVIO (quando o vendedor lançou) — por isso aparecem também as PENDENTES do dia (aguardando aprovação da secretaria), que é como dá pra saber quem fechou as vendas de hoje ANTES de assinarem o contrato. " +
+      "'matriculada' = já aprovada/assinada; 'pendente' = na fila da secretaria (Gerenciar Vendas); 'outras' = rejeitada/cancelada/desistiu. " +
+      "⚠️ NÃO é a régua de comissão (a premiação usa a data de ASSINATURA) — para premiação/atingimento use consultar_comissao.",
   };
 }
 
