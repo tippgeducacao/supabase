@@ -24,6 +24,73 @@ function toPublicUrl(internalUrl: string): string {
 
 const ALLOWED_TIPOS = new Set(["audio", "video", "image", "document", "sticker"]);
 
+// Limites e formatos da Meta WhatsApp Cloud API (upload /media). Estourar o limite
+// faz a Meta devolver o críptico "(#100) Invalid parameter" — validamos antes.
+const MEDIA_RULES: Record<string, { max: number; limite: string; rotulo: string; mimes: string[]; dica: string }> = {
+  image: {
+    max: 5 * 1024 * 1024,
+    limite: "5 MB",
+    rotulo: "imagem",
+    mimes: ["image/jpeg", "image/png"],
+    dica: "Envie JPEG ou PNG.",
+  },
+  video: {
+    max: 16 * 1024 * 1024,
+    limite: "16 MB",
+    rotulo: "vídeo",
+    mimes: ["video/mp4", "video/3gpp"],
+    dica: "Envie MP4 (codec H.264 + áudio AAC).",
+  },
+  audio: {
+    max: 16 * 1024 * 1024,
+    limite: "16 MB",
+    rotulo: "áudio",
+    mimes: ["audio/aac", "audio/amr", "audio/mpeg", "audio/mp4", "audio/ogg"],
+    dica: "Envie MP3, AAC, AMR, M4A ou OGG (opus).",
+  },
+  document: {
+    max: 100 * 1024 * 1024,
+    limite: "100 MB",
+    rotulo: "documento",
+    mimes: [
+      "application/pdf",
+      "application/msword",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "application/vnd.ms-excel",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "application/vnd.ms-powerpoint",
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      "text/plain",
+    ],
+    dica: "Envie PDF, Word, Excel, PowerPoint ou TXT.",
+  },
+  sticker: {
+    max: 500 * 1024,
+    limite: "500 KB",
+    rotulo: "figurinha",
+    mimes: ["image/webp"],
+    dica: "Envie WEBP de até 500 KB.",
+  },
+};
+
+function fmtMB(bytes: number): string {
+  return (bytes / 1048576).toFixed(2).replace(".", ",");
+}
+
+// Motivo em PT-BR quando o arquivo não passa nas regras da Meta; null = ok.
+function validarMidia(tipo: string, mime: string, size: number): string | null {
+  const regra = MEDIA_RULES[tipo];
+  if (!regra) return null;
+  const mimeBase = mime.split(";")[0].trim().toLowerCase();
+  if (!regra.mimes.includes(mimeBase)) {
+    return `O WhatsApp não aceita este formato de ${regra.rotulo} (${mimeBase || "desconhecido"}). ${regra.dica}`;
+  }
+  if (size > regra.max) {
+    return `${regra.rotulo.charAt(0).toUpperCase() + regra.rotulo.slice(1)} de ${fmtMB(size)} MB — o WhatsApp aceita ${regra.rotulo} de até ${regra.limite}. Comprima/reduza o arquivo e tente novamente.`;
+  }
+  return null;
+}
+
 function formatPhone(raw: string): string | null {
   const trimmed = String(raw ?? "").trim();
   const digits = trimmed.replace(/\D/g, "");
@@ -115,6 +182,16 @@ Deno.serve(async (req) => {
     const to = formatPhone(telefoneRaw);
     if (!to) return jsonResp({ error: "telefone inválido" }, 400);
 
+    // Valida limite de tamanho e formato ANTES de subir pra Meta (senão ela
+    // devolve o críptico "(#100) Invalid parameter" — ex.: vídeo acima de 16 MB).
+    const motivoInvalido = validarMidia(tipo, mime_type, fileBlob.size);
+    if (motivoInvalido) {
+      console.log("[whatsapp-send-media] arquivo recusado na validação:", {
+        tipo, mime_type, size: fileBlob.size, motivo: motivoInvalido,
+      });
+      return jsonResp({ error: motivoInvalido }, 422);
+    }
+
     // 3) WA account
     const admin = createClient(SUPABASE_URL, SERVICE_ROLE, {
       auth: { persistSession: false },
@@ -154,8 +231,35 @@ Deno.serve(async (req) => {
     const upJson = await upRes.json().catch(() => ({}));
     console.log("[whatsapp-send-media] upload <-", upRes.status, JSON.stringify(upJson));
     if (!upRes.ok || !upJson?.id) {
+      const metaMsg = upJson?.error?.message || `Falha no upload Meta (${upRes.status})`;
+      // (#100) no upload = quase sempre tamanho acima do limite ou codec/formato
+      // não suportado — traduz pro atendente em vez do erro cru da Meta.
+      const regra = MEDIA_RULES[tipo];
+      const errMsg = upJson?.error?.code === 100 && regra
+        ? `O WhatsApp recusou o ${regra.rotulo} (${fmtMB(blobForUpload.size)} MB). Limite: ${regra.limite}. ${regra.dica} Detalhe da Meta: ${metaMsg}`
+        : metaMsg;
+      // Persiste a falha (o ramo de envio já persistia; o de upload era cego —
+      // sem isso não dá pra diagnosticar pelo banco/Logs do Sistema).
+      try {
+        await admin.from("ped_conversas_mensagens").insert({
+          conversa_id,
+          direcao: "outbound",
+          conteudo: `[falha ao enviar ${tipo}] ${errMsg}`,
+          enviada_em: new Date().toISOString(),
+          anexos: [],
+          classificacao_ia: {
+            erro_envio: true,
+            etapa: "upload_media",
+            status: upRes.status,
+            meta_response: upJson,
+            arquivo: { filename: fileName, mime_type, size: blobForUpload.size },
+          },
+        });
+      } catch (logErr) {
+        console.log("[whatsapp-send-media] não foi possível salvar erro de upload:", (logErr as Error).message);
+      }
       return jsonResp({
-        error: upJson?.error?.message || `Falha no upload Meta (${upRes.status})`,
+        error: errMsg,
         status: upRes.status,
         detalhes: upJson,
         // 422 (nunca 502/504): o Cloudflare engole 502/504 da origem sem headers CORS.
