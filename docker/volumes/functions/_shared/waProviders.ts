@@ -105,7 +105,7 @@ export interface WaProvider {
     serverUrl: string,
     token: string,
     externalId: string,
-    opts?: { audioMp3?: boolean },
+    opts?: { audioMp3?: boolean; timeoutMs?: number },
   ): Promise<{ url: string | null; mime: string | null; base64: string | null }>;
   /** Normaliza um payload de webhook. Sempre tolerante: nunca lança. */
   parseWebhook(payload: any): WaParsedWebhook;
@@ -325,7 +325,7 @@ const uazapi: WaProvider = {
       return_base64: false,
       generate_mp3: opts?.audioMp3 ?? true,
       transcribe: false,
-    });
+    }, { timeoutMs: opts?.timeoutMs });
     return {
       url: pick<string>(r.json, ["fileURL", "url", "link"]) ?? null,
       mime: pick<string>(r.json, ["mimetype", "mime_type"]) ?? null,

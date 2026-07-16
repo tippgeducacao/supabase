@@ -127,12 +127,9 @@ async function processarMensagem(admin: any, linha: LinhaWa | null, msg: any) {
       tipo = "audio";
       await atualizarConteudoInbound(admin, claim.id, texto, "audio");
     } catch (e) {
-      const err = String(e);
-      await tel(admin, c, rodada, "erro_transcricao", null, null, err);
-      const longo = /muito longo|muito grande|abort|413|too large|maximum|25 ?mb/i.test(err);
-      await enviar(admin, linha, msg.fromDigits, c, longo
-        ? "Esse áudio é longo/pesado demais pra eu transcrever agora 🎙️. Transcrever REUNIÃO longa (aposentar o Plaud) é a próxima fase que a gente vai montar. Áudio curto (recado/comando de até ~15 min) eu transcrevo; ou me manda por texto."
-        : "Não consegui transcrever esse áudio 😕. Pode mandar por texto?");
+      await tel(admin, c, rodada, "erro_transcricao", null, null, String(e));
+      await enviar(admin, linha, msg.fromDigits, c,
+        "Tive um problema pra processar esse áudio agora 😕. Pode reenviar? (Áudio de reunião grande TAMBÉM funciona — é só tentar de novo; ou me manda por texto.)");
       return;
     }
   } else if (msg.tipo === "image") {

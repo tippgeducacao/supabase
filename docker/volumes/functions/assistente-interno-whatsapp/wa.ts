@@ -48,8 +48,9 @@ export async function enviarDocumento(
 export async function baixarAudio(linha: LinhaWa, externalId: string) {
   const provider = getWaProvider(linha.provider || "uazapi");
   // audioMp3:false = baixa o ORIGINAL (ogg/m4a). Forçar transcode p/ MP3 estourava o
-  // timeout em áudio longo (AbortError); o Whisper aceita ogg/m4a direto.
-  return await provider.downloadMedia(linha.server_url, linha.token, externalId, { audioMp3: false });
+  // timeout em áudio longo (AbortError); o Whisper aceita ogg/m4a direto. timeoutMs:60s
+  // porque o /message/download de um áudio grande (50MB) passa dos 20s padrão → AbortError.
+  return await provider.downloadMedia(linha.server_url, linha.token, externalId, { audioMp3: false, timeoutMs: 60000 });
 }
 
 /** Baixa os BYTES do áudio (p/ decidir curto × reunião e p/ transcrever/enfileirar). */
