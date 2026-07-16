@@ -47,7 +47,9 @@ export async function enviarDocumento(
 
 export async function baixarAudio(linha: LinhaWa, externalId: string) {
   const provider = getWaProvider(linha.provider || "uazapi");
-  return await provider.downloadMedia(linha.server_url, linha.token, externalId, { audioMp3: true });
+  // audioMp3:false = baixa o ORIGINAL (ogg/m4a). Forçar transcode p/ MP3 estourava o
+  // timeout em áudio longo (AbortError); o Whisper aceita ogg/m4a direto.
+  return await provider.downloadMedia(linha.server_url, linha.token, externalId, { audioMp3: false });
 }
 
 /** Baixa a imagem e devolve base64 + mime (para o Opus interpretar — visão). */

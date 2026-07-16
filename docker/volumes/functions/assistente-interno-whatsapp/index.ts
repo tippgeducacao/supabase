@@ -36,7 +36,7 @@ Deno.serve(async (req) => {
   // Provisionamento da linha (quando o chip do Gustavo chegar). Gated por segredo.
   if (url.searchParams.get("admin")) return await adminAcao(req, url, admin);
 
-  if (req.method === "GET") return new Response("assistente-interno ok", { headers: cors });
+  if (req.method === "GET") return new Response("assistente-interno ok · build 20260716b", { headers: cors });
 
   // Autenticação do webhook (anti-spoofing): se ASSIST_WEBHOOK_SECRET estiver setado, exige ?k igual.
   // O número declarado no payload NÃO é autenticação (quem POSTa controla msg.fromDigits).
@@ -102,8 +102,12 @@ async function processarMensagem(admin: any, linha: LinhaWa | null, msg: any) {
       tipo = "audio";
       await atualizarConteudoInbound(admin, claim.id, texto, "audio");
     } catch (e) {
-      await tel(admin, c, rodada, "erro_transcricao", null, null, String(e));
-      await enviar(admin, linha, msg.fromDigits, c, "Não consegui transcrever esse áudio 😕. Pode mandar por texto?");
+      const err = String(e);
+      await tel(admin, c, rodada, "erro_transcricao", null, null, err);
+      const longo = /muito longo|muito grande|abort|413|too large|maximum|25 ?mb/i.test(err);
+      await enviar(admin, linha, msg.fromDigits, c, longo
+        ? "Esse áudio é longo/pesado demais pra eu transcrever agora 🎙️. Transcrever REUNIÃO longa (aposentar o Plaud) é a próxima fase que a gente vai montar. Áudio curto (recado/comando de até ~15 min) eu transcrevo; ou me manda por texto."
+        : "Não consegui transcrever esse áudio 😕. Pode mandar por texto?");
       return;
     }
   } else if (msg.tipo === "image") {

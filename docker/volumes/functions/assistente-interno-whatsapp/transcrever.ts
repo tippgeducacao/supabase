@@ -24,8 +24,12 @@ export async function transcreverAudio(linha: LinhaWa, externalId: string): Prom
     throw new Error("áudio muito longo para transcrição de comando (reunião longa = Fase 2)");
   }
 
+  const m = (dl.mime || "").toLowerCase();
+  const ext = m.includes("mp4") || m.includes("m4a") || m.includes("aac") ? "m4a"
+    : m.includes("mpeg") || m.includes("mp3") ? "mp3"
+    : m.includes("wav") ? "wav" : "ogg";
   const form = new FormData();
-  form.append("file", new Blob([bytes], { type: dl.mime || "audio/ogg" }), "audio.ogg");
+  form.append("file", new Blob([bytes], { type: dl.mime || "audio/ogg" }), `audio.${ext}`);
   form.append("model", Deno.env.get("OPENAI_TRANSCRIBE_MODEL") || "whisper-1");
   form.append("language", "pt");
 
