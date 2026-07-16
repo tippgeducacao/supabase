@@ -93,6 +93,19 @@ export const FERRAMENTAS_CONSULTA = [
     },
   },
   {
+    name: "consultar_metricas_colaborador",
+    description:
+      "Métricas do TIME de UMA pessoa específica do comercial (vendedor ou SDR), pelo NOME. Traz: atingimento das últimas 4 semanas (média, como o tile da tela) com a quebra por semana, pontos e atingimento da SEMANA atual, e tempo no 3C (semana e hoje) + atividade de hoje (reuniões, vendas). Use para 'como está a Aline', 'qual o atingimento do Fulano nas últimas 4 semanas', 'quantos pontos a Fulana tem', 'quanto tempo o Fulano passou no 3C', 'métricas da Fulana'. Para a lista de TODOS (premiação/ranking) use consultar_comissao.",
+    input_schema: {
+      type: "object",
+      properties: {
+        nome: { type: "string", description: "Nome da pessoa do comercial (ex.: Aline, Pedro Flores)" },
+        data: { type: "string", description: "YYYY-MM-DD dentro da semana desejada (opcional; padrão = semana atual)" },
+      },
+      required: ["nome"],
+    },
+  },
+  {
     name: "consultar_leads",
     description:
       "Leads (chegada de demanda). recorte: 'total' (quantos chegaram), 'por_fonte' (quebra por fonte: Meta Ads/Formulário/Google/Orgânico/Indicação), 'pago_organico' (mídia × orgânico + CPL/CAC), 'por_curso' (leads por curso/página, ex.: Sanidade Avícola). Mídia = Meta Ads + Formulário Direto + Google.",
@@ -140,6 +153,7 @@ export async function executarConsulta(nome: string, input: any, ctx: Ctx): Prom
       case "consultar_cobranca": return await cCobranca(input, ctx);
       case "consultar_cobranca_periodo": return await cCobrancaPeriodo(input, ctx);
       case "consultar_comissao": return await cComissao(input, ctx);
+      case "consultar_metricas_colaborador": return await cMetricasColaborador(input, ctx);
       case "consultar_leads": return await cLeads(input, ctx);
       case "consultar_midia": return await cMidia(input, ctx);
       case "consultar_aulas_nao_confirmadas": return await cAulas(ctx);
@@ -313,6 +327,54 @@ async function cComissao(input: any, ctx: Ctx) {
     _nota: "Comissão da SEMANA COMERCIAL (quarta→terça). Prêmio = variável do nível × multiplicador (definido pelo atingimento). " +
       (data?.semana?.em_andamento ? "⚠️ Semana em ANDAMENTO — números parciais até fechar na terça." : ""),
   };
+}
+
+// coorte do comercial (quem tem métricas de time): vendedores + SDRs ativos.
+const COORTE_COMERCIAL = [
+  "vendedor", "vendedor_vendas_ativas", "coordenador",
+  "sdr", "sdr_inbound", "sdr_outbound", "sdr_vendas_diretas", "sdr_coordenador",
+];
+// normaliza nome p/ casar: sem acento, minúsculo, colapsa letras repetidas ("Wellinton"→"welinton").
+function normNome(s: string): string {
+  return String(s ?? "")
+    .normalize("NFD").replace(/[̀-ͯ]/g, "")
+    .toLowerCase().replace(/(.)\1+/g, "$1").replace(/\s+/g, " ").trim();
+}
+
+async function cMetricasColaborador(input: any, ctx: Ctx) {
+  const nome = String(input?.nome ?? "").trim();
+  if (!nome) return { erro: "Diga o nome da pessoa do comercial que você quer ver." };
+
+  // resolve na coorte comercial ativa (lista pequena) — casa por conter as palavras do que foi pedido
+  const { data: pessoas, error: e1 } = await ctx.admin
+    .from("profiles")
+    .select("id, name, user_type")
+    .in("user_type", COORTE_COMERCIAL)
+    .eq("ativo", true);
+  if (e1) throw new Error(e1.message);
+  const alvo = normNome(nome);
+  const termos = alvo.split(" ").filter(Boolean);
+  const cands = (pessoas ?? []).filter((p: any) => {
+    const n = normNome(p.name);
+    return termos.every((t) => n.includes(t));
+  });
+
+  if (cands.length === 0) {
+    return { erro: `Não achei ninguém no comercial chamado "${nome}" (só vejo vendedores e SDRs ativos).` };
+  }
+  if (cands.length > 1) {
+    return {
+      ambiguo: true,
+      mensagem: `Achei mais de um: ${cands.map((c: any) => c.name).join(" · ")}. De qual você quer? (diga o nome completo)`,
+      opcoes: cands.map((c: any) => c.name),
+    };
+  }
+
+  const alvoId = cands[0].id;
+  const ref = input?.data ? String(input.data).slice(0, 10) : undefined;
+  const { data, error } = await ctx.admin.rpc("assist_metricas_colaborador", { p_profile_id: alvoId, p_ref: ref ?? null });
+  if (error) throw new Error(error.message);
+  return data;
 }
 
 async function cLeads(input: any, ctx: Ctx) {
