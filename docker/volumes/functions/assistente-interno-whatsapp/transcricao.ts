@@ -5,6 +5,7 @@
 import { carregarLinha, enviarTexto, enviarDocumento, type LinhaWa } from "./wa.ts";
 import { extDeMime } from "./transcrever.ts";
 import { gerarPdf } from "./documento.ts";
+import { logMensagem } from "./db.ts";
 
 const BUCKET = "gt-doc-assets";
 const PUBLIC_SUPABASE_URL = Deno.env.get("PUBLIC_SUPABASE_URL") || "https://api.ppgeducacao.site";
@@ -82,6 +83,9 @@ export async function processarTranscricoes(admin: any): Promise<{ processado: n
 
 /** Entrega o resultado: texto curto no chat; longo vira PDF. */
 async function entregar(admin: any, linha: LinhaWa | null, job: any, resultado: string) {
+  // Registra a transcrição no HISTÓRICO da conversa, senão o bot não "lembra" dela
+  // (ex.: dono pede depois "faz um PDF desse texto que você transcreveu").
+  await logMensagem(admin, job.canon, "outbound", resultado, "transcricao").catch(() => {});
   if (!linha || !job.numero) return;
   if (resultado.length <= 3500) {
     await enviarTexto(linha, job.numero, `🎙️ *Transcrição da reunião*\n\n${resultado}`).catch(() => {});

@@ -132,6 +132,12 @@ export const FERRAMENTAS_CONSULTA = [
     input_schema: { type: "object", properties: {} },
   },
   {
+    name: "ultima_transcricao",
+    description:
+      "Recupera o TEXTO da última reunião que você transcreveu (a transcrição/resumo completo). Use quando o dono pedir para 'pegar o texto que você transcreveu', 'fazer um PDF da reunião', 'me manda de novo o resumo da reunião', 'usa aquela transcrição', etc.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
     name: "consultar_tarefa",
     description:
       "Busca uma tarefa no Gestor por texto (título/descrição) e traz status, responsáveis, prazo, descrição e TODOS os comentários — para você RESUMIR/ANALISAR a situação. Use para 'como está a tarefa X', 'me dá um resumo da tarefa Y'.",
@@ -158,6 +164,7 @@ export async function executarConsulta(nome: string, input: any, ctx: Ctx): Prom
       case "consultar_midia": return await cMidia(input, ctx);
       case "consultar_aulas_nao_confirmadas": return await cAulas(ctx);
       case "consultar_tarefa": return await cTarefa(input, ctx);
+      case "ultima_transcricao": return await cUltimaTranscricao(ctx);
       default: return { erro: `consulta desconhecida: ${nome}` };
     }
   } catch (e) {
@@ -460,6 +467,24 @@ async function cAulas(ctx: Ctx) {
 
 function stripHtml(s: string): string {
   return String(s || "").replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
+}
+
+async function cUltimaTranscricao(ctx: Ctx) {
+  const { data } = await ctx.admin
+    .from("assistente_transcricoes")
+    .select("resultado, status, criado_em")
+    .eq("canon", ctx.canon)
+    .order("criado_em", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (data?.status === "pronto" && data?.resultado) {
+    return { encontrou: true, transcricao: data.resultado,
+      _instrucao: "Texto da última reunião transcrita. Use como o dono pediu (ex.: chamar gerar_pdf com este texto)." };
+  }
+  if (data?.status === "processando" || data?.status === "fila") {
+    return { encontrou: false, mensagem: "Ainda estou transcrevendo a última reunião — daqui a pouco fica pronta." };
+  }
+  return { encontrou: false, mensagem: "Não achei nenhuma reunião transcrita ainda." };
 }
 
 async function cTarefa(input: any, ctx: Ctx) {
