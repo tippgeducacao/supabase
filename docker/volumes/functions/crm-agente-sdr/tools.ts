@@ -481,6 +481,31 @@ async function verificarCompatibilidade(supabase: any, input: any, ctx: CtxConve
     }
   }
 
+  // Guarda determinística de PRAZO (2026-07-16, caso Jaqueline): estudante que só
+  // conclui a graduação FORA da janela de elegibilidade (90 dias) não pode ser
+  // agendado. A matriz avalia só a ÁREA — com contexto 'normal' ela aprovava o
+  // estudante fora do prazo e o veredito "APROVADO" atropelava a regra do prompt.
+  // O enum novo dá ao modelo um jeito de expressar o caso, e a reprovação sai
+  // daqui (código), não da obediência ao prompt. A matriz nem roda.
+  if (input.contexto_qualificacao === 'estudante_fora_do_prazo') {
+    return {
+      id: toolUseId,
+      output: 'REPROVADO_PRAZO',
+      compativel: false,
+      pode_cursar: false,
+      curso_solicitado: input.curso_interesse ?? null,
+      curso_alternativo: null,
+      curso_alternativo_recomendado: false,
+      formacao_identificada: input.formacao_academica ?? null,
+      motivo_alteracao: 'Lead ainda cursando a graduação, com conclusão prevista fora do prazo de elegibilidade (90 dias).',
+      mensagem_para_lead: null,
+      instrucao: 'NÃO agende reunião, NÃO diga que a formação atende e NÃO empurre a decisão pro monitor. ' +
+        'Encerre com respeito e, na MESMA resposta, chame pausa_ia com motivo ' +
+        '"Lead conclui a graduação fora do prazo de 90 dias". ' +
+        'Nunca mencione "90 dias", "prazo" ou "elegibilidade" ao lead.',
+    };
+  }
+
   const { data: cursos, error } = await supabase
     .from('cursos_pos_graduacao')
     .select('pos_graduacao, pode_fazer, parcialmente_aceitas, status')
