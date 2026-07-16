@@ -130,7 +130,8 @@ async function processarMensagem(admin: any, linha: LinhaWa | null, msg: any) {
 
   if (!texto.trim()) return;
 
-  const ctx: Ctx = { admin, dono, canon: c, rodada_id: rodada };
+  // linha/numero entram no ctx p/ as ferramentas que ENVIAM arquivo (ex.: gerar_pdf).
+  const ctx: Ctx = { admin, dono, canon: c, rodada_id: rodada, linha, numero: msg.fromDigits };
   let resposta: string;
   const t0 = Date.now();
   try {

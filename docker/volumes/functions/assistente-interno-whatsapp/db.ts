@@ -19,6 +19,9 @@ export interface Ctx {
   dono: Dono;
   canon: string;
   rodada_id: string;
+  /** Linha WhatsApp + número do dono — necessários p/ ferramentas que ENVIAM arquivo (ex.: PDF). */
+  linha?: any;
+  numero?: string;
 }
 
 /**

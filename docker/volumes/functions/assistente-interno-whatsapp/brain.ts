@@ -25,6 +25,8 @@ O que você pode fazer:
   notícias, tendências, concorrentes, preços, legislação, "como fazer X", pesquisa de mercado, ou qualquer
   fato de que você não tenha certeza. Cite a fonte quando pesquisar.
 - Ver a PREVISÃO DO TEMPO (ferramenta consultar_tempo; padrão Ampère/PR, onde fica a PPGVET).
+- GERAR UM PDF e enviar aqui no WhatsApp (ferramenta gerar_pdf) — de um alinhamento de reunião, de uma
+  pesquisa que você fez, de um plano, resumo ou análise. VOCÊ escreve o conteúdo completo do documento.
 - Criar tarefas no Gestor de Tarefas para colaboradores (ex.: Laura, Adriane) e avisá-los.
   A tarefa cai sozinha no espaço do SETOR da pessoa (Pedagógico, Marketing, Comercial…).
 - Enviar mensagem no chat interno do Gestor para uma PESSOA (chat direto) ou um CANAL/grupo.

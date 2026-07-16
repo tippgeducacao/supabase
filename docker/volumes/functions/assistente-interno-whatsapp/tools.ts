@@ -3,6 +3,7 @@
 import type { Ctx } from "./db.ts";
 import { criarPendente, pendenteAtual, marcarPendente } from "./db.ts";
 import { listarEventos, criarReuniao } from "./agenda.ts";
+import { gerarEnviarPdf } from "./documento.ts";
 import { fmtData, spToIso, janela, hojeSP } from "./datas.ts";
 
 export const FERRAMENTAS = [
@@ -99,6 +100,23 @@ export const FERRAMENTAS = [
     },
   },
   {
+    name: "gerar_pdf",
+    description:
+      "Gera um PDF e ENVIA aqui no WhatsApp do dono. VOCÊ escreve o conteúdo — a ferramenta só formata e entrega. Use quando ele pedir um PDF/documento/relatório/arquivo de algo: alinhamento de reunião, resumo de uma pesquisa, plano, análise, ata. Envia DIRETO (não precisa de confirmação — é para o próprio dono).",
+    input_schema: {
+      type: "object",
+      properties: {
+        titulo: { type: "string", description: "título do documento (também vira o nome do arquivo)" },
+        conteudo: {
+          type: "string",
+          description:
+            "O texto COMPLETO do documento, já organizado e pronto (é o documento em si — não um resumo). Formatação: linha começando com '# ' = título de seção; '- ' = tópico; linha em branco = parágrafo.",
+        },
+      },
+      required: ["titulo", "conteudo"],
+    },
+  },
+  {
     name: "confirmar",
     description:
       "Executa a ação que está aguardando confirmação (criar tarefa, criar reunião, enviar mensagem OU salvar o plano do comercial). Só chame quando o dono confirmar explicitamente (sim, pode, confirmo, isso).",
@@ -119,6 +137,7 @@ export async function executarFerramenta(nome: string, input: any, ctx: Ctx): Pr
       case "criar_reuniao": return await proporReuniao(input, ctx);
       case "enviar_mensagem": return await proporMensagem(input, ctx);
       case "salvar_plano_comercial": return await proporPlano(input, ctx);
+      case "gerar_pdf": return await gerarEnviarPdf(input, ctx);
       case "confirmar": return await confirmarPendente(ctx);
       case "cancelar": return await cancelarPendente(ctx);
       default: return { erro: `ferramenta desconhecida: ${nome}` };

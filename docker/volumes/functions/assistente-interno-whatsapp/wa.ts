@@ -35,6 +35,16 @@ export async function enviarTexto(linha: LinhaWa, numeroDigits: string, texto: s
   return await provider.sendText(linha.server_url, linha.token, numeroDigits, texto);
 }
 
+/** Envia um DOCUMENTO (PDF etc.) por URL pública — a Uazapi baixa da URL e entrega no chat. */
+export async function enviarDocumento(
+  linha: LinhaWa, numeroDigits: string, url: string, filename: string, caption?: string,
+) {
+  const provider = getWaProvider(linha.provider || "uazapi");
+  return await provider.sendMedia(linha.server_url, linha.token, numeroDigits, {
+    tipo: "document", url, filename, caption,
+  });
+}
+
 export async function baixarAudio(linha: LinhaWa, externalId: string) {
   const provider = getWaProvider(linha.provider || "uazapi");
   return await provider.downloadMedia(linha.server_url, linha.token, externalId, { audioMp3: true });
