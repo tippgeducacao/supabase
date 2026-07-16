@@ -109,6 +109,21 @@ function pickByMapping(payload: any, mapping: Record<string, string>, wantedTarg
   return undefined;
 }
 
+// Página de captação = URL da LP. Toda LP manda a URL (GreatPages = chave "URL"); pegamos
+// AUTOMÁTICO, sem depender de mapeamento. Escaneia as chaves comuns (case-insensitive) e
+// devolve o 1º valor não-vazio. Origem/UTM não são capturadas aqui (decisão diretor
+// 2026-07-16: só a Página é automática; fonte/fonte_referencia ficam vazias).
+const URL_KEYS = ["url", "page_url", "pageurl", "page_uri", "pagina", "page", "landing_page", "lp"];
+function pickUrlAuto(dados: Record<string, unknown>): string | undefined {
+  const lower: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(dados)) lower[k.toLowerCase()] = v;
+  for (const key of URL_KEYS) {
+    const v = lower[key];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return undefined;
+}
+
 // ── Builder (config JSONB): execução ADITIVA das abas avançadas ──────────────
 // IMPORTANTE: tudo aqui é opt-in. Config vazio (webhooks antigos) => comportamento
 // idêntico ao anterior. Cada bloco é defensivo (try/catch) e nunca derruba o core.
@@ -490,6 +505,9 @@ Deno.serve(async (req) => {
   // Estado (campo:state → leads.regiao). Não há target fixo lead.regiao; só chega
   // via campo:state no Mapeamento de Entrada (campoFisico.regiao) ou na Criação Automática.
   const inRegiao = campoFisico.regiao ?? null;
+  // Página = URL da LP (auto). Mapeamento explícito lead.pagina_nome tem prioridade;
+  // senão a URL do payload (pickUrlAuto). Preenchida fill-if-empty no lead novo E existente.
+  const inPagina = asString(pickByMapping(dados, mapping, "lead.pagina_nome") ?? pickUrlAuto(dados), 500);
 
   // Normaliza o título do SprintHub → nome canônico do curso (só pós/MBA; cascata
   // exato → normalizado → alias → fuzzy no banco). Curso livre e título desconhecido
@@ -557,7 +575,7 @@ Deno.serve(async (req) => {
     if (email) {
       const { data } = await admin
         .from("leads")
-        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, arquivado, arquivado_em")
+        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, arquivado, arquivado_em")
         .eq("email", email)
         .limit(1);
       existing = data?.[0] ?? null;
@@ -566,7 +584,7 @@ Deno.serve(async (req) => {
       const variants = [whatsapp, whatsapp.startsWith("55") ? whatsapp.slice(2) : `55${whatsapp}`];
       const { data } = await admin
         .from("leads")
-        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, arquivado, arquivado_em")
+        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, arquivado, arquivado_em")
         .in("whatsapp", variants)
         .limit(1);
       existing = data?.[0] ?? null;
@@ -607,6 +625,7 @@ Deno.serve(async (req) => {
       if (!existing.area_interesse && (inArea ?? criacaoDefaults.area_interesse))     patch.area_interesse = (inArea ?? criacaoDefaults.area_interesse)!;
       if (!existing.tempo_formacao && (inTempo ?? criacaoDefaults.tempo_formacao))    patch.tempo_formacao = (inTempo ?? criacaoDefaults.tempo_formacao)!;
       if (!existing.regiao && (inRegiao ?? criacaoDefaults.regiao))               patch.regiao = (inRegiao ?? criacaoDefaults.regiao)!;
+      if (!existing.pagina_nome && inPagina)                                      patch.pagina_nome = inPagina;
       if (Object.keys(patch).length) {
         await admin.from("leads").update(patch).eq("id", existing.id);
       }
@@ -624,6 +643,9 @@ Deno.serve(async (req) => {
           area_interesse: inArea ?? criacaoDefaults.area_interesse ?? null,
           tempo_formacao: inTempo ?? criacaoDefaults.tempo_formacao ?? null,
           regiao: inRegiao ?? criacaoDefaults.regiao ?? null,
+          // Página = URL da LP (auto). Fonte/fonte_referencia ficam VAZIAS de propósito
+          // (default 'GreatPages' removido + trigger não força 'Orgânico' sem sinal).
+          pagina_nome: inPagina ?? null,
           // Origem da criação → evento "Criado por <webhook>" na timeline (via trigger).
           origem_criacao: integration.nome ?? `Webhook ${slug}`,
         })
