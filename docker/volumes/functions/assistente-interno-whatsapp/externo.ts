@@ -19,6 +19,19 @@ const desc = (c: number | undefined) => (c == null ? "—" : (WMO[c] ?? `código
 
 export const FERRAMENTAS_EXTERNAS = [
   {
+    name: "pesquisar_web",
+    description:
+      "PESQUISA PROFUNDA na internet (Tavily): traz uma resposta sintetizada + o conteúdo das páginas e as fontes. Use para pesquisar assuntos, mercado, concorrentes, notícias, tendências, fatos atuais, 'como fazer X', ou quando o dono pedir para 'pesquisar/buscar/dar uma olhada na internet'. Prefira esta ferramenta quando precisar de profundidade; sempre cite as fontes que ela trouxer.",
+    input_schema: {
+      type: "object",
+      properties: {
+        consulta: { type: "string", description: "o que pesquisar (pergunta ou termos)" },
+        profundidade: { type: "string", enum: ["basica", "avancada"], description: "'avancada' p/ pesquisa mais completa (padrão 'basica')" },
+      },
+      required: ["consulta"],
+    },
+  },
+  {
     name: "consultar_tempo",
     description:
       "Previsão do tempo/clima de uma cidade (padrão: Ampère/PR, onde fica a PPGVET). Traz o agora (temperatura, sensação, umidade, vento) e a previsão dos próximos dias (mín/máx, chance de chuva). Use sempre que o dono perguntar de tempo, clima, chuva, temperatura, se vai dar praia/viagem etc.",
@@ -35,13 +48,43 @@ export const FERRAMENTAS_EXTERNAS = [
 const NOMES_EXT = new Set(FERRAMENTAS_EXTERNAS.map((t) => t.name));
 export function ehExterna(nome: string): boolean { return NOMES_EXT.has(nome); }
 
-export async function executarExterna(nome: string, input: any): Promise<any> {
+export async function executarExterna(nome: string, input: any, admin: any): Promise<any> {
   try {
     if (nome === "consultar_tempo") return await cTempo(input);
+    if (nome === "pesquisar_web") return await cPesquisar(input, admin);
     return { erro: `ferramenta externa desconhecida: ${nome}` };
   } catch (e) {
     return { erro: `Falha em ${nome}: ${(e as Error).message}` };
   }
+}
+
+async function cPesquisar(input: any, admin: any) {
+  const consulta = String(input?.consulta || "").trim();
+  if (!consulta) return { erro: "diga o que pesquisar" };
+  const { data } = await admin.from("ai_api_keys").select("api_key")
+    .eq("provider", "tavily").eq("is_active", true).limit(1).maybeSingle();
+  const key = data?.api_key;
+  if (!key) return { erro: "sem_tavily", _instrucao: "Sem chave do Tavily configurada — use a busca nativa (web_search)." };
+
+  const r = await fetch("https://api.tavily.com/search", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      api_key: key, query: consulta,
+      search_depth: input?.profundidade === "avancada" ? "advanced" : "basic",
+      max_results: 6, include_answer: true,
+    }),
+  });
+  if (!r.ok) throw new Error(`tavily ${r.status}`);
+  const j = await r.json();
+  return {
+    consulta,
+    resposta: j?.answer ?? null,
+    fontes: (j?.results ?? []).map((x: any) => ({
+      titulo: x.title, url: x.url, trecho: String(x.content || "").slice(0, 600),
+    })),
+    _instrucao: "Responda em linguagem natural com base nisso e CITE as fontes (título + link). Não despeje o JSON cru.",
+  };
 }
 
 async function cTempo(input: any) {

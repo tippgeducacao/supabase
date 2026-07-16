@@ -105,7 +105,7 @@ export async function pensar(
           const out = ehConsulta(b.name)
             ? await executarConsulta(b.name, b.input, ctx)
             : ehExterna(b.name)
-            ? await executarExterna(b.name, b.input)
+            ? await executarExterna(b.name, b.input, ctx.admin)
             : await executarFerramenta(b.name, b.input, ctx);
           results.push({ type: "tool_result", tool_use_id: b.id, content: JSON.stringify(out) });
         }
