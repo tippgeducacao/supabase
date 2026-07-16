@@ -57,12 +57,15 @@ export const FERRAMENTAS = [
   {
     name: "enviar_mensagem",
     description:
-      "Propõe enviar uma mensagem no CHAT INTERNO do Gestor de Tarefas, para uma PESSOA (chat direto) ou para um CANAL/grupo. NÃO envia de imediato — registra a proposta e devolve um resumo para o dono confirmar. Use quando o dono pedir para 'mandar mensagem/avisar/falar com' alguém ou postar num canal.",
+      "Propõe enviar uma mensagem no CHAT INTERNO do Gestor de Tarefas (NÃO é WhatsApp). Dois destinos, decida pelo jeito que o dono fala:\n" +
+      "• PESSOA = chat direto/privado de alguém. Gatilhos: 'manda mensagem PARA a Laura', 'avisa o Derick', 'fala com a Adriane', 'no privado da Fulana', 'manda pra Marisa'. → destino_tipo='pessoa', destino_nome=nome da pessoa.\n" +
+      "• CANAL = um canal/grupo. Gatilhos: 'manda no CHAT do Pedagógico', 'no CANAL do Marketing', 'no GRUPO Comercial', 'posta no canal Tecnologia e Dados'. → destino_tipo='canal', destino_nome=nome do canal.\n" +
+      "Regra: se citar um NOME DE PESSOA → pessoa; se citar 'chat/canal/grupo de/do <setor/tema>' → canal. Na dúvida, pergunte. NÃO envia de imediato — registra a proposta e devolve um resumo pro dono confirmar.",
     input_schema: {
       type: "object",
       properties: {
-        destino_tipo: { type: "string", enum: ["pessoa", "canal"], description: "pessoa = chat direto; canal = canal/grupo" },
-        destino_nome: { type: "string", description: "nome da pessoa (ex.: Laura) ou do canal (ex.: Comercial)" },
+        destino_tipo: { type: "string", enum: ["pessoa", "canal"], description: "pessoa = chat direto/privado de alguém; canal = canal/grupo (ex.: 'chat do Pedagógico')" },
+        destino_nome: { type: "string", description: "nome da PESSOA (ex.: Laura, Adriane) ou do CANAL (ex.: Pedagógico, Marketing, Comercial, Tecnologia e Dados)" },
         texto: { type: "string", description: "conteúdo da mensagem" },
       },
       required: ["destino_tipo", "destino_nome", "texto"],
