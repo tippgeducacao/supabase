@@ -16,7 +16,7 @@ export const FERRAMENTAS_CONSULTA = [
   {
     name: "consultar_vendas",
     description:
-      "Vendas/matrículas de um período: quantidade, faturamento total, ticket médio e quebra por tipo (pós/curso/módulo). Use para 'quanto vendemos essa semana/mês', 'ticket médio', 'faturamento total das vendas'.",
+      "Vendas de um período, separadas em APROVADAS (a secretaria já aprovou) e AGUARDANDO APROVAÇÃO (o vendedor enviou, a secretaria ainda não aprovou — ficam na tela Gerenciar Vendas), com faturamento, ticket médio e quebra por tipo (pós/curso/módulo). Use para 'quantas vendas tivemos hoje/ontem/essa semana', 'quanto vendemos', 'ticket médio', 'faturamento das vendas', 'tem venda para aprovar?'. Sempre reporte os dois números — só as aprovadas dá um retrato incompleto do dia.",
     input_schema: {
       type: "object",
       properties: {
@@ -165,23 +165,55 @@ async function cFinanceiro(input: any, ctx: Ctx) {
 
 async function cVendas(input: any, ctx: Ctx) {
   const p = resolverPeriodo(input);
-  const { data, error } = await ctx.admin.rpc("get_vendas_aprovadas_por_semana", {
-    p_inicio: p.de, p_fim: p.ate, p_vendedor_id: null, p_tipos: TIPOS_VENDA,
-  });
-  if (error) throw new Error(error.message);
-  const linhas = data ?? [];
+  // APROVADAS (canônica, bate com o dashboard) + AGUARDANDO APROVAÇÃO (secretaria ainda não
+  // aprovou). As duas juntas = o que o time realmente vendeu no período. Buscar as duas em
+  // paralelo; a pendente é best-effort pra nunca derrubar a resposta das aprovadas.
+  const [aprov, pend] = await Promise.all([
+    ctx.admin.rpc("get_vendas_aprovadas_por_semana", {
+      p_inicio: p.de, p_fim: p.ate, p_vendedor_id: null, p_tipos: TIPOS_VENDA,
+    }),
+    ctx.admin.rpc("assist_vendas_pendentes", { p_de: p.de, p_ate: p.ate }),
+  ]);
+  if (aprov.error) throw new Error(aprov.error.message);
+  const linhas = aprov.data ?? [];
   const s = (k: string) => linhas.reduce((a: number, r: any) => a + Number(r[k] || 0), 0);
   const qtd = s("qtd"), fat = s("faturamento");
+
+  // pendentes: se a RPC falhar, DIZ que falhou — nunca omite em silêncio (foi o bug original).
+  const pj: any = pend.error ? null : (pend.data ?? null);
+  const pQtd = Number(pj?.qtd || 0);
+  const pFat = Number(pj?.faturamento || 0);
+
   return {
     periodo: p.label, de: p.de, ate: p.ate,
-    matriculas: qtd,
-    faturamento: r2(fat),
-    ticket_medio: qtd ? r2(fat / qtd) : 0,
-    quebra: {
-      pos: { qtd: s("qtd_pos"), faturamento: r2(s("fat_pos")) },
-      cursos: { qtd: s("qtd_cursos"), faturamento: r2(s("fat_cursos")) },
-      modulos: { qtd: s("qtd_modulos"), faturamento: r2(s("fat_modulos")) },
+    aprovadas: {
+      qtd,
+      faturamento: r2(fat),
+      ticket_medio: qtd ? r2(fat / qtd) : 0,
+      quebra: {
+        pos: { qtd: s("qtd_pos"), faturamento: r2(s("fat_pos")) },
+        cursos: { qtd: s("qtd_cursos"), faturamento: r2(s("fat_cursos")) },
+        modulos: { qtd: s("qtd_modulos"), faturamento: r2(s("fat_modulos")) },
+      },
     },
+    aguardando_aprovacao: pend.error
+      ? { erro: `não consegui checar as pendentes: ${pend.error.message}` }
+      : {
+          qtd: pQtd,
+          faturamento: r2(pFat),
+          quebra: {
+            pos: { qtd: Number(pj?.quebra?.pos?.qtd || 0), faturamento: r2(pj?.quebra?.pos?.faturamento) },
+            cursos: { qtd: Number(pj?.quebra?.cursos?.qtd || 0), faturamento: r2(pj?.quebra?.cursos?.faturamento) },
+            modulos: { qtd: Number(pj?.quebra?.modulos?.qtd || 0), faturamento: r2(pj?.quebra?.modulos?.faturamento) },
+          },
+        },
+    total_vendido_no_periodo: pend.error ? null : { qtd: qtd + pQtd, faturamento: r2(fat + pFat) },
+    _nota:
+      "SEMPRE informe os DOIS números quando perguntarem quantas vendas houve: as APROVADAS e as que estão AGUARDANDO APROVAÇÃO da secretaria. " +
+      "Formato sugerido: 'X vendas aprovadas (R$ ...) + Y aguardando aprovação (R$ ...) — total de Z no período'. " +
+      "Aprovadas = a secretaria já aprovou (viraram matrícula), ancoradas na data de assinatura do contrato. " +
+      "Aguardando aprovação = o vendedor já enviou e a secretaria ainda não aprovou, ancoradas na data de ENVIO; " +
+      "o faturamento delas é POTENCIAL (ainda não é receita e pode mudar/cair na aprovação). O ticket médio é só das aprovadas.",
   };
 }
 
