@@ -3,7 +3,7 @@
 import type { Ctx } from "./db.ts";
 import { criarPendente, pendenteAtual, marcarPendente } from "./db.ts";
 import { listarEventos, criarReuniao } from "./agenda.ts";
-import { fmtData, spToIso, janela } from "./datas.ts";
+import { fmtData, spToIso, janela, hojeSP } from "./datas.ts";
 
 export const FERRAMENTAS = [
   {
@@ -72,9 +72,36 @@ export const FERRAMENTAS = [
     },
   },
   {
+    name: "salvar_plano_comercial",
+    description:
+      "Salva o PLANO GERAL DO COMERCIAL (o alinhamento que os líderes fazem toda manhã: como foi o dia anterior e as ações de hoje). Grava no mesmo lugar que a tela Métricas do Time → Feedback Diário, então o time vê na tela. Use quando o dono ditar/mandar o alinhamento, a reunião da manhã, o plano de ação do dia, 'anota aí o plano', 'salva o alinhamento de hoje'. NÃO salva de imediato — registra a proposta e devolve um resumo pro dono confirmar. Por padrão vai para o dia ANALISADO (dia útil anterior), que é a convenção da tela.",
+    input_schema: {
+      type: "object",
+      properties: {
+        texto: {
+          type: "string",
+          description:
+            "O plano em texto corrido, do jeito que o dono ditou. Pode usar linhas começando com '- ' para virar tópicos e **negrito**. Organize em seções se o dono ditou assim (ex.: 'O que aconteceu ontem', 'Ações de hoje'), mas NÃO invente conteúdo que ele não falou.",
+        },
+        escopo: {
+          type: "string",
+          enum: ["geral_todos", "geral_vendedor", "geral_sdr"],
+          description: "Quem é o público: 'geral_todos' (PADRÃO — comercial inteiro, SDRs + vendedores), 'geral_vendedor' (só vendedores) ou 'geral_sdr' (só SDRs). Só mude se o dono disser que o plano é só de um time.",
+        },
+        data: { type: "string", description: "YYYY-MM-DD do dia ANALISADO (opcional; padrão = dia útil anterior)" },
+        modo: {
+          type: "string",
+          enum: ["acrescentar", "substituir"],
+          description: "Se já existir plano do dia: 'acrescentar' (PADRÃO, junta no final) ou 'substituir' (troca tudo). Só use 'substituir' se o dono pedir.",
+        },
+      },
+      required: ["texto"],
+    },
+  },
+  {
     name: "confirmar",
     description:
-      "Executa a ação que está aguardando confirmação (criar tarefa OU criar reunião). Só chame quando o dono confirmar explicitamente (sim, pode, confirmo, isso).",
+      "Executa a ação que está aguardando confirmação (criar tarefa, criar reunião, enviar mensagem OU salvar o plano do comercial). Só chame quando o dono confirmar explicitamente (sim, pode, confirmo, isso).",
     input_schema: { type: "object", properties: {} },
   },
   {
@@ -91,6 +118,7 @@ export async function executarFerramenta(nome: string, input: any, ctx: Ctx): Pr
       case "ver_agenda": return await verAgenda(input, ctx);
       case "criar_reuniao": return await proporReuniao(input, ctx);
       case "enviar_mensagem": return await proporMensagem(input, ctx);
+      case "salvar_plano_comercial": return await proporPlano(input, ctx);
       case "confirmar": return await confirmarPendente(ctx);
       case "cancelar": return await cancelarPendente(ctx);
       default: return { erro: `ferramenta desconhecida: ${nome}` };
@@ -232,6 +260,80 @@ async function proporMensagem(input: any, ctx: Ctx) {
   return { status: "aguardando_confirmacao", resumo, instrucao: "Mostre o resumo e peça confirmação antes de 'confirmar'." };
 }
 
+// Texto ditado → HTML do editor do plano (o front renderiza com DOMPurify, classe gt-rich-content).
+// ESCAPA tudo antes: o texto vem de ditado/transcrição e NÃO pode injetar HTML. Suporta só o
+// mínimo: linhas "- item" viram <ul><li>, **negrito** vira <strong>, resto vira <p>.
+function textoParaHtml(texto: string): string {
+  const esc = (s: string) =>
+    s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const negrito = (s: string) => esc(s).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  const linhas = String(texto ?? "").split(/\r?\n/).map((l) => l.trim());
+  const out: string[] = [];
+  let lista: string[] = [];
+  const fecharLista = () => {
+    if (lista.length) { out.push(`<ul>${lista.map((li) => `<li>${li}</li>`).join("")}</ul>`); lista = []; }
+  };
+  for (const l of linhas) {
+    if (!l) { fecharLista(); continue; }
+    const m = l.match(/^[-•*]\s+(.*)$/);
+    if (m) lista.push(negrito(m[1]));
+    else { fecharLista(); out.push(`<p>${negrito(l)}</p>`); }
+  }
+  fecharLista();
+  return out.join("") || `<p>${negrito(String(texto ?? "").trim())}</p>`;
+}
+
+const ESCOPO_LABEL: Record<string, string> = {
+  geral_todos: "todo o comercial (SDRs + vendedores)",
+  geral_vendedor: "só os vendedores",
+  geral_sdr: "só os SDRs",
+};
+
+async function proporPlano(input: any, ctx: Ctx) {
+  const texto = String(input.texto ?? "").trim();
+  if (!texto) return { status: "sem_texto", mensagem: "Qual é o plano/alinhamento que devo salvar?" };
+  const escopo = ["geral_todos", "geral_vendedor", "geral_sdr"].includes(input.escopo) ? input.escopo : "geral_todos";
+  const modo = input.modo === "substituir" ? "substituir" : "acrescentar";
+  const html = textoParaHtml(texto);
+
+  // Dia analisado: por padrão o dia útil anterior (mesma âncora da tela). Resolvido no banco p/ não
+  // divergir da régua (sábado é dia de trabalho; domingo/feriado ficam fora).
+  let data: string | null = typeof input.data === "string" && /^\d{4}-\d{2}-\d{2}$/.test(input.data) ? input.data : null;
+  if (!data) {
+    const { data: d } = await ctx.admin.rpc("feedback_dia_util_anterior", { p_ref: hojeSP() });
+    data = (d as unknown as string) ?? null;
+  }
+
+  // Já existe plano desse dia/escopo? (não destrói nada sem o dono mandar)
+  let jaExiste = false;
+  if (data) {
+    const { data: ex } = await ctx.admin
+      .from("feedback_diario_planos")
+      .select("id")
+      .eq("data_referencia", data).is("colaborador_id", null).eq("indicador", escopo)
+      .limit(1);
+    jaExiste = (ex ?? []).length > 0;
+  }
+
+  const resumo =
+    `📋 *Plano geral do comercial* — ${data ? fmtData(data) : "dia útil anterior"} · ${ESCOPO_LABEL[escopo]}\n\n` +
+    texto +
+    (jaExiste
+      ? `\n\n⚠️ Já existe um plano salvo nesse dia — vou *${modo === "substituir" ? "SUBSTITUIR" : "ACRESCENTAR ao final"}*.`
+      : "");
+
+  await criarPendente(ctx.admin, ctx.canon, "salvar_plano", {
+    actor: ctx.dono.profile_id, texto: html, data, escopo, modo,
+  }, resumo);
+
+  return {
+    status: "aguardando_confirmacao", resumo, ja_existe: jaExiste,
+    instrucao:
+      "Mostre o resumo ao dono e peça confirmação. NÃO chame 'confirmar' até ele responder que sim. " +
+      (jaExiste ? "Avise que já existe plano no dia e que o padrão é acrescentar (ele pode pedir 'substituir')." : ""),
+  };
+}
+
 async function verAgenda(input: any, ctx: Ctx) {
   if (!ctx.dono.calendar_integration_id) {
     return { status: "sem_agenda", mensagem: `A agenda do Google de ${ctx.dono.nome} ainda não está conectada.` };
@@ -310,6 +412,22 @@ async function confirmarPendente(ctx: Ctx) {
       const r = await criarReuniao(ctx.admin, ctx.dono.calendar_integration_id!, pl);
       return { status: "criada", tipo: "reuniao", meetLink: r.meetLink,
         mensagem: `✅ Reunião criada${r.meetLink ? `. Link do Meet: ${r.meetLink}` : ""}.` };
+    }
+    if (p.tipo === "salvar_plano") {
+      const pl = p.payload;
+      const { data, error } = await ctx.admin.rpc("assistente_salvar_plano_comercial", {
+        p_actor: pl.actor, p_texto: pl.texto, p_data: pl.data ?? null,
+        p_escopo: pl.escopo ?? "geral_todos", p_modo: pl.modo ?? "acrescentar",
+      });
+      if (error) throw new Error(error.message);
+      const acao = (data as any)?.acao ?? "salvo";
+      const dia = (data as any)?.data_referencia;
+      return {
+        status: "salvo", tipo: "plano", plano_id: (data as any)?.id,
+        mensagem:
+          `✅ Plano geral do comercial ${acao} para ${dia ? fmtData(dia) : "o dia útil anterior"}. ` +
+          `O time já vê na tela (Métricas do Time → Feedback Diário).`,
+      };
     }
     return { status: "tipo_desconhecido" };
   } catch (e) {
