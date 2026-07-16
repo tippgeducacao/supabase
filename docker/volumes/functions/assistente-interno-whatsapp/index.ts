@@ -9,9 +9,13 @@ import {
   makeAdmin, canon, resolverDono, claimInbound, atualizarConteudoInbound, logMensagem, historicoRecente, tel,
   type Ctx,
 } from "./db.ts";
-import { carregarLinha, enviarTexto, baixarImagem, type LinhaWa } from "./wa.ts";
-import { transcreverAudio } from "./transcrever.ts";
+import { carregarLinha, enviarTexto, baixarImagem, baixarAudioBytes, type LinhaWa } from "./wa.ts";
+import { transcreverBytes } from "./transcrever.ts";
+import { enfileirarTranscricao, processarTranscricoes } from "./transcricao.ts";
 import { pensar } from "./brain.ts";
+
+// Áudio maior que isto = REUNIÃO → pipeline Gemini em background (Whisper tem teto ~25MB).
+const LIMITE_WHISPER = 20 * 1024 * 1024;
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -32,6 +36,14 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   const url = new URL(req.url);
   const admin = makeAdmin();
+
+  // Worker do cron: processa 1 job da fila de transcrição de reunião (gated pelo segredo do config).
+  if (url.searchParams.get("cron") === "transcricao") {
+    const { data: cfg } = await admin.from("assistente_config").select("cron_secret").eq("id", 1).maybeSingle();
+    if (!cfg?.cron_secret || req.headers.get("x-assist-cron") !== cfg.cron_secret) return json({ error: "não autorizado" }, 401);
+    try { return json({ ok: true, ...(await processarTranscricoes(admin)) }); }
+    catch (e) { return json({ ok: false, erro: String(e) }); }
+  }
 
   // Provisionamento da linha (quando o chip do Gustavo chegar). Gated por segredo.
   if (url.searchParams.get("admin")) return await adminAcao(req, url, admin);
@@ -98,7 +110,20 @@ async function processarMensagem(admin: any, linha: LinhaWa | null, msg: any) {
   if (msg.tipo === "audio") {
     if (!linha) return;
     try {
-      texto = await transcreverAudio(linha, msg.externalId);
+      const { bytes, mime } = await baixarAudioBytes(linha, msg.externalId);
+      if (bytes.length > 120 * 1024 * 1024) {
+        await enviar(admin, linha, msg.fromDigits, c, "Esse áudio é grande demais (mais de ~2h) 😅. Me manda em partes que eu transcrevo cada uma.");
+        return;
+      }
+      if (bytes.length > LIMITE_WHISPER) {
+        // REUNIÃO (áudio longo) → transcrição em background (Gemini). Não segue pro cérebro.
+        await enfileirarTranscricao(admin, { canon: c, numero: msg.fromDigits, linhaId: linha.id ?? null, bytes, mime });
+        await atualizarConteudoInbound(admin, claim.id, "[áudio de reunião — transcrevendo]", "audio");
+        await enviar(admin, linha, msg.fromDigits, c,
+          "🎙️ Recebi seu áudio de reunião! Tô transcrevendo e resumindo (decisões + pontos de ação) — te devolvo aqui em alguns minutos. Pode seguir usando normal enquanto isso. 👍");
+        return;
+      }
+      texto = await transcreverBytes(bytes, mime);
       tipo = "audio";
       await atualizarConteudoInbound(admin, claim.id, texto, "audio");
     } catch (e) {

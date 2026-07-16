@@ -52,6 +52,19 @@ export async function baixarAudio(linha: LinhaWa, externalId: string) {
   return await provider.downloadMedia(linha.server_url, linha.token, externalId, { audioMp3: false });
 }
 
+/** Baixa os BYTES do áudio (p/ decidir curto × reunião e p/ transcrever/enfileirar). */
+export async function baixarAudioBytes(linha: LinhaWa, externalId: string): Promise<{ bytes: Uint8Array; mime: string }> {
+  const dl = await baixarAudio(linha, externalId);
+  let bytes: Uint8Array;
+  if (dl.base64) bytes = Uint8Array.from(atob(dl.base64), (ch) => ch.charCodeAt(0));
+  else if (dl.url) {
+    const r = await fetch(dl.url);
+    if (!r.ok) throw new Error(`download áudio ${r.status}`);
+    bytes = new Uint8Array(await r.arrayBuffer());
+  } else throw new Error("mídia de áudio indisponível");
+  return { bytes, mime: dl.mime || "audio/ogg" };
+}
+
 /** Baixa a imagem e devolve base64 + mime (para o Opus interpretar — visão). */
 export async function baixarImagem(
   linha: LinhaWa, externalId: string,
