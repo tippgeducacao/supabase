@@ -100,31 +100,77 @@ export async function executarFerramenta(nome: string, input: any, ctx: Ctx): Pr
   }
 }
 
-async function resolverColaborador(admin: any, nome: string) {
-  const { data } = await admin
-    .from("profiles")
-    .select("id, name")
-    .ilike("name", `%${String(nome).trim()}%`)
-    .eq("ativo", true)
-    .limit(5);
-  return data ?? [];
+type Colab = { id: string; name: string; email: string | null; setor: string | null; ativo: boolean };
+
+/** Rótulo com IDENTIFICADOR: o cadastro não tem "@" — o e-mail (+ setor) é o que diferencia
+ *  dois "Carlos"/"Debora". Sempre mostre isso ao dono antes de agir. */
+function rotulo(c: Colab): string {
+  const extra = [c.setor, c.email].filter(Boolean).join(" · ");
+  return extra ? `${c.name} (${extra})` : c.name;
+}
+
+/** Normaliza p/ busca tolerante: sem acento, minúsculo, SEM letras repetidas.
+ *  É o que faz "Wellinton" (2 Ls) achar o cadastro "Welinton" (1 L), "Marissa"→"Marisa" etc. */
+function normNome(s: string): string {
+  return String(s || "")
+    .normalize("NFD").replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, " ")
+    .replace(/(.)\1+/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const mapearColab = (rows: any[]): Colab[] =>
+  (rows ?? []).map((p: any) => ({
+    id: p.id, name: p.name, email: p.email ?? null,
+    setor: p.departamentos?.nome ?? null, ativo: !!p.ativo,
+  }));
+
+/** Busca por nome — traz ATIVOS e INATIVOS (p/ avisar "existe, mas está inativo").
+ *  1ª passada literal (ILIKE); se não achar nada, 2ª passada TOLERANTE a grafia. */
+async function resolverColaborador(admin: any, nome: string): Promise<{ cands: Colab[]; inativos: Colab[] }> {
+  const q = String(nome).trim();
+  const sel = "id, name, email, ativo, departamentos:departamento_id(nome)";
+  const { data } = await admin.from("profiles").select(sel).ilike("name", `%${q}%`).limit(10);
+  let todos = mapearColab(data);
+
+  if (todos.length === 0) {
+    const { data: all } = await admin.from("profiles").select(sel).limit(500);
+    const nq = normNome(q);
+    if (nq) {
+      todos = mapearColab(all).filter((c) => {
+        const nn = normNome(c.name);
+        return nn.includes(nq) || nn.split(" ").some((t) => t.startsWith(nq) || nq.startsWith(t));
+      });
+    }
+  }
+
+  const ativos = todos.filter((c) => c.ativo);
+  // nome EXATO vence a busca parcial (evita ambiguidade boba)
+  const exato = ativos.filter((c) => c.name.trim().toLowerCase() === q.toLowerCase());
+  return { cands: exato.length === 1 ? exato : ativos, inativos: todos.filter((c) => !c.ativo) };
 }
 
 async function proporTarefa(input: any, ctx: Ctx) {
-  const cands = await resolverColaborador(ctx.admin, input.responsavel_nome);
+  const { cands, inativos } = await resolverColaborador(ctx.admin, input.responsavel_nome);
   if (cands.length === 0) {
-    return { status: "nao_encontrado", mensagem: `Não achei um colaborador ativo chamado "${input.responsavel_nome}".` };
+    if (inativos.length > 0) {
+      return { status: "inativo", opcoes: inativos.map(rotulo),
+        mensagem: `Existe "${inativos.map(rotulo).join(" | ")}", mas está INATIVO no sistema — não dá pra atribuir tarefa.` };
+    }
+    return { status: "nao_encontrado", mensagem: `Não achei ninguém chamado "${input.responsavel_nome}" no cadastro.` };
   }
   if (cands.length > 1) {
-    return { status: "ambiguo", opcoes: cands.map((c: any) => c.name),
-      mensagem: `Achei mais de um: ${cands.map((c: any) => c.name).join(", ")}. Qual deles?` };
+    return { status: "ambiguo", opcoes: cands.map(rotulo),
+      mensagem: `Achei mais de um: ${cands.map(rotulo).join(" | ")}. Qual deles? MOSTRE o setor e o e-mail pro dono escolher.` };
   }
   const alvo = cands[0];
   const paraDiretores = input.espaco !== "inbox";
   const prazoTxt = input.prazo ? ` · prazo ${fmtData(input.prazo)}` : "";
   const prioTxt = input.prioridade && input.prioridade !== "normal" ? ` · ${input.prioridade}` : "";
   const espacoTxt = paraDiretores ? "" : " · na lista de novas tarefas do setor";
-  const resumo = `📋 Tarefa: "${input.titulo}" para *${alvo.name}*${prazoTxt}${prioTxt}${espacoTxt}`;
+  const resumo = `📋 Tarefa: "${input.titulo}" para *${rotulo(alvo)}*${prazoTxt}${prioTxt}${espacoTxt}`;
   await criarPendente(ctx.admin, ctx.canon, "criar_tarefa", {
     actor: ctx.dono.profile_id, assignee: alvo.id, assignee_nome: alvo.name,
     titulo: input.titulo, descricao: input.descricao ?? "", prazo: input.prazo ?? null,
@@ -158,12 +204,16 @@ async function proporMensagem(input: any, ctx: Ctx) {
   const tipo = input.destino_tipo === "canal" ? "canal" : "pessoa";
 
   if (tipo === "pessoa") {
-    const cands = await resolverColaborador(ctx.admin, input.destino_nome);
-    if (cands.length === 0) return { status: "nao_encontrado", mensagem: `Não achei um colaborador ativo chamado "${input.destino_nome}".` };
-    if (cands.length > 1) return { status: "ambiguo", opcoes: cands.map((c: any) => c.name),
-      mensagem: `Achei mais de um: ${cands.map((c: any) => c.name).join(", ")}. Qual deles?` };
+    const { cands, inativos } = await resolverColaborador(ctx.admin, input.destino_nome);
+    if (cands.length === 0) {
+      if (inativos.length > 0) return { status: "inativo", opcoes: inativos.map(rotulo),
+        mensagem: `Existe "${inativos.map(rotulo).join(" | ")}", mas está INATIVO — não dá pra mandar mensagem.` };
+      return { status: "nao_encontrado", mensagem: `Não achei ninguém chamado "${input.destino_nome}" no cadastro.` };
+    }
+    if (cands.length > 1) return { status: "ambiguo", opcoes: cands.map(rotulo),
+      mensagem: `Achei mais de um: ${cands.map(rotulo).join(" | ")}. Qual deles? MOSTRE o setor e o e-mail pro dono escolher.` };
     const alvo = cands[0];
-    const resumo = `💬 Mensagem no chat interno para *${alvo.name}*:\n"${texto}"`;
+    const resumo = `💬 Mensagem no chat interno para *${rotulo(alvo)}*:\n"${texto}"`;
     await criarPendente(ctx.admin, ctx.canon, "enviar_mensagem", {
       actor: ctx.dono.profile_id, tipo: "pessoa", pessoa_id: alvo.id, destino_nome: alvo.name, texto,
     }, resumo);
