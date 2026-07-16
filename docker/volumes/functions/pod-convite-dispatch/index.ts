@@ -45,6 +45,46 @@ function formatPhone(raw?: string | null): string | null {
 function htmlEscape(s: string): string {
   return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
+// Número do PODCAST (nosso) p/ montar o link wa.me: só dígitos (aceita "+55 46 ...", "554699101299").
+function waDigits(raw?: string | null): string {
+  return String(raw ?? "").replace(/\D/g, "");
+}
+// Exibição amigável do nosso número: +55 (DD) NNNNN-NNNN / +55 (DD) NNNN-NNNN.
+function formatWaDisplay(digits: string): string {
+  const d = String(digits ?? "").replace(/\D/g, "");
+  if (d.startsWith("55") && d.length === 13) return `+55 (${d.slice(2, 4)}) ${d.slice(4, 9)}-${d.slice(9)}`;
+  if (d.startsWith("55") && d.length === 12) return `+55 (${d.slice(2, 4)}) ${d.slice(4, 8)}-${d.slice(8)}`;
+  return d ? `+${d}` : "";
+}
+// Link "chamar no WhatsApp" já com a mensagem de interesse pré-preenchida.
+function waLink(digits: string, msg: string): string {
+  return `https://wa.me/${digits}?text=${encodeURIComponent(msg)}`;
+}
+// Bloco HTML: botão verde "Agendar episódio no WhatsApp" + convite pra levar a conversa pro zap.
+// Se não houver número do podcast, cai no fallback "responda este e-mail".
+function blocoWhatsapp(nome: string, podcast: string, waNumero: string): string {
+  const digits = waDigits(waNumero);
+  if (!digits) {
+    return `<p><strong>Tem interesse?</strong> É só responder este e-mail. 🙂</p>`;
+  }
+  const msg = `Olá! Vi o convite de vocês e tenho interesse em gravar um episódio no ${podcast} Podcast 🎙️`;
+  const link = htmlEscape(waLink(digits, msg));
+  const display = htmlEscape(formatWaDisplay(digits));
+  return (
+    `<div style="margin:28px 0;text-align:center;">` +
+      `<a href="${link}" style="display:inline-block;background-color:#25D366;color:#ffffff;` +
+      `text-decoration:none;font-family:Arial,Helvetica,sans-serif;font-size:16px;font-weight:bold;` +
+      `padding:15px 32px;border-radius:12px;box-shadow:0 2px 6px rgba(37,211,102,0.35);">` +
+      `💬 Agendar episódio no WhatsApp</a>` +
+      `<div style="margin-top:10px;color:#6b7280;font-family:Arial,Helvetica,sans-serif;font-size:13px;">` +
+      `Responde na hora — é bem mais rápido por lá 😉</div>` +
+    `</div>` +
+    `<p>Prefere conversar pelo <strong>WhatsApp</strong>? É só tocar no botão acima ou me chamar direto no ` +
+    `<a href="${link}">${display}</a>. E se preferir que <strong>eu</strong> te chame, é só responder este ` +
+    `e-mail com o seu número que eu falo com você por lá. 🙂</p>` +
+    `<p>Se preferir seguir por aqui mesmo, também pode responder este e-mail.</p>`
+  );
+}
 // Renderiza o corpo do template ({{1}},{{2}}…) com os parâmetros — texto legível p/ o SAC.
 function renderTemplate(corpo: string | null | undefined, params: Array<{ text: string }>): string {
   let t = String(corpo ?? "");
@@ -208,7 +248,7 @@ async function handler(req: Request): Promise<Response> {
         // ---- E-mail (best-effort) ----
         let emailOk = false;
         if (emailCtx && c.professor?.email) {
-          emailOk = await enviarEmail(emailCtx, c.professor.email, nome, podcastNome, youtube, proxToque);
+          emailOk = await enviarEmail(emailCtx, c.professor.email, nome, podcastNome, youtube, proxToque, wa.phone_number ?? "");
         }
 
         // ---- atualiza estado ----
@@ -251,7 +291,7 @@ async function resolverEmail(admin: any, caixaId: string | null) {
   return { admin, caixa, integ };
 }
 
-function corpoEmail(nome: string, podcast: string, youtube: string, toque: number): { assunto: string; html: string } {
+function corpoEmail(nome: string, podcast: string, youtube: string, toque: number, waNumero: string): { assunto: string; html: string } {
   const p = htmlEscape(podcast);
   const assunto = toque === 1
     ? `Convite para gravar no ${podcast} Podcast`
@@ -273,14 +313,14 @@ function corpoEmail(nome: string, podcast: string, youtube: string, toque: numbe
   const html =
     `<p>Olá ${htmlEscape(nome)}, tudo bem?</p>` +
     corpo +
-    `<p><strong>Tem interesse?</strong> É só responder este e-mail. 🙂</p>` +
+    blocoWhatsapp(nome, podcast, waNumero) +
     `<p>Um abraço,<br>Janaína · PPGVET</p>`;
   return { assunto, html };
 }
 
-async function enviarEmail(ctx: any, to: string, nome: string, podcast: string, youtube: string, toque: number): Promise<boolean> {
+async function enviarEmail(ctx: any, to: string, nome: string, podcast: string, youtube: string, toque: number, waNumero: string): Promise<boolean> {
   try {
-    const { assunto, html } = corpoEmail(nome, podcast, youtube, toque);
+    const { assunto, html } = corpoEmail(nome, podcast, youtube, toque, waNumero);
     const token = await ensureToken(ctx.admin, ctx.integ);
     const raw = [
       `From: ${encodeDisplayName(ctx.caixa.nome_exibicao || "PPGVET")} <${ctx.caixa.email_caixa}>`,
