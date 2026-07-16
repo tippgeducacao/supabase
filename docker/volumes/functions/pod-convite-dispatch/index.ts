@@ -278,6 +278,31 @@ async function handler(req: Request): Promise<Response> {
   }
 }
 
+// Os 3 e-mails automáticos viraram templates EDITÁVEIS na aba Templates (ids fixos). Se existirem e
+// estiverem ativos, o motor usa o corpo editável; senão cai no corpo embutido (corpoEmailFixo).
+const TEMPLATE_EMAIL_TOQUE: Record<number, string> = {
+  1: "9dc0a5e1-0000-4000-8000-000000000701",
+  2: "9dc0a5e1-0000-4000-8000-000000000702",
+  3: "9dc0a5e1-0000-4000-8000-000000000703",
+};
+type TplEmail = { assunto: string; corpo: string };
+
+async function carregarTemplatesEmail(admin: any): Promise<Map<number, TplEmail>> {
+  const ids = Object.values(TEMPLATE_EMAIL_TOQUE);
+  const m = new Map<number, TplEmail>();
+  try {
+    const { data } = await admin
+      .from("email_templates").select("id, assunto, corpo_html, ativo")
+      .in("id", ids).eq("ativo", true);
+    const byId = new Map((data ?? []).map((t: any) => [t.id, t]));
+    for (const [toque, id] of Object.entries(TEMPLATE_EMAIL_TOQUE)) {
+      const t: any = byId.get(id);
+      if (t?.corpo_html) m.set(Number(toque), { assunto: t.assunto ?? "", corpo: t.corpo_html });
+    }
+  } catch (_) { /* fallback embutido */ }
+  return m;
+}
+
 async function resolverEmail(admin: any, caixaId: string | null) {
   if (!caixaId) return null;
   const { data: caixa } = await admin
@@ -288,10 +313,36 @@ async function resolverEmail(admin: any, caixaId: string | null) {
   const { data: integ } = await admin
     .from("calendar_integrations").select("*").eq("id", caixa.calendar_integration_id).maybeSingle();
   if (!integ) return null;
-  return { admin, caixa, integ };
+  const tplEmail = await carregarTemplatesEmail(admin);
+  return { admin, caixa, integ, tplEmail };
 }
 
-function corpoEmail(nome: string, podcast: string, youtube: string, toque: number, waNumero: string): { assunto: string; html: string } {
+// Renderiza um template EDITÁVEL da aba Templates com os placeholders resolvidos por lead.
+function renderTemplateEmail(tpl: TplEmail, nome: string, podcast: string, youtube: string, waNumero: string): { assunto: string; html: string } {
+  const ytHtml = youtube ? `🎬 <a href="${htmlEscape(youtube)}">${htmlEscape(youtube)}</a>` : "";
+  const botao = blocoWhatsapp(nome, podcast, waNumero);
+  let html = String(tpl.corpo ?? "")
+    .split("{{nome}}").join(htmlEscape(nome))
+    .split("{{podcast}}").join(htmlEscape(podcast))
+    .split("{{link_youtube}}").join(ytHtml)
+    .split("{{botao_whatsapp}}").join(botao);
+  // GARANTIA: se o usuário removeu o {{botao_whatsapp}} ao editar, reinjeta o botão antes da
+  // assinatura (o botão de WhatsApp nunca some do e-mail).
+  if (!html.includes("Agendar episódio no WhatsApp")) {
+    const antes = html.replace(/(<p>\s*Um abra[çc]o)/i, `${botao}$1`);
+    html = antes !== html ? antes : html + botao;
+  }
+  // se o podcast não tem canal, remove o parágrafo do canal que ficaria vazio
+  if (!youtube) html = html.replace(/<p>[^<]*canal:\s*<\/p>/gi, "");
+  const assunto = (String(tpl.assunto ?? "").split("{{podcast}}").join(podcast)).trim()
+    || `Convite para gravar no ${podcast} Podcast`;
+  return { assunto, html };
+}
+
+function corpoEmail(nome: string, podcast: string, youtube: string, toque: number, waNumero: string, tplEmail?: Map<number, TplEmail>): { assunto: string; html: string } {
+  const tpl = tplEmail?.get(toque);
+  if (tpl) return renderTemplateEmail(tpl, nome, podcast, youtube, waNumero);
+  // ---- fallback embutido (caso o template tenha sido apagado/desativado na UI) ----
   const p = htmlEscape(podcast);
   const assunto = toque === 1
     ? `Convite para gravar no ${podcast} Podcast`
@@ -320,7 +371,7 @@ function corpoEmail(nome: string, podcast: string, youtube: string, toque: numbe
 
 async function enviarEmail(ctx: any, to: string, nome: string, podcast: string, youtube: string, toque: number, waNumero: string): Promise<boolean> {
   try {
-    const { assunto, html } = corpoEmail(nome, podcast, youtube, toque, waNumero);
+    const { assunto, html } = corpoEmail(nome, podcast, youtube, toque, waNumero, ctx.tplEmail);
     const token = await ensureToken(ctx.admin, ctx.integ);
     const raw = [
       `From: ${encodeDisplayName(ctx.caixa.nome_exibicao || "PPGVET")} <${ctx.caixa.email_caixa}>`,
