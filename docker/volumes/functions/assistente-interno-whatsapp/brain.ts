@@ -4,6 +4,10 @@ import { pendenteAtual } from "./db.ts";
 import { getAnthropicKey, chamarOpus } from "./anthropic.ts";
 import { FERRAMENTAS, executarFerramenta } from "./tools.ts";
 import { FERRAMENTAS_CONSULTA, ehConsulta, executarConsulta } from "./consultas.ts";
+import { FERRAMENTAS_EXTERNAS, ehExterna, executarExterna } from "./externo.ts";
+
+/** Busca na web — ferramenta NATIVA da Anthropic (roda no servidor deles, sem código nosso). */
+const FERRAMENTA_WEB = { type: "web_search_20260209", name: "web_search", max_uses: 5 };
 import { hojeSP } from "./datas.ts";
 
 function montarSystem(dono: Dono, pend: any): string {
@@ -16,7 +20,11 @@ Dê a resposta final direta; NÃO narre seu raciocínio nem descreva os passos i
 Você atende SOMENTE ${dono.nome}. Nunca acesse nem revele dados de outra pessoa.
 
 O que você pode fazer:
-- Responder dúvidas sobre o sistema e o negócio da PPGVET com o que você sabe.
+- Responder dúvidas sobre o sistema e o negócio da PPGVET.
+- PESQUISAR NA WEB (ferramenta web_search) — use SEMPRE que a pergunta pedir informação ATUAL ou de FORA:
+  notícias, tendências, concorrentes, preços, legislação, "como fazer X", pesquisa de mercado, ou qualquer
+  fato de que você não tenha certeza. Cite a fonte quando pesquisar.
+- Ver a PREVISÃO DO TEMPO (ferramenta consultar_tempo; padrão Ampère/PR, onde fica a PPGVET).
 - Criar tarefas no Gestor de Tarefas para colaboradores (ex.: Laura, Adriane) e avisá-los.
   A tarefa cai sozinha no espaço do SETOR da pessoa (Pedagógico, Marketing, Comercial…).
 - Enviar mensagem no chat interno do Gestor para uma PESSOA (chat direto) ou um CANAL/grupo.
@@ -28,6 +36,13 @@ O que você pode fazer:
   confirmadas, e analisar uma tarefa (descrição+comentários).
 - Ver e INTERPRETAR IMAGENS que ${dono.nome} enviar (fotos, prints de tela, quadros, planilhas fotografadas):
   descreva o que vê e responda o que ele pedir sobre a imagem.
+
+VOCÊ É UM ASSISTENTE COMPLETO — não se limite ao sistema. Além das ferramentas, você DEVE:
+- ANALISAR e ACONSELHAR: dê sua opinião, aponte riscos e trade-offs, sugira caminhos, ajude a decidir.
+- RESOLVER: faça contas, monte planos, quebre o problema em passos, redija textos (e-mail, post, roteiro, mensagem).
+- PENSAR JUNTO: brainstorm, revisar uma ideia, achar o furo de um raciocínio, comparar opções.
+Fale como um chefe de gabinete experiente: direto, prático e opinativo (com o porquê).
+NUNCA responda "não consigo" sem antes TENTAR — use web_search, as consultas do sistema, ou seu próprio conhecimento.
 
 Ao informar valores em R$ ou porcentagens, use 2 casas decimais e NÃO arredonde para inteiro.
 Se uma consulta trouxer uma nota (_nota) explicando a régua, incorpore o essencial na resposta.
@@ -72,20 +87,29 @@ export async function pensar(
   }
 
   for (let i = 0; i < 6; i++) {
-    const data = await chamarOpus(key, { max_tokens: 1500, system, messages: msgs, tools: [...FERRAMENTAS, ...FERRAMENTAS_CONSULTA] });
+    const data = await chamarOpus(key, {
+      max_tokens: 2000, system, messages: msgs,
+      tools: [...FERRAMENTAS, ...FERRAMENTAS_CONSULTA, ...FERRAMENTAS_EXTERNAS, FERRAMENTA_WEB],
+    });
 
-    if (data.stop_reason === "tool_use") {
+    // 'pause_turn' = ferramenta de SERVIDOR (web_search) ainda rodando — devolve o turno e a API retoma.
+    if (data.stop_reason === "tool_use" || data.stop_reason === "pause_turn") {
       msgs.push({ role: "assistant", content: data.content });
       const results: any[] = [];
       for (const b of data.content) {
+        // Só executamos as ferramentas NOSSAS ('tool_use'); as do servidor (web_search =
+        // 'server_tool_use') a Anthropic já resolveu sozinha.
         if (b.type === "tool_use") {
           const out = ehConsulta(b.name)
             ? await executarConsulta(b.name, b.input, ctx)
+            : ehExterna(b.name)
+            ? await executarExterna(b.name, b.input)
             : await executarFerramenta(b.name, b.input, ctx);
           results.push({ type: "tool_result", tool_use_id: b.id, content: JSON.stringify(out) });
         }
       }
-      msgs.push({ role: "user", content: results });
+      // NUNCA empurrar content vazio (a API recusa): sem ferramenta nossa, só devolve o turno.
+      if (results.length > 0) msgs.push({ role: "user", content: results });
       continue;
     }
 
