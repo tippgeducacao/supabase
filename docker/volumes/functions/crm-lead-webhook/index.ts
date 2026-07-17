@@ -110,18 +110,29 @@ function valorDoPayload(dados: any, chave: string): unknown {
   const direto = (dados as Record<string, unknown>)[chave];
   if (direto !== undefined) return direto;
   if (!chave.includes(".")) return undefined;
-  let atual: unknown = dados;
-  for (const seg of chave.split(".")) {
-    if (typeof atual === "string") {
-      const s = atual.trim();
-      if (!s.startsWith("{")) return undefined;
-      try { atual = JSON.parse(s); } catch { return undefined; }
-    }
-    if (!atual || typeof atual !== "object" || Array.isArray(atual)) return undefined;
-    atual = (atual as Record<string, unknown>)[seg];
-    if (atual === undefined) return undefined;
+  return resolveSegmentos(dados, chave.split("."));
+}
+
+// Resolve os segmentos do caminho com casamento GULOSO (junção mais longa primeiro) —
+// cobre chave com ponto LITERAL também DENTRO do objeto aninhado (ex.: a chave real
+// "eu_sou..." sob dados_completos: o caminho "dados_completos.eu_sou..." casa a junção
+// "eu_sou..." inteira antes de tentar descer por "eu_sou").
+function resolveSegmentos(atual: unknown, segs: string[]): unknown {
+  if (segs.length === 0) return atual;
+  if (typeof atual === "string") {
+    const s = atual.trim();
+    if (!s.startsWith("{")) return undefined;
+    try { atual = JSON.parse(s); } catch { return undefined; }
   }
-  return atual;
+  if (!atual || typeof atual !== "object" || Array.isArray(atual)) return undefined;
+  const obj = atual as Record<string, unknown>;
+  for (let i = segs.length; i >= 1; i--) {
+    const v = obj[segs.slice(0, i).join(".")];
+    if (v === undefined) continue;
+    const r = resolveSegmentos(v, segs.slice(i));
+    if (r !== undefined) return r;
+  }
+  return undefined;
 }
 
 // Procura no payload o primeiro valor cujo target no mapping = wantedTarget.
