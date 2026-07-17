@@ -51,6 +51,19 @@ export const FERRAMENTAS_CONSULTA = [
     },
   },
   {
+    name: "consultar_reunioes",
+    description:
+      "Reuniões, TAXA DE COMPARECIMENTO e TAXA DE CONVERSÃO de um período (mês/semana/custom), AGREGADO e POR VENDEDOR. Traz por vendedor: reuniões marcadas, comparecidas, não compareceu, canceladas, sem resultado (ainda sem desfecho), matrículas, taxa de comparecimento % e taxa de conversão %. Use para 'taxa de comparecimento do mês/da semana', 'quantas reuniões cada vendedor teve/compareceu', 'volume de reuniões por vendedor nos últimos 30 dias', 'taxa de conversão por vendedor', 'comparecimento e conversão da equipe/do time'. É a régua de ouro do sistema (bate com Métricas do Time). SEMPRE use esta ferramenta para comparecimento/volume de reuniões por período — NÃO diga que não consegue.",
+    input_schema: {
+      type: "object",
+      properties: {
+        periodo: { type: "string", enum: ["hoje", "ontem", "semana", "semana_passada", "mes", "mes_passado"] },
+        de: { type: "string", description: "YYYY-MM-DD (opcional, período custom — ex.: últimos 30 dias)" },
+        ate: { type: "string" },
+      },
+    },
+  },
+  {
     name: "consultar_cursos_matriculados",
     description: "Lista quais CURSOS tiveram matrícula no período (com a contagem por curso). Use para 'quais cursos venderam/tiveram matrícula'.",
     input_schema: {
@@ -168,6 +181,7 @@ export async function executarConsulta(nome: string, input: any, ctx: Ctx): Prom
       case "consultar_cursos_matriculados": return await cCursos(input, ctx);
       case "consultar_vendas_por_origem": return await cVendasPorOrigem(input, ctx);
       case "consultar_vendas_por_vendedor": return await cVendasPorVendedor(input, ctx);
+      case "consultar_reunioes": return await cReunioes(input, ctx);
       case "consultar_faturamento_por_curso": return await cFaturamentoPorCurso(input, ctx);
       case "consultar_cobranca": return await cCobranca(input, ctx);
       case "consultar_cobranca_periodo": return await cCobrancaPeriodo(input, ctx);
@@ -323,6 +337,23 @@ async function cVendasPorVendedor(input: any, ctx: Ctx) {
       "Vendas por vendedor, ancoradas na data de ENVIO (quando o vendedor lançou) — por isso aparecem também as PENDENTES do dia (aguardando aprovação da secretaria), que é como dá pra saber quem fechou as vendas de hoje ANTES de assinarem o contrato. " +
       "'matriculada' = já aprovada/assinada; 'pendente' = na fila da secretaria (Gerenciar Vendas); 'outras' = rejeitada/cancelada/desistiu. " +
       "⚠️ NÃO é a régua de comissão (a premiação usa a data de ASSINATURA) — para premiação/atingimento use consultar_comissao.",
+  };
+}
+
+async function cReunioes(input: any, ctx: Ctx) {
+  const p = resolverPeriodo(input);
+  const { data, error } = await ctx.admin.rpc("assist_reunioes_periodo", { p_de: p.de, p_ate: p.ate });
+  if (error) throw new Error(error.message);
+  const d = data || {};
+  return {
+    periodo: p.label, de: p.de, ate: p.ate,
+    agregado: d.agregado ?? null,
+    por_vendedor: d.por_vendedor ?? [],
+    _nota:
+      "RÉGUA DE OURO (bate com Métricas do Time). Comparecimento = comparecidas ÷ VÁLIDAS (marcadas − canceladas − desqualificadas); reunião cancelada/desqualificada NÃO entra na conta. " +
+      "'sem_resultado' = reunião ainda sem desfecho marcado (agendada/futura ou não marcada) — ela ENTRA no denominador do comparecimento, então NO MEIO DO MÊS o comparecimento pode parecer menor do que será no fechamento. " +
+      "Conversão = matrículas assinadas no período (data de assinatura ?? envio, somando as 3 tabelas) ÷ comparecidas — pode passar de 100% (venda antiga assinando agora). Reuniões ancoradas na data do agendamento (fuso de Brasília). " +
+      "Se houver B2B com reunião no período, ele aparece junto. Sempre mostre 2 casas decimais.",
   };
 }
 
