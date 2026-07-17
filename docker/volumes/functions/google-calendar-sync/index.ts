@@ -199,8 +199,10 @@ async function syncIntegration(admin: any, integ: Integration) {
 
   // Upsert into cache
   let upserted = 0;
+  const vistos: string[] = [];
   for (const ev of events) {
     if (ev.status === 'cancelled') continue;
+    vistos.push(ev.id);
     const allDay = !!ev.start?.date;
     const startsAt = allDay
       ? new Date(`${ev.start.date}T00:00:00`).toISOString()
@@ -230,13 +232,64 @@ async function syncIntegration(admin: any, integ: Integration) {
     else upserted++;
   }
 
+  // RECONCILIA: evento apagado no Google some da resposta (o list não devolve
+  // cancelado), e o upsert sozinho nunca removia nada -> a cópia ficava no cache
+  // pra sempre e vazava pras telas que leem o espelho (ex.: "Aulas de abertura").
+  //
+  // Só apaga DENTRO da janela que acabamos de buscar: todo evento com starts_at
+  // entre timeMin e timeMax necessariamente termina depois de timeMin, então o
+  // Google o teria devolvido se ainda existisse -> não estar na resposta = foi
+  // apagado/cancelado. Fora da janela nada é tocado.
+  //
+  // Seguro contra falha de API: qualquer erro no fetch/paginação dá throw acima,
+  // então nunca se chega aqui com uma lista parcial.
+  // O diff é calculado aqui (e o delete vai por id, em lotes) de propósito: um
+  // `not.in.(<todos os ids>)` viraria uma URL de dezenas de KB numa agenda cheia
+  // (>1000 eventos na janela) e estouraria o limite do PostgREST/Kong.
+  let removidos = 0;
+  try {
+    const vivos = new Set(vistos);
+    const orfaos: string[] = [];
+
+    // Paginado: o PostgREST corta em 1000 linhas em silêncio, e agenda cheia passa
+    // disso na janela -> sem paginar, a reconciliação só limparia parte.
+    for (let from = 0; ; from += 1000) {
+      const { data: pagina, error: selErr } = await admin
+        .from('calendar_events_cache')
+        .select('id, external_event_id')
+        .eq('integration_id', integ.id)
+        .gte('starts_at', timeMin)
+        .lte('starts_at', timeMax)
+        .order('id')
+        .range(from, from + 999);
+      if (selErr) throw selErr;
+      if (!pagina || pagina.length === 0) break;
+
+      for (const r of pagina as any[]) {
+        if (!vivos.has(r.external_event_id)) orfaos.push(r.id);
+      }
+      if (pagina.length < 1000) break;
+    }
+
+    for (let i = 0; i < orfaos.length; i += 100) {
+      const lote = orfaos.slice(i, i + 100);
+      const { error } = await admin.from('calendar_events_cache').delete().in('id', lote);
+      if (error) throw error;
+      removidos += lote.length;
+    }
+  } catch (e) {
+    // Reconciliação é best-effort: falhar aqui não pode derrubar o sync (que já
+    // gravou os eventos atuais).
+    console.error('reconcile failed', integ.id, e);
+  }
+
   // Mark synced
   await admin
     .from('calendar_integrations')
     .update({ last_synced_at: new Date().toISOString() })
     .eq('id', integ.id);
 
-  return { events: events.length, upserted };
+  return { events: events.length, upserted, removidos };
 }
 
 Deno.serve(async (req) => {
