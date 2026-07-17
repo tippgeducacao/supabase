@@ -417,7 +417,11 @@ Deno.serve(async (req) => {
   // O builder agora oferece TODOS os campos de contato (sistema + customizados, ex.:
   // Estado). Resolvemos cada alias: coluna física de `leads` (lead_coluna whitelisted)
   // OU valor customizado (EAV crm_campo_valores). Tudo defensivo — nunca derruba o intake.
-  const LEAD_COLS_WL = new Set(["nome", "profissao", "area_interesse", "curso_interesse", "tempo_formacao", "regiao"]);
+  // ⚠️ Espelha LEAD_COLUNAS_PERMITIDAS (useCrmCamposCustomizados) — mudou lá, reflita aqui.
+  const LEAD_COLS_WL = new Set([
+    "nome", "profissao", "area_interesse", "curso_interesse", "tempo_formacao", "regiao",
+    "linkedin", "cargo", // espelhos do decisor B2B / contatos da empresa (2026-07-17)
+  ]);
   function eavCols(tipo: string, valor: string): Record<string, unknown> {
     if (tipo === "numero" || tipo === "inteiro") {
       const n = Number(valor);
