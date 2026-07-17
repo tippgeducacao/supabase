@@ -117,6 +117,16 @@ export const FERRAMENTAS = [
     },
   },
   {
+    name: "enviar_cronograma_pdf",
+    description:
+      "Gera o CRONOGRAMA DO ALUNO de uma TURMA em PDF e ENVIA aqui no WhatsApp do dono. Use quando ele pedir 'me manda o cronograma da turma X em PDF', 'baixa o cronograma da turma Y', 'cronograma do aluno de <curso> <turma>'. Envia DIRETO (é para o próprio dono, não precisa confirmar). Se o nome bater com VÁRIAS turmas, devolve as opções pro dono escolher.",
+    input_schema: {
+      type: "object",
+      properties: { turma: { type: "string", description: "nome da turma (ex.: 'Reprodução, Nutrição e Gestão de Bovinos 01/26 #02' ou 'Nutrição de Bovinos')" } },
+      required: ["turma"],
+    },
+  },
+  {
     name: "confirmar",
     description:
       "Executa a ação que está aguardando confirmação (criar tarefa, criar reunião, enviar mensagem OU salvar o plano do comercial). Só chame quando o dono confirmar explicitamente (sim, pode, confirmo, isso).",
@@ -138,6 +148,7 @@ export async function executarFerramenta(nome: string, input: any, ctx: Ctx): Pr
       case "enviar_mensagem": return await proporMensagem(input, ctx);
       case "salvar_plano_comercial": return await proporPlano(input, ctx);
       case "gerar_pdf": return await gerarEnviarPdf(input, ctx);
+      case "enviar_cronograma_pdf": return await enviarCronogramaPdf(input, ctx);
       case "confirmar": return await confirmarPendente(ctx);
       case "cancelar": return await cancelarPendente(ctx);
       default: return { erro: `ferramenta desconhecida: ${nome}` };
@@ -350,6 +361,48 @@ async function proporPlano(input: any, ctx: Ctx) {
     instrucao:
       "Mostre o resumo ao dono e peça confirmação. NÃO chame 'confirmar' até ele responder que sim. " +
       (jaExiste ? "Avise que já existe plano no dia e que o padrão é acrescentar (ele pode pedir 'substituir')." : ""),
+  };
+}
+
+async function enviarCronogramaPdf(input: any, ctx: Ctx) {
+  const busca = String(input?.turma || "").trim();
+  if (busca.length < 3) return { status: "erro", mensagem: "Diga o nome da turma (ex.: 'Reprodução de Bovinos 01/26 #02')." };
+  const { data: turmas, error } = await ctx.admin.rpc("assist_ped_turmas", { p_curso: null, p_busca: busca });
+  if (error) throw new Error(error.message);
+  const lista = Array.isArray(turmas) ? turmas : [];
+  if (lista.length === 0) return { status: "nao_encontrado", mensagem: `Não achei turma com "${busca}".` };
+  if (lista.length > 1) {
+    return { status: "ambiguo", opcoes: lista.map((t: any) => t.turma),
+      mensagem: `Achei ${lista.length} turmas com "${busca}". Qual? ${lista.map((t: any) => t.turma).join(" | ")}` };
+  }
+  const turma = lista[0];
+  const { data: cron, error: e2 } = await ctx.admin.rpc("assist_ped_turma_cronograma", { p_turma_id: turma.id });
+  if (e2) throw new Error(e2.message);
+  const t = (cron?.turma ?? {}) as any;
+  const aulas: any[] = Array.isArray(cron?.cronograma) ? cron.cronograma : [];
+  const linhas: string[] = [
+    `# ${t.curso ?? ""}`,
+    `${t.turma ?? ""}`,
+    `Situacao: ${t.situacao ?? "-"} · inicio ${t.data_inicio ? fmtData(t.data_inicio) : "a definir"}` +
+      `${t.data_fim ? ` · fim ${fmtData(t.data_fim)}` : ""}${t.modalidade ? ` · ${t.modalidade}` : ""}`,
+    "",
+    `# Cronograma (${aulas.length} aulas)`,
+  ];
+  for (const a of aulas) {
+    const data = a.data ? fmtData(a.data) : "a definir";
+    const hora = a.horario ? ` · ${a.horario}` : "";
+    linhas.push(`- ${data}${hora} — ${a.titulo ?? ""}`);
+    if (a.ementa) linhas.push(String(a.ementa));
+    if (a.professor) linhas.push(`Prof.: ${a.professor}`);
+    linhas.push("");
+  }
+  const titulo = `Cronograma - ${t.turma ?? busca}`.slice(0, 90);
+  const r = await gerarEnviarPdf({ titulo, conteudo: linhas.join("\n") }, ctx);
+  if (r.status !== "enviado") return r;
+  return {
+    status: "enviado",
+    mensagem: `✅ Cronograma da turma "${t.turma}" enviado em PDF (${aulas.length} aulas).`,
+    _instrucao: "O PDF JÁ foi enviado ao dono. Responda em 1 linha; NÃO repita o cronograma inteiro.",
   };
 }
 

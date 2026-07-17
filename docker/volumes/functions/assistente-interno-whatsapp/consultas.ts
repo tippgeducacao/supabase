@@ -167,6 +167,24 @@ export const FERRAMENTAS_CONSULTA = [
     },
   },
   {
+    name: "consultar_curso",
+    description:
+      "Cursos do Pedagógico (Gestão Acadêmica). SEM nome = LISTA os cursos ATIVOS por área (modalidade, nº de módulos/aulas/turmas, ativo/arquivado). COM nome = DETALHE do curso: módulos (ao vivo/gravado/EAD), aulas e EMENTA por módulo, professores (coordenador/convidado), modalidade e se está ativo. Use para 'quais cursos tem na área X', 'quais módulos/aulas/ementa do curso Y', 'esse curso está ativo?', 'quem são os professores do curso Z'.",
+    input_schema: { type: "object", properties: { curso: { type: "string", description: "nome (ou parte) do curso, ou uma ÁREA (ex.: Bovinos). Vazio = lista todos os ativos." } } },
+  },
+  {
+    name: "consultar_turmas",
+    description:
+      "Turmas do Pedagógico: quais turmas existem, com SITUAÇÃO (em andamento/próxima/encerrada), datas, horário e progresso (aulas realizadas/total). Filtre por curso ou área no 'busca'. Use para 'quais turmas do curso X', 'turmas de Bovinos', 'quantas turmas em andamento'. Pra ver o cronograma/aulas de UMA turma, use consultar_cronograma_turma.",
+    input_schema: { type: "object", properties: { busca: { type: "string", description: "nome do curso, da turma ou da área (ex.: 'Reprodução de Bovinos', 'Bovinos'). Vazio = todas as turmas." } } },
+  },
+  {
+    name: "consultar_cronograma_turma",
+    description:
+      "Cronograma do aluno de UMA turma: as AULAS (data, horário, título, ementa, status), os PROFESSORES vinculados e se estão CONFIRMADOS (confirmado / aguardando / não enviado). Use para 'me mostra o cronograma da turma X', 'quais aulas/professores da turma Y', 'os professores da turma Z estão confirmados?'. Se o nome bater com várias turmas, devolve as opções. (Pra ENVIAR o cronograma em PDF no WhatsApp, use a ferramenta enviar_cronograma_pdf.)",
+    input_schema: { type: "object", properties: { turma: { type: "string", description: "nome da turma (ex.: 'Reprodução, Nutrição e Gestão de Bovinos 01/26 #02')" } }, required: ["turma"] },
+  },
+  {
     name: "ultima_transcricao",
     description:
       "Recupera o TEXTO da última reunião que você transcreveu (a transcrição/resumo completo). Use quando o dono pedir para 'pegar o texto que você transcreveu', 'fazer um PDF da reunião', 'me manda de novo o resumo da reunião', 'usa aquela transcrição', etc.",
@@ -201,6 +219,9 @@ export async function executarConsulta(nome: string, input: any, ctx: Ctx): Prom
       case "consultar_midia": return await cMidia(input, ctx);
       case "consultar_aulas_nao_confirmadas": return await cAulas(ctx);
       case "consultar_quadro": return await cQuadro(input, ctx);
+      case "consultar_curso": return await cCurso(input, ctx);
+      case "consultar_turmas": return await cTurmas(input, ctx);
+      case "consultar_cronograma_turma": return await cCronogramaTurma(input, ctx);
       case "consultar_tarefa": return await cTarefa(input, ctx);
       case "ultima_transcricao": return await cUltimaTranscricao(ctx);
       default: return { erro: `consulta desconhecida: ${nome}` };
@@ -528,6 +549,53 @@ async function cMidia(input: any, ctx: Ctx) {
     ...data,
     _nota: "A 'conta' já é o BM (o nome carrega o rótulo). Gasto é líquido (sem imposto). 'Hoje' é parcial; 'ontem' é o dia fechado.",
   };
+}
+
+async function cCurso(input: any, ctx: Ctx) {
+  const busca = String(input?.curso || "").trim();
+  const { data, error } = await ctx.admin.rpc("assist_ped_cursos", { p_busca: busca || null });
+  if (error) throw new Error(error.message);
+  const cursos = Array.isArray(data) ? data : [];
+  if (!busca) {
+    return { modo: "lista", total: cursos.length, cursos,
+      _nota: "Cursos ATIVOS por área. Peça o DETALHE de um curso pelo nome pra ver módulos, ementas, aulas e professores." };
+  }
+  if (cursos.length === 0) return { encontrou: false, mensagem: `Não achei curso com "${busca}".` };
+  const exato = cursos.find((c: any) => String(c.nome).toLowerCase() === busca.toLowerCase());
+  const alvo = exato || (cursos.length === 1 ? cursos[0] : null);
+  if (!alvo) {
+    return { modo: "varios", mensagem: `Achei ${cursos.length} cursos com "${busca}". Qual?`,
+      opcoes: cursos.map((c: any) => ({ nome: c.nome, area: c.area, ativo: c.ativo })) };
+  }
+  const { data: det, error: e2 } = await ctx.admin.rpc("assist_ped_curso_detalhe", { p_id: alvo.id });
+  if (e2) throw new Error(e2.message);
+  return { modo: "detalhe", ...det,
+    _nota: "Detalhe do curso: módulos (tipo ao vivo/gravado), aulas + ementa por módulo, professores (coordenador/convidado), modalidade e ativo. Pra ver as turmas, use consultar_turmas." };
+}
+
+async function cTurmas(input: any, ctx: Ctx) {
+  const busca = String(input?.busca || input?.curso || "").trim();
+  const { data, error } = await ctx.admin.rpc("assist_ped_turmas", { p_curso: null, p_busca: busca || null });
+  if (error) throw new Error(error.message);
+  const turmas = Array.isArray(data) ? data : [];
+  return { total: turmas.length, turmas: turmas.slice(0, 60),
+    _nota: "Turmas não arquivadas com situação (em andamento/próxima/encerrada), datas, horário e progresso (realizadas/total). Filtre por curso/área no 'busca'. Pra o cronograma de UMA turma, use consultar_cronograma_turma." };
+}
+
+async function cCronogramaTurma(input: any, ctx: Ctx) {
+  const busca = String(input?.turma || "").trim();
+  if (busca.length < 3) return { erro: "diga o nome da turma (ex.: 'Reprodução de Bovinos 01/26 #02')" };
+  const { data: turmas, error } = await ctx.admin.rpc("assist_ped_turmas", { p_curso: null, p_busca: busca });
+  if (error) throw new Error(error.message);
+  const lista = Array.isArray(turmas) ? turmas : [];
+  if (lista.length === 0) return { encontrou: false, mensagem: `Não achei turma com "${busca}".` };
+  if (lista.length > 1) {
+    return { ambiguo: true, mensagem: `Achei ${lista.length} turmas — qual?`, opcoes: lista.map((t: any) => t.turma) };
+  }
+  const { data: cron, error: e2 } = await ctx.admin.rpc("assist_ped_turma_cronograma", { p_turma_id: lista[0].id });
+  if (e2) throw new Error(e2.message);
+  return { ...cron,
+    _nota: "Cronograma do aluno: aulas (data/título/ementa/professor/status) + resumo de professores com confirmação (confirmado/aguardando/não enviado). Pra ENVIAR em PDF no WhatsApp, use enviar_cronograma_pdf." };
 }
 
 async function cQuadro(input: any, ctx: Ctx) {
