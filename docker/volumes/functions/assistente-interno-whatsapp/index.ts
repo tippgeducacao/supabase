@@ -9,7 +9,7 @@ import {
   makeAdmin, canon, resolverDono, claimInbound, atualizarConteudoInbound, logMensagem, historicoRecente, tel,
   type Ctx,
 } from "./db.ts";
-import { carregarLinha, enviarTexto, baixarImagem, baixarAudioBytes, type LinhaWa } from "./wa.ts";
+import { carregarLinha, enviarTexto, baixarImagem, baixarAudioBytes, baixarVideoBytes, baixarDocumento, type LinhaWa } from "./wa.ts";
 import { transcreverBytes } from "./transcrever.ts";
 import { enfileirarTranscricao, processarTranscricoes } from "./transcricao.ts";
 import { pensar } from "./brain.ts";
@@ -106,6 +106,7 @@ async function processarMensagem(admin: any, linha: LinhaWa | null, msg: any) {
   let texto: string = msg.conteudo || "";
   let tipo = tipoIn;
   let imagem: { base64: string; mime: string } | null = null;
+  let documento: { base64: string; mime: string } | null = null;
 
   if (msg.tipo === "audio") {
     if (!linha) return;
@@ -132,6 +133,28 @@ async function processarMensagem(admin: any, linha: LinhaWa | null, msg: any) {
         "Tive um problema pra processar esse áudio agora 😕. Pode reenviar? (Áudio de reunião grande TAMBÉM funciona — é só tentar de novo; ou me manda por texto.)");
       return;
     }
+  } else if (msg.tipo === "video") {
+    // VÍDEO → análise em background (Gemini aceita vídeo; o Opus não). Mesma fila da reunião.
+    if (!linha) return;
+    try {
+      const { bytes, mime } = await baixarVideoBytes(linha, msg.externalId);
+      if (bytes.length > 200 * 1024 * 1024) {
+        await enviar(admin, linha, msg.fromDigits, c, "Esse vídeo é grande demais (mais de ~200 MB) 😅. Me manda uma versão mais curta/leve.");
+        return;
+      }
+      await enfileirarTranscricao(admin, {
+        canon: c, numero: msg.fromDigits, linhaId: linha.id ?? null, bytes, mime,
+        tipo: "video", instrucao: (msg.caption || "").trim() || null,
+      });
+      await atualizarConteudoInbound(admin, claim.id, msg.caption?.trim() ? `[vídeo] ${msg.caption}` : "[vídeo — analisando]", "video");
+      await enviar(admin, linha, msg.fromDigits, c,
+        "🎬 Recebi seu vídeo! Tô analisando (o que aparece, as falas e — se for criativo — sugestões) e te devolvo aqui em alguns minutos. Pode seguir usando normal. 👍");
+      return;
+    } catch (e) {
+      await tel(admin, c, rodada, "erro_video", null, null, String(e));
+      await enviar(admin, linha, msg.fromDigits, c, "Tive um problema pra baixar esse vídeo 😕. Pode reenviar? (versão mais leve ajuda.)");
+      return;
+    }
   } else if (msg.tipo === "image") {
     if (!linha) return;
     try {
@@ -146,10 +169,32 @@ async function processarMensagem(admin: any, linha: LinhaWa | null, msg: any) {
       return;
     }
   } else if (msg.tipo === "document") {
-    // Documento/PDF (planejamento e reunião) = Fase 2. Imagem já funciona.
-    await enviar(admin, linha, msg.fromDigits, c,
-      "Recebi seu documento! 📎 Por enquanto leio texto, áudio e IMAGEM; documento/PDF (planejamento e reunião) chega na próxima fase.");
-    return;
+    // PDF → bloco 'document' nativo do Opus (lê texto + visual). Outros formatos: peça PDF.
+    if (!linha) return;
+    try {
+      const doc = await baixarDocumento(linha, msg.externalId);
+      if (!doc) throw new Error("download vazio");
+      // conteudo do documento = NOME do arquivo; caption = pergunta do dono (se houver).
+      const nomeArq = String(msg.mediaFilename || msg.conteudo || "");
+      const ehPdf = /pdf/i.test(doc.mime) || /\.pdf(\b|$)/i.test(nomeArq);
+      if (!ehPdf) {
+        await enviar(admin, linha, msg.fromDigits, c,
+          "Recebi seu arquivo 📎. Por enquanto eu leio *PDF* (além de imagem, áudio e vídeo). Se der, me manda em PDF que eu leio tudo.");
+        return;
+      }
+      if (doc.bytes > 20 * 1024 * 1024) {
+        await enviar(admin, linha, msg.fromDigits, c, "Esse PDF é grande demais (mais de ~20 MB) 😅. Me manda uma versão menor ou em partes.");
+        return;
+      }
+      documento = { base64: doc.base64, mime: "application/pdf" };
+      texto = (msg.caption || "").trim() || (nomeArq ? `Leia o PDF "${nomeArq}" e me diga o que é / resuma.` : "Leia este PDF e me diga o que é / resuma.");
+      tipo = "document";
+      await atualizarConteudoInbound(admin, claim.id, texto, "document");
+    } catch (e) {
+      await tel(admin, c, rodada, "erro_documento", null, null, String(e));
+      await enviar(admin, linha, msg.fromDigits, c, "Não consegui abrir esse PDF 😕. Pode reenviar?");
+      return;
+    }
   } else if (msg.tipo !== "text") {
     return; // reaction/location/etc.
   }
@@ -162,7 +207,7 @@ async function processarMensagem(admin: any, linha: LinhaWa | null, msg: any) {
   const t0 = Date.now();
   try {
     const historico = await historicoRecente(admin, c);
-    resposta = await pensar(ctx, historico, imagem);
+    resposta = await pensar(ctx, historico, imagem, documento);
     await tel(admin, c, rodada, "resposta", { chars: resposta.length }, Date.now() - t0, null);
   } catch (e) {
     await tel(admin, c, rodada, "erro", null, Date.now() - t0, String(e));

@@ -66,6 +66,37 @@ export async function baixarAudioBytes(linha: LinhaWa, externalId: string): Prom
   return { bytes, mime: dl.mime || "audio/ogg" };
 }
 
+/** Baixa os BYTES de um vídeo (p/ análise via Gemini em background — o Opus não lê vídeo). */
+export async function baixarVideoBytes(linha: LinhaWa, externalId: string): Promise<{ bytes: Uint8Array; mime: string }> {
+  const provider = getWaProvider(linha.provider || "uazapi");
+  const dl = await provider.downloadMedia(linha.server_url, linha.token, externalId, { audioMp3: false, timeoutMs: 60000 });
+  let bytes: Uint8Array;
+  if (dl.base64) bytes = Uint8Array.from(atob(dl.base64), (ch) => ch.charCodeAt(0));
+  else if (dl.url) {
+    const r = await fetch(dl.url);
+    if (!r.ok) throw new Error(`download vídeo ${r.status}`);
+    bytes = new Uint8Array(await r.arrayBuffer());
+  } else throw new Error("mídia de vídeo indisponível");
+  return { bytes, mime: dl.mime || "video/mp4" };
+}
+
+/** Baixa um DOCUMENTO (PDF etc.) e devolve base64 + mime + tamanho (o Opus lê PDF nativo). */
+export async function baixarDocumento(
+  linha: LinhaWa, externalId: string,
+): Promise<{ base64: string; mime: string; bytes: number } | null> {
+  const provider = getWaProvider(linha.provider || "uazapi");
+  const media = await provider.downloadMedia(linha.server_url, linha.token, externalId, { audioMp3: false, timeoutMs: 60000 });
+  if (media.base64) return { base64: media.base64, mime: media.mime || "application/pdf", bytes: Math.floor(media.base64.length * 0.75) };
+  if (!media.url) return null;
+  const res = await fetch(media.url);
+  if (!res.ok) return null;
+  const buf = new Uint8Array(await res.arrayBuffer());
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < buf.length; i += chunk) bin += String.fromCharCode(...buf.subarray(i, i + chunk));
+  return { base64: btoa(bin), mime: media.mime || res.headers.get("content-type") || "application/pdf", bytes: buf.length };
+}
+
 /** Baixa a imagem e devolve base64 + mime (para o Opus interpretar — visão). */
 export async function baixarImagem(
   linha: LinhaWa, externalId: string,

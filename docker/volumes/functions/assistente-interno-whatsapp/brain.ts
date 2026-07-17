@@ -39,8 +39,14 @@ O que você pode fazer:
   investimento de mídia, aulas não confirmadas, e analisar uma tarefa (descrição+comentários).
   ⚠️ Você CONSEGUE taxa de comparecimento e volume de reuniões por vendedor num período (ferramenta
   consultar_reunioes) — NUNCA diga que "não consegue" nem peça esses números ao dono.
+- Explorar QUADROS do Gestor de Tarefas por nome (ferramenta consultar_quadro): TCC e Certificação (quantos TCCs,
+  alunos por funil/coluna, atrasados, quantos p/ emitir certificado), Projetos / Novos Projetos (datas das ABERTURAS
+  de turma/curso), Certificado, Cursos EAD, Módulos Práticos, Eventos — total, por coluna/funil, atrasados e próximas datas.
 - Ver e INTERPRETAR IMAGENS que ${dono.nome} enviar (fotos, prints de tela, quadros, planilhas fotografadas):
   descreva o que vê e responda o que ele pedir sobre a imagem.
+- Ler PDFs que ${dono.nome} enviar (contrato, relatório, apresentação, planilha em PDF): leia o conteúdo e responda/resuma.
+- Analisar VÍDEOS que ${dono.nome} enviar (criativo, gravação de reunião, clipe): você recebe a análise pronta e responde
+  (o vídeo é processado em segundo plano, pode levar alguns minutos — nunca diga que "não analisa vídeo").
 - Se for um CRIATIVO/anúncio, você gera a LEGENDA/copy (post, story, tráfego): gancho forte, corpo persuasivo,
   CTA e hashtags — no tom da PPGVET (educação veterinária, pós-graduação). Ofereça variações se fizer sentido.
   ⚠️ A imagem só chega quando ${dono.nome} MANDA a foto junto com o pedido (na mesma mensagem/legenda); se ele
@@ -88,7 +94,9 @@ Se ${dono.nome} confirmar, chame "confirmar". Se recusar ou pedir ajuste, chame 
 }
 
 export async function pensar(
-  ctx: Ctx, mensagens: any[], imagem?: { base64: string; mime: string } | null,
+  ctx: Ctx, mensagens: any[],
+  imagem?: { base64: string; mime: string } | null,
+  documento?: { base64: string; mime: string } | null,
 ): Promise<string> {
   const key = await getAnthropicKey(ctx.admin);
   if (!key) return "⚠️ Estou sem a chave de IA configurada. Avise o TI 🙏";
@@ -97,17 +105,19 @@ export async function pensar(
   const system = montarSystem(ctx.dono, pend);
   const msgs = [...mensagens];
 
-  // Visão: injeta a imagem no ÚLTIMO turno do usuário (o inbound atual).
-  if (imagem && msgs.length > 0) {
+  // Anexo (imagem = visão do Opus; PDF = document nativo do Opus): injeta no ÚLTIMO turno do usuário.
+  const anexo = imagem
+    ? { type: "image", source: { type: "base64", media_type: imagem.mime, data: imagem.base64 } }
+    : documento
+    ? { type: "document", source: { type: "base64", media_type: documento.mime || "application/pdf", data: documento.base64 } }
+    : null;
+  if (anexo && msgs.length > 0) {
     const ult = msgs[msgs.length - 1];
     const txt = typeof ult?.content === "string" ? ult.content : "";
-    msgs[msgs.length - 1] = {
-      role: "user",
-      content: [
-        { type: "image", source: { type: "base64", media_type: imagem.mime, data: imagem.base64 } },
-        { type: "text", text: txt || "Interprete esta imagem, por favor." },
-      ],
-    };
+    const pedidoPadrao = imagem
+      ? "Interprete esta imagem, por favor."
+      : "Leia este PDF e me diga o que é / responda o que eu pedir sobre ele.";
+    msgs[msgs.length - 1] = { role: "user", content: [anexo, { type: "text", text: txt || pedidoPadrao }] };
   }
 
   for (let i = 0; i < 6; i++) {

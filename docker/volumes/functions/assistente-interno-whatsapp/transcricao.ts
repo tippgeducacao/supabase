@@ -25,20 +25,36 @@ Gere, em português do Brasil, um documento claro e FIEL ao áudio, com estas se
 Seja fiel: NÃO invente nomes, números ou decisões que não estão no áudio. Se algo não ficou audível/claro, diga.
 Não faça introdução nem despedida — vá direto às seções.`;
 
+const PROMPT_VIDEO =
+`Você recebeu um VÍDEO enviado por um dos donos da PPGVET Educação (educação/pós-graduação em veterinária).
+Analise em português do Brasil, de forma clara e FIEL ao que aparece (use *negrito* nos títulos, estilo WhatsApp):
+
+*O que é o vídeo* — 2 a 4 linhas: tipo de vídeo (criativo/anúncio, gravação de reunião/aula, depoimento, clipe…) e o que mostra.
+*Conteúdo* — o que acontece: cenas, pessoas, texto na tela, produto. Transcreva as falas relevantes se houver áudio.
+*Análise* — se for CRIATIVO/anúncio: avalie gancho, clareza da mensagem, CTA e ritmo, e dê sugestões de melhoria. Se for
+reunião/aula/fala: resuma pontos principais, decisões e ações (com responsável/prazo quando citados).
+
+Seja fiel: NÃO invente. Se algo não estiver claro/audível, diga. Sem introdução nem despedida — vá direto às seções.`;
+
 // ── Fila ─────────────────────────────────────────────────────────────────────
 export async function enfileirarTranscricao(
   admin: any,
-  opts: { canon: string; numero: string; linhaId: string | null; bytes: Uint8Array; mime: string },
+  opts: {
+    canon: string; numero: string; linhaId: string | null; bytes: Uint8Array; mime: string;
+    tipo?: "audio" | "video"; instrucao?: string | null;
+  },
 ): Promise<void> {
-  const path = `assistente/transcricao/${opts.canon}/${Date.now()}.${extDeMime(opts.mime)}`;
+  const tipo = opts.tipo ?? "audio";
+  const path = `assistente/${tipo}/${opts.canon}/${Date.now()}.${extDeMime(opts.mime)}`;
   const { error } = await admin.storage.from(BUCKET).upload(path, opts.bytes, {
-    contentType: opts.mime || "audio/ogg", upsert: true,
+    contentType: opts.mime || (tipo === "video" ? "video/mp4" : "audio/ogg"), upsert: true,
   });
-  if (error) throw new Error(`upload áudio: ${error.message}`);
+  if (error) throw new Error(`upload ${tipo}: ${error.message}`);
   const mb = (opts.bytes.length / (1024 * 1024)).toFixed(0);
   await admin.from("assistente_transcricoes").insert({
     canon: opts.canon, numero: opts.numero, linha_id: opts.linhaId,
     storage_path: path, mime: opts.mime, duracao_hint: `${mb} MB`, status: "fila",
+    tipo, instrucao: opts.instrucao ?? null,
   });
 }
 
@@ -59,7 +75,11 @@ export async function processarTranscricoes(admin: any): Promise<{ processado: n
 
     const key = await googleKey(admin);
     if (!key) throw new Error("sem chave Google (Gemini)");
-    const resultado = await transcreverReuniaoGemini(key, bytes, job.mime || "audio/ogg");
+    const promptBase = job.tipo === "video" ? PROMPT_VIDEO : PROMPT_REUNIAO;
+    const prompt = job.instrucao && String(job.instrucao).trim()
+      ? `${promptBase}\n\nO dono pediu especificamente: "${String(job.instrucao).trim()}" — priorize responder isso na análise.`
+      : promptBase;
+    const resultado = await analisarGemini(key, bytes, job.mime || (job.tipo === "video" ? "video/mp4" : "audio/ogg"), prompt);
 
     await admin.from("assistente_transcricoes")
       .update({ status: "pronto", resultado, erro: null, atualizado_em: new Date().toISOString() })
@@ -75,7 +95,8 @@ export async function processarTranscricoes(admin: any): Promise<{ processado: n
       .eq("id", job.id);
     if (desistir && linha && job.numero) {
       await enviarTexto(linha, job.numero,
-        "Não consegui transcrever essa reunião 😕. O áudio pode estar corrompido ou grande demais — tenta reenviar, ou me manda em partes.").catch(() => {});
+        (job.tipo === "video" ? "Não consegui analisar esse vídeo 😕." : "Não consegui transcrever essa reunião 😕.") +
+        " O arquivo pode estar corrompido ou grande demais — tenta reenviar, ou me manda em partes.").catch(() => {});
     }
     return { processado: 0, erro: msg };
   }
@@ -83,25 +104,28 @@ export async function processarTranscricoes(admin: any): Promise<{ processado: n
 
 /** Entrega o resultado: texto curto no chat; longo vira PDF. */
 async function entregar(admin: any, linha: LinhaWa | null, job: any, resultado: string) {
-  // Registra a transcrição no HISTÓRICO da conversa, senão o bot não "lembra" dela
-  // (ex.: dono pede depois "faz um PDF desse texto que você transcreveu").
-  await logMensagem(admin, job.canon, "outbound", resultado, "transcricao").catch(() => {});
+  const ehVideo = job.tipo === "video";
+  const titulo = ehVideo ? "🎬 *Análise do vídeo*" : "🎙️ *Transcrição da reunião*";
+  // Registra no HISTÓRICO da conversa, senão o bot não "lembra" (ex.: dono pede depois "faz um PDF disso").
+  await logMensagem(admin, job.canon, "outbound", resultado, ehVideo ? "video_analise" : "transcricao").catch(() => {});
   if (!linha || !job.numero) return;
   if (resultado.length <= 3500) {
-    await enviarTexto(linha, job.numero, `🎙️ *Transcrição da reunião*\n\n${resultado}`).catch(() => {});
+    await enviarTexto(linha, job.numero, `${titulo}\n\n${resultado}`).catch(() => {});
     return;
   }
   // longo → PDF
   try {
-    const bytes = await gerarPdf("Transcrição da Reunião", resultado);
-    const path = `assistente/${job.canon}/${Date.now()}-transcricao-reuniao.pdf`;
+    const bytes = await gerarPdf(ehVideo ? "Análise do Vídeo" : "Transcrição da Reunião", resultado);
+    const path = `assistente/${job.canon}/${Date.now()}-${ehVideo ? "analise-video" : "transcricao-reuniao"}.pdf`;
     await admin.storage.from(BUCKET).upload(path, bytes, { contentType: "application/pdf", upsert: true });
     const { data: pub } = admin.storage.from(BUCKET).getPublicUrl(path);
-    await enviarDocumento(linha, job.numero, toPublicUrl(pub?.publicUrl ?? ""), "transcricao-reuniao.pdf", "Transcrição da reunião");
-    await enviarTexto(linha, job.numero, "🎙️ Sua reunião ficou longa — mandei a transcrição completa em *PDF* aqui em cima. 👆").catch(() => {});
+    await enviarDocumento(linha, job.numero, toPublicUrl(pub?.publicUrl ?? ""),
+      ehVideo ? "analise-video.pdf" : "transcricao-reuniao.pdf", ehVideo ? "Análise do vídeo" : "Transcrição da reunião");
+    await enviarTexto(linha, job.numero, ehVideo
+      ? "🎬 Seu vídeo rendeu bastante — mandei a análise completa em *PDF* aqui em cima. 👆"
+      : "🎙️ Sua reunião ficou longa — mandei a transcrição completa em *PDF* aqui em cima. 👆").catch(() => {});
   } catch {
-    // se o PDF falhar, manda o texto mesmo (fatiado)
-    await enviarTexto(linha, job.numero, `🎙️ *Transcrição da reunião*\n\n${resultado.slice(0, 3500)}…`).catch(() => {});
+    await enviarTexto(linha, job.numero, `${titulo}\n\n${resultado.slice(0, 3500)}…`).catch(() => {});
   }
 }
 
@@ -114,7 +138,7 @@ async function googleKey(admin: any): Promise<string | null> {
   return data?.api_key ?? null;
 }
 
-async function transcreverReuniaoGemini(key: string, bytes: Uint8Array, mime: string): Promise<string> {
+async function analisarGemini(key: string, bytes: Uint8Array, mime: string, prompt: string): Promise<string> {
   const fileUri = await uploadEsperarAtivo(key, bytes, mime);
   const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${key}`,
@@ -124,7 +148,7 @@ async function transcreverReuniaoGemini(key: string, bytes: Uint8Array, mime: st
       body: JSON.stringify({
         contents: [{ role: "user", parts: [
           { file_data: { file_uri: fileUri, mime_type: mime } },
-          { text: PROMPT_REUNIAO },
+          { text: prompt },
         ] }],
         generationConfig: { temperature: 0.3, maxOutputTokens: 8192 },
       }),

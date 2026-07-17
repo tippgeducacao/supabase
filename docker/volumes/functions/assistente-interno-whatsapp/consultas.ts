@@ -157,6 +157,16 @@ export const FERRAMENTAS_CONSULTA = [
     input_schema: { type: "object", properties: {} },
   },
   {
+    name: "consultar_quadro",
+    description:
+      "Explora um QUADRO do Gestor de Tarefas pelo nome: total de tarefas, quantidade POR COLUNA/FUNIL, tarefas ATRASADAS (prazo vencido, não concluída) e PRÓXIMAS ENTREGAS/DATAS (com responsável). Serve p/ QUALQUER quadro — ex.: 'TCC e Certificação' (quantos TCCs, alunos por funil, atrasados, quantos p/ emitir certificado), 'Projetos' / 'Novos Projetos' (datas das ABERTURAS de turma/curso), 'Certificado', 'Cursos EAD', 'Módulos Práticos', 'Eventos'. Use para 'quantos X por coluna/etapa', 'quantos atrasados', 'quais as próximas datas / aberturas / turmas', 'como está o quadro Y'. Se o nome bater com vários quadros, devolve as opções p/ o dono escolher o nome exato.",
+    input_schema: {
+      type: "object",
+      properties: { quadro: { type: "string", description: "nome (ou parte) do quadro — ex.: 'TCC', 'Projetos', 'Certificado', 'Módulos Práticos'" } },
+      required: ["quadro"],
+    },
+  },
+  {
     name: "ultima_transcricao",
     description:
       "Recupera o TEXTO da última reunião que você transcreveu (a transcrição/resumo completo). Use quando o dono pedir para 'pegar o texto que você transcreveu', 'fazer um PDF da reunião', 'me manda de novo o resumo da reunião', 'usa aquela transcrição', etc.",
@@ -190,6 +200,7 @@ export async function executarConsulta(nome: string, input: any, ctx: Ctx): Prom
       case "consultar_leads": return await cLeads(input, ctx);
       case "consultar_midia": return await cMidia(input, ctx);
       case "consultar_aulas_nao_confirmadas": return await cAulas(ctx);
+      case "consultar_quadro": return await cQuadro(input, ctx);
       case "consultar_tarefa": return await cTarefa(input, ctx);
       case "ultima_transcricao": return await cUltimaTranscricao(ctx);
       default: return { erro: `consulta desconhecida: ${nome}` };
@@ -516,6 +527,20 @@ async function cMidia(input: any, ctx: Ctx) {
   return {
     ...data,
     _nota: "A 'conta' já é o BM (o nome carrega o rótulo). Gasto é líquido (sem imposto). 'Hoje' é parcial; 'ontem' é o dia fechado.",
+  };
+}
+
+async function cQuadro(input: any, ctx: Ctx) {
+  const q = String(input?.quadro || "").trim();
+  if (q.length < 2) return { erro: "diga o nome do quadro (ex.: TCC, Projetos, Certificado)" };
+  const { data, error } = await ctx.admin.rpc("assist_gt_quadro", { p_busca: q });
+  if (error) throw new Error(error.message);
+  return {
+    ...data,
+    _nota:
+      "Fonte = Gestor de Tarefas (o quadro real, ao vivo). 'colunas' = o funil (quantas tarefas em cada etapa/coluna). " +
+      "'atrasadas' = prazo vencido e ainda não concluída. 'proximas_entregas' = próximas datas (ex.: aberturas de turma/curso, com o responsável). " +
+      "Cada tarefa costuma ser 1 aluno (no TCC) ou 1 projeto/abertura. Se vier 'encontrou:false' com candidatos, mostre as opções e peça o nome exato.",
   };
 }
 
