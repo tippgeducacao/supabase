@@ -99,12 +99,37 @@ function canonicalBrPhone(whats55: string): string {
   return `55${d}`;
 }
 
+// Lê uma chave de `dados` aceitando CAMINHO ANINHADO com "." (ex.: "dados_completos.email" —
+// n8n/Meta que manda o formulário inteiro dentro de um objeto). Regras (2026-07-17):
+// - 1º tenta a chave EXATA no primeiro nível: chave com ponto LITERAL (ex.: "eu_sou...")
+//   continua funcionando como sempre — zero regressão pros mapeamentos flat existentes.
+// - Só então desce o caminho segmento a segmento. Segmento que cai numa STRING que parece
+//   JSON-objeto é parseado (LP form-urlencoded manda o objeto aninhado como string).
+function valorDoPayload(dados: any, chave: string): unknown {
+  if (!dados || typeof dados !== "object") return undefined;
+  const direto = (dados as Record<string, unknown>)[chave];
+  if (direto !== undefined) return direto;
+  if (!chave.includes(".")) return undefined;
+  let atual: unknown = dados;
+  for (const seg of chave.split(".")) {
+    if (typeof atual === "string") {
+      const s = atual.trim();
+      if (!s.startsWith("{")) return undefined;
+      try { atual = JSON.parse(s); } catch { return undefined; }
+    }
+    if (!atual || typeof atual !== "object" || Array.isArray(atual)) return undefined;
+    atual = (atual as Record<string, unknown>)[seg];
+    if (atual === undefined) return undefined;
+  }
+  return atual;
+}
+
 // Procura no payload o primeiro valor cujo target no mapping = wantedTarget.
 function pickByMapping(payload: any, mapping: Record<string, string>, wantedTarget: string): unknown {
   for (const [k, t] of Object.entries(mapping)) {
-    if (t === wantedTarget && payload[k] !== undefined && payload[k] !== null && payload[k] !== "") {
-      return payload[k];
-    }
+    if (t !== wantedTarget) continue;
+    const v = valorDoPayload(payload, k);
+    if (v !== undefined && v !== null && v !== "") return v;
   }
   return undefined;
 }
@@ -146,11 +171,11 @@ function condicaoPassa(c: any, payload: any, email: string | null, whatsapp: str
     case "tem_email":    return !!email;
     case "tem_whatsapp": return !!whatsapp;
     case "campo_existe": {
-      const v = c?.campo ? payload?.[c.campo] : undefined;
+      const v = c?.campo ? valorDoPayload(payload, String(c.campo)) : undefined;
       return v !== undefined && v !== null && String(v).trim() !== "";
     }
     case "campo_igual": {
-      const v = c?.campo ? payload?.[c.campo] : undefined;
+      const v = c?.campo ? valorDoPayload(payload, String(c.campo)) : undefined;
       return v !== undefined && String(v).trim() === String(c?.valor ?? "").trim();
     }
     // tem_tag / tem_segmento e tipos desconhecidos: não aplicados no edge v1 → não bloqueiam
@@ -158,10 +183,11 @@ function condicaoPassa(c: any, payload: any, email: string | null, whatsapp: str
   }
 }
 
-/** Substitui {webhook=Chave} pelo valor do payload (Criação Automática). */
+/** Substitui {webhook=Chave} pelo valor do payload (Criação Automática). Aceita caminho
+ *  aninhado com "." (valorDoPayload) — ex.: {webhook=dados_completos.full_name}. */
 function resolveWebhookVar(template: unknown, payload: any): string {
   return String(template ?? "").replace(/\{webhook=([^}]+)\}/g, (_m, k) => {
-    const v = payload?.[String(k).trim()];
+    const v = valorDoPayload(payload, String(k).trim());
     return v === undefined || v === null ? "" : String(v);
   });
 }
@@ -490,7 +516,7 @@ Deno.serve(async (req) => {
   for (const [alias, chave] of Object.entries(aliasFromMapping)) {
     const meta = camposCatalogo.get(alias);
     if (!meta) continue;
-    const val = asString(dados[chave], 500);
+    const val = asString(valorDoPayload(dados, chave), 500);
     if (val === null) continue;
     if (meta.lead_coluna && LEAD_COLS_WL.has(meta.lead_coluna)) {
       campoFisico[meta.lead_coluna] = val;
