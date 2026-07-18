@@ -152,7 +152,15 @@ Deno.serve(async (req) => {
               { inlineData: { mimeType, data: b64 } },
             ],
           }],
-          generationConfig: { temperature: 0.1, maxOutputTokens: 2048, responseMimeType: "application/json" },
+          // thinkingBudget: 0 desliga o "pensamento" do Gemini 2.5 — senão ele gasta TODO o
+          // maxOutputTokens pensando e devolve saída VAZIA (finishReason MAX_TOKENS), e a
+          // extração vinha toda null. Sem thinking, todos os tokens vão pra resposta JSON.
+          generationConfig: {
+            temperature: 0.1,
+            maxOutputTokens: 4096,
+            responseMimeType: "application/json",
+            thinkingConfig: { thinkingBudget: 0 },
+          },
         }),
       }),
       GEMINI_TIMEOUT_MS,
@@ -167,8 +175,11 @@ Deno.serve(async (req) => {
     }
 
     const data = await aiRes.json();
-    const content: string =
-      data?.candidates?.[0]?.content?.parts?.map((p: any) => p.text || "").join("") ?? "{}";
+    const cand = data?.candidates?.[0];
+    const content: string = cand?.content?.parts?.map((p: any) => p.text || "").join("") ?? "";
+    if (!content) {
+      console.log("financeiro-ler-boleto saída vazia:", JSON.stringify({ finishReason: cand?.finishReason, promptFeedback: data?.promptFeedback }).slice(0, 400));
+    }
 
     let parsed: any = {};
     try {
