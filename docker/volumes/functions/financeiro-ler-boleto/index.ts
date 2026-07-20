@@ -28,6 +28,7 @@ Devolva APENAS um JSON válido (sem markdown, sem texto extra) exatamente neste 
   "documento": "número do documento/nosso número", // null se não achar.
   "linha_digitavel": "APENAS dígitos, sem espaços/pontos",  // null se não houver.
   "codigo_barras": "APENAS dígitos",       // null se não houver.
+  "pix_copia_cola": "código PIX copia-e-cola, se houver", // null se não houver.
   "banco_emissor": "Banco que emitiu o boleto (informativo)", // null se não achar.
   "descricao": "resumo curto do que é o pagamento"  // 1 frase. null se não der pra inferir.
 }
@@ -36,6 +37,7 @@ Regras:
 - valor: só o valor a pagar (não some juros/multa a menos que já estejam no "valor cobrado"/"valor do documento"). Número puro, ex.: 3907.75.
 - Datas SEMPRE em YYYY-MM-DD. Converta dd/mm/aaaa.
 - linha_digitavel e codigo_barras: SOMENTE os dígitos (remova pontos, espaços e a barra).
+- pix_copia_cola: o código PIX "copia e cola" (BR Code) que costuma vir impresso EMBAIXO do QR Code do boleto — uma string longa (geralmente começa com "000201..."). Copie EXATAMENTE como está, SEM remover nada. null se não houver.
 - Não invente. Campo não encontrado = null.
 - Retorne SOMENTE o JSON.`;
 
@@ -208,6 +210,7 @@ Deno.serve(async (req) => {
       documento: str(parsed.documento),
       linha_digitavel: digits(parsed.linha_digitavel),
       codigo_barras: digits(parsed.codigo_barras),
+      pix_copia_cola: str(parsed.pix_copia_cola),
       banco_emissor: str(parsed.banco_emissor),
       descricao: str(parsed.descricao),
     };
