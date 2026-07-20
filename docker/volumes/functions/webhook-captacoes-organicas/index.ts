@@ -227,17 +227,29 @@ serve(async (req) => {
 
     console.log(`📋 Dados do lead:`, leadData);
 
-    const { data: leadInserted, error: leadError } = await supabase
-      .from('leads')
-      .insert([leadData])
-      .select();
-
-    let leadId = null;
-    if (leadError) {
-      console.error('⚠️ Erro ao inserir na tabela leads (captação orgânica já salva):', leadError);
-    } else {
-      leadId = leadInserted[0]?.id;
-      console.log(`✅ Lead também inserido na tabela leads! ID: ${leadId}`);
+    // Dedup por PESSOA (canon: DDD + 8 últimos dígitos). Antes NÃO havia dedup nenhum aqui
+    // → 2ª fonte de leads duplicados (e a inserção da captação já dispara o trigger
+    // notify_webhook_captacao_organica, que também cria/acha o lead por canon). Reusa o
+    // lead existente em vez de criar outro; só insere quando é pessoa realmente nova.
+    let leadId: string | null = null;
+    if (leadData.whatsapp) {
+      const { data: canonId } = await supabase.rpc('crm_lead_find_by_canon', { p_telefone: leadData.whatsapp });
+      if (canonId) {
+        leadId = canonId as string;
+        console.log(`✅ Lead existente reusado por canon (sem duplicar): ${leadId}`);
+      }
+    }
+    if (!leadId) {
+      const { data: leadInserted, error: leadError } = await supabase
+        .from('leads')
+        .insert([leadData])
+        .select();
+      if (leadError) {
+        console.error('⚠️ Erro ao inserir na tabela leads (captação orgânica já salva):', leadError);
+      } else {
+        leadId = leadInserted[0]?.id;
+        console.log(`✅ Lead também inserido na tabela leads! ID: ${leadId}`);
+      }
     }
 
     return new Response(

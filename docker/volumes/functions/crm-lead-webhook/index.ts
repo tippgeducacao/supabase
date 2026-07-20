@@ -622,13 +622,19 @@ Deno.serve(async (req) => {
       existing = data?.[0] ?? null;
     }
     if (!existing && whatsapp) {
-      const variants = [whatsapp, whatsapp.startsWith("55") ? whatsapp.slice(2) : `55${whatsapp}`];
-      const { data } = await admin
-        .from("leads")
-        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, arquivado, arquivado_em")
-        .in("whatsapp", variants)
-        .limit(1);
-      existing = data?.[0] ?? null;
+      // Dedup por PESSOA via canon (DDD + 8 últimos dígitos): tolera 9º dígito / DDI /
+      // formatação. Antes casava só por variante ±55 → criava lead duplicado quando o
+      // 9º dígito diferia (raiz da "caralhada de contato"). Defensivo: se o RPC falhar,
+      // `existing` fica null e o fluxo cai no insert normal (não quebra a captação).
+      const { data: canonId } = await admin.rpc("crm_lead_find_by_canon", { p_telefone: whatsapp });
+      if (canonId) {
+        const { data } = await admin
+          .from("leads")
+          .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, arquivado, arquivado_em")
+          .eq("id", canonId as string)
+          .maybeSingle();
+        existing = data ?? null;
+      }
     }
 
     if (existing) {

@@ -247,16 +247,13 @@ serve(async (req) => {
       vendedor_atribuido: indicacaoData.criado_por_usuario_id || null,
     };
 
-    // ⚠️ VERIFICAR DUPLICADOS DE LEAD - Checar se já existe lead similar nos últimos 5 minutos
-    console.log(`🔍 Verificando duplicados de lead...`);
-    const { data: leadExistente } = await supabase
-      .from('leads')
-      .select('id')
-      .eq('nome', leadData.nome)
-      .eq('whatsapp', leadData.whatsapp)
-      .eq('fonte_referencia', 'Indicação')
-      .gte('created_at', cincoMinutosAtras)
-      .maybeSingle();
+    // Dedup por PESSOA (canon: DDD + 8 últimos dígitos). Antes só casava nome+whatsapp
+    // EXATOS nos últimos 5 min (anti-duplo-clique) → fora da janela / variante de 9º
+    // criava lead novo. Agora reusa o lead existente da pessoa (qualquer fonte); a
+    // indicação segue registrada e é vinculada a ele.
+    console.log(`🔍 Verificando duplicados de lead (canon)...`);
+    const { data: canonLeadId } = await supabase.rpc('crm_lead_find_by_canon', { p_telefone: leadData.whatsapp });
+    const leadExistente = canonLeadId ? { id: canonLeadId as string } : null;
 
     if (leadExistente) {
       console.log(`⚠️ Lead duplicado detectado! Usando lead existente: ${leadExistente.id}`);
