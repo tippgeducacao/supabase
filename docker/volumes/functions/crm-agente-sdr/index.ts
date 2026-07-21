@@ -19,7 +19,7 @@ import { atualizarAgenteComRatchet, atualizarLead, buscarLead, carregarHistorico
 import { carregarTools, chamarAgentePrincipal, chamarRouter } from './agente.ts';
 import { type CtxConversa, executarTool, montarToolResults } from './tools.ts';
 import { prepararMensagem } from './midia.ts';
-import { enviarResposta } from './saida.ts';
+import { enviarResposta, removerRaciocinioVazado } from './saida.ts';
 import { contaDoLead } from './conta.ts';
 import { rodarEsteiraFollowup } from './followup.ts';
 import { rodarEsteiraFollowupTemplate } from './followup-template.ts';
@@ -135,6 +135,20 @@ async function iaPausada(remotejid: string): Promise<boolean> {
     return false; // em erro de leitura, não bloqueia (mantém o comportamento atual)
   }
   return data?.pausa_ia === true;
+}
+
+// Raciocínio simulado em <thinking>…</thinking> DENTRO do bloco de texto não pode
+// ficar no histórico: o modelo lê o próprio turno anterior e repete o padrão na volta
+// seguinte (auto-reforço). O envio já é protegido em saida.ts; aqui é a 2ª camada.
+// ⚠️ Só troca o texto quando sobra conteúdo — bloco `text` VAZIO no histórico é 400 na
+// Anthropic, então turno que era só raciocínio é gravado como veio (fiel, e nunca sai).
+function semRaciocinioNoTexto(content: any): any {
+  if (!Array.isArray(content)) return content;
+  return content.map((b: any) => {
+    if (b?.type !== 'text' || typeof b.text !== 'string') return b;
+    const limpo = removerRaciocinioVazado(b.text);
+    return limpo && limpo !== b.text ? { ...b, text: limpo } : b;
+  });
 }
 
 // ── uma rodada do agente sobre um lote de mensagens drenadas ────────────────
@@ -305,7 +319,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       texto: iaTexto ? resumir(iaTexto, 2000) : undefined,
       tools_decididas: iaTools.length ? iaTools : undefined,
     }, Date.now() - inicioLlm);
-    await gravarMensagem(supabase, remotejid, { role: 'assistant', content: resp.content });
+    await gravarMensagem(supabase, remotejid, { role: 'assistant', content: semRaciocinioNoTexto(resp.content) });
 
     const toolUses = (resp.content ?? []).filter((b: any) => b.type === 'tool_use');
     if (toolUses.length) {

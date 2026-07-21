@@ -42,6 +42,32 @@ const CHUNKING_SCHEMA = {
   },
 } as const;
 
+// ── RACIOCÍNIO NUNCA CHEGA AO LEAD ──────────────────────────────────────────
+// O thinking NATIVO vem em blocos `type:'thinking'` (que o loop já ignora, ele só
+// junta os `type:'text'`). Mas de vez em quando o modelo SIMULA o raciocínio DENTRO
+// do bloco de texto, embrulhado em <thinking>…</thinking> — e aí o texto inteiro ia
+// pro chunker e pro lead. Foi o caso Susana (2026-07-21, 09:55): a volta pós-tool
+// voltou com um único bloco `text` = "<thinking> …raciocínio em inglês… </thinking>
+// a pós é online com aulas ao vivo…" → 13 balões de raciocínio entregues no WhatsApp
+// (a resposta de verdade só saía no fim). Ocorreu 5x em 30 dias, desde 2026-06-30.
+// A régua vive aqui, no funil por onde TODO balão passa (agente SDR, follow-up e
+// webchat chamam humanizarTexto), e não no prompt: instrução o modelo desobedece.
+const RE_TAG_RACIOCINIO = /<\/?(?:antml:)?(?:thinking|thought|thoughts|scratchpad|reasoning|reflection)\b/i;
+const TAGS_RACIOCINIO = '(?:antml:)?(?:thinking|thoughts|thought|scratchpad|reasoning|reflection)';
+
+export function removerRaciocinioVazado(texto: string): string {
+  let t = texto ?? '';
+  if (!RE_TAG_RACIOCINIO.test(t)) return t; // caso comum: nada a fazer
+  // 1. par completo <thinking>…</thinking> (várias ocorrências, multilinha)
+  t = t.replace(new RegExp(`<(${TAGS_RACIOCINIO})\\b[^>]*>[\\s\\S]*?<\\/\\1\\s*>`, 'gi'), '');
+  // 2. abertura SEM fechamento: resposta cortada no meio do raciocínio (max_tokens)
+  //    ⇒ do <thinking> até o fim é raciocínio, nada dali serve ao lead.
+  t = t.replace(new RegExp(`<${TAGS_RACIOCINIO}\\b[^>]*>[\\s\\S]*$`, 'i'), '');
+  // 3. fechamento órfão: o raciocínio começou sem tag ⇒ tudo ANTES do </thinking> é dele.
+  t = t.replace(new RegExp(`^[\\s\\S]*?<\\/${TAGS_RACIOCINIO}\\s*>`, 'i'), '');
+  return t.replace(/\n{3,}/g, '\n\n').trim();
+}
+
 // Garantia em código da regra de ouro de humanização do prompt ("antes de
 // enviar, remova qualquer ! e qualquer travessão"): o modelo vaza de vez em
 // quando, então a régua é aplicada aqui, onde nenhum balão escapa.
@@ -49,7 +75,7 @@ const CHUNKING_SCHEMA = {
 //   !                          → ponto
 // Hífen DENTRO de palavra (pós-graduação, segunda-feira) é preservado.
 export function humanizarTexto(texto: string): string {
-  let t = texto;
+  let t = removerRaciocinioVazado(texto);
   t = t.replace(/\s*[—–]\s*/g, ', ');        // travessão tipográfico vira vírgula
   t = t.replace(/(^|\s)-(\s|$)/gm, '$1, ');  // hífen solto usado como travessão
   t = t.replace(/([?])!+/g, '$1');           // "?!" vira só "?"
@@ -133,8 +159,22 @@ export async function enviarResposta(
   pausada?: () => Promise<boolean>,
 ): Promise<void> {
   const textoLimpo = humanizarTexto(texto);
+  const raciocinioRemovido = RE_TAG_RACIOCINIO.test(texto);
+  // Só raciocínio, sem resposta ao lead (ex.: <thinking> truncado por max_tokens):
+  // silêncio é melhor que vazar o pensamento — a rodada fica registrada no Debug.
+  if (!textoLimpo) {
+    tel?.registrar('raciocinio_removido', {
+      restou_vazio: true,
+      original: texto.length > 600 ? texto.slice(0, 600) + '…' : texto,
+    });
+    return;
+  }
   const chunks = await fracionarResposta(textoLimpo);
-  tel?.registrar('resposta_chunks', { total: chunks.length, sanitizado: textoLimpo !== texto });
+  tel?.registrar('resposta_chunks', {
+    total: chunks.length,
+    sanitizado: textoLimpo !== texto,
+    raciocinio_removido: raciocinioRemovido || undefined,
+  });
   let enviados = 0;
   for (const chunk of chunks) {
     const delay = calcularDelaySegundos(chunk);

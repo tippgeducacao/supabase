@@ -72,9 +72,12 @@ function textoDe(blocos: any[]): string {
 }
 
 // Resposta final → balões (humaniza + fraciona). Fallback = balão único (resposta > silêncio).
+// ⚠️ humanizarTexto REMOVE raciocínio vazado em <thinking>…</thinking> — se o modelo só
+// pensou (sem resposta), o texto zera: devolve [] e quem chama usa o fallback, nunca balão vazio.
 async function emChunks(texto: string): Promise<string[]> {
   const limpo = humanizarTexto(texto);
-  const chunks = await fracionarResposta(limpo);
+  if (!limpo) return [];
+  const chunks = (await fracionarResposta(limpo)).filter((c) => c.trim().length > 0);
   return chunks.length ? chunks : [limpo];
 }
 
@@ -82,7 +85,7 @@ async function emChunks(texto: string): Promise<string[]> {
 // parágrafos (saudação + oferta) ou, se vier num parágrafo só, na 1ª fronteira de frase.
 function dividirAberturaEm2(texto: string): string[] {
   const t = humanizarTexto(texto || "").trim();
-  if (!t) return [t];
+  if (!t) return []; // só raciocínio (<thinking>) ou vazio → quem chama usa o fallback
   const paras = t.split(/\n\s*\n/).map((s) => s.trim()).filter(Boolean);
   if (paras.length >= 2) return [paras[0], paras.slice(1).join("\n\n")];
   const m = t.match(/^(.+?[.?!])\s+(.+)$/s);
@@ -150,7 +153,8 @@ export async function aberturaWebchat(nome: string, curso: string | null): Promi
     const data = await res.json();
     const texto = textoDe(data.content);
     // abertura em 2 balões MANUAIS (sem fracionador) — pedido do diretor
-    return texto ? dividirAberturaEm2(texto) : [fallback];
+    const baloes = texto ? dividirAberturaEm2(texto) : [];
+    return baloes.length ? baloes : [fallback];
   } catch (_e) {
     return [fallback];
   }
@@ -197,7 +201,9 @@ export async function responderWebchat(
     const toolUses = blocos.filter((b) => b.type === "tool_use");
 
     if (!toolUses.length) {
-      return { chunks: await emChunks(textoDe(blocos) || "Pode me contar um pouco mais? 😊"), estagio };
+      const fallback = "Pode me contar um pouco mais? 😊";
+      const chunks = await emChunks(textoDe(blocos) || fallback);
+      return { chunks: chunks.length ? chunks : [fallback], estagio };
     }
 
     // executa as tools REAIS (mesma implementação do WhatsApp) e continua o loop.
