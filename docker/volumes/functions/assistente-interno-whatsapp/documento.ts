@@ -63,9 +63,12 @@ export async function gerarPdf(titulo: string, conteudo: string): Promise<Uint8A
   for (const bruto of sanitize(conteudo).split("\n")) {
     const l = bruto.trimEnd();
     if (!l.trim()) { y -= 6; continue; }
+    // Título de seção do WhatsApp: linha inteira entre *asteriscos* (ex.: *Contexto*, *Adri*).
+    const tituloWpp = l.trim().match(/^\*(.+)\*$/);
+    if (tituloWpp) { y -= 6; escrever(tituloWpp[1].trim(), negrito, 13, 5); continue; }
     if (/^#{1,3}\s+/.test(l)) { y -= 6; escrever(l.replace(/^#{1,3}\s+/, ""), negrito, 13, 5); continue; }
-    if (/^[-*•]\s+/.test(l)) { escrever("• " + l.replace(/^[-*•]\s+/, ""), fonte, 11, 3); continue; }
-    escrever(l.replace(/\*\*/g, ""), fonte, 11, 4);
+    if (/^[-*•]\s+/.test(l)) { escrever("• " + l.replace(/^[-*•]\s+/, "").replace(/\*/g, ""), fonte, 11, 3); continue; }
+    escrever(l.replace(/\*/g, ""), fonte, 11, 4);
   }
   return await doc.save();
 }

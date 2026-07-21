@@ -630,19 +630,31 @@ function stripHtml(s: string): string {
 }
 
 async function cUltimaTranscricao(ctx: Ctx) {
-  const { data } = await ctx.admin
+  // Reunião em áudio vira 2 jobs (tipo 'audio' = RESUMO/ata · 'transcricao' = verbatim). Aqui
+  // preferimos o RESUMO — é o que "o texto da reunião" costuma significar; o verbatim é enorme.
+  const { data: resumo } = await ctx.admin
     .from("assistente_transcricoes")
     .select("resultado, status, criado_em")
+    .eq("canon", ctx.canon)
+    .in("tipo", ["audio", "video"])
+    .eq("status", "pronto")
+    .order("criado_em", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (resumo?.resultado) {
+    return { encontrou: true, transcricao: resumo.resultado,
+      _instrucao: "Resumo/ata da última reunião. Use como o dono pediu (ex.: chamar gerar_pdf com este texto)." };
+  }
+  // Nenhum resumo pronto ainda: ou está processando, ou nunca houve.
+  const { data: qualquer } = await ctx.admin
+    .from("assistente_transcricoes")
+    .select("status, criado_em")
     .eq("canon", ctx.canon)
     .order("criado_em", { ascending: false })
     .limit(1)
     .maybeSingle();
-  if (data?.status === "pronto" && data?.resultado) {
-    return { encontrou: true, transcricao: data.resultado,
-      _instrucao: "Texto da última reunião transcrita. Use como o dono pediu (ex.: chamar gerar_pdf com este texto)." };
-  }
-  if (data?.status === "processando" || data?.status === "fila") {
-    return { encontrou: false, mensagem: "Ainda estou transcrevendo a última reunião — daqui a pouco fica pronta." };
+  if (qualquer?.status === "processando" || qualquer?.status === "fila") {
+    return { encontrou: false, mensagem: "Ainda estou transcrevendo/resumindo a última reunião — daqui a pouco fica pronta." };
   }
   return { encontrou: false, mensagem: "Não achei nenhuma reunião transcrita ainda." };
 }

@@ -11,7 +11,7 @@ import {
 } from "./db.ts";
 import { carregarLinha, enviarTexto, baixarImagem, baixarAudioBytes, baixarVideoBytes, baixarDocumento, type LinhaWa } from "./wa.ts";
 import { transcreverBytes } from "./transcrever.ts";
-import { enfileirarTranscricao, processarTranscricoes } from "./transcricao.ts";
+import { enfileirarTranscricao, enfileirarReuniaoAudio, processarTranscricoes } from "./transcricao.ts";
 import { pensar } from "./brain.ts";
 
 // Áudio maior que isto = REUNIÃO → pipeline Gemini em background (Whisper tem teto ~25MB).
@@ -117,11 +117,11 @@ async function processarMensagem(admin: any, linha: LinhaWa | null, msg: any) {
         return;
       }
       if (bytes.length > LIMITE_WHISPER) {
-        // REUNIÃO (áudio longo) → transcrição em background (Gemini). Não segue pro cérebro.
-        await enfileirarTranscricao(admin, { canon: c, numero: msg.fromDigits, linhaId: linha.id ?? null, bytes, mime });
+        // REUNIÃO (áudio longo) → 2 jobs em background (resumo + transcrição verbatim). Não segue pro cérebro.
+        await enfileirarReuniaoAudio(admin, { canon: c, numero: msg.fromDigits, linhaId: linha.id ?? null, bytes, mime });
         await atualizarConteudoInbound(admin, claim.id, "[áudio de reunião — transcrevendo]", "audio");
         await enviar(admin, linha, msg.fromDigits, c,
-          "🎙️ Recebi seu áudio de reunião! Tô transcrevendo e resumindo (decisões + pontos de ação) — te devolvo aqui em alguns minutos. Pode seguir usando normal enquanto isso. 👍");
+          "🎙️ Recebi seu áudio de reunião! Tô montando o *resumo* (contexto, decisões e tarefas por responsável) e, logo depois, a *transcrição completa* palavra por palavra — te mando os dois aqui em alguns minutos. Áudio longo (1h+) funciona, é só aguardar. 👍");
         return;
       }
       texto = await transcreverBytes(bytes, mime);
