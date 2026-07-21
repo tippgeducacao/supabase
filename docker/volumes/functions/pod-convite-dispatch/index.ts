@@ -20,6 +20,12 @@ const TOQUE_TEMPLATE: Record<number, string> = {
   2: "podcast_followup_1",
   3: "podcast_followup_2",
 };
+// FASE DE AGENDAMENTO (Interessado): templates dos follow-ups 1/2/3 que empurram a gravação.
+const TOQUE_TEMPLATE_AGENDA: Record<number, string> = {
+  1: "podcast_agenda_1",
+  2: "podcast_agenda_2",
+  3: "podcast_agenda_3",
+};
 
 function primeiroNome(nome?: string | null): string {
   return String(nome ?? "").trim().split(/\s+/)[0] || "Professor(a)";
@@ -112,6 +118,24 @@ async function handler(req: Request): Promise<Response> {
       Deno.env.get("SUPABASE_URL") ?? "",
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
     );
+
+    // FASE DE AGENDAMENTO (Interessado): envio de UM convidado, sob demanda (clique do
+    // atendente = a aprovação). NÃO é o cron — o cron nunca manda body com modo 'agenda'.
+    // Gate: só usuário do pedagógico dispara (o modo envia mensagem real a uma pessoa).
+    const body = await req.json().catch(() => ({} as any));
+    if (body?.modo === "agenda" && body?.candidato_id) {
+      const authHeader = req.headers.get("Authorization") ?? "";
+      const userClient = createClient(
+        Deno.env.get("SUPABASE_URL") ?? "",
+        Deno.env.get("SUPABASE_ANON_KEY") ?? "",
+        { global: { headers: { Authorization: authHeader } } },
+      );
+      const { data: { user } } = await userClient.auth.getUser();
+      if (!user) return json({ ok: false, error: "não autenticado" }, 401);
+      const { data: pode } = await admin.rpc("user_can_access_pedagogico", { _user_id: user.id });
+      if (!pode) return json({ ok: false, error: "sem permissão (pedagógico)" }, 403);
+      return await dispatchAgenda(admin, String(body.candidato_id), json);
+    }
 
     let mode = "off";
     let intervaloH = 48;
@@ -278,6 +302,100 @@ async function handler(req: Request): Promise<Response> {
   }
 }
 
+// FASE DE AGENDAMENTO — envia UM follow-up de agendamento para UM convidado 'respondeu'
+// (chamado pelo clique do atendente na tela; o clique É a aprovação). Reusa toda a máquina
+// de envio (template Meta por uso_cadencia 'podcast_agenda_N' + e-mail 0704/5/6 + SAC).
+// WhatsApp só sai se o template estiver 'aprovado' na Meta; senão vai só e-mail (no-op no zap).
+async function dispatchAgenda(admin: any, candidatoId: string, json: (b: unknown, s?: number) => Response): Promise<Response> {
+  const { data: cfg } = await admin
+    .from("ped_configuracoes").select("chave, valor")
+    .in("chave", ["podcast_agenda_intervalo_horas", "podcast_email_caixa_id"]);
+  const map = new Map((cfg ?? []).map((c: any) => [c.chave, c.valor]));
+  const intervaloH = parseInt((map.get("podcast_agenda_intervalo_horas") as string) || "72", 10) || 72;
+  const caixaId = (map.get("podcast_email_caixa_id") as string) || null;
+  const nowIso = new Date().toISOString();
+  const proximaEm = new Date(Date.now() + intervaloH * 3600_000).toISOString();
+
+  const { data: c } = await admin
+    .from("pod_convite_candidatos")
+    .select("id, podcast_id, professor_id, status, agenda_toque, professor:ped_professores(nome,email,contato_whatsapp), podcast:ped_podcasts(nome,youtube_url)")
+    .eq("id", candidatoId).maybeSingle();
+  if (!c) return json({ ok: false, error: "candidato não encontrado" }, 404);
+  if (c.status !== "respondeu") return json({ ok: false, error: `candidato não está em Interessado (status=${c.status})` }, 409);
+
+  const proxToque = (c.agenda_toque ?? 0) + 1;
+  if (proxToque > 3) return json({ ok: false, error: "esgotou os 3 follow-ups de agendamento", esgotado: true }, 409);
+
+  const nome = primeiroNome(c.professor?.nome);
+  const podcastNome = c.podcast?.nome ?? "podcast";
+  const youtube = c.podcast?.youtube_url ?? "";
+
+  // ---- WhatsApp (Meta template 'podcast_agenda_N', se aprovado + convidado tem número) ----
+  const { data: waRow } = await admin.rpc("get_wa_account_podcast");
+  const wa = Array.isArray(waRow) ? waRow[0] : waRow;
+  const { data: tpls } = await admin
+    .from("ped_wa_templates")
+    .select("nome, idioma, corpo, variaveis_mapping")
+    .eq("uso_cadencia", TOQUE_TEMPLATE_AGENDA[proxToque]).eq("status", "aprovado").eq("ativo", true).limit(1);
+  const tpl = (tpls ?? [])[0];
+
+  const to = formatPhone(c.professor?.contato_whatsapp);
+  let waOk = false;
+  if (wa?.phone_number_id && wa?.access_token && tpl && to) {
+    const vm = (tpl.variaveis_mapping && typeof tpl.variaveis_mapping === "object")
+      ? tpl.variaveis_mapping : { "1": "nome_convidado", "2": "nome_podcast" };
+    const bodyParams = Object.keys(vm).filter((k) => /^\d+$/.test(k)).sort((a, b) => Number(a) - Number(b))
+      .map((k) => ({ type: "text", text: sanitizeWaParam(resolverVar(vm[k], { nome, podcast: podcastNome, youtube })) }));
+    const r = await fetch(`${META_GRAPH}/${wa.phone_number_id}/messages`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${wa.access_token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messaging_product: "whatsapp", to, type: "template",
+        template: { name: tpl.nome, language: { code: tpl.idioma || "pt_BR" }, components: [{ type: "body", parameters: bodyParams }] },
+      }),
+    });
+    waOk = r.ok;
+    const waResp = await r.json().catch(() => ({} as any));
+    if (r.ok) {
+      const textoAgenda = renderTemplate(tpl.corpo, bodyParams) || `Follow-up de agendamento · ${podcastNome}`;
+      await logPodcastConversaSac(admin, {
+        professorId: c.professor_id, telefone: c.professor?.contato_whatsapp ?? null, nome: c.professor?.nome ?? null,
+        podcastId: c.podcast_id, waAccountId: wa.id ?? null, direcao: "outbound",
+        conteudo: textoAgenda, waMessageId: waResp?.messages?.[0]?.id ?? null, templateName: tpl.nome, enviadaEm: nowIso,
+      });
+    } else {
+      console.error("[pod-dispatch agenda] wa fail", c.id, JSON.stringify(waResp));
+    }
+  }
+
+  // ---- E-mail (best-effort; templates 0704/5/6) ----
+  let emailOk = false;
+  const emailCtx = await resolverEmail(admin, caixaId, TEMPLATE_EMAIL_AGENDA);
+  if (emailCtx && c.professor?.email) {
+    emailOk = await enviarEmail(emailCtx, c.professor.email, nome, podcastNome, youtube, proxToque, wa?.phone_number ?? "", "agenda");
+  }
+
+  if (!waOk && !emailOk) {
+    return json({
+      ok: false,
+      error: to || c.professor?.email
+        ? "não foi possível enviar (WhatsApp e e-mail falharam ou o template do WhatsApp ainda não foi aprovado e o convidado não tem e-mail)"
+        : "convidado sem e-mail e sem WhatsApp válido",
+      enviados: 0,
+    }, 422);
+  }
+
+  const upd: Record<string, any> = {
+    agenda_toque: proxToque, agenda_ultimo_toque_em: nowIso, agenda_proxima_acao_em: proximaEm,
+  };
+  if (waOk) upd.agenda_wpp_em = nowIso;
+  if (emailOk) upd.agenda_email_em = nowIso;
+  // guard: só avança quem ainda está 'respondeu' (não sobrescreve se o atendente mudou o status)
+  await admin.from("pod_convite_candidatos").update(upd).eq("id", c.id).eq("status", "respondeu");
+
+  return json({ ok: true, enviados: (waOk ? 1 : 0) + (emailOk ? 1 : 0), wa: waOk, email: emailOk, toque: proxToque });
+}
+
 // Os 3 e-mails automáticos viraram templates EDITÁVEIS na aba Templates (ids fixos). Se existirem e
 // estiverem ativos, o motor usa o corpo editável; senão cai no corpo embutido (corpoEmailFixo).
 const TEMPLATE_EMAIL_TOQUE: Record<number, string> = {
@@ -285,17 +403,23 @@ const TEMPLATE_EMAIL_TOQUE: Record<number, string> = {
   2: "9dc0a5e1-0000-4000-8000-000000000702",
   3: "9dc0a5e1-0000-4000-8000-000000000703",
 };
+// FASE DE AGENDAMENTO: e-mails editáveis dos follow-ups 1/2/3 do Interessado.
+const TEMPLATE_EMAIL_AGENDA: Record<number, string> = {
+  1: "9dc0a5e1-0000-4000-8000-000000000704",
+  2: "9dc0a5e1-0000-4000-8000-000000000705",
+  3: "9dc0a5e1-0000-4000-8000-000000000706",
+};
 type TplEmail = { assunto: string; corpo: string };
 
-async function carregarTemplatesEmail(admin: any): Promise<Map<number, TplEmail>> {
-  const ids = Object.values(TEMPLATE_EMAIL_TOQUE);
+async function carregarTemplatesEmail(admin: any, idMap: Record<number, string> = TEMPLATE_EMAIL_TOQUE): Promise<Map<number, TplEmail>> {
+  const ids = Object.values(idMap);
   const m = new Map<number, TplEmail>();
   try {
     const { data } = await admin
       .from("email_templates").select("id, assunto, corpo_html, ativo")
       .in("id", ids).eq("ativo", true);
     const byId = new Map((data ?? []).map((t: any) => [t.id, t]));
-    for (const [toque, id] of Object.entries(TEMPLATE_EMAIL_TOQUE)) {
+    for (const [toque, id] of Object.entries(idMap)) {
       const t: any = byId.get(id);
       if (t?.corpo_html) m.set(Number(toque), { assunto: t.assunto ?? "", corpo: t.corpo_html });
     }
@@ -303,7 +427,7 @@ async function carregarTemplatesEmail(admin: any): Promise<Map<number, TplEmail>
   return m;
 }
 
-async function resolverEmail(admin: any, caixaId: string | null) {
+async function resolverEmail(admin: any, caixaId: string | null, idMap: Record<number, string> = TEMPLATE_EMAIL_TOQUE) {
   if (!caixaId) return null;
   const { data: caixa } = await admin
     .from("email_caixas_conectadas")
@@ -313,7 +437,7 @@ async function resolverEmail(admin: any, caixaId: string | null) {
   const { data: integ } = await admin
     .from("calendar_integrations").select("*").eq("id", caixa.calendar_integration_id).maybeSingle();
   if (!integ) return null;
-  const tplEmail = await carregarTemplatesEmail(admin);
+  const tplEmail = await carregarTemplatesEmail(admin, idMap);
   return { admin, caixa, integ, tplEmail };
 }
 
@@ -339,9 +463,30 @@ function renderTemplateEmail(tpl: TplEmail, nome: string, podcast: string, youtu
   return { assunto, html };
 }
 
-function corpoEmail(nome: string, podcast: string, youtube: string, toque: number, waNumero: string, tplEmail?: Map<number, TplEmail>): { assunto: string; html: string } {
+// Fallback embutido da FASE DE AGENDAMENTO (só se o template editável 0704/5/6 for apagado).
+function corpoEmailAgendaFallback(nome: string, podcast: string, toque: number, waNumero: string): { assunto: string; html: string } {
+  const p = htmlEscape(podcast);
+  const assunto = toque === 1
+    ? `Vamos agendar sua gravação no ${podcast}?`
+    : `Sobre a sua gravação no ${podcast}`;
+  let corpo: string;
+  if (toque === 1) {
+    corpo = `<p>Que bom que você tem interesse em gravar com a gente! 🎙️</p>` +
+      `<p>Para seguir, é só me dizer um ou dois dias/horários que funcionem melhor para você que eu já reservo a sua gravação no <strong>${p} Podcast</strong>. É online, de 30 a 45 minutos, e nós cuidamos de toda a edição.</p>`;
+  } else if (toque === 2) {
+    corpo = `<p>Passando para saber se você conseguiu ver as datas para a sua gravação no <strong>${p} Podcast</strong>. Me diz o melhor dia/horário para você que a gente já deixa tudo reservado.</p>`;
+  } else {
+    corpo = `<p>Estou passando uma última vez para fecharmos a agenda da sua gravação no <strong>${p} Podcast</strong> 🙂.</p>` +
+      `<p>Se ainda tiver interesse, é só me dizer um horário que funcione. Se preferir deixar para mais para frente, sem problema — é só me avisar.</p>`;
+  }
+  const html = `<p>Olá ${htmlEscape(nome)}, tudo bem?</p>` + corpo + blocoWhatsapp(nome, podcast, waNumero) + `<p>Um abraço,<br>Janaína · PPGVET</p>`;
+  return { assunto, html };
+}
+
+function corpoEmail(nome: string, podcast: string, youtube: string, toque: number, waNumero: string, tplEmail?: Map<number, TplEmail>, fase: "fria" | "agenda" = "fria"): { assunto: string; html: string } {
   const tpl = tplEmail?.get(toque);
   if (tpl) return renderTemplateEmail(tpl, nome, podcast, youtube, waNumero);
+  if (fase === "agenda") return corpoEmailAgendaFallback(nome, podcast, toque, waNumero);
   // ---- fallback embutido (caso o template tenha sido apagado/desativado na UI) ----
   const p = htmlEscape(podcast);
   const assunto = toque === 1
@@ -369,9 +514,9 @@ function corpoEmail(nome: string, podcast: string, youtube: string, toque: numbe
   return { assunto, html };
 }
 
-async function enviarEmail(ctx: any, to: string, nome: string, podcast: string, youtube: string, toque: number, waNumero: string): Promise<boolean> {
+async function enviarEmail(ctx: any, to: string, nome: string, podcast: string, youtube: string, toque: number, waNumero: string, fase: "fria" | "agenda" = "fria"): Promise<boolean> {
   try {
-    const { assunto, html } = corpoEmail(nome, podcast, youtube, toque, waNumero, ctx.tplEmail);
+    const { assunto, html } = corpoEmail(nome, podcast, youtube, toque, waNumero, ctx.tplEmail, fase);
     const token = await ensureToken(ctx.admin, ctx.integ);
     const raw = [
       `From: ${encodeDisplayName(ctx.caixa.nome_exibicao || "PPGVET")} <${ctx.caixa.email_caixa}>`,
