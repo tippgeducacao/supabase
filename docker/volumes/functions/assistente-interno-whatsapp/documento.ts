@@ -20,6 +20,7 @@ const toPublicUrl = (u: string) => u.replace(/^https?:\/\/(supabase-)?kong:8000/
 function sanitize(s: string): string {
   return String(s || "")
     .replace(/[—–]/g, "-").replace(/[“”]/g, '"').replace(/[‘’]/g, "'").replace(/…/g, "...")
+    .replace(/^[ \t]*•[ \t]*/gm, "- ") // bullet Unicode do modelo vira "-" ANTES do strip Latin-1
     .replace(/[^\x09\x0A\x0D\x20-\xFF]/g, ""); // fora do Latin-1 (emoji etc.) → remove
 }
 
@@ -31,17 +32,19 @@ function slug(s: string): string {
 const semAcento = (s: string) =>
   s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim();
 
-/** Seções de 1º nível da ata/análise. O resto de `*Texto*` vira SUBTÍTULO (tema ou pessoa). */
-const SECOES = [
+/** Seções de 1º nível da ata/análise — casadas por IGUALDADE EXATA (normalizada), nunca por
+ *  prefixo: um TEMA como "*Análise das capas*" ou "*Decisões sobre o catálogo*" tem que continuar
+ *  SUBTÍTULO, senão a hierarquia da ata desmonta (achado da revisão adversarial). Parentético
+ *  serve pras variantes do prompt: "Pendências (em aberto)", "Decisões (o que foi acordado)". */
+const SECOES = new Set([
   "identificacao", "resumo executivo", "contexto", "pauta e discussoes",
-  "principais pontos discutidos", "decisoes", "pendencias", "em aberto",
-  "tarefas por responsavel", "prazos e datas", "proximos passos",
+  "principais pontos discutidos", "decisoes", "decisoes o que foi acordado",
+  "pendencias", "pendencias em aberto", "em aberto", "em aberto a definir",
+  "tarefas por responsavel", "prazos e datas", "prazos e datas citados", "proximos passos",
   "o que e o video", "conteudo", "analise",
-];
-const ehSecao = (t: string) => {
-  const n = semAcento(t).replace(/[():]/g, " ").replace(/\s+/g, " ").trim();
-  return SECOES.some((s) => n === s || n.startsWith(s + " ") || n.startsWith(s));
-};
+]);
+const ehSecao = (t: string) =>
+  SECOES.has(semAcento(t).replace(/[():]/g, " ").replace(/\s+/g, " ").trim());
 
 export type PdfOpts = {
   /** Linha cinza abaixo do título (default: "PPGVET Educacao · <data de hoje>"). */
@@ -73,14 +76,28 @@ export async function gerarPdf(titulo: string, conteudo: string, opts: PdfOpts =
   let page = novaPagina();
   let y = H - M;
 
+  /** Token maior que a coluna (URL longa) é FATIADO — senão sangra pra fora da página. */
+  const fatiar = (p: string, f: any, size: number, larg: number): string[] => {
+    if (f.widthOfTextAtSize(p, size) <= larg) return [p];
+    const partes: string[] = [];
+    let atual = "";
+    for (const ch of p) {
+      if (atual && f.widthOfTextAtSize(atual + ch, size) > larg) { partes.push(atual); atual = ch; }
+      else atual += ch;
+    }
+    if (atual) partes.push(atual);
+    return partes;
+  };
   const quebra = (txt: string, f: any, size: number, larg: number): string[] => {
     const out: string[] = [];
     for (const par of String(txt).split("\n")) {
       let linha = "";
-      for (const p of par.split(/\s+/)) {
-        const teste = linha ? `${linha} ${p}` : p;
-        if (linha && f.widthOfTextAtSize(teste, size) > larg) { out.push(linha); linha = p; }
-        else linha = teste;
+      for (const cru of par.split(/\s+/)) {
+        for (const p of fatiar(cru, f, size, larg)) {
+          const teste = linha ? `${linha} ${p}` : p;
+          if (linha && f.widthOfTextAtSize(teste, size) > larg) { out.push(linha); linha = p; }
+          else linha = teste;
+        }
       }
       out.push(linha);
     }
@@ -117,10 +134,13 @@ export async function gerarPdf(titulo: string, conteudo: string, opts: PdfOpts =
   const LARG_ROT = 116;
   const linhaInfo = (rotulo: string, valor: string) => {
     const linhas = quebra(sanitize(valor), fonte, 10.5, LARG - LARG_ROT);
-    cabe(linhas.length * 14 + 4);
-    const yRot = y;
-    page.drawText(sanitize(rotulo).toUpperCase(), { x: M, y: yRot - 9, size: 7.6, font: negrito, color: CINZA });
+    let rotuloDesenhado = false;
     for (const l of linhas) {
+      cabe(14); // pagina POR LINHA — um Participantes gigante não pode desenhar por cima do rodapé
+      if (!rotuloDesenhado) {
+        page.drawText(sanitize(rotulo).toUpperCase(), { x: M, y: y - 9, size: 7.6, font: negrito, color: CINZA });
+        rotuloDesenhado = true;
+      }
       page.drawText(l, { x: M + LARG_ROT, y: y - 10.5, size: 10.5, font: fonte, color: TINTA });
       y -= 14;
     }
@@ -169,10 +189,11 @@ export async function gerarPdf(titulo: string, conteudo: string, opts: PdfOpts =
       continue;
     }
 
-    // Dentro da Identificação: "Campo: valor" vira linha do cabeçalho.
+    // Dentro da Identificação: "Campo: valor" vira linha do cabeçalho. Linha fora do padrão vira
+    // parágrafo mas NÃO fecha o bloco (senão um deslize do modelo derrubaria os campos seguintes) —
+    // a Identificação só termina no próximo título.
     const campo = emIdent ? l.match(/^\s*\*?([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ /()]{2,30})\*?\s*:\s*(.+)$/) : null;
     if (campo) { linhaInfo(campo[1].trim(), campo[2].trim()); temInfo = true; continue; }
-    fecharIdent();
 
     // Bullet (hanging indent: marcador fora, texto recuado).
     const bullet = l.match(/^\s*[-*•]\s+(.+)$/);

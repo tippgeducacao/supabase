@@ -3,13 +3,15 @@
 // (aguenta áudio de horas; o Whisper tem teto ~25MB e o inline do Gemini ~20MB).
 // Roda em BACKGROUND porque a transcrição leva minutos (webhook não pode segurar).
 //
-// ⚠️ REUNIÃO EM ÁUDIO = DOIS JOBS (mesmo upload no bucket, tipos diferentes):
-//   1) tipo='audio'       → RESUMO/ATA estruturada (Contexto, Decisões, Tarefas por responsável…).
-//   2) tipo='transcricao' → TRANSCRIÇÃO verbatim (palavra por palavra), entregue em PDF.
-// Cada job faz UMA chamada Gemini no seu PRÓPRIO tick de cron → cabe no timeout de 100s
-// mesmo em áudio de 1h+ (o resumo chega primeiro, a transcrição completa ~1 min depois).
-// Antes era 1 job só, single-shot audio→resumo com maxOutputTokens=8192 → TRUNCAVA no meio
-// da frase e o modelo entrava em LOOP de repetição (a "checklist toda repetida"). Corrigido.
+// ⚠️ REUNIÃO EM ÁUDIO = DOIS JOBS (mesmo upload no bucket/Gemini, tipos diferentes):
+//   1) tipo='audio'       → ATA estruturada (Identificação, Resumo executivo, Pauta por tema,
+//                           Decisões, Pendências, Tarefas por responsável) via gemini-2.5-PRO.
+//   2) tipo='transcricao' → TRANSCRIÇÃO verbatim FATIADA em janelas de ~15min (uma por tick,
+//                           acumulada em `resultado`; cursor em `prox_janela_min`), via flash.
+// O worker é máquina de 1 PASSO POR TICK (cron 1/min, isolate vive ~2min): upload → geração
+// (→ janelas). Passo concluído volta pra 'fila' DESCONTANDO a tentativa (progresso ≠ falha).
+// Histórico dos bugs (2026-07-21): 8k tokens truncava; thinking dinâmico do flash comia o budget
+// (ata cortada + loop "Doenças do Sistema..."); verbatim de 1h numa chamada só passa de 290s.
 import { carregarLinha, enviarTexto, enviarDocumento, type LinhaWa } from "./wa.ts";
 import { extDeMime } from "./transcrever.ts";
 import { gerarPdf } from "./documento.ts";
@@ -18,7 +20,14 @@ import { logMensagem } from "./db.ts";
 const BUCKET = "gt-doc-assets";
 const PUBLIC_SUPABASE_URL = Deno.env.get("PUBLIC_SUPABASE_URL") || "https://api.ppgeducacao.site";
 const toPublicUrl = (u: string) => u.replace(/^https?:\/\/(supabase-)?kong:8000/i, PUBLIC_SUPABASE_URL);
+// ⚠️ MODELO POR TAREFA (validado na API real com a reunião de 65MB/1h em 2026-07-21):
+// - ATA/VÍDEO (compreensão + síntese) = gemini-2.5-PRO. O flash DEGENERA em loop de repetição
+//   nesse trabalho MESMO com thinkingBudget explícito ("Doenças do Sistema..." repetido até
+//   estourar 16k tokens), e `frequencyPenalty` não existe pra ele ("Penalty is not enabled for
+//   models/gemini-2.5-flash"). O pro fez a mesma ata em 40s, finish=STOP, zero repetição.
+// - TRANSCRIÇÃO verbatim (ditado literal) = flash (rápido/barato; sem síntese não há loop de tema).
 const GEMINI_MODEL = Deno.env.get("ASSIST_GEMINI_MODEL") || "gemini-2.5-flash";
+const GEMINI_MODEL_ATA = Deno.env.get("ASSIST_GEMINI_MODEL_ATA") || "gemini-2.5-pro";
 
 // RESUMO/ATA — o deliverable principal. Estruturado (ATA formal), FIEL e ANTI-REPETIÇÃO.
 // ⚠️ O formato é o do WhatsApp (*Seção*, "- bullet", "1. item") porque o MESMO texto vai pro
@@ -58,7 +67,7 @@ NUMERADA (1., 2., 3.), cada uma com o prazo/data QUANDO citado. Exemplo:
 *Adriane*
 1. <tarefa objetiva> (prazo: <quando>, se houver)
 2. <outra tarefa>
-Tarefa sem responsável claro vai sob "*A definir responsável*".
+Tarefa sem responsável claro vai agrupada sob o nome *A definir responsável* (escrito assim, entre asteriscos, sem aspas).
 
 *Prazos e datas*
 - Datas e eventos com data mencionados (ex.: "05/08 - Dia do Médico Veterinário"). Omita a seção inteira se não houver nenhum.
@@ -70,26 +79,40 @@ REGRAS (siga à risca):
 - Se uma pessoa recebeu VÁRIAS sub-tarefas do mesmo tema, agrupe em uma ou poucas linhas inteligentes.
 - Escreva frases completas e objetivas. Nada de introdução, despedida ou comentário seu — comece direto em *Identificação*.`;
 
-// TRANSCRIÇÃO verbatim — palavra por palavra, sem resumir.
-const PROMPT_TRANSCRICAO =
-`Transcreva o ÁUDIO desta reunião na ÍNTEGRA, em português do Brasil, palavra por palavra — SEM resumir,
-SEM comentar e SEM adicionar seções ou títulos.
+// TRANSCRIÇÃO verbatim — palavra por palavra, POR JANELA DE TEMPO (medido: 1h inteira numa
+// chamada só passa de 290s e nenhum isolate sobrevive; a janela de ~15min cabe num tick).
+const FIM_AUDIO = "[FIM DO AUDIO]";
+const JANELA_MIN = 15;          // tamanho da janela transcrita por tick
+const JANELA_TETO_MIN = 240;    // trava de segurança (4h) — nunca fatia pra sempre
+
+const promptTranscricaoJanela = (iniMin: number, fimMin: number) =>
+`Transcreva SOMENTE o trecho do ÁUDIO entre ${iniMin}:00 e ${fimMin}:00 (minutos:segundos desde o início),
+em português do Brasil, palavra por palavra — SEM resumir, SEM comentar e SEM adicionar seções ou títulos.
 - Identifique quem fala quando der pra reconhecer pela voz/contexto (ex.: "Rafael:", "Adri:"); se não der, use "Falante 1:", "Falante 2:".
 - Quebre em parágrafos por fala/assunto, pra ficar legível.
 - Se algum trecho estiver inaudível, marque "[inaudível]". NÃO invente conteúdo.
 - NÃO repita frases: transcreva cada fala UMA única vez.
+- PARE EXATAMENTE ao chegar em ${fimMin}:00 — NÃO continue além disso, mesmo que a conversa siga.
+- Se o áudio TERMINAR dentro desse trecho, transcreva até o fim e escreva na ÚLTIMA linha, sozinho: ${FIM_AUDIO}
+- Se o áudio já tiver terminado ANTES de ${iniMin}:00 (não há fala nesse trecho), escreva APENAS: ${FIM_AUDIO}
 Comece direto pela transcrição.`;
 
 const PROMPT_VIDEO =
 `Você recebeu um VÍDEO enviado por um dos donos da PPGVET Educação (educação/pós-graduação em veterinária).
-Analise em português do Brasil, de forma clara e FIEL ao que aparece (use *negrito* nos títulos, estilo WhatsApp):
+Analise em português do Brasil, de forma clara e FIEL ao que aparece. Estruture em 3 seções, e o título de
+cada seção fica NUMA LINHA SOZINHA, entre *asteriscos* (negrito no WhatsApp), com o conteúdo nas linhas de baixo:
 
-*O que é o vídeo* — 2 a 4 linhas: tipo de vídeo (criativo/anúncio, gravação de reunião/aula, depoimento, clipe…) e o que mostra.
-*Conteúdo* — o que acontece: cenas, pessoas, texto na tela, produto. Transcreva as falas relevantes se houver áudio.
-*Análise* — se for CRIATIVO/anúncio: avalie gancho, clareza da mensagem, CTA e ritmo, e dê sugestões de melhoria. Se for
-reunião/aula/fala: resuma pontos principais, decisões e ações (com responsável/prazo quando citados).
+*O que é o vídeo*
+2 a 4 linhas: tipo de vídeo (criativo/anúncio, gravação de reunião/aula, depoimento, clipe…) e o que mostra.
 
-Seja fiel: NÃO invente. Se algo não estiver claro/audível, diga. Sem introdução nem despedida — vá direto às seções.`;
+*Conteúdo*
+O que acontece: cenas, pessoas, texto na tela, produto. Transcreva as falas relevantes se houver áudio.
+
+*Análise*
+Se for CRIATIVO/anúncio: avalie gancho, clareza da mensagem, CTA e ritmo, e dê sugestões de melhoria.
+Se for reunião/aula/fala: resuma pontos principais, decisões e ações (com responsável/prazo quando citados).
+
+Seja fiel: NÃO invente. Se algo não estiver claro/audível, diga. Sem introdução nem despedida — comece direto na 1ª seção.`;
 
 // generationConfig por tipo.
 // ⚠️ `thinkingBudget` NÃO é firula: no gemini-2.5-flash o "pensamento" é DINÂMICO por padrão e os
@@ -98,7 +121,7 @@ Seja fiel: NÃO invente. Se algo não estiver claro/audível, diga. Sem introdu�
 // transcrição verbatim voltava VAZIA (finish=MAX_TOKENS). Com o teto explícito, o orçamento é do texto.
 // Menos pensamento também deixa a geração MUITO mais rápida — é o que faz caber no tick de 100s.
 const CFG_RESUMO = { temperature: 0.45, topP: 0.9, maxOutputTokens: 16000, thinkingConfig: { thinkingBudget: 2048 } };
-const CFG_TRANSCRICAO = { temperature: 0.1, topP: 0.5, maxOutputTokens: 48000, thinkingConfig: { thinkingBudget: 0 } };
+const CFG_TRANSCRICAO = { temperature: 0.1, topP: 0.5, maxOutputTokens: 12000, thinkingConfig: { thinkingBudget: 0 } }; // por JANELA de 15min
 const CFG_VIDEO = { temperature: 0.4, topP: 0.9, maxOutputTokens: 12000, thinkingConfig: { thinkingBudget: 1024 } };
 
 const MAX_TENTATIVAS = 5;          // upload e geração são passos separados → cabe mais retry
@@ -187,14 +210,21 @@ export async function processarTranscricoes(admin: any): Promise<{ processado: n
     }
 
     // ── passo 2: geração ──
-    const promptBase = tipo === "video" ? PROMPT_VIDEO : tipo === "transcricao" ? PROMPT_TRANSCRICAO : PROMPT_RESUMO;
-    const cfg = tipo === "video" ? CFG_VIDEO : tipo === "transcricao" ? CFG_TRANSCRICAO : CFG_RESUMO;
-    // Instrução específica do dono só faz sentido no resumo/vídeo (a transcrição verbatim não "prioriza").
-    const prompt = (tipo !== "transcricao") && job.instrucao && String(job.instrucao).trim()
+    // Transcrição verbatim = FATIADA (uma janela de tempo por tick; a íntegra de 1h numa chamada
+    // só passa de 290s e nenhum isolate sobrevive — medido na API real em 2026-07-21).
+    if (tipo === "transcricao") return await transcreverJanela(admin, linha, job, key, uri, mime);
+
+    const promptBase = tipo === "video" ? PROMPT_VIDEO : PROMPT_RESUMO;
+    const cfg = tipo === "video" ? CFG_VIDEO : CFG_RESUMO;
+    const prompt = job.instrucao && String(job.instrucao).trim()
       ? `${promptBase}\n\nO dono pediu especificamente: "${String(job.instrucao).trim()}" — priorize isso na análise.`
       : promptBase;
 
-    const resultado = await gerarComGemini(key, uri, mime, prompt, cfg);
+    let resultado = await gerarComGemini(key, GEMINI_MODEL_ATA, uri, mime, prompt, cfg);
+    resultado = tirarPreambulo(resultado);
+    // Rede de segurança anti-degeneração: melhor retentar do que entregar um PDF de lixo repetido.
+    const loop = linhaMaisRepetida(resultado);
+    if (loop.vezes >= 15) throw new Error(`saída degenerada (linha repetida ${loop.vezes}x: "${loop.linha.slice(0, 60)}")`);
 
     await admin.from("assistente_transcricoes")
       .update({ status: "pronto", resultado, erro: null, atualizado_em: new Date().toISOString() })
@@ -217,6 +247,63 @@ export async function processarTranscricoes(admin: any): Promise<{ processado: n
     }
     return { processado: 0, erro: msg };
   }
+}
+
+/** Transcreve UMA janela (~15min) por tick e ACUMULA no job; fecha quando o modelo sinaliza o fim. */
+async function transcreverJanela(
+  admin: any, linha: LinhaWa | null, job: any, key: string, uri: string, mime: string,
+): Promise<{ processado: number; etapa?: string }> {
+  const ini = job.prox_janela_min ?? 0;
+  const fim = ini + JANELA_MIN;
+  const bruto = await gerarComGemini(key, GEMINI_MODEL, uri, mime, promptTranscricaoJanela(ini, fim), CFG_TRANSCRICAO);
+
+  const loop = linhaMaisRepetida(bruto);
+  if (loop.vezes >= 15) throw new Error(`janela ${ini}-${fim}min degenerada (linha repetida ${loop.vezes}x)`);
+
+  const acabou = bruto.includes(FIM_AUDIO) || fim >= JANELA_TETO_MIN;
+  // ⚠️ Medido na API real: às vezes o modelo IGNORA o fim da janela e segue transcrevendo (a
+  // janela 120-135min devolveu ~34min de fala até bater o teto de tokens). Sobreposição entre
+  // janelas é esperada — apara as linhas repetidas na emenda. Buraco não acontece: no ritmo
+  // medido (~1,2k chars/min) o teto de 12k tokens (~42k chars) nunca corta ANTES do fim da janela.
+  const trecho = apararSobreposicao(job.resultado ?? "", bruto.replaceAll(FIM_AUDIO, "").trim());
+  const acumulado = [job.resultado, trecho].filter(Boolean).join("\n\n");
+
+  if (!acabou) {
+    await admin.from("assistente_transcricoes").update({
+      resultado: acumulado, prox_janela_min: fim,
+      // janela concluída = progresso: volta pra fila SEM queimar tentativa (como o passo de upload).
+      status: "fila", tentativas: Math.max(0, (job.tentativas ?? 1) - 1),
+      erro: null, atualizado_em: new Date().toISOString(),
+    }).eq("id", job.id);
+    return { processado: 0, etapa: `janela ${ini}-${fim}min` };
+  }
+
+  if (!acumulado) throw new Error("transcrição terminou vazia"); // glitch → retry
+  await admin.from("assistente_transcricoes")
+    .update({ status: "pronto", resultado: acumulado, erro: null, atualizado_em: new Date().toISOString() })
+    .eq("id", job.id);
+  await entregar(admin, linha, job, acumulado);
+  return { processado: 1, etapa: "transcricao completa" };
+}
+
+/** Apara a emenda entre janelas: remove do INÍCIO do trecho novo as linhas que já estão no FIM
+ *  do acumulado (o modelo às vezes transcreve além da janela e a seguinte repete o overlap). */
+function apararSobreposicao(acumulado: string, trecho: string): string {
+  if (!acumulado || !trecho) return trecho;
+  const norm = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
+  // 500 linhas ≈ 50min de fala no ritmo medido — cobre até um overflow grande da janela anterior.
+  const cauda = new Set(
+    acumulado.split("\n").map(norm).filter((l) => l.length >= 20).slice(-500),
+  );
+  const linhas = trecho.split("\n");
+  let i = 0;
+  while (i < linhas.length) {
+    const n = norm(linhas[i]);
+    if (!n) { i++; continue; }            // linha vazia na emenda não decide nada
+    if (n.length >= 20 && cauda.has(n)) { i++; continue; }
+    break;                                 // primeira linha inédita → daqui pra frente é conteúdo novo
+  }
+  return linhas.slice(i).join("\n").trim();
 }
 
 const uriAindaVale = (job: any): boolean =>
@@ -243,6 +330,26 @@ async function subirParaGemini(admin: any, key: string, job: any, mime: string):
   await admin.from("assistente_transcricoes")
     .update({ gemini_file_uri: uri, gemini_uri_em: new Date().toISOString() }).eq("id", job.id);
   return uri;
+}
+
+/** Corta preâmbulo do modelo ("Com base no áudio..., segue a ata:") — a ata começa na 1ª *Seção*. */
+function tirarPreambulo(txt: string): string {
+  const i = txt.search(/^\*[^\n*]+\*\s*$/m);
+  return i > 0 ? txt.slice(i) : txt;
+}
+
+/** Detector de loop de repetição (a degeneração que virou "checklist repetida" 2x). */
+function linhaMaisRepetida(txt: string): { linha: string; vezes: number } {
+  const contagem = new Map<string, number>();
+  let melhor = { linha: "", vezes: 0 };
+  for (const cru of txt.split("\n")) {
+    const l = cru.trim();
+    if (l.length < 12) continue; // linha curta ("- Sim.") repete legitimamente numa transcrição
+    const n = (contagem.get(l) ?? 0) + 1;
+    contagem.set(l, n);
+    if (n > melhor.vezes) melhor = { linha: l, vezes: n };
+  }
+  return melhor;
 }
 
 const fmtDataHoraSP = (iso: string | null | undefined): string => {
@@ -283,10 +390,10 @@ async function entregar(admin: any, linha: LinhaWa | null, job: any, resultado: 
   }
   // longo (ou transcrição) → PDF
   try {
+    // A Identificação (Assunto/Participantes/…) vem do próprio texto do modelo; aqui só o subtítulo —
+    // duplicar data/tamanho do áudio ACIMA do Assunto poluía o cabeçalho (achado da revisão).
     const bytes = await gerarPdf(meta.pdfTitulo, resultado, {
-      subtitulo: `PPGVET Educacao  ·  registrada em ${fmtDataHoraSP(job.criado_em)}`,
-      // O bloco *Identificação* que o modelo escreve (Assunto/Participantes/…) entra logo abaixo destas.
-      info: [["Registrada em", fmtDataHoraSP(job.criado_em)], ["Áudio", String(job.duracao_hint || "")]],
+      subtitulo: `PPGVET Educacao  ·  reuniao registrada em ${fmtDataHoraSP(job.criado_em)}`,
     });
     const path = `assistente/${job.canon}/${Date.now()}-${meta.pdfNome}.pdf`;
     await admin.storage.from(BUCKET).upload(path, bytes, { contentType: "application/pdf", upsert: true });
@@ -309,14 +416,14 @@ async function googleKey(admin: any): Promise<string | null> {
 
 /** Gera o texto a partir de um arquivo JÁ enviado ao Gemini (passo 2 do worker). */
 async function gerarComGemini(
-  key: string, fileUri: string, mime: string, prompt: string,
+  key: string, modelo: string, fileUri: string, mime: string, prompt: string,
   cfg: Record<string, unknown>,
 ): Promise<string> {
   await esperarAtivo(key, fileUri, 40_000);
 
   const chamar = async (generationConfig: Record<string, unknown>) => {
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${key}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent?key=${key}`,
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -384,6 +491,11 @@ async function esperarAtivo(key: string, fileUri: string, limiteMs: number): Pro
   let state = "";
   while (Date.now() < ate) {
     const g = await fetch(`${fileUri}?key=${key}`);
+    // ⚠️ Arquivo expirado/sumido volta 403/404 — o status TEM que ir na mensagem, é ele que o
+    // catch do worker usa pra LIMPAR a uri e re-subir o áudio (achado da revisão adversarial).
+    if (g.status === 403 || g.status === 404) {
+      throw new Error(`arquivo no Gemini sumiu/expirou (${g.status} NOT_FOUND)`);
+    }
     state = (await g.json().catch(() => ({})))?.state ?? "";
     if (state === "ACTIVE") return;
     if (state === "FAILED") throw new Error("Gemini falhou ao processar o arquivo");
