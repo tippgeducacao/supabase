@@ -247,9 +247,12 @@ export async function processarTranscricoes(admin: any): Promise<{ processado: n
   const job = (jobs ?? [])[0];
   if (!job) return { processado: 0 };
 
-  const linha = await carregarLinha(admin);
   const tipo: string = job.tipo || "audio";
+  let linha: LinhaWa | null = null;
   try {
+    // Dentro do try DE PROPÓSITO: um blip aqui deixava o job 'processando' órfão pra sempre
+    // (throw fora do try não passa pelo caminho de refila — achado da revisão adversarial).
+    linha = await carregarLinha(admin);
     if ((job.tentativas ?? 1) > MAX_TENTATIVAS) throw new Error("excedeu tentativas");
 
     const key = await googleKey(admin);
@@ -286,10 +289,10 @@ export async function processarTranscricoes(admin: any): Promise<{ processado: n
       if (irmao?.status === "pronto" && irmao.resultado) {
         const ata = await ataViaOpus(admin, irmao.resultado, job.instrucao);
         if (ata) {
+          await entregar(admin, linha, job, ata); // entrega ANTES de marcar (falhou → refila/retry)
           await admin.from("assistente_transcricoes")
             .update({ status: "pronto", resultado: ata, erro: null, atualizado_em: new Date().toISOString() })
             .eq("id", job.id);
-          await entregar(admin, linha, job, ata);
           return { processado: 1, etapa: "ata via opus" };
         }
         // Opus indisponível → segue pro fallback Gemini abaixo.
@@ -316,18 +319,23 @@ export async function processarTranscricoes(admin: any): Promise<{ processado: n
     const loop = linhaMaisRepetida(resultado);
     if (loop.vezes >= 15) throw new Error(`saída degenerada (linha repetida ${loop.vezes}x: "${loop.linha.slice(0, 60)}")`);
 
+    await entregar(admin, linha, job, resultado); // entrega ANTES de marcar (falhou → refila/retry)
     await admin.from("assistente_transcricoes")
       .update({ status: "pronto", resultado, erro: null, atualizado_em: new Date().toISOString() })
       .eq("id", job.id);
-
-    await entregar(admin, linha, job, resultado);
     return { processado: 1, etapa: "gerado" };
   } catch (e) {
     const msg = String(e);
-    // Arquivo sumiu/expirou no Gemini → esquece a uri e a próxima tentativa sobe de novo.
+    // Arquivo sumiu/expirou no Gemini → esquece a uri (TAMBÉM a do job irmão, que compartilha o
+    // mesmo upload — senão o retry re-herda a uri morta dele) e a próxima tentativa sobe de novo.
     const patch: Record<string, unknown> = { erro: msg, atualizado_em: new Date().toISOString() };
     if (/\b(403|404)\b|PERMISSION_DENIED|NOT_FOUND|File .* not found/i.test(msg)) {
       patch.gemini_file_uri = null; patch.gemini_uri_em = null;
+      try {
+        await admin.from("assistente_transcricoes")
+          .update({ gemini_file_uri: null, gemini_uri_em: null })
+          .eq("storage_path", job.storage_path);
+      } catch { /* best-effort */ }
     }
     const desistir = (job.tentativas ?? 1) >= MAX_TENTATIVAS;
     patch.status = desistir ? "erro" : "fila";
@@ -382,10 +390,13 @@ async function transcreverJanela(
   }
 
   if (!acumulado) throw new Error("transcrição terminou vazia"); // glitch → retry
+  // ⚠️ ENTREGA ANTES de marcar pronto (achado da revisão): se o envio falhar (linha caiu), o
+  // throw manda o job de volta pra fila e o retry re-tenta — antes ficava 'pronto' em silêncio
+  // e o dono nunca recebia. (Trade-off aceito: update falhar depois do envio = reentrega rara.)
+  await entregar(admin, linha, job, acumulado);
   await admin.from("assistente_transcricoes")
     .update({ status: "pronto", resultado: acumulado, erro: null, atualizado_em: new Date().toISOString() })
     .eq("id", job.id);
-  await entregar(admin, linha, job, acumulado);
   return { processado: 1, etapa: "transcricao completa" };
 }
 
@@ -495,7 +506,10 @@ function msgErro(tipo: string): string {
   return "Consegui receber a reunião, mas tropecei pra montar a *ata* 😕. Reenvia que eu tento de novo (reunião grande também funciona).";
 }
 
-/** Entrega o resultado no WhatsApp: resumo/vídeo = texto curto ou PDF; transcrição = sempre PDF. */
+/** Entrega o resultado no WhatsApp: resumo/vídeo = texto curto ou PDF; transcrição = sempre PDF.
+ *  ⚠️ LANÇA se a entrega PRINCIPAL falhar (o provider devolve {ok:false} SEM lançar — checar é
+ *  obrigatório): o worker refila e re-tenta. Antes tudo era engolido e o job virava 'pronto'
+ *  sem o dono receber nada (achado "alta" da revisão adversarial). */
 async function entregar(admin: any, linha: LinhaWa | null, job: any, resultado: string) {
   const tipo: string = job.tipo || "audio";
   const meta = tipo === "video"
@@ -507,34 +521,46 @@ async function entregar(admin: any, linha: LinhaWa | null, job: any, resultado: 
     : { titulo: "🎙️ *Ata da reunião*", pdfNome: "ata-reuniao", pdfTitulo: "Ata de Reunião",
         avisoPdf: "🎙️ Pronto! A *ata executiva* — contexto, decisões, pendências e o checklist de tarefas por pessoa — está no *PDF* aqui em cima. 👆", semprePdf: false, histTipo: "transcricao" };
 
-  // Registra no HISTÓRICO da conversa, senão o bot não "lembra" (ex.: dono pede depois "faz um PDF disso").
-  // ⚠️ A transcrição VERBATIM é enorme (1h ~15k tokens) → NUNCA vai crua pro histórico (estouraria o
-  // contexto do Opus a cada turno). Loga um marcador curto; o texto útil (resumo) já foi logado à parte.
+  if (!linha || !job.numero) throw new Error("sem linha/número de WhatsApp para entregar");
+  const exigirOk = async (envio: Promise<any>, oQue: string) => {
+    const r = await envio; // erro de rede sobe sozinho
+    if (r && r.ok === false) throw new Error(`envio do ${oQue} falhou (provider ok:false)`);
+  };
+
+  let entregou = false;
+  if (meta.semprePdf || resultado.length > 3500) {
+    // longo (ou transcrição) → PDF; falha do PDF cai no texto truncado (abaixo)
+    try {
+      // A Identificação (Assunto/Participantes/…) vem do próprio texto do modelo; aqui só o
+      // subtítulo — duplicar data/tamanho do áudio ACIMA do Assunto poluía o cabeçalho.
+      const bytes = await gerarPdf(meta.pdfTitulo, resultado, {
+        subtitulo: `PPGVET Educacao  ·  reuniao registrada em ${fmtDataHoraSP(job.criado_em)}`,
+      });
+      const path = `assistente/${job.canon}/${Date.now()}-${meta.pdfNome}.pdf`;
+      await admin.storage.from(BUCKET).upload(path, bytes, { contentType: "application/pdf", upsert: true });
+      const { data: pub } = admin.storage.from(BUCKET).getPublicUrl(path);
+      await exigirOk(
+        enviarDocumento(linha, job.numero, toPublicUrl(pub?.publicUrl ?? ""), `${meta.pdfNome}.pdf`, meta.pdfTitulo),
+        "PDF",
+      );
+      await enviarTexto(linha, job.numero, meta.avisoPdf).catch(() => {}); // aviso é secundário
+      entregou = true;
+    } catch (e) {
+      console.error("entrega em PDF falhou, caindo pro texto:", String(e).slice(0, 160));
+    }
+  }
+  if (!entregou) {
+    const corpo = resultado.length > 3500 ? `${resultado.slice(0, 3500)}…` : resultado;
+    await exigirOk(enviarTexto(linha, job.numero, `${meta.titulo}\n\n${corpo}`), "texto");
+  }
+
+  // HISTÓRICO só depois de entregar DE VERDADE (senão o bot "lembra" de algo que nunca chegou).
+  // ⚠️ A transcrição VERBATIM é enorme (1h ~15k tokens) → NUNCA vai crua pro histórico (estouraria
+  // o contexto do Opus a cada turno). Loga um marcador curto; a ata (curta) vai inteira.
   const histTexto = tipo === "transcricao"
     ? "[Transcrição completa da reunião enviada em PDF]"
     : resultado;
   await logMensagem(admin, job.canon, "outbound", histTexto, meta.histTipo).catch(() => {});
-  if (!linha || !job.numero) return;
-
-  if (!meta.semprePdf && resultado.length <= 3500) {
-    await enviarTexto(linha, job.numero, `${meta.titulo}\n\n${resultado}`).catch(() => {});
-    return;
-  }
-  // longo (ou transcrição) → PDF
-  try {
-    // A Identificação (Assunto/Participantes/…) vem do próprio texto do modelo; aqui só o subtítulo —
-    // duplicar data/tamanho do áudio ACIMA do Assunto poluía o cabeçalho (achado da revisão).
-    const bytes = await gerarPdf(meta.pdfTitulo, resultado, {
-      subtitulo: `PPGVET Educacao  ·  reuniao registrada em ${fmtDataHoraSP(job.criado_em)}`,
-    });
-    const path = `assistente/${job.canon}/${Date.now()}-${meta.pdfNome}.pdf`;
-    await admin.storage.from(BUCKET).upload(path, bytes, { contentType: "application/pdf", upsert: true });
-    const { data: pub } = admin.storage.from(BUCKET).getPublicUrl(path);
-    await enviarDocumento(linha, job.numero, toPublicUrl(pub?.publicUrl ?? ""), `${meta.pdfNome}.pdf`, meta.pdfTitulo);
-    await enviarTexto(linha, job.numero, meta.avisoPdf).catch(() => {});
-  } catch {
-    await enviarTexto(linha, job.numero, `${meta.titulo}\n\n${resultado.slice(0, 3500)}…`).catch(() => {});
-  }
 }
 
 // ── Gemini File API ──────────────────────────────────────────────────────────
