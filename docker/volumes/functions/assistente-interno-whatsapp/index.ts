@@ -121,7 +121,7 @@ async function processarMensagem(admin: any, linha: LinhaWa | null, msg: any) {
         await enfileirarReuniaoAudio(admin, { canon: c, numero: msg.fromDigits, linhaId: linha.id ?? null, bytes, mime });
         await atualizarConteudoInbound(admin, claim.id, "[áudio de reunião — transcrevendo]", "audio");
         await enviar(admin, linha, msg.fromDigits, c,
-          "🎙️ Recebi seu áudio de reunião! Já tô transcrevendo — te mando a *transcrição completa* (palavra por palavra, com os falantes) e na sequência a *ata executiva* com decisões, pendências e o checklist de tarefas por pessoa. Reunião de 1h chega em ~5 min; mais longa, um pouco mais. 👍");
+          "🎙️ Recebi seu áudio de reunião! Já tô transcrevendo — te mando a *transcrição completa* e na sequência a *ata executiva* com decisões, pendências e o checklist por pessoa. Reunião de 1h chega em ~5 min.\n\n👥 *Quem participou da reunião?* Me responde aqui com os nomes (ex.: \"eu e a Adriane\") que a ata já sai com os participantes certos — sem isso eu NÃO chuto nome, deixo em aberto pra você completar.");
         return;
       }
       texto = await transcreverBytes(bytes, mime);

@@ -38,7 +38,7 @@ const GEMINI_MODEL_ATA = Deno.env.get("ASSIST_GEMINI_MODEL_ATA") || "gemini-2.5-
 // inteligentes, usem o Opus 4.8 pra esse trabalho"). O Opus não lê áudio — a cadeia é
 // Gemini transcreve (janelas paralelas) → Opus escreve a ata do TEXTO. Qualidade muito acima
 // do resumo áudio→texto do Gemini, e o formato de saída é o MESMO (o documento.ts renderiza).
-const PROMPT_ATA_OPUS = (transcricao: string, instrucao?: string | null) =>
+const PROMPT_ATA_OPUS = (transcricao: string, instrucao?: string | null, contextoDono?: string | null) =>
 `Você é o chefe de gabinete dos donos da PPGVET Educação (educação/pós-graduação em veterinária).
 Abaixo está a TRANSCRIÇÃO de uma reunião interna (com marcação de falantes quando foi possível
 reconhecer). Escreva a ATA EXECUTIVA dessa reunião, em português do Brasil — o material que um
@@ -47,12 +47,27 @@ aberto e o CHECKLIST do que cada pessoa vai fazer.
 
 TAMANHO: proporcional à reunião — o equivalente a 2 a 3 folhas para uma reunião longa (1h+),
 1 a 2 folhas para uma curta. Denso e útil, nunca prolixo.
+${contextoDono?.trim() ? `
+O DONO (quem enviou o áudio) informou sobre esta reunião — respeite como FONTE DA VERDADE:
+"""
+${contextoDono.trim()}
+"""
+` : ""}
+REGRA DE NOMES (a mais importante de todas — nome errado destrói a confiança na ata):
+- PARTICIPANTES = SOMENTE os que o dono informou. Se ele não informou, escreva exatamente:
+  "não informados — me manda os nomes que eu atualizo a ata". NUNCA deduza participante pela
+  voz, pelo papel ("direção", "marketing") ou pelo contexto. NUNCA liste as pessoas apenas
+  CITADAS na conversa como participantes.
+- Ao atribuir falas/tarefas no corpo, use SÓ nomes que aparecem LITERALMENTE na transcrição
+  (alguém chamou a pessoa pelo nome ou ela se apresentou) ou que o dono informou. Na dúvida,
+  mantenha o rótulo da transcrição ("Falante 2"). É PROIBIDO transformar um papel num nome
+  próprio ou "adivinhar" o nome de um falante.
 
 FORMATO (obrigatório — títulos numa linha própria, entre *asteriscos*):
 
 *Identificação*
 Assunto: <título curto e específico, máx. 90 caracteres>
-Participantes: <quem participou — use os nomes das falas e do contexto; inclua o papel quando dedutível, ex.: "Adriane (pedagógico)">
+Participantes: <APENAS os informados pelo dono; senão "não informados — me manda os nomes que eu atualizo a ata">
 Data citada: <data/dia mencionado; senão "não citada">
 Pauta principal: <uma linha>
 
@@ -63,8 +78,8 @@ no geral e qual é o próximo movimento.
 *Pauta e discussões*
 Agrupe por TEMA (máx. 8). Nome do tema numa linha em *negrito* (ex.: *1. Escola de Especialistas*)
 e, abaixo, 2 a 6 bullets contando o que se discutiu — com substância: quem defendeu o quê, números
-citados, alternativas descartadas. Atribua posições às pessoas quando a transcrição permitir
-("Adriane apontou que...", "Rafael decidiu que...").
+citados, alternativas descartadas. Atribua posições às pessoas seguindo a REGRA DE NOMES acima
+(nome literal da transcrição ou informado pelo dono; senão "Falante 2 apontou que...").
 
 *Decisões*
 - Uma linha por decisão FECHADA, com quem bateu o martelo quando identificável. Se nada foi fechado, escreva "- Nada foi fechado nesta reunião.".
@@ -152,7 +167,8 @@ const JANELA_TETO_MIN = 240;    // trava de segurança (4h) — nunca fatia pra 
 const promptTranscricaoJanela = (iniMin: number, fimMin: number) =>
 `Transcreva SOMENTE o trecho do ÁUDIO entre ${iniMin}:00 e ${fimMin}:00 (minutos:segundos desde o início),
 em português do Brasil, palavra por palavra — SEM resumir, SEM comentar e SEM adicionar seções ou títulos.
-- Identifique quem fala quando der pra reconhecer pela voz/contexto (ex.: "Rafael:", "Adri:"); se não der, use "Falante 1:", "Falante 2:".
+- Rotule os falantes como "Falante 1:", "Falante 2:", … Só use um NOME se ele for dito NO ÁUDIO
+  (alguém chama a pessoa pelo nome ou ela se apresenta) — NUNCA chute nome pela voz ou pelo papel.
 - Quebre em parágrafos por fala/assunto, pra ficar legível.
 - Se algum trecho estiver inaudível, marque "[inaudível]". NÃO invente conteúdo.
 - NÃO repita frases: transcreva cada fala UMA única vez.
@@ -287,7 +303,7 @@ export async function processarTranscricoes(admin: any): Promise<{ processado: n
     if (tipo === "audio") {
       const irmao = await irmaoTranscricao(admin, job);
       if (irmao?.status === "pronto" && irmao.resultado) {
-        const ata = await ataViaOpus(admin, irmao.resultado, job.instrucao);
+        const ata = await ataViaOpus(admin, irmao.resultado, job.instrucao, await contextoDoDono(admin, job));
         if (ata) {
           await entregar(admin, linha, job, ata); // entrega ANTES de marcar (falhou → refila/retry)
           await admin.from("assistente_transcricoes")
@@ -410,14 +426,42 @@ async function irmaoTranscricao(admin: any, job: any): Promise<any | null> {
   return data ?? null;
 }
 
+/** O que o dono falou no chat DEPOIS de mandar o áudio (é onde ele responde "quem participou foi
+ *  eu e a Adriane") + quem ele é. Vira a FONTE DA VERDADE dos participantes — o modelo é PROIBIDO
+ *  de deduzir nome de falante (a 1ª ata inventou um "Andre"; reclamação real do dono 2026-07-21). */
+async function contextoDoDono(admin: any, job: any): Promise<string | null> {
+  try {
+    const [{ data: dono }, { data: msgs }] = await Promise.all([
+      admin.from("assistente_donos").select("nome").eq("canon", job.canon).maybeSingle(),
+      admin.from("assistente_mensagens").select("conteudo")
+        .eq("canon", job.canon).eq("direcao", "inbound")
+        .gt("criado_em", job.criado_em)
+        .order("criado_em", { ascending: true }).limit(6),
+    ]);
+    const falas = (msgs ?? [])
+      .map((m: any) => String(m.conteudo ?? "").trim())
+      .filter((c: string) => c && !c.startsWith("[")) // pula placeholders tipo "[áudio de reunião…]"
+      .join("\n").slice(0, 800);
+    const partes = [
+      dono?.nome ? `Quem enviou o áudio (o "eu" das mensagens abaixo): ${dono.nome}.` : "",
+      falas ? `Mensagens do dono depois de enviar o áudio (se ele citar quem participou, participantes são ESTES):\n${falas}` : "",
+    ].filter(Boolean);
+    return partes.length ? partes.join("\n") : null;
+  } catch {
+    return null; // contexto é bônus — nunca trava a ata
+  }
+}
+
 /** Ata executiva escrita pelo OPUS 4.8 a partir da transcrição. null = Opus indisponível (fallback). */
-async function ataViaOpus(admin: any, transcricao: string, instrucao?: string | null): Promise<string | null> {
+async function ataViaOpus(
+  admin: any, transcricao: string, instrucao?: string | null, contextoDono?: string | null,
+): Promise<string | null> {
   try {
     const key = await getAnthropicKey(admin);
     if (!key) return null;
     const resp = await chamarOpus(key, {
       max_tokens: 8000,
-      messages: [{ role: "user", content: PROMPT_ATA_OPUS(transcricao, instrucao) }],
+      messages: [{ role: "user", content: PROMPT_ATA_OPUS(transcricao, instrucao, contextoDono) }],
     });
     const txt = (resp?.content ?? [])
       .filter((b: any) => b?.type === "text")
