@@ -3,19 +3,24 @@
 // (aguenta áudio de horas; o Whisper tem teto ~25MB e o inline do Gemini ~20MB).
 // Roda em BACKGROUND porque a transcrição leva minutos (webhook não pode segurar).
 //
-// ⚠️ REUNIÃO EM ÁUDIO = DOIS JOBS (mesmo upload no bucket/Gemini, tipos diferentes):
-//   1) tipo='audio'       → ATA estruturada (Identificação, Resumo executivo, Pauta por tema,
-//                           Decisões, Pendências, Tarefas por responsável) via gemini-2.5-PRO.
-//   2) tipo='transcricao' → TRANSCRIÇÃO verbatim FATIADA em janelas de ~15min (uma por tick,
-//                           acumulada em `resultado`; cursor em `prox_janela_min`), via flash.
-// O worker é máquina de 1 PASSO POR TICK (cron 1/min, isolate vive ~2min): upload → geração
-// (→ janelas). Passo concluído volta pra 'fila' DESCONTANDO a tentativa (progresso ≠ falha).
+// ⚠️ REUNIÃO EM ÁUDIO = DOIS JOBS encadeados (mesmo upload no bucket/Gemini):
+//   1) tipo='transcricao' → TRANSCRIÇÃO verbatim FATIADA em janelas de 15min, LOTE de 3 em
+//                           paralelo por tick (flash; acumulada em `resultado`, cursor
+//                           `prox_janela_min`). Roda PRIMEIRO (inserida antes; claim é FIFO).
+//   2) tipo='audio'       → ATA EXECUTIVA escrita pelo OPUS 4.8 a partir da transcrição do
+//                           irmão (checklist por pessoa, decisões, pendências). Enquanto o
+//                           irmão roda, DEFERE sem queimar tentativa; irmão morto → fallback
+//                           Gemini 2.5-pro direto do áudio.
+// O worker é máquina de 1 PASSO POR TICK (cron 1/min, isolate vive ~2min): upload → janelas →
+// ata. Passo concluído volta pra 'fila' DESCONTANDO a tentativa (progresso ≠ falha).
 // Histórico dos bugs (2026-07-21): 8k tokens truncava; thinking dinâmico do flash comia o budget
-// (ata cortada + loop "Doenças do Sistema..."); verbatim de 1h numa chamada só passa de 290s.
+// (ata cortada + loop "Doenças do Sistema..."); verbatim de 1h numa chamada só passa de 290s;
+// flash degenera na SÍNTESE mesmo com thinkingBudget (por isso ata = Opus/pro, nunca flash).
 import { carregarLinha, enviarTexto, enviarDocumento, type LinhaWa } from "./wa.ts";
 import { extDeMime } from "./transcrever.ts";
 import { gerarPdf } from "./documento.ts";
 import { logMensagem } from "./db.ts";
+import { chamarOpus, getAnthropicKey } from "./anthropic.ts";
 
 const BUCKET = "gt-doc-assets";
 const PUBLIC_SUPABASE_URL = Deno.env.get("PUBLIC_SUPABASE_URL") || "https://api.ppgeducacao.site";
@@ -29,7 +34,66 @@ const toPublicUrl = (u: string) => u.replace(/^https?:\/\/(supabase-)?kong:8000/
 const GEMINI_MODEL = Deno.env.get("ASSIST_GEMINI_MODEL") || "gemini-2.5-flash";
 const GEMINI_MODEL_ATA = Deno.env.get("ASSIST_GEMINI_MODEL_ATA") || "gemini-2.5-pro";
 
-// RESUMO/ATA — o deliverable principal. Estruturado (ATA formal), FIEL e ANTI-REPETIÇÃO.
+// ATA ESCRITA PELO OPUS 4.8 A PARTIR DA TRANSCRIÇÃO (pedido do dono 2026-07-21: "sejam
+// inteligentes, usem o Opus 4.8 pra esse trabalho"). O Opus não lê áudio — a cadeia é
+// Gemini transcreve (janelas paralelas) → Opus escreve a ata do TEXTO. Qualidade muito acima
+// do resumo áudio→texto do Gemini, e o formato de saída é o MESMO (o documento.ts renderiza).
+const PROMPT_ATA_OPUS = (transcricao: string, instrucao?: string | null) =>
+`Você é o chefe de gabinete dos donos da PPGVET Educação (educação/pós-graduação em veterinária).
+Abaixo está a TRANSCRIÇÃO de uma reunião interna (com marcação de falantes quando foi possível
+reconhecer). Escreva a ATA EXECUTIVA dessa reunião, em português do Brasil — o material que um
+diretor lê em 5 minutos e sabe tudo que importa: contexto, o que foi decidido, o que ficou em
+aberto e o CHECKLIST do que cada pessoa vai fazer.
+
+TAMANHO: proporcional à reunião — o equivalente a 2 a 3 folhas para uma reunião longa (1h+),
+1 a 2 folhas para uma curta. Denso e útil, nunca prolixo.
+
+FORMATO (obrigatório — títulos numa linha própria, entre *asteriscos*):
+
+*Identificação*
+Assunto: <título curto e específico, máx. 90 caracteres>
+Participantes: <quem participou — use os nomes das falas e do contexto; inclua o papel quando dedutível, ex.: "Adriane (pedagógico)">
+Data citada: <data/dia mencionado; senão "não citada">
+Pauta principal: <uma linha>
+
+*Resumo executivo*
+1 parágrafo denso (4 a 7 linhas), texto corrido: por que a reunião aconteceu, o que se decidiu
+no geral e qual é o próximo movimento.
+
+*Pauta e discussões*
+Agrupe por TEMA (máx. 8). Nome do tema numa linha em *negrito* (ex.: *1. Escola de Especialistas*)
+e, abaixo, 2 a 6 bullets contando o que se discutiu — com substância: quem defendeu o quê, números
+citados, alternativas descartadas. Atribua posições às pessoas quando a transcrição permitir
+("Adriane apontou que...", "Rafael decidiu que...").
+
+*Decisões*
+- Uma linha por decisão FECHADA, com quem bateu o martelo quando identificável. Se nada foi fechado, escreva "- Nada foi fechado nesta reunião.".
+
+*Pendências (em aberto)*
+- Uma linha por assunto sem definição e de quem depende. Se não houver, escreva "- Nada ficou em aberto.".
+
+*Tarefas por responsável*
+O CHECKLIST da reunião, agrupado POR PESSOA. Nome numa linha em *negrito* e as tarefas em lista
+numerada (1., 2., 3.), objetivas e acionáveis, com prazo/data quando citado. Sub-tarefas do mesmo
+tema viram UMA linha inteligente. Tarefa sem dono vai sob *A definir responsável*.
+
+*Prazos e datas*
+- Datas e eventos com data citados. Omita a seção se não houver nenhum.
+
+REGRAS:
+- FIDELIDADE TOTAL: só o que está na transcrição. Não invente nomes, números, decisões nem prazos.
+  Trecho ambíguo → "(não ficou claro)". Nomes com grafia incerta → use a forma mais provável uma vez e mantenha.
+- Cada ponto/decisão/tarefa aparece UMA vez (consolide repetições da conversa).
+- Sem introdução, comentário seu ou despedida — comece direto em *Identificação*.${
+  instrucao?.trim() ? `\n- O dono pediu especificamente: "${instrucao.trim()}" — priorize isso.` : ""}
+
+TRANSCRIÇÃO:
+"""
+${transcricao}
+"""`;
+
+// RESUMO/ATA direto do ÁUDIO (Gemini 2.5-pro) — hoje é só o FALLBACK quando a transcrição
+// falhou de vez (a ata boa vem do Opus sobre o texto). Estruturado, FIEL e ANTI-REPETIÇÃO.
 // ⚠️ O formato é o do WhatsApp (*Seção*, "- bullet", "1. item") porque o MESMO texto vai pro
 // chat quando é curto e pro PDF quando é longo — o `documento.ts` traduz isso pro layout de ata.
 const PROMPT_RESUMO =
@@ -143,9 +207,10 @@ export async function enfileirarReuniaoAudio(
     canon: opts.canon, numero: opts.numero, linha_id: opts.linhaId,
     storage_path: path, mime: opts.mime, duracao_hint: `${mb} MB`, status: "fila", instrucao: null,
   };
-  // Resumo PRIMEIRO (criado_em anterior → o claim [order by criado_em] o entrega antes da transcrição).
-  await admin.from("assistente_transcricoes").insert({ ...base, tipo: "audio" });
+  // TRANSCRIÇÃO PRIMEIRO (criado_em anterior → o claim [order by criado_em] prioriza ela):
+  // a ata agora é escrita pelo OPUS a partir do texto, então depende da transcrição pronta.
   await admin.from("assistente_transcricoes").insert({ ...base, tipo: "transcricao" });
+  await admin.from("assistente_transcricoes").insert({ ...base, tipo: "audio" });
 }
 
 /** VÍDEO (ou uso genérico): 1 job só. */
@@ -210,9 +275,34 @@ export async function processarTranscricoes(admin: any): Promise<{ processado: n
     }
 
     // ── passo 2: geração ──
-    // Transcrição verbatim = FATIADA (uma janela de tempo por tick; a íntegra de 1h numa chamada
+    // Transcrição verbatim = FATIADA (janelas de tempo em paralelo; a íntegra de 1h numa chamada
     // só passa de 290s e nenhum isolate sobrevive — medido na API real em 2026-07-21).
     if (tipo === "transcricao") return await transcreverJanela(admin, linha, job, key, uri, mime);
+
+    // ATA de reunião = OPUS 4.8 sobre a transcrição do job irmão (pedido do dono). O caminho
+    // Gemini áudio→ata fica como FALLBACK (irmão falhou de vez / job avulso sem irmão).
+    if (tipo === "audio") {
+      const irmao = await irmaoTranscricao(admin, job);
+      if (irmao?.status === "pronto" && irmao.resultado) {
+        const ata = await ataViaOpus(admin, irmao.resultado, job.instrucao);
+        if (ata) {
+          await admin.from("assistente_transcricoes")
+            .update({ status: "pronto", resultado: ata, erro: null, atualizado_em: new Date().toISOString() })
+            .eq("id", job.id);
+          await entregar(admin, linha, job, ata);
+          return { processado: 1, etapa: "ata via opus" };
+        }
+        // Opus indisponível → segue pro fallback Gemini abaixo.
+      } else if (irmao && irmao.status !== "erro") {
+        // Transcrição ainda rodando → aguarda SEM queimar tentativa (o claim prioriza o irmão,
+        // que é mais antigo; se ele morrer de vez, cai no fallback na próxima passada).
+        await admin.from("assistente_transcricoes").update({
+          status: "fila", tentativas: Math.max(0, (job.tentativas ?? 1) - 1),
+          atualizado_em: new Date().toISOString(),
+        }).eq("id", job.id);
+        return { processado: 0, etapa: "aguardando transcricao" };
+      }
+    }
 
     const promptBase = tipo === "video" ? PROMPT_VIDEO : PROMPT_RESUMO;
     const cfg = tipo === "video" ? CFG_VIDEO : CFG_RESUMO;
@@ -249,33 +339,46 @@ export async function processarTranscricoes(admin: any): Promise<{ processado: n
   }
 }
 
-/** Transcreve UMA janela (~15min) por tick e ACUMULA no job; fecha quando o modelo sinaliza o fim. */
+// Quantas janelas rodam EM PARALELO num tick (velocidade — pedido do dono: "15-20min é lento").
+// 3 × ~80s em paralelo ≈ 1 tick; 1h de reunião = 4 janelas = 2 ticks; 2h15 = 9 janelas = 3 ticks.
+const LOTE_JANELAS = 3;
+
+/** Transcreve um LOTE de janelas em paralelo por tick e ACUMULA; fecha quando aparece o fim. */
 async function transcreverJanela(
   admin: any, linha: LinhaWa | null, job: any, key: string, uri: string, mime: string,
 ): Promise<{ processado: number; etapa?: string }> {
   const ini = job.prox_janela_min ?? 0;
-  const fim = ini + JANELA_MIN;
-  const bruto = await gerarComGemini(key, GEMINI_MODEL, uri, mime, promptTranscricaoJanela(ini, fim), CFG_TRANSCRICAO);
+  const janelas = Array.from({ length: LOTE_JANELAS }, (_, k) => ({
+    ini: ini + k * JANELA_MIN, fim: ini + (k + 1) * JANELA_MIN,
+  })).filter((j) => j.ini < JANELA_TETO_MIN);
 
-  const loop = linhaMaisRepetida(bruto);
-  if (loop.vezes >= 15) throw new Error(`janela ${ini}-${fim}min degenerada (linha repetida ${loop.vezes}x)`);
+  const brutos = await Promise.all(janelas.map((j) =>
+    gerarComGemini(key, GEMINI_MODEL, uri, mime, promptTranscricaoJanela(j.ini, j.fim), CFG_TRANSCRICAO)
+  ));
 
-  const acabou = bruto.includes(FIM_AUDIO) || fim >= JANELA_TETO_MIN;
-  // ⚠️ Medido na API real: às vezes o modelo IGNORA o fim da janela e segue transcrevendo (a
-  // janela 120-135min devolveu ~34min de fala até bater o teto de tokens). Sobreposição entre
-  // janelas é esperada — apara as linhas repetidas na emenda. Buraco não acontece: no ritmo
-  // medido (~1,2k chars/min) o teto de 12k tokens (~42k chars) nunca corta ANTES do fim da janela.
-  const trecho = apararSobreposicao(job.resultado ?? "", bruto.replaceAll(FIM_AUDIO, "").trim());
-  const acumulado = [job.resultado, trecho].filter(Boolean).join("\n\n");
+  let acumulado = job.resultado ?? "";
+  let acabou = janelas.length === 0 || (janelas.at(-1)!.fim >= JANELA_TETO_MIN);
+  for (let k = 0; k < brutos.length; k++) {
+    const bruto = brutos[k];
+    const loop = linhaMaisRepetida(bruto);
+    if (loop.vezes >= 15) throw new Error(`janela ${janelas[k].ini}-${janelas[k].fim}min degenerada (linha repetida ${loop.vezes}x)`);
+    // ⚠️ Medido na API real: às vezes o modelo IGNORA o fim da janela e segue transcrevendo (a
+    // janela 120-135min devolveu ~34min de fala até o teto de tokens). Sobreposição na emenda é
+    // esperada — `apararSobreposicao` corta. Buraco não acontece: no ritmo medido (~1,2k chars/min)
+    // o teto de 12k tokens nunca corta ANTES do fim da janela.
+    const trecho = apararSobreposicao(acumulado, bruto.replaceAll(FIM_AUDIO, "").trim());
+    if (trecho) acumulado = [acumulado, trecho].filter(Boolean).join("\n\n");
+    if (bruto.includes(FIM_AUDIO)) { acabou = true; break; }
+  }
 
   if (!acabou) {
     await admin.from("assistente_transcricoes").update({
-      resultado: acumulado, prox_janela_min: fim,
-      // janela concluída = progresso: volta pra fila SEM queimar tentativa (como o passo de upload).
+      resultado: acumulado, prox_janela_min: janelas.at(-1)!.fim,
+      // lote concluído = progresso: volta pra fila SEM queimar tentativa (como o passo de upload).
       status: "fila", tentativas: Math.max(0, (job.tentativas ?? 1) - 1),
       erro: null, atualizado_em: new Date().toISOString(),
     }).eq("id", job.id);
-    return { processado: 0, etapa: `janela ${ini}-${fim}min` };
+    return { processado: 0, etapa: `janelas ${ini}-${janelas.at(-1)!.fim}min` };
   }
 
   if (!acumulado) throw new Error("transcrição terminou vazia"); // glitch → retry
@@ -284,6 +387,35 @@ async function transcreverJanela(
     .eq("id", job.id);
   await entregar(admin, linha, job, acumulado);
   return { processado: 1, etapa: "transcricao completa" };
+}
+
+/** Job irmão (mesmo áudio) de tipo transcricao — é dele que o Opus escreve a ata. */
+async function irmaoTranscricao(admin: any, job: any): Promise<any | null> {
+  const { data } = await admin.from("assistente_transcricoes")
+    .select("id, status, resultado")
+    .eq("storage_path", job.storage_path).eq("tipo", "transcricao")
+    .neq("id", job.id)
+    .order("criado_em", { ascending: false }).limit(1).maybeSingle();
+  return data ?? null;
+}
+
+/** Ata executiva escrita pelo OPUS 4.8 a partir da transcrição. null = Opus indisponível (fallback). */
+async function ataViaOpus(admin: any, transcricao: string, instrucao?: string | null): Promise<string | null> {
+  try {
+    const key = await getAnthropicKey(admin);
+    if (!key) return null;
+    const resp = await chamarOpus(key, {
+      max_tokens: 8000,
+      messages: [{ role: "user", content: PROMPT_ATA_OPUS(transcricao, instrucao) }],
+    });
+    const txt = (resp?.content ?? [])
+      .filter((b: any) => b?.type === "text")
+      .map((b: any) => b.text ?? "").join("").trim();
+    return txt ? tirarPreambulo(txt) : null;
+  } catch (e) {
+    console.error("ataViaOpus falhou (cai no fallback Gemini):", String(e).slice(0, 200));
+    return null;
+  }
 }
 
 /** Apara a emenda entre janelas: remove do INÍCIO do trecho novo as linhas que já estão no FIM
@@ -359,8 +491,8 @@ const fmtDataHoraSP = (iso: string | null | undefined): string => {
 
 function msgErro(tipo: string): string {
   if (tipo === "video") return "Não consegui analisar esse vídeo 😕. O arquivo pode estar grande demais — tenta reenviar, ou me manda mais curto.";
-  if (tipo === "transcricao") return "Tive um problema pra gerar a *transcrição completa* dessa reunião 😕. O resumo eu já te mandei; se quiser a transcrição palavra por palavra, é só reenviar o áudio.";
-  return "Consegui receber a reunião, mas tropecei pra montar o *resumo* 😕. Reenvia que eu tento de novo (reunião grande também funciona).";
+  if (tipo === "transcricao") return "Não consegui fechar a *transcrição palavra por palavra* dessa reunião 😕 — mas segue o jogo: a *ata* eu monto mesmo assim e te mando em seguida.";
+  return "Consegui receber a reunião, mas tropecei pra montar a *ata* 😕. Reenvia que eu tento de novo (reunião grande também funciona).";
 }
 
 /** Entrega o resultado no WhatsApp: resumo/vídeo = texto curto ou PDF; transcrição = sempre PDF. */
@@ -371,9 +503,9 @@ async function entregar(admin: any, linha: LinhaWa | null, job: any, resultado: 
         avisoPdf: "🎬 Seu vídeo rendeu bastante — mandei a análise completa em *PDF* aqui em cima. 👆", semprePdf: false, histTipo: "video_analise" }
     : tipo === "transcricao"
     ? { titulo: "📝 *Transcrição completa da reunião*", pdfNome: "transcricao-reuniao", pdfTitulo: "Transcrição Completa da Reunião",
-        avisoPdf: "📝 A *transcrição completa* (palavra por palavra) da reunião está no *PDF* aqui em cima. 👆", semprePdf: true, histTipo: "transcricao" }
+        avisoPdf: "📝 A *transcrição completa* (palavra por palavra, com os falantes) está no *PDF* aqui em cima. 👆 Agora tô escrevendo a *ata executiva* — chega em 1-2 min.", semprePdf: true, histTipo: "transcricao" }
     : { titulo: "🎙️ *Ata da reunião*", pdfNome: "ata-reuniao", pdfTitulo: "Ata de Reunião",
-        avisoPdf: "🎙️ Montei a *ata da reunião* — resumo executivo, decisões, pendências e as tarefas de cada um estão no *PDF* aqui em cima. 👆 A *transcrição* palavra por palavra chega em seguida.", semprePdf: false, histTipo: "transcricao" };
+        avisoPdf: "🎙️ Pronto! A *ata executiva* — contexto, decisões, pendências e o checklist de tarefas por pessoa — está no *PDF* aqui em cima. 👆", semprePdf: false, histTipo: "transcricao" };
 
   // Registra no HISTÓRICO da conversa, senão o bot não "lembra" (ex.: dono pede depois "faz um PDF disso").
   // ⚠️ A transcrição VERBATIM é enorme (1h ~15k tokens) → NUNCA vai crua pro histórico (estouraria o
