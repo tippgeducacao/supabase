@@ -627,10 +627,15 @@ Deno.serve(async (req) => {
         .maybeSingle();
       if (tpl?.conteudo) corpo = String(tpl.conteudo);
       if (!corpo) {
+        // ⚠️ Cache é POR CONTA: o mesmo NOME tem corpo (e nº de variáveis) diferente em cada
+        // WABA. Buscar só pelo nome pegava o corpo da outra conta e gravava no chat um texto
+        // com as variáveis deslocadas — mensagem que o lead nunca recebeu (caso 2026-07-21,
+        // lembrete_1_hora_antes_utility: cache do Wellinton [4 vars] × template novo [3 vars]).
         const { data: cache } = await admin
           .from("crm_whatsapp_template_bodies")
           .select("body_text")
           .eq("template_name", template_name)
+          .eq("wa_account_id", wa.id)
           .maybeSingle();
         if (cache?.body_text) corpo = String(cache.body_text);
       }
@@ -650,7 +655,10 @@ Deno.serve(async (req) => {
           if (bodyText) {
             corpo = bodyText;
             await admin.from("crm_whatsapp_template_bodies")
-              .upsert({ template_name, body_text: bodyText }, { onConflict: "template_name" });
+              .upsert(
+                { template_name, wa_account_id: wa.id, body_text: bodyText },
+                { onConflict: "template_name,wa_account_id" },
+              );
           }
         } catch (e: any) {
           console.log("[crm-whatsapp-send] fetch corpo template falhou:", e?.message);
