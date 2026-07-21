@@ -151,6 +151,23 @@ function semRaciocinioNoTexto(content: any): any {
   });
 }
 
+// ALUNO MATRICULADO ⇒ a IA NÃO ATENDE, pausa e devolve pro humano.
+// A IA comercial trata todo mundo como lead novo: com aluno ela qualifica, oferece horário e
+// agenda reunião de VENDA — e, pressionada, inventa um motivo pra conversa (caso Hariadne,
+// 2026-07-21: "essa conversa no meet é justamente com o monitor do seu curso, pra checar sua
+// experiência" — isso não existe). A régua é a MESMA dos disparos (crm_e_aluno: segmento
+// marcado como público-aluno OU matrícula real, por telefone canônico), então quem já não
+// recebe disparo também não é atendido pela IA. Fail-OPEN: erro de leitura não bloqueia o
+// atendimento (a régua é uma proteção, não pode virar apagão).
+async function ehAlunoMatriculado(telefone: string): Promise<boolean> {
+  const { data, error } = await supabase.rpc('crm_e_aluno_telefone', { p_telefone: telefone });
+  if (error) {
+    console.error(`[crm-agente-sdr] crm_e_aluno_telefone ${telefone}: ${error.message}`);
+    return false;
+  }
+  return data === true;
+}
+
 // ── uma rodada do agente sobre um lote de mensagens drenadas ────────────────
 
 async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): Promise<void> {
@@ -542,6 +559,21 @@ Deno.serve(async (req) => {
     if (!lead || lead.iniciar_atendimento !== true) return json({ ok: true, skip: 'sem_iniciar_atendimento' });
   }
   if (lead.pausa_ia === true) return json({ ok: true, skip: 'pausa_ia' });
+
+  // Já é ALUNO? A IA não fala com aluno — pausa (uma vez) e o humano assume. Nas próximas
+  // mensagens dele o guard de pausa_ia acima já corta, então isto roda no máximo 1×.
+  if (await ehAlunoMatriculado(payload.telefone)) {
+    await supabase.rpc('crm_set_pausa_ia', {
+      p_telefone: payload.telefone,
+      p_pausa: true,
+      p_motivo: 'Contato é aluno matriculado — atendimento com um humano',
+    });
+    criarTelemetria(supabase, payload.remotejid).registrar('skip_aluno_matriculado', {
+      telefone: payload.telefone,
+      motivo: 'contato é aluno matriculado — IA pausada, atendimento humano',
+    });
+    return json({ ok: true, skip: 'aluno_matriculado' });
+  }
 
   const trabalho = processarInbound(payload);
   if (typeof EdgeRuntime !== 'undefined' && EdgeRuntime?.waitUntil) {

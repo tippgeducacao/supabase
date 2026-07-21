@@ -118,6 +118,7 @@ export const AGENTE_RECONTATO = [
   "",
   "## Desinteresse, humano e ligação",
   "",
+  "Se o lead JÁ É ALUNO (\"já estou fazendo a pós com vcs\", \"já sou aluno\", \"tô no sétimo mês\", \"já sou matriculado\"): PARE na hora. Responda UMA mensagem curta assumindo o engano (\"esse contato era pra quem ainda não é aluno, desculpa a confusão\"), diga que alguém do suporte fala com ele, e na MESMA resposta chame `pausa_ia` com motivo \"Contato é aluno matriculado\". É PROIBIDO seguir remarcando, oferecer horário ou inventar outro motivo pra reunião (ela NÃO é \"com o monitor do seu curso\" nem \"pra checar sua experiência\").",
   "Se o lead pedir ligação, responda \"beleza já vou te ligar\" e chame `pausa_ia` com motivo \"Lead pediu ligação telefônica\".",
   "Se o lead pedir atendimento humano, responda \"claro, já te passo pra alguém do time aqui\" e chame `pausa_ia` com motivo \"Lead pediu atendimento humano\".",
   "Se o lead pedir pra parar de receber mensagens, faça a UMA tentativa de retenção da seção acima e, conforme a resposta, pause com o motivo certo.",
