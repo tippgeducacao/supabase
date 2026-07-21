@@ -1,6 +1,12 @@
 // Gera um PDF do conteúdo que o cérebro escreveu e ENVIA no WhatsApp do dono.
 // pdf-lib = ESM puro (roda no Deno). NÃO há headless browser no edge, então o layout é
 // montado à mão (quebra de linha/página manual) — simples e previsível.
+//
+// LAYOUT ESTILO "ATA DE REUNIÃO" (pedido do dono 2026-07-21, com print de referência):
+// título + subtítulo, BLOCO DE IDENTIFICAÇÃO (Assunto/Participantes/… em linhas rótulo→valor),
+// SEÇÕES em caixa alta com filete, subtítulos por tema/pessoa, bullets e listas numeradas,
+// rodapé com "Página X de Y". O conteúdo continua sendo texto no formato do WhatsApp
+// (*Seção*, "- bullet", "1. item") — quem entende esse formato é o parser aqui embaixo.
 import type { Ctx } from "./db.ts";
 import { enviarDocumento } from "./wa.ts";
 import { hojeSP, fmtData } from "./datas.ts";
@@ -22,7 +28,29 @@ function slug(s: string): string {
     .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60)) || "documento";
 }
 
-export async function gerarPdf(titulo: string, conteudo: string): Promise<Uint8Array> {
+const semAcento = (s: string) =>
+  s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim();
+
+/** Seções de 1º nível da ata/análise. O resto de `*Texto*` vira SUBTÍTULO (tema ou pessoa). */
+const SECOES = [
+  "identificacao", "resumo executivo", "contexto", "pauta e discussoes",
+  "principais pontos discutidos", "decisoes", "pendencias", "em aberto",
+  "tarefas por responsavel", "prazos e datas", "proximos passos",
+  "o que e o video", "conteudo", "analise",
+];
+const ehSecao = (t: string) => {
+  const n = semAcento(t).replace(/[():]/g, " ").replace(/\s+/g, " ").trim();
+  return SECOES.some((s) => n === s || n.startsWith(s + " ") || n.startsWith(s));
+};
+
+export type PdfOpts = {
+  /** Linha cinza abaixo do título (default: "PPGVET Educacao · <data de hoje>"). */
+  subtitulo?: string;
+  /** Linhas fixas do cabeçalho, antes das que vierem no conteúdo. Ex.: [["Recebido em","21/07 16:36"]] */
+  info?: Array<[string, string]>;
+};
+
+export async function gerarPdf(titulo: string, conteudo: string, opts: PdfOpts = {}): Promise<Uint8Array> {
   // Import DINÂMICO de propósito: se o pdf-lib falhar em carregar no runtime do edge, só ESTA
   // ferramenta quebra (erro tratado) — um import no topo derrubaria o bot inteiro no boot.
   const { PDFDocument, StandardFonts, rgb } = await import("https://esm.sh/pdf-lib@1.17.1");
@@ -33,43 +61,145 @@ export async function gerarPdf(titulo: string, conteudo: string): Promise<Uint8A
   const [W, H] = [595.28, 841.89]; // A4
   const M = 56;
   const LARG = W - M * 2;
-  let page = doc.addPage([W, H]);
+  const ROD = 34; // reserva do rodapé
+
+  const TINTA = rgb(0.09, 0.10, 0.13);
+  const CINZA = rgb(0.42, 0.45, 0.50);
+  const ACENTO = rgb(0.05, 0.42, 0.35);
+  const FILETE = rgb(0.84, 0.86, 0.87);
+
+  const paginas: any[] = [];
+  const novaPagina = () => { const p = doc.addPage([W, H]); paginas.push(p); return p; };
+  let page = novaPagina();
   let y = H - M;
 
-  const quebra = (txt: string, f: any, size: number): string[] => {
+  const quebra = (txt: string, f: any, size: number, larg: number): string[] => {
     const out: string[] = [];
-    for (const par of txt.split("\n")) {
+    for (const par of String(txt).split("\n")) {
       let linha = "";
       for (const p of par.split(/\s+/)) {
         const teste = linha ? `${linha} ${p}` : p;
-        if (linha && f.widthOfTextAtSize(teste, size) > LARG) { out.push(linha); linha = p; }
+        if (linha && f.widthOfTextAtSize(teste, size) > larg) { out.push(linha); linha = p; }
         else linha = teste;
       }
       out.push(linha);
     }
     return out;
   };
-  const escrever = (txt: string, f: any, size: number, gap = 4, cor = rgb(0.1, 0.1, 0.12)) => {
-    for (const l of quebra(txt, f, size)) {
-      if (y - size < M) { page = doc.addPage([W, H]); y = H - M; }
-      page.drawText(l, { x: M, y: y - size, size, font: f, color: cor });
+  const cabe = (altura: number) => { if (y - altura < M + ROD) { page = novaPagina(); y = H - M; } };
+
+  /** Escreve texto com quebra de linha/página. `x`/`larg` permitem recuo (bullets, valores). */
+  const escrever = (
+    txt: string,
+    o: { f?: any; size?: number; cor?: any; x?: number; larg?: number; gap?: number } = {},
+  ) => {
+    const f = o.f ?? fonte, size = o.size ?? 10.5, x = o.x ?? M;
+    const larg = o.larg ?? (LARG - (x - M)), gap = o.gap ?? 4;
+    for (const l of quebra(txt, f, size, larg)) {
+      cabe(size + gap);
+      page.drawText(l, { x, y: y - size, size, font: f, color: o.cor ?? TINTA });
       y -= size + gap;
     }
   };
+  const filete = (cor = FILETE, esp = 0.7) => {
+    cabe(8);
+    page.drawLine({ start: { x: M, y }, end: { x: W - M, y }, thickness: esp, color: cor });
+    y -= 8;
+  };
 
-  escrever(sanitize(titulo), negrito, 18, 6);
-  escrever(`${fmtData(hojeSP())}  ·  PPGVET Educacao`, fonte, 9, 16, rgb(0.45, 0.45, 0.5));
+  // ── Cabeçalho ──────────────────────────────────────────────────────────────
+  escrever(sanitize(titulo).toUpperCase(), { f: negrito, size: 20, gap: 5 });
+  escrever(sanitize(opts.subtitulo || `PPGVET Educacao  ·  ${fmtData(hojeSP())}`),
+    { f: fonte, size: 9, cor: CINZA, gap: 10 });
+  filete(ACENTO, 1.6);
+
+  // ── Bloco de identificação (rótulo → valor), estilo ata ────────────────────
+  const LARG_ROT = 116;
+  const linhaInfo = (rotulo: string, valor: string) => {
+    const linhas = quebra(sanitize(valor), fonte, 10.5, LARG - LARG_ROT);
+    cabe(linhas.length * 14 + 4);
+    const yRot = y;
+    page.drawText(sanitize(rotulo).toUpperCase(), { x: M, y: yRot - 9, size: 7.6, font: negrito, color: CINZA });
+    for (const l of linhas) {
+      page.drawText(l, { x: M + LARG_ROT, y: y - 10.5, size: 10.5, font: fonte, color: TINTA });
+      y -= 14;
+    }
+    y -= 2;
+  };
+
+  let temInfo = false;
+  for (const [rot, val] of opts.info ?? []) {
+    if (!String(val ?? "").trim()) continue;
+    linhaInfo(rot, String(val)); temInfo = true;
+  }
+
+  // ── Corpo ──────────────────────────────────────────────────────────────────
+  let emIdent = false;      // dentro da seção *Identificação* → linhas "Campo: valor" viram cabeçalho
+  let primeiraSecao = true;
+
+  const fecharIdent = () => {
+    if (emIdent) { emIdent = false; if (temInfo) { y -= 2; filete(FILETE, 0.7); } }
+  };
 
   for (const bruto of sanitize(conteudo).split("\n")) {
     const l = bruto.trimEnd();
-    if (!l.trim()) { y -= 6; continue; }
-    // Título de seção do WhatsApp: linha inteira entre *asteriscos* (ex.: *Contexto*, *Adri*).
-    const tituloWpp = l.trim().match(/^\*(.+)\*$/);
-    if (tituloWpp) { y -= 6; escrever(tituloWpp[1].trim(), negrito, 13, 5); continue; }
-    if (/^#{1,3}\s+/.test(l)) { y -= 6; escrever(l.replace(/^#{1,3}\s+/, ""), negrito, 13, 5); continue; }
-    if (/^[-*•]\s+/.test(l)) { escrever("• " + l.replace(/^[-*•]\s+/, "").replace(/\*/g, ""), fonte, 11, 3); continue; }
-    escrever(l.replace(/\*/g, ""), fonte, 11, 4);
+    if (!l.trim()) { y -= 5; continue; }
+
+    // Título entre *asteriscos* ocupando a linha inteira: seção (caixa alta + filete) ou subtítulo.
+    const marcado = l.trim().match(/^\*+\s*(.+?)\s*\*+:?$/);
+    const hash = l.match(/^#{1,3}\s+(.+)$/);
+    const tituloLinha = marcado?.[1] ?? hash?.[1];
+
+    if (tituloLinha) {
+      if (ehSecao(tituloLinha)) {
+        // "Identificação" não vira título: o conteúdo dela É o cabeçalho da ata.
+        if (semAcento(tituloLinha).startsWith("identificacao")) { emIdent = true; primeiraSecao = false; continue; }
+        fecharIdent();
+        y -= primeiraSecao ? 4 : 12;
+        primeiraSecao = false;
+        cabe(64); // título de seção nunca fica órfão no pé da página (precisa caber com algum conteúdo)
+        escrever(tituloLinha.toUpperCase(), { f: negrito, size: 10.5, cor: ACENTO, gap: 4 });
+        filete(FILETE, 0.7);
+      } else {
+        fecharIdent();
+        y -= 7;
+        cabe(46); // idem para o subtítulo (tema/pessoa) e sua primeira linha
+        escrever(tituloLinha, { f: negrito, size: 11.5, gap: 4 });
+      }
+      continue;
+    }
+
+    // Dentro da Identificação: "Campo: valor" vira linha do cabeçalho.
+    const campo = emIdent ? l.match(/^\s*\*?([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ /()]{2,30})\*?\s*:\s*(.+)$/) : null;
+    if (campo) { linhaInfo(campo[1].trim(), campo[2].trim()); temInfo = true; continue; }
+    fecharIdent();
+
+    // Bullet (hanging indent: marcador fora, texto recuado).
+    const bullet = l.match(/^\s*[-*•]\s+(.+)$/);
+    if (bullet) {
+      cabe(15);
+      page.drawText("•", { x: M + 2, y: y - 10.5, size: 10.5, font: fonte, color: ACENTO });
+      escrever(bullet[1].replace(/\*/g, ""), { x: M + 16, gap: 3.5 });
+      continue;
+    }
+    // Lista numerada.
+    const num = l.match(/^\s*(\d{1,2})[.)]\s+(.+)$/);
+    if (num) {
+      cabe(15);
+      page.drawText(`${num[1]}.`, { x: M + 2, y: y - 10.5, size: 10.5, font: negrito, color: ACENTO });
+      escrever(num[2].replace(/\*/g, ""), { x: M + 20, gap: 3.5 });
+      continue;
+    }
+    escrever(l.replace(/\*/g, ""), { gap: 4.5 });
   }
+
+  // ── Rodapé (só faz sentido no fim: precisa do total de páginas) ────────────
+  paginas.forEach((p, i) => {
+    const t = `Pagina ${i + 1} de ${paginas.length}`;
+    p.drawLine({ start: { x: M, y: M - 6 }, end: { x: W - M, y: M - 6 }, thickness: 0.5, color: FILETE });
+    p.drawText(t, { x: (W - fonte.widthOfTextAtSize(t, 8)) / 2, y: M - 18, size: 8, font: fonte, color: CINZA });
+  });
+
   return await doc.save();
 }
 
