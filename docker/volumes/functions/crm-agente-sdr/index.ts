@@ -327,6 +327,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     tel.registrar('llm_chamada', {
       volta: rodada + 1,
       agente: agenteEfetivo,
+      modelo: resp.model ?? null,
       stop_reason: resp.stop_reason ?? null,
       tokens_entrada: resp.usage?.input_tokens ?? null,
       tokens_saida: resp.usage?.output_tokens ?? null,

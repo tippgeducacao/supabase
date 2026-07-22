@@ -21,7 +21,7 @@ const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
 const SDR_API_URL = (Deno.env.get('AGENTE_SDR_SDRAPI_URL') ?? `${SUPABASE_URL}/functions/v1/sdr-api`).replace(/\/$/, '');
 const SDR_API_KEY = Deno.env.get('AGENTE_SDR_SDRAPI_KEY') ?? '';
 const VOYAGE_KEY = Deno.env.get('AGENTE_SDR_VOYAGE_KEY') ?? Deno.env.get('VOYAGE_API_KEY') ?? '';
-const MODELO_MATRIZ = Deno.env.get('AGENTE_SDR_MODEL_MATRIZ') ?? 'claude-sonnet-4-6';
+const MODELO_MATRIZ = Deno.env.get('AGENTE_SDR_MODEL_MATRIZ') ?? 'claude-sonnet-5';
 // Integração (calendar_integrations) da conta Workspace com acesso às agendas dos
 // monitores — equivalente à credencial "Workspace PPG" do n8n.
 const GCAL_INTEGRATION_ID = Deno.env.get('AGENTE_SDR_GCAL_INTEGRATION_ID') ?? '';
@@ -519,9 +519,12 @@ async function verificarCompatibilidade(supabase: any, input: any, ctx: CtxConve
     curso_interesse: input.curso_interesse ?? '',
   });
 
+  // thinking disabled EXPLÍCITO: no Sonnet 5, omitir liga o adaptativo — aqui é
+  // classificação contra tabela que devolve JSON cru em 1024 tokens (thinking truncaria).
   const resp = await chamarAnthropic({
     model: MODELO_MATRIZ,
     max_tokens: 1024,
+    thinking: { type: 'disabled' },
     system,
     messages: [{ role: 'user', content: user }],
   });

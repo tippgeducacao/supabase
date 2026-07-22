@@ -18,7 +18,7 @@ import { limparParaRouter, sanitizarHistorico } from "../crm-agente-sdr/historic
 import { fracionarResposta, humanizarTexto } from "../crm-agente-sdr/saida.ts";
 
 const ANTHROPIC_KEY = Deno.env.get("AGENTE_SDR_ANTHROPIC_KEY") ?? Deno.env.get("ANTHROPIC_API_KEY") ?? "";
-const MODELO = Deno.env.get("AGENTE_SDR_MODEL") ?? "claude-sonnet-4-6";
+const MODELO = Deno.env.get("AGENTE_SDR_MODEL") ?? "claude-sonnet-5";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SDR_API_URL = (Deno.env.get("AGENTE_SDR_SDRAPI_URL") ?? `${SUPABASE_URL}/functions/v1/sdr-api`).replace(/\/$/, "");
 const SDR_API_KEY = Deno.env.get("AGENTE_SDR_SDRAPI_KEY") ?? "";
@@ -140,6 +140,9 @@ export async function aberturaWebchat(nome: string, curso: string | null): Promi
       body: JSON.stringify({
         model: MODELO,
         max_tokens: 400,
+        // disabled EXPLÍCITO: no Sonnet 5, omitir liga o thinking adaptativo — que em
+        // 400 tokens engoliria a saudação inteira e cairia sempre no fallback estático.
+        thinking: { type: "disabled" },
         system: [
           { type: "text", text: promptDoEstagio(nome, curso, "validacao") },
           { type: "text", text: montarContextoTemporal() },

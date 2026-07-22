@@ -6,8 +6,9 @@ import { PROMPT_ROUTER } from './prompts.ts';
 import type { Msg } from './historico.ts';
 
 const ANTHROPIC_KEY = Deno.env.get('AGENTE_SDR_ANTHROPIC_KEY') ?? Deno.env.get('ANTHROPIC_API_KEY') ?? '';
-// Mesmo modelo do n8n (Credenciais.model); override por env se um dia mudar.
-export const MODELO_AGENTE = Deno.env.get('AGENTE_SDR_MODEL') ?? 'claude-sonnet-4-6';
+// Override por env se um dia mudar. ⚠️ Sonnet 5: budget_tokens e temperature≠default
+// dão 400 — as chamadas abaixo usam thinking adaptive/disabled e nenhum sampling param.
+export const MODELO_AGENTE = Deno.env.get('AGENTE_SDR_MODEL') ?? 'claude-sonnet-5';
 
 export async function chamarAnthropic(body: Record<string, unknown>, extraHeaders: Record<string, string> = {}): Promise<any> {
   // retryOnFail do n8n: 5 tentativas, 3s entre elas.
@@ -32,12 +33,14 @@ export async function chamarAnthropic(body: Record<string, unknown>, extraHeader
   throw new Error(`Anthropic: ${ultimoErro}`);
 }
 
-// ── Router: decide validação × qualificador (tool forçada, temp 0) ──────────
+// ── Router: decide validação × qualificador (tool forçada, sem thinking) ─────
+// thinking disabled EXPLÍCITO: no Sonnet 5, omitir liga o adaptativo — o router quer
+// resposta imediata com tool forçada, não raciocínio.
 export async function chamarRouter(historicoLimpo: Msg[]): Promise<'agente_validacao' | 'agente_qualificador'> {
   const resp = await chamarAnthropic({
     model: MODELO_AGENTE,
     max_tokens: 512,
-    temperature: 0,
+    thinking: { type: 'disabled' },
     system: PROMPT_ROUTER,
     messages: historicoLimpo,
     tools: [{
@@ -75,11 +78,12 @@ export async function chamarAgentePrincipal(opts: {
     system.push({ type: 'text', text: opts.contextoTemporal });
   }
 
+  // thinking adaptativo (o formato budget_tokens dá 400 no Sonnet 5); max_tokens com
+  // folga porque o thinking conta DENTRO dele e o tokenizer do Sonnet 5 gasta ~30% mais.
   return await chamarAnthropic({
     model: MODELO_AGENTE,
-    max_tokens: 4096,
-    temperature: 1,
-    thinking: { type: 'enabled', budget_tokens: 3000 },
+    max_tokens: 8192,
+    thinking: { type: 'adaptive' },
     system,
     messages: opts.messages,
     tools: opts.tools,

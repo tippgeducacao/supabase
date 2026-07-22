@@ -275,10 +275,12 @@ async function gerarFollowup(
   const messages = montarMensagensFollowup(history, tentativaAtual);
 
   const inicio = Date.now();
+  // thinking disabled EXPLÍCITO: no Sonnet 5, omitir liga o adaptativo — o follow-up
+  // devolve JSON curto em 1024 tokens (thinking truncaria a resposta).
   const resp = await chamarAnthropic({
     model: MODELO_AGENTE,
     max_tokens: 1024,
-    temperature: 1,
+    thinking: { type: 'disabled' },
     system: [
       { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } },
       { type: 'text', text: contextoTemporal },
@@ -291,6 +293,7 @@ async function gerarFollowup(
     agente: 'followup',
     stage,
     tentativa: tentativaAtual,
+    modelo: resp?.model ?? null,
     stop_reason: resp?.stop_reason ?? null,
     final_answer: out.final_answer,
     tokens_entrada: resp?.usage?.input_tokens ?? null,
