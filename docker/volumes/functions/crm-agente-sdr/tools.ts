@@ -542,32 +542,56 @@ async function verificarCompatibilidade(supabase: any, input: any, ctx: CtxConve
 }
 
 // ── consulta_objecoes (Voyage + match_ppg_voyage top-1) ─────────────────────
+// ⚠️ FALHA NUNCA vira licença pra improvisar (caso Ana 2026-07-21): o Voyage sem billing
+// fica no free tier (3 RPM) e devolve 429 em rajada; o catch genérico ("conduza normalmente")
+// deixava o modelo INVENTAR a quebra — ele afirmou que "a reunião é por chat, sem ligação".
+// Aqui: retry curto no 429/5xx + fallback GUIADO que proíbe inventar característica/quebra.
 async function consultaObjecoes(supabase: any, input: any, toolUseId: string) {
-  const vRes = await fetch('https://api.voyageai.com/v1/embeddings', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${VOYAGE_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      input: [input.mensagem_lead],
-      model: 'voyage-4-large',
-      input_type: 'query',
-      output_dimension: 1024,
-    }),
-  });
-  if (!vRes.ok) throw new Error(`Voyage HTTP ${vRes.status}: ${await vRes.text()}`);
-  const vJson = await vRes.json();
-  const embedding = vJson.data?.[0]?.embedding;
-  if (!embedding) throw new Error('Voyage não retornou embedding');
+  try {
+    let vRes: Response | null = null;
+    for (let tentativa = 1; tentativa <= 3; tentativa++) {
+      vRes = await fetch('https://api.voyageai.com/v1/embeddings', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${VOYAGE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          input: [input.mensagem_lead],
+          model: 'voyage-4-large',
+          input_type: 'query',
+          output_dimension: 1024,
+        }),
+      });
+      if (vRes.ok) break;
+      if (tentativa < 3 && (vRes.status === 429 || vRes.status >= 500)) {
+        await new Promise((r) => setTimeout(r, tentativa * 1500));
+        continue;
+      }
+      break;
+    }
+    if (!vRes || !vRes.ok) throw new Error(`Voyage HTTP ${vRes?.status}: ${await vRes?.text()}`);
+    const vJson = await vRes.json();
+    const embedding = vJson.data?.[0]?.embedding;
+    if (!embedding) throw new Error('Voyage não retornou embedding');
 
-  const { data, error } = await supabase.rpc('match_ppg_voyage', {
-    query_embedding: `[${embedding.join(',')}]`,
-    match_count: 1,
-    filter: {},
-  });
-  if (error) throw new Error(`match_ppg_voyage: ${error.message}`);
+    const { data, error } = await supabase.rpc('match_ppg_voyage', {
+      query_embedding: `[${embedding.join(',')}]`,
+      match_count: 1,
+      filter: {},
+    });
+    if (error) throw new Error(`match_ppg_voyage: ${error.message}`);
 
-  // top-1 sempre — retriever burro (idem n8n).
-  const resposta = data?.[0]?.metadata?.resposta;
-  return { resposta_objecao: resposta || 'CONFIANCA_BAIXA', id: toolUseId };
+    // top-1 sempre — retriever burro (idem n8n).
+    const resposta = data?.[0]?.metadata?.resposta;
+    return { resposta_objecao: resposta || 'CONFIANCA_BAIXA', id: toolUseId };
+  } catch (e) {
+    // Fallback próprio (NÃO deixar cair no catch genérico "conduza normalmente"):
+    // sem a base, o modelo NÃO pode fabricar argumento de venda.
+    console.error('[crm-agente-sdr] consulta_objecoes falhou:', e);
+    return {
+      resposta_objecao: 'INDISPONIVEL',
+      instrucao: 'A base de quebras está indisponível agora (falha técnica — não cite isso ao lead). É PROIBIDO inventar uma quebra por conta própria: NÃO afirme características da reunião, do curso, de valores ou condições que não estejam confirmadas no histórico desta conversa. Responda CURTO e neutro: reconheça a colocação do lead e reforce que a conversa com o monitor é rápida e é onde a condição especial é apresentada. Se a objeção for "prefiro por mensagem/não consigo call", diga que consegue mandar o cronograma e o valor integral por aqui, mas que a condição especial é apresentada na reunião — sem prometer nada além disso.',
+      id: toolUseId,
+    };
+  }
 }
 
 // ── envia_informacoes (sdr-api + contrato de retorno) ───────────────────────
