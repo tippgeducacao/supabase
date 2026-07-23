@@ -4,6 +4,7 @@
 // Avanço de fase é MANUAL (time na fila) — aqui só enviamos o template da fase atual
 // e fazemos follow-ups (a cada 3 dias, máx 3 tentativas) enquanto a fase não muda.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { resolverCampoProfessor } from "../_shared/pedProfessorCampos.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -57,6 +58,9 @@ function formatDatePtBR(ymd: string | null): string {
 }
 
 function buildVar(name: string, ctx: { professor: any; modulo: any; pos: any; convite: any }): string {
+  // Campos do CADASTRO do professor mapeados no template ("professor.*")
+  const doProf = resolverCampoProfessor(name, ctx.professor);
+  if (doProf !== null) return doProf;
   const moduloLabel = ctx.modulo?.modulo_nome || `Módulo ${String(ctx.modulo?.modulo_numero ?? "").padStart(2, "0")}`;
   switch (name) {
     case "nome_professor": return firstName(ctx.professor?.nome);
@@ -124,7 +128,7 @@ Deno.serve(async (req) => {
       try {
         const { data: modulo } = await supabase.from("ped_modulo_gravacao").select("id,modulo_numero,modulo_nome,pos_graduacao_id,data_agendada").eq("id", convite.modulo_gravacao_id).maybeSingle();
         if (!modulo) throw new Error("modulo de gravação não encontrado");
-        const { data: professor } = await supabase.from("ped_professores").select("id,nome,contato_whatsapp").eq("id", convite.professor_atual_id).maybeSingle();
+        const { data: professor } = await supabase.from("ped_professores").select("*").eq("id", convite.professor_atual_id).maybeSingle();
         if (!professor) throw new Error("professor não encontrado");
         const { data: pos } = await supabase.from("ped_pos_graduacoes").select("id,nome,instituicao").eq("id", modulo.pos_graduacao_id).maybeSingle();
 

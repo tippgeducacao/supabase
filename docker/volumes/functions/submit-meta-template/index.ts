@@ -21,6 +21,26 @@ const SAMPLES: Record<string, string> = {
   valor: "1.500,00",
   // Lista enviada como string única (newlines preservados — Meta aceita \n no sample de BODY)
   lista_aulas: "• 15 de junho de 2026 — Pós em Reprodução Bovina\n• 22 de junho de 2026 — Pós em Bovinos de Leite\n• 06 de julho de 2026 — Pós em Bovinos de Leite",
+  // Campos do CADASTRO do professor (variaveis_mapping "professor.*" — ver
+  // _shared/pedProfessorCampos.ts): exemplo realista pro revisor da Meta.
+  "professor.nome": "João",
+  "professor.nome_completo": "João Silva",
+  "professor.cargo_atual": "Professor",
+  "professor.cpf": "123.456.789-00",
+  "professor.contato_whatsapp": "(11) 99999-9999",
+  "professor.email": "professor@ppgvet.com",
+  "professor.forma_pagamento": "PIX",
+  "professor.chave_pix": "professor@ppgvet.com",
+  "professor.valor_hora_aula_online": "200,00",
+  "professor.valor_hora_aula_presencial": "250,00",
+  "professor.especialidades": "Reprodução, Nutrição",
+  "professor.pasta_link": "https://drive.google.com/drive/folders/exemplo",
+  // Podcast (pod-convite-dispatch resolve por heurística de nome)
+  nome_convidado: "João Silva",
+  nome_podcast: "PPGVET Cast",
+  link_youtube: "https://youtube.com/watch?v=exemplo",
+  modulo: "Módulo 01",
+  data_gravacao: "15 de junho de 2026",
 };
 
 const SAMPLES_URL: Record<string, string> = {

@@ -1,6 +1,7 @@
 // dispatch-professor-invite
 // Cron diário: processa convites a professores e envia WhatsApp via Meta Cloud API.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { resolverCampoProfessor } from "../_shared/pedProfessorCampos.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -229,6 +230,9 @@ function buildVariableValue(
     pos: any;
   },
 ): string {
+  // Campos do CADASTRO do professor mapeados no template ("professor.*")
+  const doProf = resolverCampoProfessor(varName, ctx.professor);
+  if (doProf !== null) return doProf;
   const aulaDate = ctx.aula?.data ? dateOnlyToDate(ctx.aula.data) : null;
   const tomorrow = aulaDate ? new Date(aulaDate) : null;
   switch (varName) {
@@ -658,7 +662,7 @@ Deno.serve(async (req) => {
 
         const { data: professor } = await supabase
           .from("ped_professores")
-          .select("id,nome,contato_whatsapp")
+          .select("*") // linha completa: variaveis_mapping pode apontar qualquer campo do cadastro
           .eq("id", convite.professor_atual_id)
           .maybeSingle();
         if (!professor) throw new Error("professor não encontrado");
