@@ -19,7 +19,7 @@ import { atualizarAgenteComRatchet, atualizarLead, buscarLead, carregarHistorico
 import { carregarTools, chamarAgentePrincipal, chamarRouter } from './agente.ts';
 import { type CtxConversa, executarTool, montarToolResults } from './tools.ts';
 import { prepararMensagem } from './midia.ts';
-import { enviarResposta, removerRaciocinioVazado } from './saida.ts';
+import { conversaTexto, enviarResposta, horariosInventados, removerRaciocinioVazado } from './saida.ts';
 import { contaDoLead } from './conta.ts';
 import { rodarEsteiraFollowup } from './followup.ts';
 import { rodarEsteiraFollowupTemplate } from './followup-template.ts';
@@ -288,6 +288,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   // engolir a própria despedida do agente.
   const TOOLS_QUE_PAUSAM = new Set(['pausa_ia', 'temporizador_proxima_turma']);
   let pausouPorTool = false;
+  let corrigiuHorario = false; // guarda de horário inventado: re-instrui só 1x
 
   // ── RETENÇÃO PENDENTE ⇒ DESLIGA AS ESTEIRAS (2026-07-14) ──────────────────
   // Quando o lead demonstra desinteresse, o prompt manda fazer UMA pergunta de
@@ -376,6 +377,29 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       .join('\n')
       .trim();
     if (texto) {
+      // Regra de ouro nº 2 em CÓDIGO (caso Marcello 2026-07-23): oferta de horário
+      // que não apareceu em lugar NENHUM da conversa (consulta_disponibilidade,
+      // fala do lead, turnos anteriores) = slot INVENTADO — o Sonnet 5 fez isso em
+      // resposta-reflexo, oferecendo inclusive horários já passados. Re-instrui o
+      // modelo 1x (turno interno + volta do loop); na reincidência, não envia.
+      const inventados = horariosInventados(texto, conversaTexto(messages));
+      if (inventados.length && !corrigiuHorario) {
+        corrigiuHorario = true;
+        tel.registrar('horario_inventado', { horarios: inventados, acao: 'reinstruido', texto: resumir(texto, 600) });
+        await gravarMensagem(supabase, remotejid, {
+          role: 'user',
+          content: '[CORRECAO_INTERNA_AUTO_IGNORE] Sua última mensagem NÃO foi enviada ao lead: ela oferece horário(s) ' +
+            `(${inventados.join(', ')}) que não vieram de consulta_disponibilidade nesta conversa — é proibido inventar ` +
+            'horário (Regra de ouro nº 2). Refaça agora: rode consulta_disponibilidade e ofereça SÓ o que ela devolver, ' +
+            'ou responda sem citar horário específico. Não mencione esta correção ao lead.',
+        });
+        continue;
+      }
+      if (inventados.length) {
+        tel.registrar('horario_inventado', { horarios: inventados, acao: 'descartado', texto: resumir(texto, 600) });
+        tel.registrar('rodada_fim', { voltas_llm: rodada + 1, respondeu: false }, Date.now() - inicioRodada);
+        return;
+      }
       // Última checagem antes de falar: a geração do LLM (com tools) pode ter levado
       // dezenas de segundos; se o atendente pausou nesse meio, NÃO envia. O recheck
       // entre chunks (passado a enviarResposta) cobre a pausa durante o dribble.

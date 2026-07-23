@@ -199,3 +199,52 @@ export async function enviarResposta(
     await renovarLock(); // rodada longa não pode perder o lock pro TTL
   }
 }
+
+// ── Guarda de HORÁRIO INVENTADO (2026-07-23, caso Marcello) ─────────────────
+// Regra de ouro nº 2 em CÓDIGO: horário específico OFERECIDO ao lead precisa
+// ter aparecido antes na conversa (retorno de consulta_disponibilidade, fala
+// do próprio lead ou turno anterior). O Sonnet 5 violou a regra do prompt em
+// resposta-reflexo sem thinking ("15h, 16h ou 17h30 funcionam pra vc?" sem
+// NENHUMA consulta — 15h e 16h já tinham passado). Só age em mensagem com
+// cara de OFERTA (contém '?'), pra não falso-positivar confirmações/infos.
+const RE_HORA = /\b(\d{1,2})(?::(\d{2})|h(\d{2})?)\b/gi;
+
+function extrairHorarios(texto: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of texto.matchAll(RE_HORA)) {
+    const h = parseInt(m[1], 10);
+    const min = parseInt(m[2] ?? m[3] ?? '0', 10);
+    if (h > 23 || min > 59) continue;
+    out.add(`${h}:${String(min).padStart(2, '0')}`);
+  }
+  return out;
+}
+
+// Texto "conhecido" da conversa: falas, tool_use/tool_result — NUNCA thinking
+// (a signature é base64 e conteria "12h" por acaso, poluindo o conjunto).
+export function conversaTexto(messages: { role: string; content: unknown }[]): string {
+  const partes: string[] = [];
+  for (const m of messages) {
+    if (typeof m.content === 'string') { partes.push(m.content); continue; }
+    if (!Array.isArray(m.content)) continue;
+    for (const b of m.content as Record<string, unknown>[]) {
+      if (b?.type === 'text' && typeof b.text === 'string') partes.push(b.text);
+      else if (b?.type === 'tool_result') partes.push(JSON.stringify(b.content ?? ''));
+      else if (b?.type === 'tool_use') partes.push(JSON.stringify(b.input ?? ''));
+    }
+  }
+  return partes.join('\n');
+}
+
+// Horários que a resposta OFERECE mas que não existem em lugar nenhum da
+// conversa ⇒ inventados. Durações não são oferta ("2h de antecedência", "24h").
+export function horariosInventados(resposta: string, conversa: string): string[] {
+  if (!resposta.includes('?')) return [];
+  const semDuracao = resposta
+    .replace(/\b\d{1,2}h\s+de\s+anteced\w*/gi, '')
+    .replace(/\b(24|48)h\b/gi, '');
+  const oferecidos = extrairHorarios(semDuracao);
+  if (!oferecidos.size) return [];
+  const conhecidos = extrairHorarios(conversa);
+  return [...oferecidos].filter((h) => !conhecidos.has(h));
+}
