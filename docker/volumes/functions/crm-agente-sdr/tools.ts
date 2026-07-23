@@ -329,14 +329,28 @@ async function confirmarAgendamento(supabase: any, input: any, ctx: CtxConversa,
 // MOVE o evento do Google Calendar pro novo horário (mesmo link). NÃO cria agendamento novo.
 async function remarcarAgendamento(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
   try {
-    // 1) acha o agendamento ATIVO (status=agendado) do lead — o mais próximo no futuro.
-    const get = await sdrApi(`agendamentos?telefone=${encodeURIComponent(ctx.telefone)}&status=agendado&limit=50`);
+    // 1) acha o agendamento ATIVO do lead — MESMA régua do guard de duplicata do
+    //    fn_sdr_api_agendar_reuniao (status <> cancelado + SEM resultado). ⚠️ NÃO
+    //    filtrar por status=agendado (caso Marília 2026-07-23): reunião que passa do
+    //    horário vira status 'atrasado' e sumia daqui, enquanto o guard do confirmar
+    //    ainda a via como ativa → DEADLOCK (remarcar "não achei" × confirmar "já
+    //    existe") e o lead ficava sem remarcação. Os dois lados têm que enxergar o
+    //    MESMO conjunto. O trigger trg_reset_overdue_on_reschedule devolve a
+    //    'atrasado' pra 'agendado' quando a data nova é futura.
+    const get = await sdrApi(`agendamentos?telefone=${encodeURIComponent(ctx.telefone)}&limit=50`);
     const getResp = await get.json().catch(() => ({}));
     const lista: any[] = Array.isArray(getResp.data) ? getResp.data : [];
     const agora = Date.now();
-    const alvo = lista
-      .filter((a) => a.data_agendamento && new Date(a.data_agendamento).getTime() > agora - 3_600_000)
-      .sort((a, b) => new Date(a.data_agendamento).getTime() - new Date(b.data_agendamento).getTime())[0] ?? lista[0];
+    const elegiveis = lista.filter((a) =>
+      a.data_agendamento && a.status !== 'cancelado' && a.resultado_reuniao == null,
+    );
+    // Preferência: a mais próxima na janela do guard (>= now-2h, espelha o INTERVAL
+    // '2 hours'); fallback = a mais RECENTE ainda sem resultado (remarcar reativa a
+    // linha existente em vez de "não achei").
+    const alvo = elegiveis
+      .filter((a) => new Date(a.data_agendamento).getTime() > agora - 7_200_000)
+      .sort((a, b) => new Date(a.data_agendamento).getTime() - new Date(b.data_agendamento).getTime())[0]
+      ?? elegiveis.sort((a, b) => new Date(b.data_agendamento).getTime() - new Date(a.data_agendamento).getTime())[0];
     if (!alvo) {
       return { resultado: 'Nenhum agendamento ativo encontrado para este lead. Se ele quer marcar do zero, use consulta_disponibilidade + confirmar_agendamento.', id: toolUseId };
     }
