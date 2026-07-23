@@ -243,6 +243,26 @@ async function deletarEventoMeet(supabase: any, calendarId: string, eventId: str
 }
 
 async function confirmarAgendamento(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
+  // Gate determinístico de FORMAÇÃO (2026-07-23, caso Carla): reunião só é criada
+  // depois que a formação do lead passou pela matriz — verificar_compatibilidade_curso
+  // persiste formacao_academica no lead, e sem ela a tool recusa. Fail-open em erro
+  // de leitura (o gate protege o funil, não pode derrubar agendamento por infra).
+  try {
+    const lead = await buscarLead(supabase, ctx.remotejid);
+    if (lead && !String(lead.formacao_academica ?? '').trim()) {
+      return {
+        resultado: 'RECUSADO: a formação deste lead ainda não foi verificada nesta base.',
+        instrucao: 'NÃO diga que a reunião está marcada. Antes de agendar: se a graduação do lead já apareceu ' +
+          'nesta conversa (ou no histórico), rode verificar_compatibilidade_curso em segundo plano com ela; ' +
+          'se não apareceu, pergunte de forma natural ("só pra acertar o horário certo, me confirma: qual é a ' +
+          'sua graduação?") e rode a verificação com a resposta. Só depois do APROVADO chame confirmar_agendamento de novo.',
+        agendamento_id: null,
+        id: toolUseId,
+      };
+    }
+  } catch (e) {
+    console.log(`[crm-agente-sdr] gate de formação falhou (segue): ${(e as Error).message}`);
+  }
   try {
     const post = await sdrApi('agendamentos', {
       method: 'POST',
@@ -472,7 +492,10 @@ function validarMatriz(resultado: any): any {
 
 async function verificarCompatibilidade(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
   // Side effect do subfluxo: grava objetivos/área no lead (não bloqueante).
+  // formacao_academica também é persistida (2026-07-23): dá visibilidade ao time
+  // ("você é med vet?" some) e alimenta o gate de formação do confirmar_agendamento.
   const patch: Record<string, unknown> = {};
+  if (input.formacao_academica) patch.formacao_academica = input.formacao_academica;
   if (input.objetivos_profissionais) patch.objetivos_profissionais = input.objetivos_profissionais;
   if (input.area_trabalho) patch.situacao_trabalho_atual = input.area_trabalho;
   if (Object.keys(patch).length) {
