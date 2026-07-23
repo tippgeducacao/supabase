@@ -69,6 +69,7 @@ function buildVar(name: string, ctx: { professor: any; modulo: any; pos: any; co
     case "modulo": return moduloLabel;
     case "data_gravacao": return formatDatePtBR(ctx.convite?.data_gravacao ?? ctx.modulo?.data_agendada ?? null);
     case "valor": return ctx.convite?.valor != null ? Number(ctx.convite.valor).toFixed(2).replace(".", ",") : "";
+    case "link_sala_aula": return String(ctx.pos?.link_sala_meet ?? "");
     default: return "";
   }
 }
@@ -130,7 +131,7 @@ Deno.serve(async (req) => {
         if (!modulo) throw new Error("modulo de gravação não encontrado");
         const { data: professor } = await supabase.from("ped_professores").select("*").eq("id", convite.professor_atual_id).maybeSingle();
         if (!professor) throw new Error("professor não encontrado");
-        const { data: pos } = await supabase.from("ped_pos_graduacoes").select("id,nome,instituicao").eq("id", modulo.pos_graduacao_id).maybeSingle();
+        const { data: pos } = await supabase.from("ped_pos_graduacoes").select("id,nome,instituicao,link_sala_meet").eq("id", modulo.pos_graduacao_id).maybeSingle();
 
         const cadencia = STATUS_TO_CADENCIA[convite.status];
         const { data: template } = await supabase.from("ped_wa_templates").select("*").eq("uso_cadencia", cadencia).eq("status", "aprovado").eq("ativo", true).maybeSingle();

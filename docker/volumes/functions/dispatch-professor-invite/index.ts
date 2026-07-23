@@ -252,6 +252,9 @@ function buildVariableValue(
       return tomorrow ? formatDatePtBR(tomorrow) : "";
     case "horario":
       return ctx.aula?.horario ?? "";
+    case "link_sala_aula":
+      // Link da sala (cadastro do CURSO em /pedagogico-v2/cursos), com override por aula
+      return String(ctx.aula?.link_sala_override || ctx.pos?.link_sala_meet || "");
     default:
       return "";
   }

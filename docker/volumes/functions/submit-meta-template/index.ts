@@ -41,6 +41,7 @@ const SAMPLES: Record<string, string> = {
   link_youtube: "https://youtube.com/watch?v=exemplo",
   modulo: "Módulo 01",
   data_gravacao: "15 de junho de 2026",
+  link_sala_aula: "https://meet.google.com/abc-defg-hij",
 };
 
 const SAMPLES_URL: Record<string, string> = {
