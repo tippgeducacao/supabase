@@ -332,6 +332,9 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       stop_reason: resp.stop_reason ?? null,
       tokens_entrada: resp.usage?.input_tokens ?? null,
       tokens_saida: resp.usage?.output_tokens ?? null,
+      // Sonnet 5 adaptativo: o TEXTO do thinking vem criptografado (vazio+signature),
+      // mas o usage expõe quanto ele pensou — única observabilidade restante.
+      tokens_pensamento: resp.usage?.output_tokens_details?.thinking_tokens ?? null,
       cache_lido: resp.usage?.cache_read_input_tokens ?? null,
       blocos: blocosResp.map((b) => b.type),
       pensamento: iaPensamento ? resumir(iaPensamento, 2000) : undefined,

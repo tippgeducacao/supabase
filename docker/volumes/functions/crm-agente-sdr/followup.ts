@@ -298,6 +298,7 @@ async function gerarFollowup(
     final_answer: out.final_answer,
     tokens_entrada: resp?.usage?.input_tokens ?? null,
     tokens_saida: resp?.usage?.output_tokens ?? null,
+    tokens_pensamento: resp?.usage?.output_tokens_details?.thinking_tokens ?? null,
     cache_lido: resp?.usage?.cache_read_input_tokens ?? null,
   }, Date.now() - inicio);
   return out;
