@@ -568,10 +568,12 @@ async function verificarCompatibilidade(supabase: any, input: any, ctx: CtxConve
     };
   }
 
+  // ORDER BY estável: a tabela entra no system cacheado — ordem variável = cache miss.
   const { data: cursos, error } = await supabase
     .from('cursos_pos_graduacao')
     .select('pos_graduacao, pode_fazer, parcialmente_aceitas, status')
-    .eq('status', 'ativo');
+    .eq('status', 'ativo')
+    .order('pos_graduacao');
   if (error) throw new Error(`cursos_pos_graduacao: ${error.message}`);
 
   // No n8n a tabela chegava ao agente via tool getAll; aqui vai injetada no system.
@@ -587,7 +589,9 @@ async function verificarCompatibilidade(supabase: any, input: any, ctx: CtxConve
     model: MODELO_MATRIZ,
     max_tokens: 1024,
     thinking: { type: 'disabled' },
-    system,
+    // system idêntico em TODA chamada da matriz (prompt + tabela ordenada) →
+    // cacheado e compartilhado entre todos os leads.
+    system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
     messages: [{ role: 'user', content: user }],
   });
   const texto = (resp.content ?? [])

@@ -41,7 +41,9 @@ export async function chamarRouter(historicoLimpo: Msg[]): Promise<'agente_valid
     model: MODELO_AGENTE,
     max_tokens: 512,
     thinking: { type: 'disabled' },
-    system: PROMPT_ROUTER,
+    // PROMPT_ROUTER é estático → prefixo (tool do router + system) COMPARTILHADO entre
+    // TODOS os leads: todo inbound roteado paga 0,1x nessa parte.
+    system: [{ type: 'text', text: PROMPT_ROUTER, cache_control: { type: 'ephemeral' } }],
     messages: historicoLimpo,
     tools: [{
       name: 'router_output',
@@ -64,7 +66,17 @@ export async function chamarRouter(historicoLimpo: Msg[]): Promise<'agente_valid
   return agente;
 }
 
-// ── Loop principal: prompt cacheado + contexto temporal fresh + thinking ────
+// ── Loop principal: cache em 3 camadas + contexto temporal FORA do prefixo ──
+// Breakpoints (máx. 4 na API):
+//   (1) última TOOL   → prefixo só-tools COMPARTILHADO entre todos os leads da persona;
+//   (2) prompt        → por lead (cobre voltas e respostas rápidas);
+//   (3) último bloco REAL da última mensagem → o HISTÓRICO vira cache incremental.
+// Antes só existia o (2): o histórico inteiro (~19k tokens) era re-enviado como input
+// CHEIO em toda volta — era o grosso do gasto do agente.
+// ⚠️ O contexto temporal muda a cada MINUTO: ele entra como bloco de texto no FIM da
+// última mensagem, DEPOIS do breakpoint (3) — fresco em toda chamada, sem invalidar o
+// cache do histórico. NUNCA voltar com ele pro system (entre o prompt e as messages
+// ele estourava qualquer cache de mensagem a cada minuto).
 export async function chamarAgentePrincipal(opts: {
   promptAgente: string;
   contextoTemporal: string;
@@ -74,8 +86,25 @@ export async function chamarAgentePrincipal(opts: {
   const system: any[] = [
     { type: 'text', text: opts.promptAgente, cache_control: { type: 'ephemeral' } },
   ];
-  if (opts.contextoTemporal && opts.contextoTemporal.trim() !== '') {
-    system.push({ type: 'text', text: opts.contextoTemporal });
+
+  const tools = opts.tools.length
+    ? [...opts.tools.slice(0, -1), { ...opts.tools[opts.tools.length - 1], cache_control: { type: 'ephemeral' } }]
+    : opts.tools;
+
+  // Clona (não muta o array do chamador — o webchat mantém o dele entre voltas).
+  const messages = opts.messages.map((m) => ({ ...m }));
+  const ult: any = messages[messages.length - 1];
+  if (ult) {
+    const blocos: any[] = Array.isArray(ult.content)
+      ? ult.content.map((b: any) => ({ ...b }))
+      : [{ type: 'text', text: String(ult.content) }];
+    if (blocos.length) {
+      blocos[blocos.length - 1] = { ...blocos[blocos.length - 1], cache_control: { type: 'ephemeral' } };
+    }
+    if (opts.contextoTemporal && opts.contextoTemporal.trim() !== '') {
+      blocos.push({ type: 'text', text: opts.contextoTemporal });
+    }
+    ult.content = blocos;
   }
 
   // thinking adaptativo (o formato budget_tokens dá 400 no Sonnet 5); max_tokens com
@@ -85,18 +114,21 @@ export async function chamarAgentePrincipal(opts: {
     max_tokens: 8192,
     thinking: { type: 'adaptive' },
     system,
-    messages: opts.messages,
-    tools: opts.tools,
+    messages,
+    tools,
   });
 }
 
 // ── Tools do agente: mesma fonte do n8n (tabela lista_tools_claude) ─────────
 export async function carregarTools(supabase: any, agente: string): Promise<any[]> {
+  // ORDER BY estável: a ordem das tools entra no prefixo de cache — ordem variável
+  // entre chamadas = prefixo diferente = cache miss silencioso.
   const { data, error } = await supabase
     .from('lista_tools_claude')
     .select('tool')
     .eq('type', 'ppg')
-    .eq('agente', agente);
+    .eq('agente', agente)
+    .order('id');
   if (error) throw new Error(`carregarTools: ${error.message}`);
   return (data ?? []).map((r: any) => r.tool).filter(Boolean);
 }

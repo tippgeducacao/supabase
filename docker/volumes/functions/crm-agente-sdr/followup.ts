@@ -281,8 +281,10 @@ async function gerarFollowup(
     model: MODELO_AGENTE,
     max_tokens: 1024,
     thinking: { type: 'disabled' },
+    // SEM cache_control: o system é renderizado POR LEAD e o follow-up é one-shot —
+    // cachear aqui era pagar 1,25x de escrita sem nenhuma leitura depois.
     system: [
-      { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: systemPrompt },
       { type: 'text', text: contextoTemporal },
     ],
     messages,
@@ -300,6 +302,7 @@ async function gerarFollowup(
     tokens_saida: resp?.usage?.output_tokens ?? null,
     tokens_pensamento: resp?.usage?.output_tokens_details?.thinking_tokens ?? null,
     cache_lido: resp?.usage?.cache_read_input_tokens ?? null,
+    cache_escrito: resp?.usage?.cache_creation_input_tokens ?? null,
   }, Date.now() - inicio);
   return out;
 }

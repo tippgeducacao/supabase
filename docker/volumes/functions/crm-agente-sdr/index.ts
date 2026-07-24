@@ -336,6 +336,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       // mas o usage expõe quanto ele pensou — única observabilidade restante.
       tokens_pensamento: resp.usage?.output_tokens_details?.thinking_tokens ?? null,
       cache_lido: resp.usage?.cache_read_input_tokens ?? null,
+      cache_escrito: resp.usage?.cache_creation_input_tokens ?? null,
       blocos: blocosResp.map((b) => b.type),
       pensamento: iaPensamento ? resumir(iaPensamento, 2000) : undefined,
       texto: iaTexto ? resumir(iaTexto, 2000) : undefined,
