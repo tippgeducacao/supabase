@@ -163,6 +163,11 @@ function blocosParaTexto(content: string | any[]): string {
 // INFORMAÇÕES DA TENTATIVA na última msg user (mantém os marcadores no histórico
 // pro modelo contar tentativas e detectar o último estilo).
 function montarMensagensFollowup(history: Msg[], tentativaAtual: number): Msg[] {
+  // Só o FIM da conversa importa pro follow (checkpoint + último estilo estão nos
+  // turnos recentes); o nº da tentativa é contado FORA, no histórico COMPLETO, e
+  // injetado abaixo. Mandar a conversa inteira custava ~7,6k tokens/chamada à toa
+  // (~1.400 follows/dia ≈ US$ 21/dia de input).
+  history = history.slice(-40);
   const norm: { role: 'user' | 'assistant'; content: string }[] = [];
   for (const m of history) {
     if (!m || !m.role) continue;
