@@ -549,6 +549,12 @@ Deno.serve(async (req) => {
   // Página = URL da LP (auto). Mapeamento explícito lead.pagina_nome tem prioridade;
   // senão a URL do payload (pickUrlAuto). Preenchida fill-if-empty no lead novo E existente.
   const inPagina = asString(pickByMapping(dados, mapping, "lead.pagina_nome") ?? pickUrlAuto(dados), 500);
+  // Fonte (leads.fonte) — opt-in via mapeamento `lead.fonte` (tipicamente um valor fixo na
+  // query string da URL, ex.: formulário instantâneo do Meta que chega pelo n8n e precisa
+  // continuar contando como "Formulário Direto" na Gestão de Leads). Sem mapeamento fica
+  // NULL e o trigger compute_lead_fonte decide como sempre (ele PRESERVA fonte já
+  // preenchida quando fonte_referencia vem vazia). Fill-if-empty no lead existente.
+  const inFonte = asString(pickByMapping(dados, mapping, "lead.fonte"), 100);
 
   // Normaliza o título do SprintHub → nome canônico do curso (só pós/MBA; cascata
   // exato → normalizado → alias → fuzzy no banco). Curso livre e título desconhecido
@@ -616,7 +622,7 @@ Deno.serve(async (req) => {
     if (email) {
       const { data } = await admin
         .from("leads")
-        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, arquivado, arquivado_em")
+        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, arquivado, arquivado_em")
         .eq("email", email)
         .limit(1);
       existing = data?.[0] ?? null;
@@ -630,7 +636,7 @@ Deno.serve(async (req) => {
       if (canonId) {
         const { data } = await admin
           .from("leads")
-          .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, arquivado, arquivado_em")
+          .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, arquivado, arquivado_em")
           .eq("id", canonId as string)
           .maybeSingle();
         existing = data ?? null;
@@ -673,6 +679,7 @@ Deno.serve(async (req) => {
       if (!existing.tempo_formacao && (inTempo ?? criacaoDefaults.tempo_formacao))    patch.tempo_formacao = (inTempo ?? criacaoDefaults.tempo_formacao)!;
       if (!existing.regiao && (inRegiao ?? criacaoDefaults.regiao))               patch.regiao = (inRegiao ?? criacaoDefaults.regiao)!;
       if (!existing.pagina_nome && inPagina)                                      patch.pagina_nome = inPagina;
+      if (!existing.fonte && inFonte)                                             patch.fonte = inFonte;
       if (Object.keys(patch).length) {
         await admin.from("leads").update(patch).eq("id", existing.id);
       }
@@ -693,6 +700,8 @@ Deno.serve(async (req) => {
           // Página = URL da LP (auto). Fonte/fonte_referencia ficam VAZIAS de propósito
           // (default 'GreatPages' removido + trigger não força 'Orgânico' sem sinal).
           pagina_nome: inPagina ?? null,
+          // Fonte só quando mapeada explicitamente (lead.fonte); senão NULL, como antes.
+          ...(inFonte ? { fonte: inFonte } : {}),
           // Origem da criação → evento "Criado por <webhook>" na timeline (via trigger).
           origem_criacao: integration.nome ?? `Webhook ${slug}`,
         })
