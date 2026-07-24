@@ -1,6 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
-import { encode as base64Encode } from "https://deno.land/std@0.168.0/encoding/base64.ts";
+import { encode as base64Encode, decode as base64Decode } from "https://deno.land/std@0.168.0/encoding/base64.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -27,6 +27,60 @@ function internalizeStorageUrl(url: string): string {
     }
   } catch { /* URL inválida → devolve como veio */ }
   return url;
+}
+
+// ===== Vídeo: limites e Files API do Gemini =====
+// O inlineData tem teto de ~20 MB por REQUEST (com o base64 incluso) — vídeo acima
+// de VIDEO_INLINE_MAX_BYTES sobe pra Files API (upload resumable + espera o
+// processamento) e entra no generateContent por referência (fileData.fileUri).
+// Teto do produto: 50 MB (pedido Laura 2026-07-24).
+const VIDEO_MAX_BYTES = 50 * 1024 * 1024;
+const VIDEO_INLINE_MAX_BYTES = 12 * 1024 * 1024;
+
+async function uploadVideoToGeminiFiles(bytes: Uint8Array, mime: string, apiKey: string): Promise<string> {
+  const start = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${apiKey}`, {
+    method: "POST",
+    headers: {
+      "X-Goog-Upload-Protocol": "resumable",
+      "X-Goog-Upload-Command": "start",
+      "X-Goog-Upload-Header-Content-Length": String(bytes.byteLength),
+      "X-Goog-Upload-Header-Content-Type": mime,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ file: { display_name: `caption-video-${Date.now()}` } }),
+  });
+  if (!start.ok) {
+    throw new Error(`Gemini Files API recusou o upload (HTTP ${start.status}): ${(await start.text()).slice(0, 300)}`);
+  }
+  const uploadUrl = start.headers.get("x-goog-upload-url");
+  if (!uploadUrl) throw new Error("Gemini Files API não devolveu a URL de upload.");
+
+  const up = await fetch(uploadUrl, {
+    method: "POST",
+    headers: { "X-Goog-Upload-Command": "upload, finalize", "X-Goog-Upload-Offset": "0" },
+    body: bytes,
+  });
+  if (!up.ok) throw new Error(`Falha ao subir o vídeo pra Gemini Files API (HTTP ${up.status}).`);
+  const uj = await up.json();
+  const fileName: string | undefined = uj?.file?.name; // ex.: "files/abc123"
+  let fileUri: string | undefined = uj?.file?.uri;
+  let state: string | undefined = uj?.file?.state;
+  if (!fileUri || !fileName) throw new Error("Gemini Files API não devolveu o arquivo enviado.");
+
+  // Vídeo passa por processamento no Google antes de poder ser referenciado.
+  const deadline = Date.now() + 90_000;
+  while (state === "PROCESSING" && Date.now() < deadline) {
+    await sleep(2000);
+    const st = await fetch(`https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${apiKey}`);
+    if (!st.ok) break;
+    const sj = await st.json();
+    state = sj?.state;
+    fileUri = sj?.uri || fileUri;
+  }
+  if (state !== "ACTIVE") {
+    throw new Error(`O Gemini não terminou de processar o vídeo (estado: ${state || "desconhecido"}). Tente de novo em instantes.`);
+  }
+  return fileUri;
 }
 
 // media_type aceito pela Claude Vision (jpeg/png/gif/webp). Deriva do content-type e,
@@ -239,22 +293,23 @@ Gere APENAS a legenda, sem explicações adicionais. A legenda deve estar pronta
       }
 
       // Obter bytes + mime do vídeo (de dataURL local ou baixando a URL).
-      let b64 = "";
+      let bytes: Uint8Array = new Uint8Array(0);
       let mime = video_mime || "video/mp4";
       try {
         if (video_data) {
           const m = String(video_data).match(/^data:(video\/[\w.+-]+);base64,(.+)$/);
           if (!m) throw new Error("video_data inválido (esperado dataURL base64 de vídeo).");
           mime = m[1];
-          b64 = m[2];
+          bytes = base64Decode(m[2]);
         } else {
           const vr = await fetch(internalizeStorageUrl(String(video_url)));
           if (!vr.ok) throw new Error(`Não consegui baixar o vídeo (HTTP ${vr.status}).`);
           const ct = vr.headers.get("content-type");
           if (ct && ct.startsWith("video/")) mime = ct.split(";")[0];
-          const buf = new Uint8Array(await vr.arrayBuffer());
-          if (buf.byteLength > 18 * 1024 * 1024) throw new Error("Vídeo muito grande para análise inline (máx. ~18 MB). Reduza o vídeo ou gere a legenda a partir de uma imagem.");
-          b64 = base64Encode(buf);
+          bytes = new Uint8Array(await vr.arrayBuffer());
+        }
+        if (bytes.byteLength > VIDEO_MAX_BYTES) {
+          throw new Error("Vídeo muito grande para análise (máx. 50 MB). Reduza o vídeo ou gere a legenda a partir de uma imagem.");
         }
       } catch (ve) {
         return new Response(JSON.stringify({ error: ve instanceof Error ? ve.message : "Falha ao ler o vídeo." }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
@@ -276,13 +331,18 @@ Gere APENAS a legenda, sem explicações adicionais. A legenda deve estar pronta
       const genVId = genV?.id;
 
       try {
+        // Pequeno vai inline; grande (12–50 MB) sobe pra Files API e entra por
+        // referência — o inlineData estoura o teto de ~20 MB por request.
+        const videoPart = bytes.byteLength > VIDEO_INLINE_MAX_BYTES
+          ? { fileData: { mimeType: mime, fileUri: await uploadVideoToGeminiFiles(bytes, mime, GEMINI_API_KEY) } }
+          : { inlineData: { mimeType: mime, data: base64Encode(bytes) } };
         const gemRes = await fetchAIWithRetry(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             systemInstruction: { parts: [{ text: systemPrompt }] },
             contents: [{ role: "user", parts: [
-              { inlineData: { mimeType: mime, data: b64 } },
+              videoPart,
               { text: userMessage },
             ] }],
             generationConfig: { temperature: 0.7, maxOutputTokens: 1024 },
