@@ -66,6 +66,23 @@ export function limparParaRouter(brutas: Msg[]): Msg[] {
 // texto; tool_results soltos são reposicionados logo após seu tool_use; turnos
 // consecutivos do mesmo role são fundidos (tool_results primeiro no bloco).
 export function sanitizarHistorico(brutas: Msg[]): Msg[] {
+  // Thinking de turnos ANTIGOS sai do replay: a API só exige os blocos de thinking no
+  // turno assistant da cadeia de tools ATIVA (o último). Os antigos ENVENENAM o contexto
+  // — thinking de dias atrás afirmando "Today is Thursday July 16" fez o agente insistir
+  // numa data errada em 24/07 (caso Rafael) — e desperdiçam tokens (signatures enormes).
+  let idxUltimoAssistant = -1;
+  for (let i = brutas.length - 1; i >= 0; i--) {
+    if (brutas[i]?.role === 'assistant') { idxUltimoAssistant = i; break; }
+  }
+  brutas = brutas
+    .map((m, i) => {
+      if (!m || m.role !== 'assistant' || !Array.isArray(m.content) || i === idxUltimoAssistant) return m;
+      const semThinking = m.content.filter((b: any) => b?.type !== 'thinking' && b?.type !== 'redacted_thinking');
+      if (semThinking.length === m.content.length) return m;
+      return semThinking.length ? { ...m, content: semThinking } : null;
+    })
+    .filter((m): m is Msg => m !== null);
+
   const results = new Map<string, any>();
   for (const m of brutas) {
     if (m.role === 'user' && Array.isArray(m.content)) {

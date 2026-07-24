@@ -84,7 +84,31 @@ function formataBrasiliaDataHora(isoUtc: string): string {
 }
 
 // ── consulta_disponibilidade ────────────────────────────────────────────────
+// HOJE em Brasília — pra guarda de data passada e pra ancorar o "hoje" nas respostas
+// da tool (caso 2026-07-24: o modelo achou que era quarta 22/07, consultou 22 e 23,
+// recebeu "Nenhum horário disponível" — indistinguível de dia cheio — e CONFIRMOU a
+// data errada pro lead. A tool agora corrige a data in-band, igual ao horário inventado).
+function hojeBrasilia() {
+  const br = new Date(Date.now() - BR_OFFSET_MS);
+  const iso = `${br.getUTCFullYear()}-${pad(br.getUTCMonth() + 1)}-${pad(br.getUTCDate())}`;
+  return { iso, display: `${DIA_SEMANA_BR[br.getUTCDay()]}, ${pad(br.getUTCDate())}/${pad(br.getUTCMonth() + 1)}/${br.getUTCFullYear()}` };
+}
+
 async function consultaDisponibilidade(input: any, toolUseId: string) {
+  const hoje = hojeBrasilia();
+
+  // Data PASSADA nunca chega à agenda: devolve correção explícita com o HOJE real.
+  const dataPedida = String(input.data_desejada ?? '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dataPedida) && dataPedida < hoje.iso) {
+    return {
+      resultado: `⚠️ A data consultada (${dataPedida}) JÁ PASSOU. HOJE é ${hoje.display} (${hoje.iso}). ` +
+        `Refaça a consulta com a data de HOJE ou uma futura — e, se você afirmou outra data/dia da semana ao lead, ` +
+        `corrija com naturalidade usando o HOJE informado aqui (nunca insista na data errada).`,
+      slots_raw: [],
+      id: toolUseId,
+    };
+  }
+
   const qs = new URLSearchParams({ pos: input.curso_escolhido ?? '', limite: '6' });
   if (input.data_desejada) qs.set('data', input.data_desejada);
   if (input.periodo_desejado) qs.set('periodo', input.periodo_desejado);
@@ -125,7 +149,8 @@ async function consultaDisponibilidade(input: any, toolUseId: string) {
 
   let conteudo: string;
   if (!slots.length) {
-    conteudo = 'Nenhum horário disponível para o período solicitado.';
+    // Âncora do HOJE junto: "sem horário" nunca pode reforçar uma data errada do modelo.
+    conteudo = `Nenhum horário disponível para o período solicitado. (Referência: HOJE é ${hoje.display}, ${hoje.iso}.)`;
   } else {
     const formatted = slots.map((s) => {
       const brt = toBrasilia(s.inicio);
