@@ -14,6 +14,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3';
 import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO } from './prompts.ts';
 import { AGENTE_RECONTATO, montarDossieRecontato } from './prompts-recontato.ts';
+import { AGENTE_CAMPANHA_DIRETA } from './prompts-campanha-direta.ts';
 import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, renderPrompt } from './contexto.ts';
 import { atualizarAgenteComRatchet, atualizarLead, buscarLead, carregarHistorico, criarLead, excluirDadosLead, gravarMensagem, limparParaRouter, sanitizarHistorico } from './historico.ts';
 import { carregarTools, chamarAgentePrincipal, chamarRouter } from './agente.ts';
@@ -168,6 +169,44 @@ async function ehAlunoMatriculado(telefone: string): Promise<boolean> {
   return data === true;
 }
 
+// ── persona CAMPANHA DIRETA (número de anúncio Click-to-WhatsApp) ───────────
+
+// Allowlist de teste (crm_agente_sdr_config.teste_telefones, 8 últimos dígitos).
+// Enquanto a conversação está sendo validada, a IA deste número responde APENAS a
+// esses telefones — a campanha está NO AR e recebendo lead real o tempo todo, então
+// ligar pra todo mundo antes de validar seria irreversível. Array vazio = sem trava.
+// Fail-CLOSED de propósito: se a leitura falhar, não atende (o silêncio é reversível,
+// uma resposta ruim a lead real não é).
+async function permitidoNoTeste(telefone: string): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('crm_agente_sdr_config')
+    .select('teste_telefones')
+    .eq('id', 1)
+    .maybeSingle();
+  if (error) {
+    console.error(`[crm-agente-sdr] allowlist de teste: ${error.message}`);
+    return false;
+  }
+  const lista: string[] = data?.teste_telefones ?? [];
+  if (!lista.length) return true; // sem trava = produção
+  const sub8 = String(telefone).replace(/\D/g, '').slice(-8);
+  return lista.some((t) => String(t).replace(/\D/g, '').slice(-8) === sub8);
+}
+
+// Tools da vez. Na campanha direta a ABERTURA usa a persona própria (que tem a
+// atualizar_dados_lead); no FECHAMENTO o qualificador segue idêntico ao dos outros
+// números, só ganhando a atualizar_dados_lead — o lead pode corrigir o nome lá também.
+// ⚠️ Ordem estável: os extras entram sempre no fim (a ordem das tools compõe o
+// prefixo do prompt cache; ordem variável = cache miss silencioso).
+async function toolsDaVez(agenteEfetivo: string, ehCampanha: boolean): Promise<any[]> {
+  if (!ehCampanha) return await carregarTools(supabase, agenteEfetivo);
+  if (agenteEfetivo === 'agente_validacao') return await carregarTools(supabase, 'agente_campanha_direta');
+  const base = await carregarTools(supabase, agenteEfetivo);
+  const extras = (await carregarTools(supabase, 'agente_campanha_direta'))
+    .filter((t: any) => t?.name === 'atualizar_dados_lead');
+  return [...base, ...extras];
+}
+
 // ── uma rodada do agente sobre um lote de mensagens drenadas ────────────────
 
 async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): Promise<void> {
@@ -233,8 +272,13 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   // Persona: LEAD em modo_recontato manda (independe do número — espelha o gate de
   // entrada); senão vale a persona do número (relay/buffer). 'recontato' = no-show:
   // missão fixa (reabrir + remarcar), então NÃO passa pelo router validação×qualificador.
+  // 'campanha_direta' = número de ANÚNCIO: mesma dupla validação×qualificador (mesmo
+  // router, mesmo ratchet), só que a ABERTURA usa o prompt próprio, que COLETA nome →
+  // curso → formação antes de checar elegibilidade (o lead vem sem cadastro nenhum).
   const persona = lead?.modo_recontato === true || ultimo.agente_ia_persona === 'recontato'
-    ? 'recontato' : 'qualificador';
+    ? 'recontato'
+    : ultimo.agente_ia_persona === 'campanha_direta' ? 'campanha_direta' : 'qualificador';
+  const ehCampanha = persona === 'campanha_direta';
   let promptAgente: string;
   let tools: any[];
   let contextoEfetivo = contextoTemporal;
@@ -272,12 +316,14 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       efetivo: agenteAtual,
       anterior: lead?.agente_atual ?? null,
       fallback: routerFallback,
+      persona,
     }, Date.now() - inicioRouter);
+    const promptAbertura = ehCampanha ? AGENTE_CAMPANHA_DIRETA : AGENTE_VALIDACAO;
     promptAgente = renderPrompt(
-      agenteAtual === 'agente_qualificador' ? AGENTE_QUALIFICADOR : AGENTE_VALIDACAO,
+      agenteAtual === 'agente_qualificador' ? AGENTE_QUALIFICADOR : promptAbertura,
       vars,
     );
-    tools = await carregarTools(supabase, agenteAtual);
+    tools = await toolsDaVez(agenteAtual, ehCampanha);
   }
   const renovar = lockRenovar(remotejid);
 
@@ -582,9 +628,28 @@ Deno.serve(async (req) => {
   //    número — leads carregam iniciar_atendimento=true global, então sem esse gate o
   //    qualificador responderia comparecidos/leads antigos).
   //  - número 'qualificador' (padrão): atende quem tem iniciar_atendimento (lead novo).
-  const lead = await buscarLead(supabase, payload.remotejid);
+  //  - número 'campanha_direta' (anúncio): o lead NUNCA passou por webhook de LP, então
+  //    não existe em cliente_ppg_leads_sdr e cairia em 'sem_iniciar_atendimento' — ou seja,
+  //    a IA nunca falaria com ninguém da campanha. Aqui o próprio clique no anúncio é o
+  //    opt-in, então o lead é semeado na hora (respeitando não-perturbe e pausa).
+  const ehCampanhaDireta = payload.agente_ia_persona === 'campanha_direta';
+  if (ehCampanhaDireta && !(await permitidoNoTeste(payload.telefone))) {
+    return json({ ok: true, skip: 'fora_da_allowlist_teste' });
+  }
+
+  let lead = await buscarLead(supabase, payload.remotejid);
   if (lead?.modo_recontato !== true) {
     if (payload.agente_ia_persona === 'recontato') return json({ ok: true, skip: 'fora_do_modo_recontato' });
+    if (ehCampanhaDireta) {
+      if (lead?.nao_perturbe === true) return json({ ok: true, skip: 'nao_perturbe' });
+      if (!lead) {
+        await criarLead(supabase, payload.remotejid); // nasce com iniciar_atendimento = true (default)
+        lead = await buscarLead(supabase, payload.remotejid);
+      } else if (lead.iniciar_atendimento !== true) {
+        await atualizarLead(supabase, payload.remotejid, { iniciar_atendimento: true });
+        lead.iniciar_atendimento = true;
+      }
+    }
     if (!lead || lead.iniciar_atendimento !== true) return json({ ok: true, skip: 'sem_iniciar_atendimento' });
   }
   if (lead.pausa_ia === true) return json({ ok: true, skip: 'pausa_ia' });

@@ -861,6 +861,44 @@ async function consultaPosDisponiveis(supabase: any, input: any, ctx: CtxConvers
   );
 }
 
+// ── atualizar_dados_lead (persona campanha_direta) ──────────────────────────
+// Materializa NOME e GRADUAÇÃO ditos pelo lead. Existe porque no número de ANÚNCIO
+// o cadastro chega VAZIO: não houve LP nem formulário. Sem isto o nome se perde no
+// histórico e o time acaba chamando o lead pelo apelido do WhatsApp ("Morro😎😎",
+// "Tio Júlio") — e a formação some. A régua de ONDE gravar vive na RPC
+// crm_agente_atualizar_dados_lead (agente + card do SAC + CRM), não aqui.
+async function atualizarDadosLead(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
+  const sair = (texto: string) => ({ resultado: texto, id: toolUseId });
+  const nome = String(input?.nome ?? '').trim();
+  const formacao = String(input?.formacao ?? '').trim();
+  if (!nome && !formacao) {
+    return sair('Nada a atualizar: chame esta função só quando o lead informar o nome ou a graduação dele.');
+  }
+
+  const { data, error } = await supabase.rpc('crm_agente_atualizar_dados_lead', {
+    p_remotejid: ctx.remotejid,
+    p_nome: nome || null,
+    p_formacao: formacao || null,
+  });
+  if (error) {
+    console.error(`[crm-agente-sdr] atualizar_dados_lead: ${error.message}`);
+    return sair('Não consegui registrar agora. Siga a conversa normalmente, sem citar isso ao lead.');
+  }
+
+  // A RPC recusa valor que não parece nome/graduação e devolve a instrução do que fazer.
+  if (data && (data as any).ok === false) {
+    return sair(String((data as any).instrucao ?? 'Valor inválido. Pergunte de novo, de forma leve.'));
+  }
+
+  const partes = [nome ? `nome "${nome}"` : null, formacao ? `graduação "${formacao}"` : null].filter(Boolean);
+  return sair(
+    `Registrado no cadastro: ${partes.join(' e ')}. ` +
+    (nome ? `Use "${nome.split(' ')[0]}" ao falar com o lead (minúsculo, no máximo duas vezes na conversa). ` : '') +
+    (formacao ? 'Isto NÃO checa elegibilidade: rode verificar_compatibilidade_curso para isso. ' : '') +
+    'NUNCA comente com o lead que registrou ou salvou os dados dele.',
+  );
+}
+
 // ── dispatcher ──────────────────────────────────────────────────────────────
 export async function executarTool(
   supabase: any,
@@ -879,6 +917,7 @@ export async function executarTool(
       case 'pausa_ia': return await pausaIa(supabase, input, ctx, id);
       case 'temporizador_proxima_turma': return await temporizadorProximaTurma(supabase, input, ctx, id);
       case 'consulta_pos_disponiveis': return await consultaPosDisponiveis(supabase, input, ctx, id);
+      case 'atualizar_dados_lead': return await atualizarDadosLead(supabase, input, ctx, id);
       default: return { resultado: `Tool desconhecida: ${name}`, id };
     }
   } catch (e) {
