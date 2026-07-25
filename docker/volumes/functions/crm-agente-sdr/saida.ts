@@ -116,13 +116,20 @@ export async function fracionarResposta(texto: string): Promise<string[]> {
   }
 }
 
-// Port do "Calcula Delay": 45 wpm (0.75 palavra/s), variação ±20%, 2 a 12s.
+// Port do "Calcula Delay": 45 wpm (0.75 palavra/s), variação ±20%, 2 a 6s.
+// ⚠️ O teto caiu de 12s para 6s em 2026-07-25. O dribble roda em BACKGROUND
+// (EdgeRuntime.waitUntil) e o supervisor do edge runtime mata o isolate sob carga
+// ("CPU time hard limit reached" / "early termination"): quanto mais tempo o loop
+// passa dormindo, maior a chance de a resposta sair pela METADE. Medido no dia:
+// 56 de 408 rodadas (13,7%) truncadas em 6h, 85 balões perdidos — o lead recebia
+// só o primeiro balão e a conversa "travava". Mexer aqui é o botão mais barato:
+// 3 balões passaram de ~36s de exposição para ~12s.
 export function calcularDelaySegundos(mensagem: string): number {
   const palavras = mensagem.split(/\s+/).filter((w) => w.length > 0).length;
   let delay = palavras / 0.75;
   const variacao = (Math.random() * 0.4) - 0.2;
   delay = delay * (1 + variacao);
-  delay = Math.max(2, Math.min(delay, 12));
+  delay = Math.max(2, Math.min(delay, 6));
   return Math.round(delay * 10) / 10;
 }
 
@@ -176,9 +183,15 @@ export async function enviarResposta(
     raciocinio_removido: raciocinioRemovido || undefined,
   });
   let enviados = 0;
+  let primeiro = true;
   for (const chunk of chunks) {
-    const delay = calcularDelaySegundos(chunk);
-    await new Promise((r) => setTimeout(r, delay * 1000));
+    // ⚠️ O "tempo de digitação" vale ENTRE os balões, NUNCA antes do primeiro: o lead
+    // já esperou o debounce + a geração do LLM, então essa espera extra só atrasava a
+    // resposta e alargava a janela em que o supervisor pode matar o worker — deixando
+    // a conversa muda depois de UM balão (caso 2026-07-25). O 1º balão sai na hora.
+    const delay = primeiro ? 0 : calcularDelaySegundos(chunk);
+    primeiro = false;
+    if (delay > 0) await new Promise((r) => setTimeout(r, delay * 1000));
     // Pausou durante o "tempo de digitação"? Não manda este nem os próximos balões.
     if (pausada && (await pausada())) {
       tel?.registrar('envio_abortado_pausa', {
