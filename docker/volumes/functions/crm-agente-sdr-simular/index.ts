@@ -45,8 +45,13 @@ async function resolverPos(alvo: string): Promise<string> {
     return `Pós-graduações ATIVAS da PPG:\n${lista}\nCite só as relevantes (máx. 3-4), sem os prefixos "PÓS |"/"MBA |".`;
   }
   const { data: resolved } = await supabase.rpc('fn_sdr_api_resolver_pos_graduacao', { p_valor: alvo });
+  // ⚠️ O resolver ECOA o texto buscado no campo `nome` mesmo quando NÃO acha nada
+  // ({"id": null, "nome": "equinos"}). Quem decide é o **id** — é assim que o executor
+  // real (tools.ts) faz. Checar o nome dava "achou" pra qualquer coisa e fazia o agente
+  // confirmar pós inexistente no teste (falso positivo do harness).
+  const cursoId = (resolved as any)?.id ?? null;
   const nomeOficial = String((resolved as any)?.nome ?? '').trim();
-  if (!nomeOficial) {
+  if (!cursoId) {
     return `Não achei uma pós correspondente a "${alvo}". Catálogo ativo:\n${lista}\n` +
       `Confirme com o lead qual dessas ele quer (cite as 2-3 mais próximas, sem os prefixos).`;
   }
