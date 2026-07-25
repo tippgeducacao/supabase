@@ -302,6 +302,44 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       persona: 'recontato',
       dossie: dossie ? true : false,
     }, 0);
+  } else if (ehCampanha) {
+    // ⚠️ NA CAMPANHA DIRETA O ROUTER NÃO DECIDE A ABERTURA (decisão do usuário
+    // 2026-07-25). O lead de anúncio SEMPRE entra na COLETA (nome → curso → formação):
+    // deixar o router escolher abre a porta pra ele mandar direto pro qualificador —
+    // que assume horário já escolhido — e a coleta nunca acontecer, que é justamente o
+    // motivo desta persona existir. O router segue consultado só pra PROMOVER ao
+    // fechamento, e a promoção só vale DEPOIS que nome E formação já foram coletados.
+    // O ratchet continua valendo: promovido a qualificador, não volta pra abertura.
+    const coletaFeita = Boolean(
+      String(lead?.nome ?? '').trim() && String(lead?.formacao_academica ?? '').trim(),
+    );
+    let agenteAtual = lead?.agente_atual === 'agente_qualificador' ? 'agente_qualificador' : 'agente_validacao';
+    let decidiu: string = agenteAtual;
+    const consultarRouter = agenteAtual !== 'agente_qualificador' && coletaFeita;
+    const inicioRouter = Date.now();
+    if (consultarRouter) {
+      try {
+        decidiu = await chamarRouter(limparParaRouter(await carregarHistorico(supabase, remotejid)));
+        if (decidiu === 'agente_qualificador') agenteAtual = 'agente_qualificador';
+      } catch (e) {
+        console.error('[crm-agente-sdr] router (campanha direta) falhou, mantendo a abertura:', e);
+      }
+    }
+    await atualizarLead(supabase, remotejid, { agente_atual: agenteAtual });
+    agenteEfetivo = agenteAtual;
+    tel.registrar('router_decisao', {
+      decidiu,
+      efetivo: agenteAtual,
+      anterior: lead?.agente_atual ?? null,
+      persona,
+      coleta_feita: coletaFeita,
+      router_consultado: consultarRouter,
+    }, Date.now() - inicioRouter);
+    promptAgente = renderPrompt(
+      agenteAtual === 'agente_qualificador' ? AGENTE_QUALIFICADOR : AGENTE_CAMPANHA_DIRETA,
+      vars,
+    );
+    tools = await toolsDaVez(agenteAtual, true);
   } else {
     // Router (em erro, mantém o agente atual — não derruba a conversa).
     let proximo: 'agente_validacao' | 'agente_qualificador';
@@ -323,12 +361,12 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       fallback: routerFallback,
       persona,
     }, Date.now() - inicioRouter);
-    const promptAbertura = ehCampanha ? AGENTE_CAMPANHA_DIRETA : AGENTE_VALIDACAO;
+    // (campanha_direta não cai aqui — tem branch próprio, sem router na abertura)
     promptAgente = renderPrompt(
-      agenteAtual === 'agente_qualificador' ? AGENTE_QUALIFICADOR : promptAbertura,
+      agenteAtual === 'agente_qualificador' ? AGENTE_QUALIFICADOR : AGENTE_VALIDACAO,
       vars,
     );
-    tools = await toolsDaVez(agenteAtual, ehCampanha);
+    tools = await carregarTools(supabase, agenteAtual);
   }
   const renovar = lockRenovar(remotejid);
 
