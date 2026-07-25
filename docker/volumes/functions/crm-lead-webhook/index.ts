@@ -555,6 +555,19 @@ Deno.serve(async (req) => {
   // NULL e o trigger compute_lead_fonte decide como sempre (ele PRESERVA fonte já
   // preenchida quando fonte_referencia vem vazia). Fill-if-empty no lead existente.
   const inFonte = asString(pickByMapping(dados, mapping, "lead.fonte"), 100);
+  // Metadados do anúncio (campanha/conjunto/criativo/formulário). O formulário INSTANTÂNEO
+  // do Meta não passa por LP, entao não traz UTM na URL — a atribuição vem destes campos,
+  // que alimentam o filtro "por formulário" da Gestão de Leads (useMetaFormNames) e o bloco
+  // de campanha/criativo do Contato 360. Opt-in: só grava o que estiver mapeado.
+  const META_COLS = [
+    "meta_campaign_id", "meta_campaign_name", "meta_adset_id", "meta_adset_name",
+    "meta_ad_id", "meta_ad_name", "meta_form_id", "meta_form_name", "meta_platform",
+  ] as const;
+  const inMeta: Record<string, string> = {};
+  for (const c of META_COLS) {
+    const v = asString(pickByMapping(dados, mapping, `lead.${c}`), 255);
+    if (v) inMeta[c] = v;
+  }
 
   // Normaliza o título do SprintHub → nome canônico do curso (só pós/MBA; cascata
   // exato → normalizado → alias → fuzzy no banco). Curso livre e título desconhecido
@@ -622,7 +635,7 @@ Deno.serve(async (req) => {
     if (email) {
       const { data } = await admin
         .from("leads")
-        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, arquivado, arquivado_em")
+        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, meta_campaign_id, meta_campaign_name, meta_adset_id, meta_adset_name, meta_ad_id, meta_ad_name, meta_form_id, meta_form_name, meta_platform, arquivado, arquivado_em")
         .eq("email", email)
         .limit(1);
       existing = data?.[0] ?? null;
@@ -636,7 +649,7 @@ Deno.serve(async (req) => {
       if (canonId) {
         const { data } = await admin
           .from("leads")
-          .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, arquivado, arquivado_em")
+          .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, meta_campaign_id, meta_campaign_name, meta_adset_id, meta_adset_name, meta_ad_id, meta_ad_name, meta_form_id, meta_form_name, meta_platform, arquivado, arquivado_em")
           .eq("id", canonId as string)
           .maybeSingle();
         existing = data ?? null;
@@ -680,6 +693,7 @@ Deno.serve(async (req) => {
       if (!existing.regiao && (inRegiao ?? criacaoDefaults.regiao))               patch.regiao = (inRegiao ?? criacaoDefaults.regiao)!;
       if (!existing.pagina_nome && inPagina)                                      patch.pagina_nome = inPagina;
       if (!existing.fonte && inFonte)                                             patch.fonte = inFonte;
+      for (const [c, v] of Object.entries(inMeta)) if (!existing[c])              patch[c] = v;
       if (Object.keys(patch).length) {
         await admin.from("leads").update(patch).eq("id", existing.id);
       }
@@ -702,6 +716,7 @@ Deno.serve(async (req) => {
           pagina_nome: inPagina ?? null,
           // Fonte só quando mapeada explicitamente (lead.fonte); senão NULL, como antes.
           ...(inFonte ? { fonte: inFonte } : {}),
+          ...inMeta,
           // Origem da criação → evento "Criado por <webhook>" na timeline (via trigger).
           origem_criacao: integration.nome ?? `Webhook ${slug}`,
         })
@@ -1349,6 +1364,26 @@ Deno.serve(async (req) => {
     status: duplicado ? "duplicado" : "ok",
     ip_origem: ipOrigem,
   });
+
+  // (11.9) HISTÓRICO DO ENVIO CRU (lead_entries) — opt-in via config.registrarEntrada.
+  // Alimenta o Histórico do Contato 360 (get_contato_timeline) e a busca de histórico da
+  // Gestão de Leads (search_lead_entries) — é o que o webhook-leads registrava para o
+  // formulário instantâneo do Meta. Best-effort: nunca derruba o intake.
+  if (config?.registrarEntrada === true && leadId) {
+    try {
+      await admin.from("lead_entries").insert({
+        lead_id: leadId,
+        raw_payload: payload as any,
+        pagina_nome: inPagina ?? integration.pagina_nome ?? null,
+        fonte: inFonte ?? null,
+        criou_oportunidade: !!oportunidadeId,
+        motivo: oportunidadeId ? "nova_oportunidade" : (duplicado ? "duplicado" : "sem_oportunidade"),
+        criado_por: integration.nome ?? `Webhook ${slug}`,
+      });
+    } catch (e: any) {
+      console.error("[crm-lead-webhook] lead_entries falhou:", e?.message);
+    }
+  }
 
   // (12) MAPEAMENTO DE RETORNO (config.retorno) — opt-in. Se definido, devolve um objeto
   // custom com variáveis resolvidas; senão, mantém o shape padrão. Código de status vem de
