@@ -34,9 +34,30 @@ async function autorizado(req: Request): Promise<boolean> {
   return Boolean(segredo) && req.headers.get('x-followup-key') === segredo;
 }
 
+// Catálogo + resolução de pós: espelha o executor real (tools.ts), usando as MESMAS
+// fontes — a tabela cursos e a RPC fn_sdr_api_resolver_pos_graduacao. É isso que faz o
+// teste valer pra "o lead pediu uma pós que não existe".
+async function resolverPos(alvo: string): Promise<string> {
+  const { data: cursos } = await supabase
+    .from('cursos').select('nome').eq('ativo', true).eq('modalidade', 'Pós-Graduação').order('nome');
+  const lista = ((cursos ?? []) as { nome: string }[]).map((c) => `- ${c.nome}`).join('\n');
+  if (!alvo) {
+    return `Pós-graduações ATIVAS da PPG:\n${lista}\nCite só as relevantes (máx. 3-4), sem os prefixos "PÓS |"/"MBA |".`;
+  }
+  const { data: resolved } = await supabase.rpc('fn_sdr_api_resolver_pos_graduacao', { p_valor: alvo });
+  const nomeOficial = String((resolved as any)?.nome ?? '').trim();
+  if (!nomeOficial) {
+    return `Não achei uma pós correspondente a "${alvo}". Catálogo ativo:\n${lista}\n` +
+      `Confirme com o lead qual dessas ele quer (cite as 2-3 mais próximas, sem os prefixos).`;
+  }
+  const nomeConversa = nomeOficial.replace(/^p[oó]s\s*\|\s*/i, '').replace(/^mba\s*\|\s*/i, 'MBA ').trim();
+  return `Interesse do lead ATUALIZADO para: ${nomeConversa} (nome oficial: ${nomeOficial}). ` +
+    `Daqui em diante use "${nomeConversa}" em TODAS as chamadas.`;
+}
+
 // Retornos plausíveis das tools — texto no MESMO espírito dos executores reais
 // (tools.ts), porque é o texto que guia a próxima decisão do modelo.
-function mockTool(nome: string, input: any, mocks: any): string {
+async function mockTool(nome: string, input: any, mocks: any): Promise<string> {
   switch (nome) {
     case 'atualizar_dados_lead': {
       const partes = ['nome', 'formacao', 'tempo_formacao']
@@ -45,11 +66,13 @@ function mockTool(nome: string, input: any, mocks: any): string {
         ? `Registrado no cadastro: ${partes.join(', ')}. NUNCA comente com o lead que registrou os dados.`
         : 'Nada a atualizar.';
     }
-    case 'consulta_pos_disponiveis': {
-      const alvo = String(input?.trocar_para ?? '').trim();
-      if (!alvo) return 'Pós ATIVAS: Reprodução, Nutrição e Gestão de Bovinos (3EM1); Sanidade Avícola; Clínica Médica e Cirúrgica de Bovinos; Postura Comercial.';
-      return `Interesse do lead ATUALIZADO para: ${alvo}. Use esse nome nas próximas chamadas.`;
-    }
+    // ⚠️ Este mock NÃO pode confirmar qualquer curso: a 1ª versão devolvia
+    // "Interesse ATUALIZADO para: <o que o modelo pediu>" e o agente, confiando na
+    // ferramenta (comportamento CORRETO), dizia "temos sim a pós de equinos" — um
+    // falso positivo do harness, não um erro do agente. Aqui usamos o RESOLVER REAL
+    // (fn_sdr_api_resolver_pos_graduacao), o mesmo de produção.
+    case 'consulta_pos_disponiveis':
+      return await resolverPos(String(input?.trocar_para ?? '').trim());
     case 'envia_informacoes':
       return `Cronograma enviado ao lead no WhatsApp (conteudo="${input?.conteudo ?? '?'}"). Valor integral: R$ 4.200,00.`;
     case 'verificar_compatibilidade_curso': {
@@ -125,14 +148,15 @@ Deno.serve(async (req) => {
         for (const tu of toolUses) {
           transcript.push({ quem: 'tool', nome: tu.name, input: tu.input });
         }
-        messages.push({
-          role: 'user',
-          content: toolUses.map((tu: any) => ({
+        const results = [];
+        for (const tu of toolUses) {
+          results.push({
             type: 'tool_result',
             tool_use_id: tu.id,
-            content: mockTool(tu.name, tu.input, mocks),
-          })),
-        });
+            content: await mockTool(tu.name, tu.input, mocks),
+          });
+        }
+        messages.push({ role: 'user', content: results });
         if (texto) transcript.push({ quem: 'joao', texto });
         // pausa_ia encerra o atendimento — nada mais é dito.
         if (toolUses.some((tu: any) => tu.name === 'pausa_ia')) { volta = 99; break; }
