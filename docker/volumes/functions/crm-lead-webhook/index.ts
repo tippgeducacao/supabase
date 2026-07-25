@@ -568,6 +568,19 @@ Deno.serve(async (req) => {
     const v = asString(pickByMapping(dados, mapping, `lead.${c}`), 255);
     if (v) inMeta[c] = v;
   }
+  // UTMs em leads.utm_* — mapeáveis (lead.utm_*). No lead de LP elas são extraídas da URL
+  // pelo trigger compute_lead_fonte; o formulário instantâneo do Meta não tem URL, então
+  // aplicamos o MESMO proxy do webhook-leads: campanha/conjunto/anúncio viram
+  // utm_campaign/utm_term/utm_content (é o que liga esses leads ao Melhores Criativos).
+  // O proxy só age quando há meta_* mapeado ⇒ integração que não mapeia nada segue igual.
+  const inUtm: Record<string, string> = {};
+  for (const c of ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term"]) {
+    const v = asString(pickByMapping(dados, mapping, `lead.${c}`), 255);
+    if (v) inUtm[c] = v;
+  }
+  if (!inUtm.utm_campaign && inMeta.meta_campaign_name) inUtm.utm_campaign = inMeta.meta_campaign_name;
+  if (!inUtm.utm_content  && inMeta.meta_ad_name)       inUtm.utm_content  = inMeta.meta_ad_name;
+  if (!inUtm.utm_term     && inMeta.meta_adset_name)    inUtm.utm_term     = inMeta.meta_adset_name;
 
   // Normaliza o título do SprintHub → nome canônico do curso (só pós/MBA; cascata
   // exato → normalizado → alias → fuzzy no banco). Curso livre e título desconhecido
@@ -635,7 +648,7 @@ Deno.serve(async (req) => {
     if (email) {
       const { data } = await admin
         .from("leads")
-        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, meta_campaign_id, meta_campaign_name, meta_adset_id, meta_adset_name, meta_ad_id, meta_ad_name, meta_form_id, meta_form_name, meta_platform, arquivado, arquivado_em")
+        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, meta_campaign_id, meta_campaign_name, meta_adset_id, meta_adset_name, meta_ad_id, meta_ad_name, meta_form_id, meta_form_name, meta_platform, utm_source, utm_medium, utm_campaign, utm_content, utm_term, arquivado, arquivado_em")
         .eq("email", email)
         .limit(1);
       existing = data?.[0] ?? null;
@@ -649,7 +662,7 @@ Deno.serve(async (req) => {
       if (canonId) {
         const { data } = await admin
           .from("leads")
-          .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, meta_campaign_id, meta_campaign_name, meta_adset_id, meta_adset_name, meta_ad_id, meta_ad_name, meta_form_id, meta_form_name, meta_platform, arquivado, arquivado_em")
+          .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, meta_campaign_id, meta_campaign_name, meta_adset_id, meta_adset_name, meta_ad_id, meta_ad_name, meta_form_id, meta_form_name, meta_platform, utm_source, utm_medium, utm_campaign, utm_content, utm_term, arquivado, arquivado_em")
           .eq("id", canonId as string)
           .maybeSingle();
         existing = data ?? null;
@@ -694,6 +707,7 @@ Deno.serve(async (req) => {
       if (!existing.pagina_nome && inPagina)                                      patch.pagina_nome = inPagina;
       if (!existing.fonte && inFonte)                                             patch.fonte = inFonte;
       for (const [c, v] of Object.entries(inMeta)) if (!existing[c])              patch[c] = v;
+      for (const [c, v] of Object.entries(inUtm))  if (!existing[c])              patch[c] = v;
       if (Object.keys(patch).length) {
         await admin.from("leads").update(patch).eq("id", existing.id);
       }
@@ -717,6 +731,7 @@ Deno.serve(async (req) => {
           // Fonte só quando mapeada explicitamente (lead.fonte); senão NULL, como antes.
           ...(inFonte ? { fonte: inFonte } : {}),
           ...inMeta,
+          ...inUtm,
           // Origem da criação → evento "Criado por <webhook>" na timeline (via trigger).
           origem_criacao: integration.nome ?? `Webhook ${slug}`,
         })
