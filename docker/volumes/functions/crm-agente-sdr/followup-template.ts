@@ -604,7 +604,10 @@ async function encadearProximaRodada(supabase: any, horaUtc: number, cadeia: num
     if (!segredo || !base) { console.error('[followup-template] cadeia: sem segredo/URL'); return; }
     const qs = new URLSearchParams({ mode: 'followup-template', hora: String(horaUtc), cadeia: String(cadeia) });
     if (Number.isFinite(limite) && (limite as number) > 0) qs.set('limite', String(limite));
-    const resp = await fetch(`${base}/functions/v1/crm-agente-sdr?${qs.toString()}`, {
+    // ⚠️ A rodada seguinte vai pra crm-agente-sdr-ESTEIRAS, nunca de volta pra
+    // crm-agente-sdr: encadear no isolate do agente é o que queimava o CPU dele e
+    // matava as respostas em background (13,7% truncadas até 2026-07-25).
+    const resp = await fetch(`${base}/functions/v1/crm-agente-sdr-esteiras?${qs.toString()}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-followup-key': segredo },
       body: '{}',
