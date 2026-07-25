@@ -215,7 +215,6 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     mensagens: itens.map((i: any) => resumir(i.mensagem, 300)),
     arquivos: itens.filter((i: any) => i.arquivo).length,
   });
-  const ultimo = itens[itens.length - 1];
   // Contexto da CONVERSA: conta/lead/oportunidade vêm do último item do buffer QUE
   // TEM o campo — o POST de drenagem do reconciliador (drenar_orfao) chegava SEM
   // wa_account_id e, sendo o último do lote, zerava o ctx: a resposta caía na 1ª
@@ -275,9 +274,15 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   // 'campanha_direta' = número de ANÚNCIO: mesma dupla validação×qualificador (mesmo
   // router, mesmo ratchet), só que a ABERTURA usa o prompt próprio, que COLETA nome →
   // curso → formação antes de checar elegibilidade (o lead vem sem cadastro nenhum).
-  const persona = lead?.modo_recontato === true || ultimo.agente_ia_persona === 'recontato'
+  // ⚠️ A persona sai de `doUltimoCom`, NUNCA do último item cru: o POST de drenagem do
+  // reconciliador (drenar_orfao) chega SEM agente_ia_persona e, sendo o último do lote,
+  // zerava a persona pra 'qualificador' — o número de anúncio rodava o prompt de validação
+  // padrão, sem pedir nome/formação (visto em 2026-07-25). É a MESMA armadilha que já
+  // tinha derrubado a conta/lead/oportunidade do ctx (caso Ananda).
+  const personaDoNumero = doUltimoCom('agente_ia_persona');
+  const persona = lead?.modo_recontato === true || personaDoNumero === 'recontato'
     ? 'recontato'
-    : ultimo.agente_ia_persona === 'campanha_direta' ? 'campanha_direta' : 'qualificador';
+    : personaDoNumero === 'campanha_direta' ? 'campanha_direta' : 'qualificador';
   const ehCampanha = persona === 'campanha_direta';
   let promptAgente: string;
   let tools: any[];
