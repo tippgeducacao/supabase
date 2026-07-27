@@ -195,6 +195,7 @@ async function handler(req: Request): Promise<Response> {
   //    n8n legado lia o buffer de 300 em 300.
   const alvo = `${THREEC_BASE}/campaigns/${cfg.campanha_id}/lists/${listaId}/mailing?api_token=${THREEC_TOKEN}`
   const aceitos: number[] = [] // indices de `rows` que o 3C aceitou
+  let descartadosPeloTresC = 0 // 2xx mas o 3C deduplicou contra a campanha
   const falhas: string[] = []
 
   for (let ini = 0; ini < mailing.length; ini += MAX_POR_POST) {
@@ -213,6 +214,20 @@ async function handler(req: Request): Promise<Response> {
     }
     const corpo = await resp.text()
     if (resp.status >= 200 && resp.status < 300) {
+      // ⚠️ 2xx NAO significa "importou tudo": o 3C DEDUPLICA POR TELEFONE na
+      // CAMPANHA inteira (nao por lista) e descarta em silencio quem ja existe
+      // nela — apagar as listas NAO limpa essa base. A resposta traz
+      // `imported_lines` com o numero REAL de linhas aceitas.
+      try {
+        const j = JSON.parse(corpo)
+        const imp = typeof j?.imported_lines === 'number' ? j.imported_lines : fatia.length
+        if (imp < fatia.length) {
+          descartadosPeloTresC += fatia.length - imp
+          console.warn('[threec-mailing-sync] 3C descartou linhas (duplicata na campanha)', {
+            lote: ini / MAX_POR_POST, enviadas: fatia.length, importadas: imp,
+          })
+        }
+      } catch { /* corpo nao-JSON: segue o baile */ }
       for (let k = ini; k < ini + fatia.length; k++) aceitos.push(k)
     } else {
       console.error('[threec-mailing-sync] 3C recusou lote', { ini, status: resp.status, corpo: corpo.slice(0, 300) })
@@ -247,6 +262,8 @@ async function handler(req: Request): Promise<Response> {
     enviados: mailing.length,
     marcados: marcados ?? 0,
     com_curso: mailing.filter((m) => m.curso).length,
+    // quantos o 3C recusou por ja existirem na campanha (dedup dele, nao nosso)
+    descartados_duplicata_campanha: descartadosPeloTresC,
   })
 }
 
