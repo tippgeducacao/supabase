@@ -54,10 +54,16 @@ interface LeadRow {
 
 // ---------------------------------------------------------------- limpeza ----
 // O agente do discador LE esses campos na tela. O dado cru vem sujo de 3 formas:
-//   • caracteres invisiveis (U+034F etc.) que leads usam p/ furar filtro de bot
-//   • formacao com underscore, do formulario da Meta: "medico_veterinario_(a)"
-//   • curso em CAIXA ALTA em parte das origens
-const INVISIVEIS = /[­͏​-‏ -‮⁠-⁯﻿]/g
+//   - caracteres invisiveis que o lead usa p/ furar filtro de bot
+//   - formacao com underscore, do formulario da Meta: "medico_veterinario_(a)"
+//   - curso em CAIXA ALTA em parte das origens
+//
+// Construido com new RegExp e ESCAPES ASCII de proposito: caractere invisivel
+// literal no fonte quebra o parser do Deno ("Unterminated regexp literal") e
+// derruba o boot da function inteira. Ja aconteceu aqui — nao voltar ao literal.
+// U+00AD soft hyphen | U+034F combining grapheme joiner | U+200B-200F zero-width
+// e marcas de direcao | U+2060-206F word joiner/invisiveis | U+FEFF BOM
+const INVISIVEIS = new RegExp('[\u00AD\u034F\u200B-\u200F\u2060-\u206F\uFEFF]', 'g')
 
 const limpar = (s: string): string =>
   (s ?? '').replace(INVISIVEIS, '').replace(/\s+/g, ' ').trim()
@@ -82,6 +88,8 @@ const normalizarCurso = (s: string): string => {
     .map((p, i) => {
       const semPont = p.replace(/[^\wáàâãéêíóôõúç]/gi, '')
       if (i > 0 && MINUSCULAS.has(semPont)) return p
+      // sigla do dominio (POA, BEA, MBA, ITH...) fica em caixa alta
+      if (semPont.length <= 3 && semPont.length > 0) return p.toLocaleUpperCase('pt-BR')
       return p.charAt(0).toLocaleUpperCase('pt-BR') + p.slice(1)
     })
     .join(' ')
