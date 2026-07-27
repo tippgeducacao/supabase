@@ -113,7 +113,7 @@ const supabase = createClient(SUPABASE_URL, SERVICE_ROLE, {
   auth: { persistSession: false, autoRefreshToken: false },
 })
 
-Deno.serve(async (req) => {
+async function handler(req: Request): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders })
   if (req.method !== 'POST') return json({ error: 'Method not allowed' }, 405)
 
@@ -122,7 +122,16 @@ Deno.serve(async (req) => {
   // container sao strings diferentes — comparar so com uma da 401 no cron.
   const auth = (req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '')
   if (!auth || auth !== SERVICE_ROLE) {
-    const { data: vaultKey } = await supabase.rpc('_get_service_role_key').catch(() => ({ data: null }))
+    // NAO usar .catch() aqui: supabase.rpc() devolve um PostgrestBuilder
+    // (thenable, nao Promise) — .catch nao existe e lança TypeError, que vira
+    // um "Internal Server Error" sem corpo. try/catch de verdade.
+    let vaultKey: string | null = null
+    try {
+      const r = await supabase.rpc('_get_service_role_key')
+      vaultKey = (r.data as string | null) ?? null
+    } catch (err) {
+      console.error('[threec-mailing-sync] falha ao ler a key do vault', String(err))
+    }
     if (!vaultKey || auth !== vaultKey) return json({ error: 'forbidden' }, 403)
   }
 
@@ -210,4 +219,15 @@ Deno.serve(async (req) => {
     marcados: marcados ?? 0,
     com_curso: mailing.filter((m) => m.curso).length,
   })
+}
+
+// Nunca devolver "Internal Server Error" pelado: sem corpo nao da para
+// diagnosticar (custou um ciclo de deploy aqui). Todo erro sai como JSON.
+Deno.serve(async (req) => {
+  try {
+    return await handler(req)
+  } catch (err) {
+    console.error('[threec-mailing-sync] erro nao tratado', err)
+    return json({ error: 'erro interno', detail: String(err) }, 500)
+  }
 })
