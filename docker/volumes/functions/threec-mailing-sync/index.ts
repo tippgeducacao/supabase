@@ -41,6 +41,11 @@ const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 // no 3C. Mudou aqui -> tem que recriar as listas (o 3C fixa o header na criacao).
 const HEADER = ['identifier', 'areacode', 'phone', 'nome', 'email', 'formacao', 'curso'] as const
 
+// Teto do 3C por requisicao: "O campo Mailing deve ter no maximo 300 itens".
+// Confirmado ao vivo (422 com 800). O `limite_por_rodada` da config pode ser
+// maior — a function fatia sozinha.
+const MAX_POR_POST = 300
+
 interface LeadRow {
   lead_id: string
   canon: string
@@ -185,28 +190,46 @@ async function handler(req: Request): Promise<Response> {
     return json({ ok: true, dry: true, lista: qLista, lista_id: listaId, total: mailing.length, amostra: mailing.slice(0, 5) })
   }
 
-  // 4) Envia ao 3C
+  // 4) Envia ao 3C EM LOTES: a API recusa mais de 300 itens por POST
+  //    ("O campo Mailing deve ter no maximo 300 itens") — era por isso que o
+  //    n8n legado lia o buffer de 300 em 300.
   const alvo = `${THREEC_BASE}/campaigns/${cfg.campanha_id}/lists/${listaId}/mailing?api_token=${THREEC_TOKEN}`
-  let resp: Response
-  try {
-    resp = await fetch(alvo, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ header: HEADER, mailing }),
-    })
-  } catch (err) {
-    // 422 e nunca 502/504: o Cloudflare engole 5xx da origem sem headers CORS.
-    return json({ error: 'falha ao alcancar o 3C', detail: String(err) }, 422)
+  const aceitos: number[] = [] // indices de `rows` que o 3C aceitou
+  const falhas: string[] = []
+
+  for (let ini = 0; ini < mailing.length; ini += MAX_POR_POST) {
+    const fatia = mailing.slice(ini, ini + MAX_POR_POST)
+    let resp: Response
+    try {
+      resp = await fetch(alvo, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ header: HEADER, mailing: fatia }),
+      })
+    } catch (err) {
+      // 422 e nunca 502/504: o Cloudflare engole 5xx da origem sem headers CORS.
+      falhas.push(`lote ${ini / MAX_POR_POST}: ${String(err)}`)
+      continue
+    }
+    const corpo = await resp.text()
+    if (resp.status >= 200 && resp.status < 300) {
+      for (let k = ini; k < ini + fatia.length; k++) aceitos.push(k)
+    } else {
+      console.error('[threec-mailing-sync] 3C recusou lote', { ini, status: resp.status, corpo: corpo.slice(0, 300) })
+      falhas.push(`lote ${ini / MAX_POR_POST}: HTTP ${resp.status} ${corpo.slice(0, 200)}`)
+    }
   }
 
-  const corpo = await resp.text()
-  if (resp.status < 200 || resp.status >= 300) {
-    console.error('[threec-mailing-sync] 3C recusou', { status: resp.status, corpo: corpo.slice(0, 500) })
-    return json({ error: '3C recusou o mailing', status: resp.status, detail: corpo.slice(0, 500) }, 422)
+  // Nenhum lote passou -> nao marca nada (o proximo tick tenta de novo)
+  if (aceitos.length === 0) {
+    return json({ error: '3C recusou todos os lotes', detail: falhas.slice(0, 3) }, 422)
   }
 
-  // 5) Marca so o que o 3C aceitou (idempotente por canon)
-  const itens = rows.map((r) => ({ lead_id: r.lead_id, canon: r.canon, telefone: r.telefone, curso: r.curso }))
+  // 5) Marca SO o que o 3C aceitou (idempotente por canon)
+  const itens = aceitos.map((k) => {
+    const r = rows[k]
+    return { lead_id: r.lead_id, canon: r.canon, telefone: r.telefone, curso: r.curso }
+  })
   const { data: marcados, error: eMarcar } = await supabase.rpc('threec_mailing_marcar', {
     p_itens: itens,
     p_lista_id: String(listaId),
