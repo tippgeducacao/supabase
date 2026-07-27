@@ -135,6 +135,7 @@ async function handler(req: Request): Promise<Response> {
     if (!vaultKey || auth !== vaultKey) return json({ error: 'forbidden' }, 403)
   }
 
+  console.log('[threec-mailing-sync] gate ok; token?', THREEC_TOKEN ? 'sim' : 'NAO')
   if (!THREEC_TOKEN) return json({ error: '3C_TOKEN_API nao configurado no edge-runtime' }, 500)
 
   const url = new URL(req.url)
@@ -151,6 +152,7 @@ async function handler(req: Request): Promise<Response> {
   if (eCfg || !cfg) return json({ error: 'config indisponivel', detail: eCfg?.message }, 500)
   if (!cfg.ativo) return json({ ok: true, skip: 'pipeline pausado (threec_mailing_config.ativo=false)' })
 
+  console.log("[3c-mailing] config ok", cfg.campanha_id, "ativo=", cfg.ativo)
   const listaId = qLista === 'base' ? cfg.lista_base_id : cfg.lista_quente_id
 
   // 2) Leads elegiveis (a regua vive na RPC)
@@ -161,6 +163,7 @@ async function handler(req: Request): Promise<Response> {
   })
   if (eSel) return json({ error: 'falha ao selecionar leads', detail: eSel.message }, 500)
 
+  console.log("[3c-mailing] rpc ok; linhas=", (leads ?? []).length, "erro=", eSel ? eSel.message : "nenhum")
   const rows = (leads ?? []) as LeadRow[]
   if (rows.length === 0) return json({ ok: true, enviados: 0, motivo: 'nenhum lead elegivel' })
 
@@ -175,6 +178,7 @@ async function handler(req: Request): Promise<Response> {
     curso: normalizarCurso(r.curso),
   }))
 
+  console.log("[3c-mailing] payload montado:", mailing.length)
   if (dry) {
     return json({ ok: true, dry: true, lista: qLista, lista_id: listaId, total: mailing.length, amostra: mailing.slice(0, 5) })
   }
