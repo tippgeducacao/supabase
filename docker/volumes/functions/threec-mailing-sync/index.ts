@@ -65,8 +65,10 @@ interface LeadRow {
 // e marcas de direcao | U+2060-206F word joiner/invisiveis | U+FEFF BOM
 const INVISIVEIS = new RegExp('[\u00AD\u034F\u200B-\u200F\u2060-\u206F\uFEFF]', 'g')
 
+// NFKC dobra as fontes estilizadas do Unicode que o lead usa no perfil
+// ("𝑵𝒂𝒕𝒂𝒍𝒚" -> "Nataly"). Sem isso o agente ve o nome ilegivel na tela do 3C.
 const limpar = (s: string): string =>
-  (s ?? '').replace(INVISIVEIS, '').replace(/\s+/g, ' ').trim()
+  (s ?? '').normalize('NFKC').replace(INVISIVEIS, '').replace(/\s+/g, ' ').trim()
 
 // "medico_veterinario_(a)" -> "Medico Veterinario (a)"
 const humanizarFormacao = (s: string): string => {
