@@ -272,13 +272,19 @@ const uazapi: WaProvider = {
   },
 
   async sendMedia(serverUrl, token, numberDigits, opts) {
-    // uazapiGO: type aceita image|video|audio|ptt|document|myfile. Mapeamos a partir do nosso tipo.
+    // uazapiGO: type aceita image|video|audio|ptt|document|myfile|sticker (a API valida e
+    // recusa desconhecido com "invalid media type: X" — confirmado na nossa instância).
+    // ⚠️ STICKER vai como `sticker`, NUNCA como `image`: com `image` a Uazapi TRANSCODIFICA
+    // o arquivo pra JPEG → figurinha estática chegava como FOTO comum e figurinha ANIMADA
+    // falhava ("failed to convert image to JPEG: failed to decode image: unsupported image
+    // format" — 28 de 55 envios entre 14/07 e 27/07). Com `sticker` a API preserva o
+    // image/webp e o WhatsApp entrega como figurinha.
     const typeMap: Record<string, string> = {
       image: "image",
       video: "video",
       audio: "audio",
       document: "document",
-      sticker: "image",
+      sticker: "sticker",
     };
     const r = await uazFetch(serverUrl, "/send/media", "POST", { token }, {
       number: numberDigits,
