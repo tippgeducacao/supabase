@@ -22,7 +22,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { FOLLOWUP_SYSTEM } from './prompts-followup.ts';
 import { chamarAnthropic, MODELO_AGENTE } from './agente.ts';
-import { extrairPrimeiroNome, montarContextoTemporal, renderPrompt } from './contexto.ts';
+import { extrairPrimeiroNome, montarContextoTemporal } from './contexto.ts';
 import {
   atualizarLead,
   buscarLead,
@@ -162,12 +162,12 @@ function blocosParaTexto(content: string | any[]): string {
 // Funde turnos consecutivos do mesmo role, garante 1ª msg user e injeta as
 // INFORMAÇÕES DA TENTATIVA na última msg user (mantém os marcadores no histórico
 // pro modelo contar tentativas e detectar o último estilo).
-function montarMensagensFollowup(history: Msg[], tentativaAtual: number): Msg[] {
+function montarMensagensFollowup(history: Msg[], tentativaAtual: number, nomeCtx: string, cursoCtx: string): Msg[] {
   // Só o FIM da conversa importa pro follow (checkpoint + último estilo estão nos
   // turnos recentes); o nº da tentativa é contado FORA, no histórico COMPLETO, e
-  // injetado abaixo. Mandar a conversa inteira custava ~7,6k tokens/chamada à toa
-  // (~1.400 follows/dia ≈ US$ 21/dia de input).
-  history = history.slice(-40);
+  // injetado abaixo. ⚠️ Cap de 16 (medido 2026-07-27): o cap de 40 NÃO mordia —
+  // conversa típica tem <40 turnos e o input seguia em ~7,8k/chamada.
+  history = history.slice(-16);
   const norm: { role: 'user' | 'assistant'; content: string }[] = [];
   for (const m of history) {
     if (!m || !m.role) continue;
@@ -184,6 +184,7 @@ function montarMensagensFollowup(history: Msg[], tentativaAtual: number): Msg[] 
     MARCADOR_FOLLOWUP +
     '\n\nINFORMAÇÕES DA TENTATIVA DE FOLLOW-UP:\n' +
     `- Esta é a ${tentativaAtual}ª tentativa de follow-up.\n` +
+    `- Dados do lead: nome = ${nomeCtx}, curso de interesse = ${cursoCtx}.\n` +
     '- Analise o histórico, identifique o checkpoint e o último estilo usado, escolha um estilo diferente e gere a mensagem no formato JSON pedido.';
 
   const ult = norm[norm.length - 1];
@@ -271,13 +272,12 @@ async function gerarFollowup(
   const nome = extrairPrimeiroNome(lead.nome);
   const curso = (lead.curso_interesse_original ?? '').trim();
   // Fallback explícito quando o lead não tem nome/curso: o prompt instrui a OMITIR
-  // (em vez de deixar "e aí ," ou "a pós em ." com o placeholder vazio).
-  const systemPrompt = renderPrompt(FOLLOWUP_SYSTEM, {
-    nome_ctx: nome || '(não informado — não use nome)',
-    curso_ctx: curso || '(não informado — fale "a pós" sem nomear o curso)',
-  });
+  // (em vez de deixar "e aí ," ou "a pós em ." com o placeholder vazio). Os dados
+  // vão no bloco INFORMAÇÕES DA TENTATIVA (última mensagem) — o system fica ESTÁTICO.
+  const nomeCtx = nome || '(não informado — não use nome)';
+  const cursoCtx = curso || '(não informado — fale "a pós" sem nomear o curso)';
   const contextoTemporal = montarContextoTemporal();
-  const messages = montarMensagensFollowup(history, tentativaAtual);
+  const messages = montarMensagensFollowup(history, tentativaAtual, nomeCtx, cursoCtx);
 
   const inicio = Date.now();
   // thinking disabled EXPLÍCITO: no Sonnet 5, omitir liga o adaptativo — o follow-up
@@ -286,10 +286,12 @@ async function gerarFollowup(
     model: MODELO_AGENTE,
     max_tokens: 1024,
     thinking: { type: 'disabled' },
-    // SEM cache_control: o system é renderizado POR LEAD e o follow-up é one-shot —
-    // cachear aqui era pagar 1,25x de escrita sem nenhuma leitura depois.
+    // System ESTÁTICO (nome/curso vão no bloco de dados da última mensagem) →
+    // cache COMPARTILHADO entre TODOS os follow-ups: ~1 chamada a cada 1-2 min
+    // mantém o TTL de 5 min sempre quente, então quase toda chamada lê a 0,1x.
+    // O temporal (muda a cada minuto) fica FORA do prefixo, depois do breakpoint.
     system: [
-      { type: 'text', text: systemPrompt },
+      { type: 'text', text: FOLLOWUP_SYSTEM, cache_control: { type: 'ephemeral' } },
       { type: 'text', text: contextoTemporal },
     ],
     messages,
