@@ -88,7 +88,26 @@ export function humanizarTexto(texto: string): string {
   return t.trim();
 }
 
+// ── CONFIRMAÇÃO DE REUNIÃO VAI EM UM BALÃO SÓ (2026-07-27, caso Fran Lopes) ──
+// O dribble roda em BACKGROUND (EdgeRuntime.waitUntil) e o supervisor do edge
+// runtime mata o isolate no meio da espera: 7-14% das respostas saem truncadas.
+// Quando isso pega a confirmação do agendamento, o lead recebe "Horário reservado
+// pra você:" e MAIS NADA — a data, o monitor e o LINK DO MEET ficam nos balões
+// 2-4 que nunca saem (Fran Lopes 26/07: 1 de 4 balões; ela só recebeu o link 13h
+// depois, na mão de uma atendente; 5 casos em 7 dias). A mensagem com link de
+// reunião é a mais cara do fluxo inteiro, então ela NÃO é fracionada: um balão só
+// não tem "entre balões", logo não há janela em que o worker possa morrer.
+// ⚠️ A guarda vive aqui, dentro do fracionador, para valer também no follow-up e
+// no webchat (que importam esta função direto). Não resolve o truncamento geral —
+// esse é estrutural (tirar o dribble do background / enfileirar os chunks).
+const RE_LINK_REUNIAO = /https?:\/\/(?:meet\.google\.com|[\w.-]*\bzoom\.us|teams\.(?:live|microsoft)\.com)\/\S+/i;
+
+export function contemLinkReuniao(texto: string): boolean {
+  return RE_LINK_REUNIAO.test(texto ?? '');
+}
+
 export async function fracionarResposta(texto: string): Promise<string[]> {
+  if (contemLinkReuniao(texto)) return [texto];
   try {
     const res = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
@@ -181,6 +200,8 @@ export async function enviarResposta(
     total: chunks.length,
     sanitizado: textoLimpo !== texto,
     raciocinio_removido: raciocinioRemovido || undefined,
+    // balão único proposital (link de reunião) — não confundir com chunking que falhou
+    balao_unico_link_reuniao: contemLinkReuniao(textoLimpo) || undefined,
   });
   let enviados = 0;
   let primeiro = true;
