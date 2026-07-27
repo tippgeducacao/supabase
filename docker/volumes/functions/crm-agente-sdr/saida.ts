@@ -68,6 +68,86 @@ export function removerRaciocinioVazado(texto: string): string {
   return t.replace(/\n{3,}/g, '\n\n').trim();
 }
 
+// ── RELATÓRIO AO SISTEMA NUNCA CHEGA AO LEAD (2026-07-27) ───────────────────
+// Irmã do removerRaciocinioVazado, e pelo mesmo motivo: a "Regra de ouro nº 1"
+// já proíbe verbatim ("nunca escreva seu raciocínio... 'o lead disse'") e o
+// modelo desobedece assim mesmo. Aqui o vazamento tem forma própria: em vez de
+// PENSAR alto, o agente RELATA o estado do atendimento pro sistema — e o relato
+// vira balão de WhatsApp ("Não há nova mensagem do lead para responder.",
+// "*sem resposta necessária*", "Ele já foi pausado e marcado como sem interesse").
+// Padrão medido: 67 de 69 casos caem na volta SEGUINTE a uma `pausa_ia` chamada
+// SEM texto junto — o modelo, sem nada a dizer ao lead, responde ao sistema. E o
+// recheck de pausa não salva: `pausouPorTool` (index.ts) desliga o recheck
+// justamente nessa volta, de propósito, pra não engolir a despedida legítima
+// (caso Claudia 2026-07-06). 212 balões em 45 dias, 192 deles nos últimos 3.
+//
+// ⚠️ Régua CONSERVADORA, validada contra as 126.277 respostas reais da IA dos
+// últimos 45 dias: barra 225 (0,18%), zero falso positivo. TRÊS armadilhas que o
+// corpus revelou e que NÃO podem voltar — cada uma barrava fala legítima ao lead:
+//   (a) envoltório `*…*` sem exigir `[^*]` nas pontas pega o **NEGRITO**, que o
+//       chunker usa em balão próprio: "**14h, 14h30 ou 15h**" (oferta de horário!);
+//   (b) "sem mensagens" sem o "nova" pega a RETENÇÃO ("te chamar quando abrir a
+//       próxima turma, sem mensagens no meio tempo");
+//   (c) "nenhuma mensagem" / "aguardando" sem exigir "do lead" pega a despedida de
+//       OPT-OUT ("não receberá mais nenhuma mensagem nossa") e "fico te aguardando".
+// Por isso todo sinal exige a forma COMPLETA do relatório, e a 3ª pessoa ("do
+// lead") é o discriminador central: o João falando COM o lead nunca diz "lead".
+// Mexeu aqui → revalide contra o corpus (query no CLAUDE.md) ANTES de subir.
+const RE_META: RegExp[] = [
+  // Envoltório de ITÁLICO SIMPLES: *sem resposta necessária*, *aguardando resposta do lead*.
+  // ⚠️ `[^*]` nas duas pontas é o que separa do **NEGRITO**, que é legítimo e comum
+  // (o chunker isola "**14h, 14h30 ou 15h**" e "**Sanidade Avícola**" em balão próprio).
+  /^\*[^*].*[^*]\*$/,
+  /\bsem\s+(?:uma\s+)?(?:nova|novas)\s+mensage(?:m|ns)\b/i,
+  /\bn[ãa]o\s+h[áa]\s+(?:(?:uma|nenhuma|nova|novas)\s+)*mensage(?:m|ns)\b/i,
+  // ⚠️ "nenhuma mensagem" EXIGE "do lead": sem isso barra a despedida de opt-out
+  // ("não receberá mais nenhuma mensagem nossa"), que é fala legítima ao lead.
+  /\bnenhuma\s+mensagem\s+(?:nova\s+)?d[oa]\s+lead\b/i,
+  /\bsem\s+resposta\s+necess/i,
+  /\bsem\s+necessidade\s+de\s+resposta\b/i,
+  /\b(?:nenhuma|sem)\s+a[çc][ãa]o\b/i,
+  /\bn[ãa]o\s+h[áa]\s+a[çc][ãa]o\b/i,
+  /\bn[ãa]o\s+(?:vou|irei)\s+(?:enviar|mandar|responder|iniciar)\b/i,
+  /\batendimento\s+(?:j[áa]\s+)?(?:est[áa]|foi|permanece|segue)?\s*pausad/i,
+  /\batendimento\b.{0,30}\bfoi\s+encerrado\b/i,
+  /\bconversa\s+(?:j[áa]\s+)?(?:est[áa]|foi)\s+(?:pausad|encerrad)/i,
+  // ⚠️ "aguardando" EXIGE "do lead" (3ª pessoa): "fico te aguardando", "o monitor já
+  // está te aguardando" e "Estamos te aguardando" são fala legítima ao lead.
+  /\baguardand[oa]\b[^.!?]{0,30}\bd[oa]\s+lead\b/i,
+  /^(?:o|a)\s+lead\b/i,
+  /^lead\b/i,
+  /^(?:ele|ela)\s+j[áa]\s+(?:foi|est[áa]|optou|pediu|solicitou|confirmou|recebeu)\b/i,
+  /^devo\s+(?:informar|dizer|perguntar|responder|avisar)\b/i,
+  /^olhando\s+o\s+hist[óo]rico\b/i,
+  /\b(?:o\s+)?lead\s+(?:reiterou|confirmou|disse|respondeu|mandou|pediu|solicitou|optou)\b/i,
+  /\bn[ãa]o\s+(?:é|e)\s+(?:uma\s+)?(?:mensagem|resposta)\s+real\b/i,
+  /\bthe\s+(?:lead|user)\b/i, // raciocínio em inglês que escapou sem tag
+  /\bn[ãa]o\s+veio\s+do\s+lead\b/i,
+];
+
+const linhaEhMeta = (linha: string): boolean => {
+  const t = linha.trim();
+  return t.length > 0 && RE_META.some((re) => re.test(t));
+};
+
+export function contemMeta(texto: string): boolean {
+  return (texto ?? '').split('\n').some(linhaEhMeta);
+}
+
+// Remove a LINHA inteira que é relatório (grão do removerRaciocinioVazado): nos
+// 212 casos reais a mensagem é inteiramente meta, então sobra vazio e o
+// enviarResposta cai no silêncio. Quando o relatório vem junto de uma despedida
+// de verdade, só o relatório sai e a despedida segue pro lead.
+export function removerLinhasMeta(texto: string): string {
+  if (!contemMeta(texto)) return texto ?? '';
+  return (texto ?? '')
+    .split('\n')
+    .filter((l) => !linhaEhMeta(l))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 // Garantia em código da regra de ouro de humanização do prompt ("antes de
 // enviar, remova qualquer ! e qualquer travessão"): o modelo vaza de vez em
 // quando, então a régua é aplicada aqui, onde nenhum balão escapa.
@@ -76,6 +156,7 @@ export function removerRaciocinioVazado(texto: string): string {
 // Hífen DENTRO de palavra (pós-graduação, segunda-feira) é preservado.
 export function humanizarTexto(texto: string): string {
   let t = removerRaciocinioVazado(texto);
+  t = removerLinhasMeta(t);
   t = t.replace(/\s*[—–]\s*/g, ', ');        // travessão tipográfico vira vírgula
   t = t.replace(/(^|\s)-(\s|$)/gm, '$1, ');  // hífen solto usado como travessão
   t = t.replace(/([?])!+/g, '$1');           // "?!" vira só "?"
@@ -186,10 +267,12 @@ export async function enviarResposta(
 ): Promise<void> {
   const textoLimpo = humanizarTexto(texto);
   const raciocinioRemovido = RE_TAG_RACIOCINIO.test(texto);
-  // Só raciocínio, sem resposta ao lead (ex.: <thinking> truncado por max_tokens):
-  // silêncio é melhor que vazar o pensamento — a rodada fica registrada no Debug.
+  const metaRemovida = contemMeta(texto);
+  // Nada sobrou pro lead: ou era só raciocínio (<thinking> truncado por
+  // max_tokens), ou era só relatório ao sistema ("sem nova mensagem do lead").
+  // Silêncio é melhor que vazar — a rodada fica registrada no Debug do Agente.
   if (!textoLimpo) {
-    tel?.registrar('raciocinio_removido', {
+    tel?.registrar(metaRemovida && !raciocinioRemovido ? 'meta_descartada' : 'raciocinio_removido', {
       restou_vazio: true,
       original: texto.length > 600 ? texto.slice(0, 600) + '…' : texto,
     });
@@ -200,6 +283,7 @@ export async function enviarResposta(
     total: chunks.length,
     sanitizado: textoLimpo !== texto,
     raciocinio_removido: raciocinioRemovido || undefined,
+    meta_removida: metaRemovida || undefined,
     // balão único proposital (link de reunião) — não confundir com chunking que falhou
     balao_unico_link_reuniao: contemLinkReuniao(textoLimpo) || undefined,
   });
