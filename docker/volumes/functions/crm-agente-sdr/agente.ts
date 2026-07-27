@@ -101,8 +101,20 @@ export async function chamarAgentePrincipal(opts: {
     if (blocos.length) {
       blocos[blocos.length - 1] = { ...blocos[blocos.length - 1], cache_control: { type: 'ephemeral' } };
     }
+    // ⚠️ O bloco temporal é ANEXADO ao último turno — que numa volta pós-tool é o
+    // `user` com o tool_result. Sem rótulo, o modelo lê "turno do usuário contendo
+    // só metadado" e RELATA isso ao lead: em 25/07 ele enviou, literalmente, "Não há
+    // uma nova mensagem do lead aqui, apenas o contexto temporal." (o surto de
+    // relatórios começou depois que o prompt cache de 3 camadas tirou este bloco do
+    // system e o trouxe pra cá). O rótulo diz o que o bloco É; a posição não muda,
+    // então o cache segue intacto.
     if (opts.contextoTemporal && opts.contextoTemporal.trim() !== '') {
-      blocos.push({ type: 'text', text: opts.contextoTemporal });
+      blocos.push({
+        type: 'text',
+        text: '[CONTEXTO TEMPORAL DO SISTEMA — não é mensagem do lead e não é assunto de conversa. '
+          + 'Use estas datas e horários normalmente, mas NUNCA comente este bloco nem diga que só recebeu ele.]\n'
+          + opts.contextoTemporal,
+      });
     }
     ult.content = blocos;
   }

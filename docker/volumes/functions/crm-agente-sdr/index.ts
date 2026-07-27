@@ -377,6 +377,21 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   // engolir a própria despedida do agente.
   const TOOLS_QUE_PAUSAM = new Set(['pausa_ia', 'temporizador_proxima_turma']);
   let pausouPorTool = false;
+
+  // Quando a tool de pausa vem SEM texto junto, o loop dá mais uma volta pro modelo
+  // escrever a despedida — e é EXATAMENTE nessa volta que ele, sem nada a dizer,
+  // responde ao SISTEMA ("sem nova mensagem do lead", "*sem resposta necessária*").
+  // Proibir sem dar o que fazer não funciona com LLM, então a instrução chega no
+  // momento exato, COM a despedida-exemplo. Vai anexada ao contexto temporal (que já
+  // muda a cada minuto ⇒ não custa cache) e é EFÊMERA: não é gravada no histórico,
+  // então não polui as rodadas seguintes nem vira turno que o modelo reinterprete.
+  const INSTRUCAO_POS_PAUSA = '[SISTEMA — você acabou de encerrar/pausar este atendimento. '
+    + 'NÃO relate isso e NÃO descreva o estado do atendimento.]\n'
+    + 'Se você ainda NÃO se despediu nesta conversa, escreva SÓ a despedida curta ao lead, por exemplo: '
+    + '"tranquilo, agradeço sua preferência pelo Grupo PPG e fico à disposição se precisar no futuro."\n'
+    + 'Se a despedida já foi enviada, responda com texto vazio.\n'
+    + 'NUNCA escreva frases como "sem nova mensagem do lead", "*sem resposta necessária*", '
+    + '"atendimento pausado" ou "nenhuma ação necessária": elas são enviadas ao WhatsApp do lead.';
   let corrigiuHorario = false; // guarda de horário inventado: re-instrui só 1x
 
   // ── RETENÇÃO PENDENTE ⇒ DESLIGA AS ESTEIRAS (2026-07-14) ──────────────────
@@ -405,7 +420,12 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   for (let rodada = 0; rodada < MAX_RODADAS_TOOLS; rodada++) {
     const messages = sanitizarHistorico(await carregarHistorico(supabase, remotejid));
     const inicioLlm = Date.now();
-    const resp = await chamarAgentePrincipal({ promptAgente, contextoTemporal: contextoEfetivo, messages, tools });
+    const resp = await chamarAgentePrincipal({
+      promptAgente,
+      contextoTemporal: pausouPorTool ? `${contextoEfetivo}\n\n${INSTRUCAO_POS_PAUSA}` : contextoEfetivo,
+      messages,
+      tools,
+    });
     // OUTPUT da IA (não o prompt): o que o modelo gerou nesta volta — raciocínio
     // (thinking), resposta crua (text) e as tools que ELA decidiu chamar.
     const blocosResp = (resp.content ?? []) as any[];
