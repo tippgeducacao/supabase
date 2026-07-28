@@ -61,127 +61,119 @@ async function anthropicKey(): Promise<string | null> {
 // ── Contrato da saída ────────────────────────────────────────────────────────
 // Tool-use forçado: o modelo é obrigado a devolver ESTE shape (nada de markdown
 // solto que o front tenha que adivinhar como renderizar).
+//
+// ⚠️ O contrato é de DADOS, não de texto (decisão do usuário 2026-07-28: "a IA
+// está gerando muito texto; quero bater o olho e entender, mostrando quantos são
+// de cada coisa"). Por isso: `blocos` são séries `{rotulo, valor}` que o painel
+// desenha como BARRAS, e todo campo de texto tem `maxLength` curto. Prosa longa
+// aqui vira parede de texto na tela — se precisar explicar, o lugar é `nota`.
 const FERRAMENTA = {
   name: "entregar_analise",
-  description: "Entrega a análise do período no formato que o painel do Código 2200 renderiza.",
+  description: "Entrega a leitura do período em DADOS (números por categoria), não em texto corrido.",
   input_schema: {
     type: "object",
     properties: {
       veredito: {
         type: "string",
-        description: "Uma frase direta sobre como o período está indo. Sem rodeio, sem elogio vazio.",
+        maxLength: 130,
+        description: "UMA frase curta, com número. Ex.: '15 vendas de 62 (24,19%) — conversão caiu de 27,86% para 12,50%.'",
       },
       semaforo: {
         type: "string",
         enum: ["verde", "amarelo", "vermelho"],
         description: "verde = no ritmo da meta; amarelo = risco; vermelho = fora do ritmo.",
       },
-      numeros_chave: {
+      placar: {
         type: "array",
-        maxItems: 5,
+        minItems: 4,
+        maxItems: 6,
+        description: "Os números que resumem o período. Só o essencial — é a primeira coisa que o gestor olha.",
         items: {
           type: "object",
           properties: {
-            rotulo: { type: "string" },
-            valor: { type: "string", description: "Número já formatado (2 casas decimais quando for taxa/média)." },
-            comparacao: { type: "string", description: "Contra o período anterior ou a meta. Vazio se não houver base." },
+            rotulo: { type: "string", maxLength: 26 },
+            valor: { type: "string", maxLength: 14, description: "Número já formatado (2 casas em taxa, ponto de milhar)." },
+            comparacao: { type: "string", maxLength: 34, description: "Contra o período anterior ou a meta. Vazio se não houver base." },
+            tendencia: { type: "string", enum: ["subiu", "caiu", "igual", "sem_base"] },
+            bom: { type: "boolean", description: "true se o número é positivo para a operação, false se é ruim." },
           },
           required: ["rotulo", "valor"],
         },
       },
-      de_onde_veio: {
+      blocos: {
         type: "array",
-        maxItems: 6,
-        description: "Atribuição: de qual origem/campanha vieram as vendas e os agendamentos, por curso.",
-        items: {
-          type: "object",
-          properties: {
-            titulo: { type: "string" },
-            detalhe: { type: "string" },
-          },
-          required: ["titulo", "detalhe"],
-        },
-      },
-      quem_esta_indo_bem: {
-        type: "array",
-        maxItems: 5,
-        items: {
-          type: "object",
-          properties: {
-            pessoa: { type: "string" },
-            por_que: { type: "string", description: "Com o número que sustenta." },
-          },
-          required: ["pessoa", "por_que"],
-        },
-      },
-      pontos_de_atencao: {
-        type: "array",
-        maxItems: 6,
-        items: {
-          type: "object",
-          properties: {
-            titulo: { type: "string" },
-            evidencia: { type: "string", description: "O número/fato do dossiê que sustenta." },
-            impacto: { type: "string", description: "O que isso custa na meta." },
-          },
-          required: ["titulo", "evidencia"],
-        },
-      },
-      maturacao_e_cadencia: {
-        type: "array",
-        maxItems: 6,
+        minItems: 3,
+        maxItems: 7,
         description:
-          "Há quanto tempo o lead estava na base quando agendou/comprou, velocidade do 1º contato " +
-          "(speed-to-lead), leads largados sem contato e o que isso diz sobre a cadência.",
+          "Séries de QUANTIDADE por categoria — o painel desenha cada uma como barras. " +
+          "Use para: vendas por origem, vendas por curso, reuniões por origem, comparecimento por " +
+          "idade do lead, tempo até o 1º contato por origem, objeções por tipo, reuniões por vendedor. " +
+          "Escolha os cruzamentos que EXPLICAM o período — não repita a mesma informação em dois blocos.",
         items: {
           type: "object",
           properties: {
-            titulo: { type: "string" },
-            detalhe: { type: "string" },
+            titulo: { type: "string", maxLength: 46, description: "Ex.: 'De onde vieram as 15 vendas'." },
+            categoria: {
+              type: "string",
+              enum: ["origem", "curso", "cadencia", "pessoas", "conversas", "reunioes"],
+              description: "Define a cor do bloco no painel.",
+            },
+            unidade: { type: "string", maxLength: 16, description: "Ex.: vendas, reuniões, leads, %, dias, min." },
+            itens: {
+              type: "array",
+              minItems: 2,
+              maxItems: 8,
+              items: {
+                type: "object",
+                properties: {
+                  rotulo: { type: "string", maxLength: 38 },
+                  valor: { type: "number", description: "A quantidade. Taxa vai como número (ex.: 54.17), não como texto." },
+                  nota: { type: "string", maxLength: 28, description: "Complemento curto. Ex.: 'ciclo 6 dias', '0 vendas'." },
+                  tom: { type: "string", enum: ["bom", "neutro", "ruim"] },
+                },
+                required: ["rotulo", "valor"],
+              },
+            },
           },
-          required: ["titulo", "detalhe"],
+          required: ["titulo", "categoria", "unidade", "itens"],
         },
       },
-      o_que_dizem_as_conversas: {
+      alertas: {
         type: "array",
-        maxItems: 5,
-        description: "Padrões nas objeções, resumos de reunião e falas de quem não compareceu.",
+        maxItems: 4,
+        description: "O que está sangrando AGORA. Número na frente, frase curta.",
         items: {
           type: "object",
           properties: {
-            padrao: { type: "string" },
-            evidencia: { type: "string", description: "Quantas vezes apareceu e/ou um trecho real." },
+            numero: { type: "string", maxLength: 14 },
+            texto: { type: "string", maxLength: 72 },
+            gravidade: { type: "string", enum: ["alta", "media"] },
           },
-          required: ["padrao", "evidencia"],
+          required: ["numero", "texto", "gravidade"],
         },
       },
       acoes: {
         type: "array",
-        maxItems: 6,
-        description: "O que fazer agora. Específico, executável hoje, ancorado num número do dossiê.",
+        maxItems: 5,
+        description: "O que fazer hoje. Verbo no início, curto, com o número que justifica.",
         items: {
           type: "object",
           properties: {
-            acao: { type: "string" },
-            para_quem: { type: "string", description: "Pessoa ou time. '—' se for geral." },
-            por_que: { type: "string" },
+            texto: { type: "string", maxLength: 96 },
+            para_quem: { type: "string", maxLength: 26 },
             prioridade: { type: "string", enum: ["alta", "media", "baixa"] },
           },
-          required: ["acao", "por_que", "prioridade"],
+          required: ["texto", "prioridade"],
         },
-      },
-      projecao: {
-        type: "string",
-        description: "Onde o período fecha se o ritmo atual se mantiver, com o número.",
       },
       lacunas: {
         type: "array",
-        maxItems: 4,
-        description: "Perguntas que os dados NÃO respondem (dado ausente/inconclusivo). Vazio se não houver.",
-        items: { type: "string" },
+        maxItems: 3,
+        description: "O que os dados NÃO respondem. Frase curta. Vazio se não houver.",
+        items: { type: "string", maxLength: 90 },
       },
     },
-    required: ["veredito", "semaforo", "numeros_chave", "de_onde_veio", "pontos_de_atencao", "acoes", "projecao"],
+    required: ["veredito", "semaforo", "placar", "blocos", "acoes"],
   },
 } as const;
 
@@ -242,8 +234,29 @@ COMO LER O DOSSIÊ
 - "textos" é o que foi realmente dito: objeções de quem não comprou, resumos de reunião, motivos de
   desqualificação e as últimas mensagens de quem não compareceu. Use para explicar o PORQUÊ dos números.
 
-TOM: português brasileiro, direto, de quem opera. Frases curtas. Zero jargão de consultoria.
-Você fala com o diretor e com o time comercial — eles conhecem o negócio, não precisam de introdução.`;
+COMO ESCREVER — LEIA COM ATENÇÃO, É O QUE MAIS IMPORTA
+Você NÃO escreve relatório. Você entrega um PAINEL: números por categoria que o gestor
+entende batendo o olho, sem ler parágrafo.
+
+1. PREFIRA SEMPRE UM BLOCO DE BARRAS a uma frase. Se der para dizer com "categoria → quantidade",
+   é bloco. Frase só quando o número sozinho não se explica.
+2. Cada bloco responde UMA pergunta e traz a QUANTIDADE de cada coisa. Bons blocos:
+   · De onde vieram as N vendas (origem → nº de vendas)
+   · Quais cursos venderam (curso → nº)
+   · Reuniões por origem (origem → nº) e comparecimento por origem (origem → %)
+   · Comparecimento por idade do lead (faixa → %)
+   · Tempo até o 1º contato por origem (origem → minutos)
+   · Objeções mais repetidas (motivo → nº de vezes) — CONTE as ocorrências nos textos
+   · Reuniões e fechamento por vendedor (pessoa → nº)
+3. Ordene os itens do MAIOR para o menor. Use 'tom': bom (verde), ruim (vermelho), neutro.
+   'nota' é complemento de 2 a 4 palavras, não uma frase.
+4. Nada de texto redundante: se o número está no bloco, não repita no veredito nem na ação.
+5. Limites são LIMITES: veredito é UMA frase; ação começa com verbo e cabe em uma linha;
+   alerta é número + no máximo 8 palavras.
+6. Máximo 7 blocos. Escolha os que EXPLICAM o período — bloco que não muda decisão fica fora.
+
+TOM: português brasileiro, telegráfico, de quem opera. Zero jargão de consultoria, zero
+introdução, zero "é importante notar que". Você fala com o diretor e com o time comercial.`;
 
 function promptUsuario(escopo: string, dossie: any): string {
   const j = dossie?.janela ?? {};
@@ -252,16 +265,18 @@ function promptUsuario(escopo: string, dossie: any): string {
     : `a SEMANA ${j.de} → ${j.ate}${j.ate !== j.semana_fim ? " (semana em curso — ainda não fechou)" : ""}`;
   return `Analise ${periodo} da operação comercial.
 
-Foque, nesta ordem:
-1. Estamos no ritmo da meta? (compare com o período anterior e com a meta do dossiê)
-2. DE ONDE veio cada venda e cada reunião — qual campanha/origem entregou matrícula de qual curso,
-   e qual origem está gerando agenda que não converte.
-3. MATURAÇÃO E CADÊNCIA: há quanto tempo o lead estava na base quando agendou e quando assinou;
-   quais origens vivem de base fria; onde o 1º contato está lento ou não aconteceu; qual faixa de
-   idade de lead comparece mais. Aponte lead quente sendo largado — com o número.
-4. Quem está comparecendo e fechando (vendedor e SDR), e quem está com número fora da curva.
-5. O que as conversas revelam (objeções repetidas, motivo de no-show, o que o lead escreveu).
-6. O que fazer AGORA — ações específicas, com nome e número.
+Monte o painel — QUANTOS de cada coisa, não texto:
+
+· placar: os 4 a 6 números que resumem o período (venda, meta, comparecimento, conversão…),
+  cada um comparado ao período anterior.
+· blocos (barras): escolha os cruzamentos que EXPLICAM o período. Comece por
+  "de onde vieram as vendas" (origem → quantidade) e "quais cursos venderam".
+  Depois os que revelarem mais: reuniões por origem, comparecimento por origem ou por idade
+  do lead, tempo até o 1º contato por origem, objeções mais repetidas (CONTE nos textos),
+  desempenho por vendedor.
+· alertas: o que está sangrando agora — número na frente (lead sem contato, conversa parada,
+  falha de disparo, origem que agenda e não fecha).
+· acoes: o que fazer hoje, começando por verbo.
 
 DOSSIÊ (JSON):
 ${JSON.stringify(dossie)}`;
