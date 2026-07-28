@@ -225,8 +225,12 @@ COMO LER O DOSSIÊ
   · "maturacao_na_reuniao/na_venda": dias entre cadastro e reunião/assinatura. Mediana alta numa
     origem significa que a colheita do período veio de base ANTIGA daquela origem, não da mídia
     desta semana — isso muda completamente a leitura de "campanha que está performando".
-  · "comparecimento_por_idade_do_lead": compare as faixas. Se lead novo comparece MENOS que lead
-    de 31 a 90 dias, diga isso explicitamente — é contra-intuitivo e muda a régua de priorização.
+  · "comparecimento_por_idade_do_lead": a taxa é sobre as AVALIADAS da faixa, e cada faixa traz
+    "agendadas" e "avaliadas" separadas. ⚠️ No bloco, o rótulo do item TEM QUE citar a base
+    avaliada (ex.: "31 a 90 dias (26 avaliadas)") e NUNCA as agendadas — a soma das agendadas das
+    faixas é o total de reuniões do período (toda reunião cai em UMA faixa), então usar agendadas
+    no rótulo faz parecer que houve mais reunião do que houve. Compare as faixas e diga se alguma
+    destoa — mas só chame de diferença o que estiver fora da margem de uma base pequena.
   · "safra_do_lead": de qual mês de cadastro veio a colheita. É o retrato do estoque que sustenta
     a operação hoje.
   · "funil_da_safra_que_entrou": leitura PARCIAL (safra nova ainda vai madurar) — nunca apresente
