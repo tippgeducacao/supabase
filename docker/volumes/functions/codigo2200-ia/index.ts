@@ -249,6 +249,11 @@ COMO LER O DOSSIÊ
     como taxa final de conversão da origem.
 - "textos" é o que foi realmente dito: objeções de quem não comprou, resumos de reunião, motivos de
   desqualificação e as últimas mensagens de quem não compareceu. Use para explicar o PORQUÊ dos números.
+  ⚠️ Cada bloco de texto traz "total_no_periodo" (quantos existem), "incluidos" (quantos vieram) e
+  "amostra". Quando **amostra = true** você está lendo uma FATIA dos mais recentes — ao contar
+  ocorrências, diga a base que leu ("17 menções em 40 resumos lidos de 101") e NUNCA apresente a
+  contagem como o total do período. Com amostra = false a contagem cobre o período inteiro e você
+  pode dizer isso.
 
 COMO ESCREVER — LEIA COM ATENÇÃO, É O QUE MAIS IMPORTA
 Você NÃO escreve relatório. Você entrega um PAINEL: números por categoria que o gestor
@@ -262,7 +267,8 @@ entende batendo o olho, sem ler parágrafo.
    · Reuniões por origem (origem → nº) e comparecimento por origem (origem → %)
    · Comparecimento por idade do lead (faixa → %)
    · Tempo até o 1º contato por origem (origem → minutos)
-   · Objeções mais repetidas (motivo → nº de vezes) — CONTE as ocorrências nos textos
+   · Objeções mais repetidas (motivo → nº de vezes) — CONTE as ocorrências nos textos e diga
+     na unidade ou na nota sobre quantas você contou (ex.: unidade "menções em 81 objeções")
    · Reuniões e fechamento por vendedor (pessoa → nº)
 3. Ordene os itens do MAIOR para o menor. Use 'tom': bom (verde), ruim (vermelho), neutro.
    'nota' é complemento de 2 a 4 palavras, não uma frase.
