@@ -98,9 +98,24 @@ async function mockTool(nome: string, input: any, mocks: any): Promise<string> {
     case 'consulta_objecoes':
       return 'resposta_objecao: "a conversa com o monitor é rápida, uns 15 minutos, e é onde vc vê a condição especial". Adapte ao contexto e reconduza pro agendamento.';
     case 'pausa_ia':
-      return `Atendimento em Pausa (motivo: ${input?.motivo ?? '-'}).`;
+      // Espelha o executor real: tipo="nao_perturbe" arquiva o lead (opt-out).
+      return input?.tipo === 'nao_perturbe'
+        ? `Atendimento em Pausa e lead ARQUIVADO (opt-out, motivo: ${input?.motivo ?? '-'}). Ele sai de todos os disparos.`
+        : `Atendimento em Pausa (motivo: ${input?.motivo ?? '-'}).`;
     case 'temporizador_proxima_turma':
       return 'Recontato agendado para a próxima turma. IA pausada.';
+    case 'agendar_retorno': {
+      // Espelha o clamp DURO do banco (crm_agente_timer_retorno): 1..7.
+      const pedidos = Number(input?.dias ?? 3);
+      const aplicados = Math.min(Math.max(Number.isFinite(pedidos) ? pedidos : 3, 1), 7);
+      const d = new Date();
+      d.setDate(d.getDate() + aplicados);
+      const br = d.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+      return `Retorno agendado para ${br} (${aplicados} dia(s))`
+        + (aplicados !== pedidos ? ` — o pedido de ${pedidos} dias foi limitado ao teto de 7.` : '')
+        + `. O lead fica fora dos disparos até lá e o time o retoma no dia. `
+        + `Confirme a data com ele e despeça-se. NÃO chame pausa_ia.`;
+    }
     default:
       return `Tool ${nome} executada.`;
   }
@@ -119,7 +134,11 @@ Deno.serve(async (req) => {
   const mocks = body?.mocks ?? {};
   if (!mensagensLead.length) return json({ error: 'mensagens[] obrigatório' }, 400);
 
-  const agente = persona === 'campanha_direta' ? 'agente_campanha_direta' : 'agente_validacao';
+  // agente_override: permite carregar as tools de uma persona de TESTE
+  // (ex.: agente_teste_analise) sem tocar nas 4 personas de produção.
+  const agente = String(body?.agente_override ?? '').trim()
+    || (persona === 'campanha_direta' ? 'agente_campanha_direta'
+        : persona === 'qualificador' ? 'agente_qualificador' : 'agente_validacao');
   const promptBase = persona === 'campanha_direta'
     ? AGENTE_CAMPANHA_DIRETA
     : persona === 'qualificador' ? AGENTE_QUALIFICADOR : AGENTE_VALIDACAO;
@@ -129,7 +148,11 @@ Deno.serve(async (req) => {
     curso_interesse_original: String(body?.curso ?? ''),
     pergunta_formacao: montarPerguntaFormacao(''),
   };
-  const promptAgente = renderPrompt(promptBase, vars);
+  // prompt_extra: bloco anexado ao FIM do prompt real, só nesta simulação.
+  // Serve pra validar redação nova ANTES de commitá-la em prompts.ts (que é
+  // código e, uma vez deployado, já vale pra produção).
+  const promptExtra = String(body?.prompt_extra ?? '').trim();
+  const promptAgente = renderPrompt(promptBase, vars) + (promptExtra ? `\n\n${promptExtra}` : '');
   const contextoTemporal = montarContextoTemporal();
   const tools = await carregarTools(supabase, agente);
 
