@@ -795,6 +795,37 @@ async function pausaIa(supabase: any, input: any, ctx: CtxConversa, toolUseId: s
   return { mensagem: 'Atendimento em Pausa', status: 'pausado', id: toolUseId };
 }
 
+// ── agendar_retorno ─────────────────────────────────────────────────────────
+// Lead pediu tempo pra analisar o material e combinou uma data. Agenda o retorno
+// (teto DURO de 7 dias, aplicado no BANCO — o modelo não é fonte de verdade de
+// regra) e tira o lead dos disparos até lá.
+// ⚠️ NÃO pausa a IA de propósito: se ele voltar antes do prazo, o João atende.
+async function agendarRetorno(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
+  const sair = (texto: string) => ({ resultado: texto, id: toolUseId });
+  const pedidos = Number(input?.dias);
+
+  const { data, error } = await supabase.rpc('crm_agente_timer_retorno', {
+    p_telefone: ctx.telefone,
+    p_dias: Number.isFinite(pedidos) ? Math.trunc(pedidos) : 3,
+    p_motivo: input?.motivo ?? null,
+  });
+  if (error) throw new Error(`crm_agente_timer_retorno: ${error.message}`);
+
+  const d = (data ?? {}) as Record<string, any>;
+  if (d.ok === false) {
+    return sair(`Não consegui agendar o retorno (${d.erro ?? 'erro desconhecido'}). ` +
+      `Confirme a data com o lead assim mesmo e siga à disposição. NÃO chame pausa_ia.`);
+  }
+  const limitado = d.dias_aplicados !== d.dias_pedidos;
+  return sair(
+    `Retorno agendado para ${d.retorno_em} (${d.dias_aplicados} dia(s)).` +
+    (limitado ? ` O pedido de ${d.dias_pedidos} dias foi limitado ao teto de 7 — combine essa data com o lead, não prometa a maior.` : '') +
+    ` O lead fica fora dos disparos até lá e o time o retoma no dia. ` +
+    `Confirme a data com ele, diga que fica à disposição se surgir dúvida antes, e pare por aí. ` +
+    `NÃO chame pausa_ia: ele pode voltar antes e você segue atendendo.`,
+  );
+}
+
 // ── temporizador_proxima_turma ──────────────────────────────────────────────
 // Lead pediu pra ser chamado quando abrir a PRÓXIMA TURMA: agenda o Temporizador de
 // Recontato com a data real da próxima turma (ped_turmas, via RPC worker
@@ -943,6 +974,7 @@ export async function executarTool(
       case 'consulta_objecoes': return await consultaObjecoes(supabase, input, id);
       case 'envia_informacoes': return await enviaInformacoes(supabase, input, ctx, id);
       case 'pausa_ia': return await pausaIa(supabase, input, ctx, id);
+      case 'agendar_retorno': return await agendarRetorno(supabase, input, ctx, id);
       case 'temporizador_proxima_turma': return await temporizadorProximaTurma(supabase, input, ctx, id);
       case 'consulta_pos_disponiveis': return await consultaPosDisponiveis(supabase, input, ctx, id);
       case 'atualizar_dados_lead': return await atualizarDadosLead(supabase, input, ctx, id);
