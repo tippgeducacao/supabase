@@ -229,7 +229,10 @@ COMO LER O DOSSIÊ
 - "vendas.sem_origem_identificada" são matrículas cujo lead não casou — não atribua essas a ninguém.
 - "reunioes_da_ia" são as agendadas pelo agente de IA (a conta "IA SDR" aparece como SDR).
 - "conversas.pendencias_agora" é uma foto do AGORA (não do período): conversas em que o lead falou
-  por último e ninguém respondeu.
+  por último e ninguém respondeu. Vem contada por PESSOA (um número tem um atendimento por funil)
+  e sem lead arquivado — é o MESMO número que o time vê no Feedback Diário e nas Conversas, então
+  pode citar sem divergir da tela deles. "sem_responsavel" são as que não têm dono: essas não se
+  resolvem respondendo, se resolvem ATRIBUINDO alguém — se houver, vire uma ação separada.
 - "cadencia" responde HÁ QUANTO TEMPO o lead estava na base e QUÃO RÁPIDO foi atendido. Leia
   "cadencia.como_ler" ANTES de concluir qualquer coisa dali — em especial: "contato" e "toque"
   contam QUALQUER mensagem nossa, inclusive disparo em massa, então volume de toque NÃO é esforço
