@@ -280,28 +280,6 @@ serve(async (req) => {
       return normalized;
     };
 
-    // Gera as variantes de um WhatsApp brasileiro normalizado (+55DDD...) para
-    // deduplicação tolerante ao 9º dígito. Celulares têm 9 dígitos locais (com o
-    // '9' inicial) mas o mesmo número pode ter sido salvo com 8 (sem o 9), ou
-    // vice-versa. Retorna as formas equivalentes para casar em `.in(...)`.
-    const whatsappVariants = (normalized: string | null): string[] => {
-      if (!normalized) return [];
-      const digits = normalized.replace(/\D/g, '');
-      const variants = new Set<string>([normalized]);
-      // Espera formato +55 + DDD(2) + local. Sem código do país, não dá pra inferir DDD com segurança.
-      if (digits.startsWith('55') && digits.length >= 12) {
-        const ddd = digits.slice(2, 4);
-        const local = digits.slice(4);
-        if (local.length === 9 && local.startsWith('9')) {
-          // Com 9º dígito → adiciona forma sem o 9.
-          variants.add(`+55${ddd}${local.slice(1)}`);
-        } else if (local.length === 8) {
-          // Sem 9º dígito → adiciona forma com o 9.
-          variants.add(`+55${ddd}9${local}`);
-        }
-      }
-      return Array.from(variants);
-    };
 
     // Função robusta para converter UTC para timezone brasileiro
     const convertUTCToBrazilTime = (input: string): string => {
@@ -663,21 +641,27 @@ serve(async (req) => {
     let criouOportunidade = false;
     let motivo = 'lead_existente';
 
-    // 1. Buscar lead existente pelo WhatsApp normalizado — tolerante ao 9º dígito
-    //    (casa formas com/sem o '9' inicial). Mantém o MAIS ANTIGO como ativo
-    //    (atribuição de primeiro toque), preservando a origem original do lead.
+    // 1. Buscar lead existente pela RÉGUA CANÔNICA DE PESSOA (fn_canon_ddd8), via
+    //    `crm_lead_find_by_canon` — a mesma função do resto do sistema, que devolve o
+    //    lead MAIS ANTIGO (atribuição de primeiro toque) e já ignora `mesclado`.
+    //    ⚠️ ANTES casava por `.in('whatsapp', <variantes>)`, e as variantes só cobriam
+    //    formas com "+55…" — não casavam os 29.119 leads salvos como "55DDDNUM" (sem o
+    //    "+"), os 7.803 com pontuação nem os sem DDI. Resultado medido: 238 leads deste
+    //    webhook em 7 dias, **21 duplicados** — e 16 deles tinham o irmão em formato
+    //    puro, ou seja, o dedupe falhava até sem formatação.
     let existingLead = null;
     if (leadData.whatsapp) {
-      const variants = whatsappVariants(leadData.whatsapp);
-      const { data: found } = await supabase
-        .from('leads')
-        .select('*')
-        .in('whatsapp', variants)
-        .neq('status', 'mesclado')
-        .order('created_at', { ascending: true })
-        .limit(1)
-        .single();
-      existingLead = found;
+      const { data: canonId } = await supabase.rpc('crm_lead_find_by_canon', {
+        p_telefone: leadData.whatsapp,
+      });
+      if (canonId) {
+        const { data: found } = await supabase
+          .from('leads')
+          .select('*')
+          .eq('id', canonId as string)
+          .single();
+        existingLead = found;
+      }
     }
 
     if (existingLead) {
