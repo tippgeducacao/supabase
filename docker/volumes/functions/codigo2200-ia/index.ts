@@ -198,6 +198,12 @@ REGRAS INEGOCIÁVEIS
 
 COMO LER O DOSSIÊ
 - "resumo" é o período; "anterior" é o mesmo número de dias imediatamente antes (é a sua base de comparação).
+- ⚠️ "resumo.leads" NÃO é só demanda: quando o TI importa uma planilha, a base importada entra nesse
+  número. "resumo.leads_de_planilha" diz QUANTOS desses vieram de importação. Antes de dizer que lead
+  subiu ou caiu, desconte: demanda = leads − leads_de_planilha. Um salto em que quase tudo é planilha
+  é IMPORTAÇÃO DE BASE, não captação — diga isso com os dois números e não trate como crescimento.
+  (speed_to_lead e funil_da_safra já excluem a base importada, então os "nunca contatados" de lá são
+  leads de demanda de verdade.)
 - Comparecimento = comparecidas ÷ avaliadas (reunião cancelada e desqualificada ficam FORA de tudo).
 - Conversão = matrículas do período ÷ reuniões comparecidas do período. Pode passar de 100% quando
   fecham vendas de reuniões antigas — isso é esperado, não é erro.
