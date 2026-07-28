@@ -755,6 +755,12 @@ async function enviaInformacoes(supabase: any, input: any, ctx: CtxConversa, too
 }
 
 // ── pausa_ia ────────────────────────────────────────────────────────────────
+// ⚠️ `tipo` NÃO é decorativo: 'nao_perturbe' = o lead pediu pra parar de receber.
+// Pausar só (pausa_ia + followup off) NÃO tira ninguém de disparo — a régua é
+// crm_bloqueio_disparo, que lê arquivado / nao_perturbe / timer. O tipo ficou
+// sendo ignorado aqui desde sempre: o modelo mandava 'nao_perturbe' em 99,7% das
+// pausas por desinteresse e o lead seguia recebendo template (1.244 pessoas
+// cutucadas depois de pedir pra parar, em 90 dias).
 async function pausaIa(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
   const { error } = await supabase.rpc('crm_set_pausa_ia', {
     p_telefone: ctx.telefone,
@@ -764,6 +770,28 @@ async function pausaIa(supabase: any, input: any, ctx: CtxConversa, toolUseId: s
   if (error) throw new Error(`crm_set_pausa_ia: ${error.message}`);
   // n8n também desligava o follow-up automático ao pausar.
   try { await atualizarLead(supabase, ctx.remotejid, { followup_ativado: false }); } catch { /* não bloqueia */ }
+
+  // Opt-out de verdade: arquiva (resolve as conversas do SAC junto) + marca
+  // nao_perturbe. Best-effort — falha aqui nunca desfaz a pausa que já valeu.
+  if (input.tipo === 'nao_perturbe') {
+    try {
+      const { data, error: eArq } = await supabase.rpc('crm_agente_arquivar_desinteresse', {
+        p_telefone: ctx.telefone,
+        p_motivo: input.motivo ?? null,
+      });
+      if (eArq) throw new Error(eArq.message);
+      const d = (data ?? {}) as Record<string, any>;
+      return {
+        mensagem: 'Atendimento em Pausa',
+        status: 'pausado',
+        opt_out: true,
+        arquivado: (d.arquivados ?? 0) > 0 || (d.nao_perturbe_marcados ?? 0) > 0,
+        id: toolUseId,
+      };
+    } catch (e) {
+      console.error(`[crm-agente-sdr] opt-out (arquivar) falhou: ${(e as Error).message}`);
+    }
+  }
   return { mensagem: 'Atendimento em Pausa', status: 'pausado', id: toolUseId };
 }
 
