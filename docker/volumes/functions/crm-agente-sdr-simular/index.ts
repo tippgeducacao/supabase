@@ -20,6 +20,7 @@ import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO } from '../crm-agente-sdr/prompts
 import { AGENTE_CAMPANHA_DIRETA } from '../crm-agente-sdr/prompts-campanha-direta.ts';
 import { carregarTools, chamarAgentePrincipal } from '../crm-agente-sdr/agente.ts';
 import { montarContextoTemporal, montarPerguntaFormacao, renderPrompt } from '../crm-agente-sdr/contexto.ts';
+import { humanizarTexto } from '../crm-agente-sdr/saida.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
@@ -167,7 +168,14 @@ Deno.serve(async (req) => {
     for (let volta = 0; volta < 6; volta++) {
       const resp: any = await chamarAgentePrincipal({ promptAgente, contextoTemporal, messages, tools });
       const blocos = (resp.content ?? []) as any[];
-      const texto = blocos.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+      const textoCru = blocos.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+      // ⚠️ O transcript tem que mostrar o que o LEAD RECEBERIA, não o que o modelo
+      // gerou: em produção todo balão passa por humanizarTexto (removerRaciocinioVazado
+      // + removerLinhasMeta). Sem isto o harness MENTE nos dois sentidos — mostra
+      // vazamento que não existe (caso "*sem novas ações necessárias*", que o filtro
+      // remove) e esconderia um que existisse. `filtrado` registra o que saiu.
+      const texto = humanizarTexto(textoCru);
+      const filtrado = texto !== textoCru ? textoCru : null;
       const toolUses = blocos.filter((b) => b.type === 'tool_use');
 
       messages.push({ role: 'assistant', content: resp.content });
@@ -185,13 +193,15 @@ Deno.serve(async (req) => {
           });
         }
         messages.push({ role: 'user', content: results });
-        if (texto) transcript.push({ quem: 'joao', texto });
+        if (texto) transcript.push({ quem: 'joao', texto, ...(filtrado ? { filtrado } : {}) });
+        else if (filtrado) transcript.push({ quem: 'joao', texto: '', filtrado, silenciado: true });
         // pausa_ia encerra o atendimento — nada mais é dito.
         if (toolUses.some((tu: any) => tu.name === 'pausa_ia')) { volta = 99; break; }
         continue;
       }
 
-      if (texto) transcript.push({ quem: 'joao', texto });
+      if (texto) transcript.push({ quem: 'joao', texto, ...(filtrado ? { filtrado } : {}) });
+      else if (filtrado) transcript.push({ quem: 'joao', texto: '', filtrado, silenciado: true });
       break;
     }
   }
