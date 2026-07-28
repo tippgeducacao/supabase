@@ -472,6 +472,10 @@ Deno.serve(async (req) => {
                   enviada_em: enviadaEm,
                   anexos,
                   reply_to_wa_message_id: replyToWaMessageId,
+                  // Clique de BOTÃO do template chegava como texto solto ("Assinado"),
+                  // indistinguível de digitação. Guardar o id/payload deixa o chat
+                  // mostrar "respondeu pelo botão <id>".
+                  botao_clicado: tipoEvento === "inbound_button" ? (buttonRaw || null) : null,
                 });
                 if (msgInsErr) console.log("[whatsapp-webhook] insert mensagem erro:", msgInsErr.message);
                 else console.log("[whatsapp-webhook] mensagem salva conversa=", conversaId, "anexos=", anexos.length);
@@ -533,10 +537,15 @@ async function handlePodcastInbound(supabase: any, value: any, podcastWaAccountI
     const from: string = msg?.from || "";
     if (!from) continue;
     let resposta = "";
+    // id/payload do botão (quando o convidado respondeu com 1 toque) — mesma precedência
+    // do caminho principal; sem isso o clique fica indistinguível de texto digitado no SAC.
+    let botaoClicado: string | null = null;
     if (msg?.type === "interactive" && msg?.interactive?.type === "button_reply") {
       resposta = msg.interactive.button_reply?.title || msg.interactive.button_reply?.id || "";
+      botaoClicado = msg.interactive.button_reply?.id || msg.interactive.button_reply?.title || null;
     } else if (msg?.type === "button") {
       resposta = msg.button?.text || msg.button?.payload || "";
+      botaoClicado = msg.button?.payload || msg.button?.text || null;
     } else if (msg?.type === "text") {
       resposta = msg.text?.body || "";
     } else {
@@ -576,6 +585,7 @@ async function handlePodcastInbound(supabase: any, value: any, podcastWaAccountI
       waAccountId: podcastWaAccountId,
       direcao: "inbound",
       conteudo: resposta,
+      botaoClicado,
       waMessageId: msg?.id ?? null,
     });
 

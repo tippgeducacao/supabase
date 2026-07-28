@@ -244,11 +244,20 @@ Deno.serve(async (req) => {
 
         // avança follow-up: +3 dias até FOLLOWUP_MAX; depois para e espera ação manual
         const fc = (convite.followup_count ?? 0) + 1;
-        await supabase.from("ped_convites_gravacao").update({
+        // ⚠️ Checar o erro: UPDATE recusado (constraint/enum) deixaria proxima_acao_em
+        // vencido e este cron roda a cada 30 min — vira reenvio em loop. Fallback:
+        // empurra a próxima ação pra frente pra não martelar o professor.
+        const { error: updErr } = await supabase.from("ped_convites_gravacao").update({
           followup_count: fc,
           ultima_mensagem_enviada_em: new Date().toISOString(),
           proxima_acao_em: fc >= FOLLOWUP_MAX ? "2099-12-31T23:59:59Z" : new Date(Date.now() + FOLLOWUP_INTERVAL_MS).toISOString(),
         }).eq("id", convite.id);
+        if (updErr) {
+          console.error(`[dispatch-gravacao] UPDATE de estado falhou convite=${convite.id}: ${updErr.message}`);
+          await supabase.from("ped_convites_gravacao")
+            .update({ proxima_acao_em: new Date(Date.now() + FOLLOWUP_INTERVAL_MS).toISOString() })
+            .eq("id", convite.id);
+        }
 
         if (envioOk) sent++; else errors++;
         detail.sent = envioOk; detail.cadencia = cadencia; detail.followup = fc;
@@ -256,6 +265,15 @@ Deno.serve(async (req) => {
         if (mode !== "off") await sleep(SEND_DELAY_MS);
       } catch (e: any) {
         errors++; detail.error = e?.message ?? String(e); details.push(detail);
+        // Backoff: sem isso o convite fica com proxima_acao_em vencido e este cron
+        // (a cada 30 min) re-tenta o mesmo envio indefinidamente.
+        try {
+          await supabase.from("ped_convites_gravacao")
+            .update({ proxima_acao_em: new Date(Date.now() + FOLLOWUP_INTERVAL_MS).toISOString() })
+            .eq("id", convite.id);
+        } catch (bkErr: any) {
+          console.error("[dispatch-gravacao] backoff falhou:", bkErr?.message ?? bkErr);
+        }
       }
     }
 

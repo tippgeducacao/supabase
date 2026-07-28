@@ -16,6 +16,8 @@ export interface PodcastConversaMsg {
   conteudo: string;
   waMessageId?: string | null;
   templateName?: string | null;
+  /** id/payload do botão clicado (inbound). Sem isso o clique vira texto solto no chat. */
+  botaoClicado?: string | null;
   enviadaEm?: string;           // ISO; default agora
 }
 
@@ -68,6 +70,7 @@ export async function logPodcastConversaSac(admin: any, m: PodcastConversaMsg): 
       direcao: m.direcao,
       conteudo: m.conteudo,
       template_name: m.templateName ?? null,
+      botao_clicado: m.botaoClicado ?? null,
       wa_message_id: m.waMessageId ?? null,
       enviada_em: now,
     });

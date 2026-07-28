@@ -137,6 +137,120 @@ function nowPlus(ms: number): string {
   return new Date(Date.now() + ms).toISOString();
 }
 
+// Nº de falhas consecutivas de envio antes de PARAR e escalar pra um humano.
+const MAX_FALHAS_ENVIO = 3;
+
+// Backoff após falha: MENOR que o período do cron (24h). Com 24h, o proxima_acao_em
+// caía alguns segundos DEPOIS do horário da execução seguinte e o convite perdia um
+// dia inteiro a cada tentativa.
+const BACKOFF_FALHA_MS = 20 * 3600 * 1000;
+
+// Janela do guard anti-repetição: tem que ser MAIOR que o intervalo do cron (24h),
+// senão o guard nunca dispara no caso que ele existe para impedir — as repetições
+// reais de julho/2026 tinham gap de exatamente 24,00h. 47h cobre o cron diário com
+// folga para atraso e ainda deixa passar a cadência de follow-up (a cada 48h).
+const JANELA_ANTI_REPETICAO_MS = 47 * 3600 * 1000;
+
+/** Status em que "sem professor" é a semântica real — só neles a escalação pode trocar o status. */
+const STATUS_FASE1 = new Set(["fase1_titular_aguardando", "fase1b_reserva_aguardando"]);
+
+/**
+ * Falha de envio → backoff; na 3ª consecutiva PARA o convite e escala pra um humano.
+ *
+ * Antes disso, erro permanente (template com variável quebrada, número inválido)
+ * não mexia em proxima_acao_em: o convite continuava vencido e o cron re-tentava
+ * TODO DIA para sempre, gravando uma mensagem nova no SAC a cada tentativa.
+ *
+ * ⚠️ A escalação NUNCA sobrescreve o status de um convite já CONFIRMADO: trocar
+ * fase2 / dia_aula_link_enviado / pos_aula_realizada por 'critico_escalacao_manual'
+ * apagaria a confirmação do professor (a Fila de Convites voltaria a mostrar a aula
+ * como "aguardando") só porque um WhatsApp não saiu. Nesses casos o convite PARA
+ * (proxima_acao_em null) com metadata.escalado=true, preservando o estado de negócio.
+ */
+async function registrarFalhaEnvio(
+  supabase: any,
+  convite: any,
+  motivo: string,
+  extra: Record<string, unknown> = {},
+): Promise<{ falhas: number; escalado: boolean }> {
+  const meta = (convite.metadata as Record<string, unknown>) ?? {};
+  const falhas = Number(meta.falhas_envio_consecutivas ?? 0) + 1;
+  const escalado = falhas >= MAX_FALHAS_ENVIO;
+  const podeTrocarStatus = STATUS_FASE1.has(String(convite.status));
+
+  const { error } = await supabase
+    .from("ped_convites")
+    .update({
+      ...(escalado
+        ? {
+            proxima_acao_em: null,
+            ...(podeTrocarStatus ? { status: "critico_escalacao_manual" } : {}),
+          }
+        : { proxima_acao_em: nowPlus(BACKOFF_FALHA_MS) }),
+      metadata: {
+        ...meta,
+        falhas_envio_consecutivas: falhas,
+        ultima_falha_envio_em: new Date().toISOString(),
+        ultima_falha_envio_motivo: motivo,
+        // Lido pelo aviso do portal (ped_v2_aviso_disparos_travados_refresh): é o que
+        // sinaliza escalação quando o status NÃO pôde ser trocado.
+        ...(escalado ? { escalado: true, escalado_em: new Date().toISOString(), escalado_motivo: motivo } : {}),
+        ...extra,
+      },
+    })
+    .eq("id", convite.id);
+
+  if (error) console.error(`[dispatch] registrarFalhaEnvio UPDATE falhou convite=${convite.id}: ${error.message}`);
+
+  if (escalado) {
+    await supabase.from("ped_convites_eventos").insert({
+      convite_id: convite.id,
+      aula_id: convite.aula_id,
+      tipo: "escalado_falhas_envio",
+      ator: "system",
+      payload: { falhas, motivo, status_preservado: !podeTrocarStatus, status: convite.status, ...extra },
+    });
+  }
+  return { falhas, escalado };
+}
+
+/**
+ * GUARD ANTI-REPETIÇÃO — rede de segurança contra o mesmo template sair 2x pro mesmo
+ * convite sem o estado ter avançado (foi assim que um professor recebeu a mesma
+ * mensagem 5 dias seguidos: o UPDATE de estado falhava calado e o cron re-selecionava
+ * o convite todo dia).
+ *
+ * Conta só ENVIO BEM-SUCEDIDO (`mensagem_enviada`): tentativa que a Meta recusou não
+ * entregou nada, e o retry dela é governado pelo backoff/escalação de registrarFalhaEnvio.
+ *
+ * Fail-CLOSED: se a consulta falhar, assume "já enviado" e não manda — a rede de
+ * segurança não pode virar porta aberta por causa de um timeout.
+ */
+async function envioJaFeitoRecentemente(
+  supabase: any,
+  conviteId: string,
+  templateNome: string,
+): Promise<{ bloquear: boolean; motivo?: string }> {
+  const desde = new Date(Date.now() - JANELA_ANTI_REPETICAO_MS).toISOString();
+  const { data, error } = await supabase
+    .from("ped_convites_eventos")
+    .select("created_at, payload")
+    .eq("convite_id", conviteId)
+    .eq("template_name", templateNome)
+    .eq("tipo", "mensagem_enviada")
+    .gte("created_at", desde)
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  if (error) {
+    console.error(`[dispatch] guard anti-repetição: consulta falhou (${error.message}) → fail-closed`);
+    return { bloquear: true, motivo: "consulta_guard_falhou" };
+  }
+  const ultimo = data?.[0];
+  if (!ultimo) return { bloquear: false };
+  return { bloquear: true, motivo: `enviado_em_${ultimo.created_at}` };
+}
+
 function buildAulaStartIso(dataYmd: string, horario: string | null): string {
   // horario esperado "HH:MM-HH:MM" (padronizado pela migration 20260527171000)
   const inicio = (horario ?? "19:00").split(/[-–]/)[0].trim() || "19:00";
@@ -251,7 +365,10 @@ function buildVariableValue(
     case "data_amanha":
       return tomorrow ? formatDatePtBR(tomorrow) : "";
     case "horario":
-      return ctx.aula?.horario ?? "";
+      // NUNCA vazio: aula sem horário cadastrado zerava o {{n}} e a Meta recusava o
+      // template inteiro (131008) — o lembrete de 30d ficou repetindo dias seguidos
+      // por causa de UMA aula sem horário. "a combinar" entrega a mensagem.
+      return String(ctx.aula?.horario ?? "").trim() || "a combinar";
     case "link_sala_aula":
       // Link da sala (cadastro do CURSO em /pedagogico-v2/cursos), com override por aula
       return String(ctx.aula?.link_sala_override || ctx.pos?.link_sala_meet || "");
@@ -493,6 +610,36 @@ Deno.serve(async (req) => {
       // Depois do filtro: sobrou 1 (ou 0) → individual (o single tem template com escalonamento).
       if (grupo.length < 2) { individuais.push(...grupo); continue; }
 
+      // GUARD ANTI-REPETIÇÃO também no caminho CONSOLIDADO — é por aqui que a fase 1
+      // dispara na prática (professor com 2+ aulas), e sem o guard uma falha de estado
+      // aqui reenviaria o lote todo dia, com a Meta ACEITANDO (spam entregue de verdade).
+      if (!forceLive) {
+        const bloqueados: any[] = [];
+        for (const c of grupo) {
+          const g = await envioJaFeitoRecentemente(supabase, c.id, loteTpl.nome);
+          if (g.bloquear) bloqueados.push({ c, motivo: g.motivo });
+        }
+        if (bloqueados.length === grupo.length) {
+          console.log(`[dispatch] ANTI-REPETIÇÃO lote grupo=${key} já disparado → pulando`);
+          for (const b of bloqueados) {
+            await supabase.from("ped_convites_eventos").insert({
+              convite_id: b.c.id,
+              aula_id: b.c.aula_id,
+              tipo: "envio_repetido_bloqueado",
+              template_name: loteTpl.nome,
+              ator: "system",
+              payload: { modo: "consolidado_fase1", status: b.c.status, motivo: b.motivo },
+            });
+            await supabase.from("ped_convites")
+              .update({ proxima_acao_em: nowPlus(BACKOFF_FALHA_MS) })
+              .eq("id", b.c.id);
+          }
+          processed += grupo.length;
+          details.push({ grupo: key, consolidado: true, skipped: "envio_repetido_bloqueado", aulas: grupo.length });
+          continue;
+        }
+      }
+
       processed += grupo.length;
       const detailG: any = { grupo: key, professor_id: profId, aulas: grupo.length, consolidado: true };
       try {
@@ -603,8 +750,27 @@ Deno.serve(async (req) => {
           const update = computeFase1Update(c, c.__aula);
           // marca que o disparo saiu consolidado (o botão "Confirmo todas" já casa
           // por disparo_inicial_lote; garantimos a flag caso venha de convite antigo).
-          const meta = { ...((c.metadata as Record<string, unknown>) ?? {}), disparo_inicial_lote: true, ultimo_disparo_consolidado_em: nowIso2, lote_wa_message_id: waMsgId };
-          await supabase.from("ped_convites").update({ ...update, metadata: meta }).eq("id", c.id);
+          const meta = {
+            ...((c.metadata as Record<string, unknown>) ?? {}),
+            disparo_inicial_lote: true,
+            ultimo_disparo_consolidado_em: nowIso2,
+            lote_wa_message_id: waMsgId,
+            falhas_envio_consecutivas: 0, // envio deu certo: zera o contador de escalação
+          };
+          // ⚠️ Checar o erro é obrigatório aqui também: sem isso o convite fica com
+          // proxima_acao_em vencido e o lote inteiro é reenviado no dia seguinte —
+          // com a Meta ACEITANDO (o professor recebe de verdade, todo dia).
+          const { error: updLoteErr } = await supabase
+            .from("ped_convites").update({ ...update, metadata: meta }).eq("id", c.id);
+          if (updLoteErr) {
+            console.error(`[dispatch] consolidado: UPDATE falhou convite=${c.id}: ${updLoteErr.message}`);
+            await registrarFalhaEnvio(supabase, c, `erro_state_machine: ${updLoteErr.message}`);
+            await supabase.from("ped_convites_eventos").insert({
+              convite_id: c.id, aula_id: c.aula_id, tipo: "erro_state_machine",
+              template_name: loteTpl.nome, ator: "system",
+              payload: { update, error: updLoteErr.message, modo: "consolidado_fase1" },
+            });
+          }
           await supabase.from("ped_convites_eventos").insert({
             convite_id: c.id, aula_id: c.aula_id, tipo: "mensagem_enviada", template_name: loteTpl.nome, ator: "system",
             payload: { template: loteTpl.nome, modo: "consolidado_fase1", wa_message_id: waMsgId, aulas_no_lote: aulasOrd.length, next_status: update.status ?? c.status },
@@ -620,9 +786,21 @@ Deno.serve(async (req) => {
         details.push(detailG);
       } catch (e) {
         errors++;
-        detailG.error = e instanceof Error ? e.message : String(e);
+        const msgG = e instanceof Error ? e.message : String(e);
+        detailG.error = msgG;
+        // Backoff + evento POR CONVITE: sem isso o grupo reentrava no run seguinte com
+        // proxima_acao_em vencido e re-tentava para sempre, sem escalar e — pior — SEM
+        // gravar `erro_envio`, ficando invisível também para o aviso do portal.
+        for (const c of grupo) {
+          await supabase.from("ped_convites_eventos").insert({
+            convite_id: c.id, aula_id: c.aula_id, tipo: "erro_envio",
+            template_name: loteTpl.nome, ator: "system",
+            payload: { error: msgG, modo: "consolidado_fase1" },
+          });
+          const r = await registrarFalhaEnvio(supabase, c, msgG, { modo: "consolidado_fase1" });
+          if (r.escalado) detailG.escalados = (detailG.escalados ?? 0) + 1;
+        }
         details.push(detailG);
-        // convites do grupo NÃO são avançados → reentram no próximo run (nada perdido).
       }
       if (!forceLive) await sleep(SEND_DELAY_MS);
     }
@@ -752,6 +930,44 @@ Deno.serve(async (req) => {
           continue;
         }
 
+        // 6.5) GUARD ANTI-REPETIÇÃO (rede de segurança contra spam)
+        // Qualquer bug que impeça o convite de avançar de estado (UPDATE recusado,
+        // proxima_acao_em no passado, cadência que não muda) fazia o cron reenviar o
+        // MESMO template todo dia, indefinidamente — foi o caso real de 24→28/07
+        // (5 disparos idênticos ao mesmo professor) e de 01→08/07 (11 disparos).
+        // Regra: o mesmo convite não recebe o MESMO template 2x em menos de 20h.
+        // force_live (reenvio manual pelo painel) ignora o guard de propósito.
+        if (!forceLive) {
+          const guard = await envioJaFeitoRecentemente(supabase, convite.id, template.nome);
+          if (guard.bloquear) {
+            console.log(
+              `[dispatch] ANTI-REPETIÇÃO convite=${convite.id} template=${template.nome} (${guard.motivo}) → pulando`,
+            );
+            await supabase.from("ped_convites_eventos").insert({
+              convite_id: convite.id,
+              aula_id: convite.aula_id,
+              tipo: "envio_repetido_bloqueado",
+              template_name: template.nome,
+              ator: "system",
+              payload: {
+                cadencia,
+                status: convite.status,
+                janela_horas: JANELA_ANTI_REPETICAO_MS / 3600000,
+                motivo: guard.motivo,
+              },
+            });
+            // Reagenda pra frente pra não ficar re-avaliando o convite a cada execução.
+            await supabase
+              .from("ped_convites")
+              .update({ proxima_acao_em: nowPlus(BACKOFF_FALHA_MS) })
+              .eq("id", convite.id);
+            detail.skipped = "envio_repetido_bloqueado";
+            detail.template = template.nome;
+            details.push(detail);
+            continue;
+          }
+        }
+
         // 7) parameters via variaveis_mapping (em ordem das variáveis {{1}}, {{2}}, ...)
         // Aceita 3 formatos por retrocompat:
         //   ["nome_professor","instituicao",...]                    → array direto
@@ -777,6 +993,43 @@ Deno.serve(async (req) => {
           type: "text",
           text: buildVariableValue(v, ctx),
         }));
+
+        // 7.1) GUARD PARÂMETRO VAZIO — a Meta RECUSA o template inteiro quando um
+        // parâmetro vem vazio (131008 "Parameter of type text is missing text value").
+        // Foi o que quebrou o pos_aula_status_v2_v2 de 24→28/07: o mapping apontava
+        // uma variável que o dispatcher não sabia resolver ⇒ texto "" ⇒ 131008 todo dia.
+        // Melhor NÃO enviar (e escalar) do que rodar o mesmo erro diariamente.
+        const varsVazias = mapping
+          .map((v, i) => ({ pos: i + 1, campo: v, valor: bodyParams[i]?.text ?? "" }))
+          .filter((p) => !String(p.valor).trim());
+
+        if (varsVazias.length) {
+          console.error(
+            `[dispatch] PARAMETRO VAZIO convite=${convite.id} template=${template.nome} vars=${JSON.stringify(varsVazias)}`,
+          );
+          await supabase.from("ped_convites_eventos").insert({
+            convite_id: convite.id,
+            aula_id: convite.aula_id,
+            tipo: "erro_envio",
+            template_name: template.nome,
+            ator: "system",
+            payload: {
+              error: "parametro_vazio",
+              detalhe: "Meta recusaria o template (131008). Envio não realizado.",
+              cadencia,
+              variaveis_vazias: varsVazias,
+            },
+          });
+          const r = await registrarFalhaEnvio(supabase, convite, "parametro_vazio", {
+            variaveis_vazias: varsVazias.map((v) => v.campo),
+          });
+          errors++;
+          detail.error = "parametro_vazio";
+          detail.variaveis_vazias = varsVazias;
+          detail.escalado = r.escalado;
+          details.push(detail);
+          continue;
+        }
 
         const components: any[] = [{ type: "body", parameters: bodyParams }];
 
@@ -939,6 +1192,9 @@ Deno.serve(async (req) => {
                   direcao: "outbound",
                   conteudo: corpoRender,
                   template_name: template.nome,
+                  // Snapshot dos botões: é o que o SAC mostra como chips no balão
+                  // ("o que o professor pode responder com 1 toque").
+                  template_botoes: Array.isArray(template.botoes) ? template.botoes : null,
                   professor_id: professor.id,
                   wa_message_id: waMsgId,
                   enviada_em: nowIso,
@@ -1157,7 +1413,41 @@ Deno.serve(async (req) => {
           update.proxima_acao_em = null;
         }
 
-        await supabase.from("ped_convites").update(update).eq("id", convite.id);
+        // Zera o contador de falhas — o envio deu certo.
+        if ((convite.metadata as any)?.falhas_envio_consecutivas) {
+          update.metadata = {
+            ...((convite.metadata as Record<string, unknown>) ?? {}),
+            falhas_envio_consecutivas: 0,
+          };
+        }
+
+        // ⚠️ CHECAR O ERRO É OBRIGATÓRIO: sem isso, um UPDATE recusado pelo banco
+        // (status fora do enum, NOT NULL, CHECK) passa CALADO — o convite fica no
+        // estado antigo com proxima_acao_em vencido e o cron reenvia a mesma
+        // mensagem todo dia. Foi exatamente a causa do spam de julho/2026.
+        const { error: updErr } = await supabase
+          .from("ped_convites")
+          .update(update)
+          .eq("id", convite.id);
+
+        if (updErr) {
+          console.error(
+            `[dispatch] STATE MACHINE UPDATE FALHOU convite=${convite.id} update=${JSON.stringify(update)} erro=${updErr.message}`,
+          );
+          // Backoff + contador: um UPDATE que falha de forma PERSISTENTE (constraint,
+          // enum, lock) tem que parar e escalar como qualquer outra falha — senão o
+          // convite volta amanhã, e no dia seguinte, indefinidamente (o bug original).
+          await registrarFalhaEnvio(supabase, convite, `erro_state_machine: ${updErr.message}`);
+          await supabase.from("ped_convites_eventos").insert({
+            convite_id: convite.id,
+            aula_id: convite.aula_id,
+            tipo: "erro_state_machine",
+            template_name: template.nome,
+            ator: "system",
+            payload: { update, error: updErr.message, status_atual: convite.status },
+          });
+          detail.erro_state_machine = updErr.message;
+        }
 
         if (mode !== "off") sent++;
         detail.template = template.nome;
@@ -1168,13 +1458,18 @@ Deno.serve(async (req) => {
         errors++;
         const msg = e instanceof Error ? e.message : String(e);
         detail.error = msg;
+        // Backoff + escalação: sem isso o convite continuava vencido e o cron
+        // re-tentava o MESMO envio todo dia (spam no SAC + ruído na Meta).
+        const r = await registrarFalhaEnvio(supabase, convite, msg);
+        detail.falhas_consecutivas = r.falhas;
+        detail.escalado = r.escalado;
         details.push(detail);
         await supabase.from("ped_convites_eventos").insert({
           convite_id: convite.id,
           aula_id: convite.aula_id,
           tipo: "erro_envio",
           ator: "system",
-          payload: { error: msg },
+          payload: { error: msg, falhas_consecutivas: r.falhas, escalado: r.escalado },
         });
       }
 

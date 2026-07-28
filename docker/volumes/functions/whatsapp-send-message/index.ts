@@ -144,6 +144,19 @@ Deno.serve(async (req) => {
       });
     }
 
+    // Template: carrega o cadastro pra poder RENDERIZAR o corpo e guardar os botões.
+    // Antes, o SAC gravava só "[template] <nome>" — o atendente não via o texto que o
+    // contato recebeu nem quais botões estavam na mensagem.
+    let tplCadastro: { corpo: string | null; botoes: unknown } | null = null;
+    if (tipo === "template" && template_name) {
+      const { data: t } = await admin
+        .from("ped_wa_templates")
+        .select("corpo,botoes")
+        .eq("nome", template_name)
+        .maybeSingle();
+      tplCadastro = t ?? null;
+    }
+
     let waPayload: Record<string, unknown>;
     if (tipo === "text") {
       waPayload = {
@@ -223,7 +236,15 @@ Deno.serve(async (req) => {
     if (tipo === "text") {
       conteudoPersist = String(conteudo);
     } else if (tipo === "template") {
-      conteudoPersist = `[template] ${template_name}`;
+      // Renderiza {{1}}, {{2}}... com os parâmetros realmente enviados; sem cadastro
+      // do template (ou sem corpo), mantém o rótulo antigo como fallback.
+      const params: string[] = (Array.isArray(template_components) ? template_components : [])
+        .filter((c: any) => c?.type === "body")
+        .flatMap((c: any) => (Array.isArray(c.parameters) ? c.parameters : []))
+        .map((p: any) => String(p?.text ?? ""));
+      let corpo = String(tplCadastro?.corpo ?? "");
+      params.forEach((valor, i) => { corpo = corpo.split(`{{${i + 1}}}`).join(valor); });
+      conteudoPersist = corpo.trim() || `[template] ${template_name}`;
     } else {
       conteudoPersist = caption ? String(caption) : `[${tipo}]`;
       anexos = [{ tipo, url: media_url, filename: media_filename ?? null }];
@@ -234,6 +255,8 @@ Deno.serve(async (req) => {
       direcao: "outbound",
       conteudo: conteudoPersist,
       template_name: tipo === "template" ? template_name : null,
+      template_botoes:
+        tipo === "template" && Array.isArray(tplCadastro?.botoes) ? tplCadastro?.botoes : null,
       wa_message_id: waMsgId,
       enviada_em: nowIso,
       anexos,

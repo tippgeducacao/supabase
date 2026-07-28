@@ -14,6 +14,24 @@ function formatValor(v: unknown): string {
 }
 
 /**
+ * DOCUMENTO que o professor precisa nos enviar para receber, derivado do campo
+ * livre `forma_pagamento` do cadastro (que mistura documento — NF/RECIBO — com
+ * MEIO de pagamento — PIX).
+ *
+ * Existe porque o template `pos_aula_status_v2_v2` diz "Envie sua {{4}} por aqui":
+ * o valor CRU não cabe na frase ("Envie sua PIX") e vem VAZIO em ~85% do cadastro,
+ * e parâmetro vazio faz a Meta recusar o template inteiro (erro 131008).
+ * Por isso nunca devolve string vazia.
+ */
+export function documentoPagamentoTexto(formaPagamento: unknown): string {
+  const v = String(formaPagamento ?? "").trim().toUpperCase();
+  if (v.includes("NOTA") || v === "NF") return "nota fiscal";
+  if (v.includes("RECIBO")) return "documentação (recibo assinado)";
+  // PIX / "NÃO SE APLICA" / vazio → texto que serve aos dois casos.
+  return "nota fiscal ou recibo";
+}
+
+/**
  * Retorna o valor do campo do CADASTRO do professor, ou null quando o campo não
  * é "professor.*" (aí o dispatcher segue no switch de contexto dele).
  */
@@ -34,6 +52,8 @@ export function resolverCampoProfessor(campo: string, prof: any): string | null 
       return String(prof.email ?? "");
     case "professor.forma_pagamento":
       return String(prof.forma_pagamento ?? "");
+    case "professor.documento_pagamento":
+      return documentoPagamentoTexto(prof.forma_pagamento);
     case "professor.chave_pix":
       return String(prof.chave_pix ?? "");
     case "professor.valor_hora_aula_online":
