@@ -205,6 +205,14 @@ COMO LER O DOSSIÊ
   (speed_to_lead e funil_da_safra já excluem a base importada, então os "nunca contatados" de lá são
   leads de demanda de verdade.)
 - Comparecimento = comparecidas ÷ avaliadas (reunião cancelada e desqualificada ficam FORA de tudo).
+- ⚠️ TODO recorte que traz "taxa_comparecimento_pct" (por origem, vendedor, SDR, hora, idade do
+  lead) traz também "agendadas" E "avaliadas" — a taxa é sobre as AVALIADAS. No rótulo do item,
+  cite SEMPRE a base avaliada ("18h (1 avaliada)", "Flávia (1 avaliada)") e NUNCA as agendadas:
+  "6 agendadas, 1 compareceu, 100,00%" não fecha para quem lê. **Taxa com menos de 5 avaliadas é
+  ruído** — não vire tendência, não gere ação em cima dela e, se citar, diga que a base é pequena.
+  Isso vale também para a comparação com "anterior", que traz "reunioes_avaliadas": se as bases
+  forem muito diferentes (ex.: 13 avaliadas hoje contra 68 ontem), diga isso em vez de declarar
+  que subiu ou caiu.
 - Conversão = matrículas do período ÷ reuniões comparecidas do período. Pode passar de 100% quando
   fecham vendas de reuniões antigas — isso é esperado, não é erro.
 - ⚠️ "converteu" (nos blocos de reunião) e "vendas" NÃO são a mesma coisa e NUNCA devem ser somados
@@ -231,12 +239,10 @@ COMO LER O DOSSIÊ
   · "maturacao_na_reuniao/na_venda": dias entre cadastro e reunião/assinatura. Mediana alta numa
     origem significa que a colheita do período veio de base ANTIGA daquela origem, não da mídia
     desta semana — isso muda completamente a leitura de "campanha que está performando".
-  · "comparecimento_por_idade_do_lead": a taxa é sobre as AVALIADAS da faixa, e cada faixa traz
-    "agendadas" e "avaliadas" separadas. ⚠️ No bloco, o rótulo do item TEM QUE citar a base
-    avaliada (ex.: "31 a 90 dias (26 avaliadas)") e NUNCA as agendadas — a soma das agendadas das
-    faixas é o total de reuniões do período (toda reunião cai em UMA faixa), então usar agendadas
-    no rótulo faz parecer que houve mais reunião do que houve. Compare as faixas e diga se alguma
-    destoa — mas só chame de diferença o que estiver fora da margem de uma base pequena.
+  · "comparecimento_por_idade_do_lead": vale a regra de base avaliada acima. Aqui ela é ainda mais
+    importante porque a soma das *agendadas* das faixas é o total de reuniões do período (toda
+    reunião cai em UMA faixa) — usar agendadas no rótulo faz parecer que houve mais reunião do que
+    houve. Compare as faixas e diga se alguma destoa, respeitando o piso de base pequena.
   · "safra_do_lead": de qual mês de cadastro veio a colheita. É o retrato do estoque que sustenta
     a operação hoje.
   · "funil_da_safra_que_entrou": leitura PARCIAL (safra nova ainda vai madurar) — nunca apresente
