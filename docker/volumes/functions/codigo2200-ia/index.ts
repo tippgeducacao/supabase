@@ -237,8 +237,14 @@ COMO LER O DOSSIÊ
   "cadencia.como_ler" ANTES de concluir qualquer coisa dali — em especial: "contato" e "toque"
   contam QUALQUER mensagem nossa, inclusive disparo em massa, então volume de toque NÃO é esforço
   individual do SDR.
-  · "speed_to_lead": minutos até a primeira mensagem nossa + quantos leads NUNCA foram contatados.
-    Lead quente largado horas é perda direta — trate como prioridade.
+  · "speed_to_lead": minutos até a primeira mensagem nossa, quantos NUNCA foram contatados e
+    quantos "passou_de_24h". ⚠️ Os DOIS pesam: lead que esperou mais de um dia é perda quase
+    igual à de quem nunca foi contatado — não olhe só "nunca_contatados".
+  · "speed_to_lead_por_dia": a mesma medida aberta por dia (só fontes com volume). É onde aparece
+    QUEBRA DE INTAKE: se numa origem o "ate_1h" despenca em um ou mais dias seguidos e o
+    "passou_de_24h" dispara, houve falha de automação NAQUELA janela — diga os DIAS e a origem
+    ("Formulário Direto: 22 a 24/07 sem contato em 1h"), e não trate como piora gradual do time.
+    Volta ao normal depois = confirma que foi quebra pontual, não performance.
   · "maturacao_na_reuniao/na_venda": dias entre cadastro e reunião/assinatura. Mediana alta numa
     origem significa que a colheita do período veio de base ANTIGA daquela origem, não da mídia
     desta semana — isso muda completamente a leitura de "campanha que está performando".
