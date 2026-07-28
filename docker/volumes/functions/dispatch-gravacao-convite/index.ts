@@ -213,14 +213,12 @@ Deno.serve(async (req) => {
 
               try {
                 // upsert sac_contatos por telefone
-                const { data: contatoExistente } = await supabase.from("sac_contatos").select("id, tipo").eq("telefone", to).maybeSingle();
-                let contatoId = contatoExistente?.id ?? null;
-                if (contatoId) {
-                  await supabase.from("sac_contatos").update({ tipo: "professor", professor_id_ref: professor.id }).eq("id", contatoId);
-                } else {
-                  const { data: novoContato } = await supabase.from("sac_contatos").insert({ nome: professor.nome, telefone: to, tipo: "professor", professor_id_ref: professor.id }).select("id").single();
-                  contatoId = novoContato?.id ?? null;
-                }
+                // Ponto ÚNICO (RPC): casa o telefone tolerando 9º dígito/DDI e já atualiza
+                // tipo/professor_id_ref. O `.eq('telefone', to)` exato duplicava o contato.
+                const { data: contatoRpc } = await supabase.rpc("sac_contato_find_or_create", {
+                  p_telefone: to, p_nome: professor.nome, p_tipo: "professor", p_professor_id_ref: professor.id,
+                });
+                const contatoId = (contatoRpc as string | null) ?? null;
                 if (contatoId) {
                   // 1 atendimento por contato (constraint uq_sac_atend_um_por_contato): busca em QUALQUER status
                   const { data: atendAberto } = await supabase.from("sac_atendimentos").select("id, status").eq("contato_id", contatoId).maybeSingle();

@@ -270,25 +270,13 @@ Deno.serve(async (req) => {
 
         // 9) Sincroniza SAC: upsert sac_contatos + cria/atualiza sac_atendimento ativo
         try {
-          let contatoId: string | null = null;
-          const { data: contatoExistente } = await supabase
-            .from("sac_contatos")
-            .select("id, tipo")
-            .eq("telefone", telefone)
-            .maybeSingle();
-          if (contatoExistente?.id) {
-            contatoId = contatoExistente.id;
-            await supabase
-              .from("sac_contatos")
-              .update({ tipo: "professor", professor_id_ref: profId })
-              .eq("id", contatoId);
-          } else {
-            const { data: novoContato } = await supabase
-              .from("sac_contatos")
-              .insert({ nome: prof.nome, telefone, tipo: "professor", professor_id_ref: profId })
-              .select("id").single();
-            contatoId = novoContato?.id ?? null;
-          }
+          // Ponto ÚNICO (RPC): casa o telefone tolerando 9º dígito/DDI e já atualiza
+          // tipo/professor_id_ref. O `.eq('telefone', …)` exato duplicava o contato —
+          // e contato duplicado parte a conversa (cada um leva seus atendimentos).
+          const { data: contatoRpc } = await supabase.rpc("sac_contato_find_or_create", {
+            p_telefone: telefone, p_nome: prof.nome, p_tipo: "professor", p_professor_id_ref: profId,
+          });
+          const contatoId: string | null = (contatoRpc as string | null) ?? null;
 
           if (contatoId) {
             // 1 atendimento por contato (constraint uq_sac_atend_um_por_contato):
