@@ -228,6 +228,11 @@ COMO LER O DOSSIÊ
   Ciclo longo em uma origem = a venda de hoje foi paga por mídia de meses atrás.
 - "vendas.sem_origem_identificada" são matrículas cujo lead não casou — não atribua essas a ninguém.
 - "reunioes_da_ia" são as agendadas pelo agente de IA (a conta "IA SDR" aparece como SDR).
+- ⚠️ Item com "b2b": true (em reunioes.por_vendedor e reunioes.por_curso) é do time B2B, que vende
+  outro produto e NÃO faz parte da missão 2200 (que é pós-graduação). Os totais já incluem essas
+  reuniões e você não deve recalcular nada — mas NÃO ranqueie vendedor B2B junto do time comercial,
+  NÃO gaste alerta, ação ou lacuna com ele, e não trate "wisenetix" como curso da missão. Se o
+  volume B2B for relevante, cite em UMA linha à parte dizendo que é B2B.
 - "conversas.pendencias_agora" é uma foto do AGORA (não do período): conversas em que o lead falou
   por último e ninguém respondeu. Vem contada por PESSOA (um número tem um atendimento por funil)
   e sem lead arquivado — é o MESMO número que o time vê no Feedback Diário e nas Conversas, então
