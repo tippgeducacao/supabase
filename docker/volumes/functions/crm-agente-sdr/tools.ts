@@ -561,10 +561,15 @@ async function verificarCompatibilidade(supabase: any, input: any, ctx: CtxConve
       formacao_identificada: input.formacao_academica ?? null,
       motivo_alteracao: 'Lead ainda cursando a graduação, com conclusão prevista fora do prazo de elegibilidade (90 dias).',
       mensagem_para_lead: null,
+      // ⚠️ NÃO é desinteresse — é um lead que fica elegível DEPOIS. Pausar aqui o
+      // descartava pra sempre (609 casos antes desta mudança). Agora agenda o
+      // retorno pra perto da formatura (teto de 12 meses, aplicado no banco).
       instrucao: 'NÃO agende reunião, NÃO diga que a formação atende e NÃO empurre a decisão pro monitor. ' +
-        'Encerre com respeito e, na MESMA resposta, chame pausa_ia com motivo ' +
-        '"Lead conclui a graduação fora do prazo de 90 dias". ' +
-        'Nunca mencione "90 dias", "prazo" ou "elegibilidade" ao lead.',
+        'Este lead NÃO está desinteressado: ele vai poder cursar quando terminar a graduação. ' +
+        'Na MESMA resposta, chame agendar_retorno com tipo="formatura" e meses = quantos meses faltam ' +
+        'pra ele concluir (ex.: conclui em 2 anos → 24; o sistema limita ao teto). ' +
+        'NÃO chame pausa_ia. Encerre dizendo, de forma aproximada, que vai chamá-lo quando ele ' +
+        'estiver terminando o curso — nunca mencione "90 dias", "prazo" ou "elegibilidade".',
     };
   }
 
@@ -802,20 +807,36 @@ async function pausaIa(supabase: any, input: any, ctx: CtxConversa, toolUseId: s
 // ⚠️ NÃO pausa a IA de propósito: se ele voltar antes do prazo, o João atende.
 async function agendarRetorno(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
   const sair = (texto: string) => ({ resultado: texto, id: toolUseId });
-  const pedidos = Number(input?.dias);
+  const tipo = String(input?.tipo ?? 'analise').toLowerCase() === 'formatura' ? 'formatura' : 'analise';
+  const dias = Number(input?.dias);
+  const meses = Number(input?.meses);
 
   const { data, error } = await supabase.rpc('crm_agente_timer_retorno', {
     p_telefone: ctx.telefone,
-    p_dias: Number.isFinite(pedidos) ? Math.trunc(pedidos) : 3,
+    p_dias: tipo === 'analise' ? (Number.isFinite(dias) ? Math.trunc(dias) : 3) : null,
     p_motivo: input?.motivo ?? null,
+    p_tipo: tipo,
+    p_meses: tipo === 'formatura' ? (Number.isFinite(meses) ? Math.trunc(meses) : 6) : null,
   });
   if (error) throw new Error(`crm_agente_timer_retorno: ${error.message}`);
 
   const d = (data ?? {}) as Record<string, any>;
   if (d.ok === false) {
     return sair(`Não consegui agendar o retorno (${d.erro ?? 'erro desconhecido'}). ` +
-      `Confirme a data com o lead assim mesmo e siga à disposição. NÃO chame pausa_ia.`);
+      `Encerre com cordialidade dizendo que vai chamá-lo mais pra frente. NÃO chame pausa_ia.`);
   }
+
+  if (tipo === 'formatura') {
+    const limitado = d.meses_aplicados !== d.meses_pedidos;
+    return sair(
+      `Retorno agendado para ${d.retorno_em} (${d.meses_aplicados} meses), perto de ele concluir a graduação.` +
+      (limitado ? ` O prazo pedido foi limitado ao teto de 12 meses — NÃO prometa data exata ao lead, fale de forma aproximada ("quando vc estiver terminando a graduação").` : '') +
+      ` O lead fica fora dos disparos até lá e o time o retoma. ` +
+      `Encerre com cordialidade dizendo que vai chamá-lo quando ele estiver concluindo o curso. ` +
+      `NUNCA cite "90 dias", "prazo" ou "elegibilidade". NÃO chame pausa_ia.`,
+    );
+  }
+
   const limitado = d.dias_aplicados !== d.dias_pedidos;
   return sair(
     `Retorno agendado para ${d.retorno_em} (${d.dias_aplicados} dia(s)).` +
