@@ -90,7 +90,15 @@ async function mockTool(nome: string, input: any, mocks: any): Promise<string> {
         return 'REPROVADO para esta pós (exclusiva de médico veterinário). curso_alternativo: "Gestão de Pessoas e Extensão Rural". Ofereça a alternativa.';
       }
       if (m === 'prazo') {
-        return 'REPROVADO_PRAZO. O lead conclui a graduação fora do prazo. NÃO agende reunião: encerre com respeito e chame pausa_ia.';
+        // ⚠️ ESPELHO da instrução REAL do handler (tools.ts, ramo estudante_fora_do_prazo).
+        // Estava congelado na versão antiga ("chame pausa_ia") e por isso o teste
+        // reprovava o comportamento novo — era o MOCK mandando pausar, não o agente.
+        return 'REPROVADO_PRAZO. O lead ainda está cursando e conclui fora do prazo. NÃO agende reunião, ' +
+          'NÃO diga que a formação atende e NÃO empurre a decisão pro monitor. Este lead NÃO está ' +
+          'desinteressado: vai poder cursar quando terminar a graduação. Na MESMA resposta, chame ' +
+          'agendar_retorno com tipo="formatura" e meses = quantos meses faltam pra ele concluir ' +
+          '(o sistema limita ao teto). NÃO chame pausa_ia. Encerre dizendo, de forma aproximada, que ' +
+          'vai chamá-lo quando ele estiver terminando o curso — nunca mencione "90 dias" ou "prazo".';
       }
       return 'APROVADO. A formação do lead é compatível com a pós de interesse.';
     }
