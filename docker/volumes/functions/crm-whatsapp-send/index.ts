@@ -41,6 +41,62 @@ async function metaUploadMedia(
   return String(j.id);
 }
 
+/**
+ * media_id reusável para documento/imagem/vídeo — resolve do cache ou sobe 1x.
+ *
+ * ⚠️ Por que existe: enviar por `link` faz a Meta BAIXAR o arquivo do nosso storage a
+ * CADA envio. Um 500 esporádico no caminho (Cloudflare/Kong/storage) vira erro
+ * **131053** ("Downloading media from weblink failed with http code 500") e a mensagem
+ * morre em silêncio — o erro chega ASSÍNCRONO (webhook), depois de a edge já ter
+ * respondido "enviado", então ninguém reenvia. Medido em 2026-07-30: 15 pessoas em 48h,
+ * **13 ficaram sem o cronograma** (a IA e a atendente tentaram e as duas falharam), em
+ * surtos curtos (10:06-10:14 e 15:29-15:51) que não acompanham volume. Os cronogramas
+ * têm 12-13 MB e um deles sozinho já foi baixado ~1.200x em 10 dias (~15 GB).
+ *
+ * Com media_id a Meta não baixa mais nada: 1 upload por (arquivo × número), reusado por
+ * 25 dias (a Meta retém 30). Falhou o upload? devolve null e o chamador manda por link —
+ * o comportamento de hoje, nunca pior.
+ */
+async function resolverMediaId(
+  admin: any, phoneNumberId: string, accessToken: string,
+  fileUrl: string, mime: string, filename: string,
+): Promise<string | null> {
+  try {
+    const { data: hit } = await admin
+      .from("crm_whatsapp_media_cache")
+      .select("media_id")
+      .eq("url", fileUrl)
+      .eq("phone_number_id", phoneNumberId)
+      .gt("expira_em", new Date().toISOString())
+      .maybeSingle();
+    if (hit?.media_id) return String(hit.media_id);
+
+    const mediaId = await metaUploadMedia(phoneNumberId, accessToken, fileUrl, mime, filename);
+    // upsert: outra rodada em paralelo pode ter subido o mesmo arquivo (2 ids válidos, tanto faz)
+    await admin.from("crm_whatsapp_media_cache").upsert({
+      url: fileUrl,
+      phone_number_id: phoneNumberId,
+      media_id: mediaId,
+      mime,
+      filename,
+      criado_em: new Date().toISOString(),
+      expira_em: new Date(Date.now() + 25 * 24 * 3600 * 1000).toISOString(),
+    }, { onConflict: "url,phone_number_id" });
+    return mediaId;
+  } catch (e) {
+    console.warn("[crm-whatsapp-send] media_id indisponível, usando link:", e instanceof Error ? e.message : e);
+    return null;
+  }
+}
+
+/** Invalida o cache quando a Meta recusa o id (expirado/removido) — o chamador refaz por link. */
+async function invalidarMediaId(admin: any, fileUrl: string, phoneNumberId: string): Promise<void> {
+  try {
+    await admin.from("crm_whatsapp_media_cache")
+      .delete().eq("url", fileUrl).eq("phone_number_id", phoneNumberId);
+  } catch { /* best-effort */ }
+}
+
 function formatPhone(raw: string): string | null {
   const digits = (raw ?? "").replace(/\D/g, "");
   if (!digits) return null;
@@ -407,6 +463,9 @@ Deno.serve(async (req) => {
 
     // Monta payload Meta
     let waPayload: Record<string, unknown>;
+    // media_id usado neste envio (document/image/video). Guardado pra, se a Meta recusar
+    // o id (expirado/removido do lado dela), invalidar o cache e refazer por link.
+    let mediaIdUsado: string | null = null;
     // Mídia do cabeçalho do template — capturada p/ persistir como anexo e a imagem
     // do template APARECER no chat (CRM + SAC via mirror), não só o texto do corpo.
     let templateHeaderMedia: { tipo: string; url: string; mime: string } | null = null;
@@ -478,13 +537,18 @@ Deno.serve(async (req) => {
       };
     } else if (tipo === "document") {
       // PDF/arquivo por URL pública (Storage do Supabase, Drive, site…). caption = conteudo (opcional).
+      // Preferimos media_id (a Meta NÃO baixa a URL ⇒ imune ao 131053); link é o fallback.
       const caption = String(conteudo ?? "").trim();
+      mediaIdUsado = await resolverMediaId(
+        admin, phoneNumberId, accessToken, docUrl,
+        String(mime_type ?? "").trim() || "application/pdf", docFilename || "documento.pdf",
+      );
       waPayload = {
         messaging_product: "whatsapp",
         to,
         type: "document",
         document: {
-          link: docUrl,
+          ...(mediaIdUsado ? { id: mediaIdUsado } : { link: docUrl }),
           filename: docFilename,
           ...(caption ? { caption: caption.slice(0, 1024) } : {}),
         },
@@ -493,22 +557,36 @@ Deno.serve(async (req) => {
       // Imagem INLINE (não vira "arquivo"): type=image + caption opcional. Meta aceita
       // jpeg/png por URL pública.
       const caption = String(conteudo ?? "").trim();
+      mediaIdUsado = await resolverMediaId(
+        admin, phoneNumberId, accessToken, docUrl,
+        String(mime_type ?? "").trim() || "image/jpeg", docFilename || "imagem.jpg",
+      );
       waPayload = {
         messaging_product: "whatsapp",
         to,
         type: "image",
-        image: { link: docUrl, ...(caption ? { caption: caption.slice(0, 1024) } : {}) },
+        image: {
+          ...(mediaIdUsado ? { id: mediaIdUsado } : { link: docUrl }),
+          ...(caption ? { caption: caption.slice(0, 1024) } : {}),
+        },
       };
     } else if (tipo === "video") {
       // Vídeo INLINE (player no WhatsApp, não "arquivo"): type=video + caption opcional.
       // Meta aceita mp4/3gp por URL pública (codec H.264 + AAC). Sem branch próprio, o
       // vídeo era enviado como `document` e chegava como arquivo pra baixar.
       const caption = String(conteudo ?? "").trim();
+      mediaIdUsado = await resolverMediaId(
+        admin, phoneNumberId, accessToken, docUrl,
+        String(mime_type ?? "").trim() || "video/mp4", docFilename || "video.mp4",
+      );
       waPayload = {
         messaging_product: "whatsapp",
         to,
         type: "video",
-        video: { link: docUrl, ...(caption ? { caption: caption.slice(0, 1024) } : {}) },
+        video: {
+          ...(mediaIdUsado ? { id: mediaIdUsado } : { link: docUrl }),
+          ...(caption ? { caption: caption.slice(0, 1024) } : {}),
+        },
       };
     } else if (tipo === "audio") {
       // OGG/Opus → MENSAGEM DE VOZ (forma de onda) só se enviado por `audio.id` (mídia
@@ -598,15 +676,31 @@ Deno.serve(async (req) => {
 
     console.log("[crm-whatsapp-send] -> Meta:", JSON.stringify(waPayload));
 
-    const r = await fetch(`${META_GRAPH}/${phoneNumberId}/messages`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(waPayload),
-    });
-    const waResp = await r.json().catch(() => ({}));
+    const postMeta = (payload: Record<string, unknown>) =>
+      fetch(`${META_GRAPH}/${phoneNumberId}/messages`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+
+    let r = await postMeta(waPayload);
+    let waResp = await r.json().catch(() => ({}));
+
+    // media_id recusado (expirou/sumiu do lado da Meta) ⇒ invalida o cache e refaz por LINK.
+    // Sem isso, um id morto derrubaria TODOS os envios daquele arquivo — pior que o 131053
+    // que este caminho veio corrigir.
+    if (!r.ok && mediaIdUsado) {
+      console.warn("[crm-whatsapp-send] Meta recusou media_id, refazendo por link:", JSON.stringify(waResp?.error ?? {}));
+      await invalidarMediaId(admin, docUrl, phoneNumberId);
+      const obj = (waPayload as any)[tipo as string];
+      if (obj && typeof obj === "object") { delete obj.id; obj.link = docUrl; }
+      mediaIdUsado = null;
+      r = await postMeta(waPayload);
+      waResp = await r.json().catch(() => ({}));
+    }
     console.log("[crm-whatsapp-send] <- Meta status:", r.status);
 
     const waMsgId = waResp?.messages?.[0]?.id ?? null;
