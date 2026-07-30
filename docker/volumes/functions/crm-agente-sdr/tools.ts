@@ -778,7 +778,18 @@ async function pausaIa(supabase: any, input: any, ctx: CtxConversa, toolUseId: s
 
   // Opt-out de verdade: arquiva (resolve as conversas do SAC junto) + marca
   // nao_perturbe. Best-effort — falha aqui nunca desfaz a pausa que já valeu.
-  if (input.tipo === 'nao_perturbe') {
+  //
+  // 'sem_graduacao' entra no MESMO caminho: lead que não tem graduação nenhuma e
+  // não está cursando uma NUNCA vai poder se matricular numa pós lato sensu, então
+  // não é "pausa" (que deixa o lead no fluxo e SEGUE mandando disparo) — é saída
+  // definitiva, com o card resolvido. Medido antes do fix: 342 desqualificados por
+  // graduação seguiam elegíveis e 254 deles levaram 1.009 disparos DEPOIS.
+  // ⚠️ O discriminador é o ENUM, nunca o texto de `motivo`: "Lead não possui
+  // graduação completa" (o motivo mais comum, 187 casos) é ambíguo entre quem só
+  // tem ensino médio e quem ainda está CURSANDO — e o segundo não pode ser
+  // arquivado (volta a ser elegível ao se formar; o caminho dele é agendar_retorno
+  // com tipo="formatura").
+  if (input.tipo === 'nao_perturbe' || input.tipo === 'sem_graduacao') {
     try {
       const { data, error: eArq } = await supabase.rpc('crm_agente_arquivar_desinteresse', {
         p_telefone: ctx.telefone,
@@ -789,12 +800,14 @@ async function pausaIa(supabase: any, input: any, ctx: CtxConversa, toolUseId: s
       return {
         mensagem: 'Atendimento em Pausa',
         status: 'pausado',
-        opt_out: true,
+        motivo_saida: input.tipo === 'sem_graduacao' ? 'sem_graduacao' : 'opt_out',
+        opt_out: input.tipo === 'nao_perturbe',
         arquivado: (d.arquivados ?? 0) > 0 || (d.nao_perturbe_marcados ?? 0) > 0,
+        atendimento_resolvido: (d.arquivados ?? 0) > 0,
         id: toolUseId,
       };
     } catch (e) {
-      console.error(`[crm-agente-sdr] opt-out (arquivar) falhou: ${(e as Error).message}`);
+      console.error(`[crm-agente-sdr] arquivamento (${input.tipo}) falhou: ${(e as Error).message}`);
     }
   }
   return { mensagem: 'Atendimento em Pausa', status: 'pausado', id: toolUseId };

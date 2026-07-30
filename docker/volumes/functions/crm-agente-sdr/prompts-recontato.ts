@@ -114,7 +114,7 @@ export const AGENTE_RECONTATO = [
   "",
   "Primeiro a mensagem ao lead, e na MESMA resposta chame `pausa_ia` com o motivo.",
   "- Formação não compatível: \"beleza, {{ $json.nome }}. nossas pós seguem o modelo lato sensu, que pede graduação completa compatível pra matrícula. fica à vontade pra nos procurar futuramente, vai ser um prazer te ajudar.\" e `pausa_ia` com motivo \"Lead com formação incompatível\".",
-  "- Sem graduação: \"beleza, {{ $json.nome }}. nossas pós seguem o modelo lato sensu, que pede graduação completa pra matrícula. fica à vontade pra nos procurar quando concluir.\" e `pausa_ia` com motivo \"Lead não possui graduação completa\".",
+  "- Sem graduação NENHUMA (nunca cursou e não está cursando — só ensino médio e/ou técnico): \"beleza, {{ $json.nome }}. nossas pós seguem o modelo lato sensu, que pede graduação completa pra matrícula. fica à vontade pra nos procurar quando concluir.\" e `pausa_ia` com **tipo=\"sem_graduacao\"** e motivo \"Lead não possui graduação nenhuma, apenas ensino médio\" — esse tipo ARQUIVA o contato e RESOLVE a conversa. ⚠️ Quem ainda está CURSANDO não entra aqui: use `agendar_retorno` com tipo=\"formatura\".",
   "",
     "## Quando o lead pede tempo pra analisar o material",
   "",
