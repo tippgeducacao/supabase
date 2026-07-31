@@ -573,8 +573,11 @@ Deno.serve(async (req) => {
   // aplicamos o MESMO proxy do webhook-leads: campanha/conjunto/anúncio viram
   // utm_campaign/utm_term/utm_content (é o que liga esses leads ao Melhores Criativos).
   // O proxy só age quando há meta_* mapeado ⇒ integração que não mapeia nada segue igual.
+  // gclid/fbclid entram no MESMO balde das UTMs (2026-07-31): as LPs Lovable passaram
+  // a persistir os dois em sessionStorage e mandá-los na query. São opt-in por
+  // mapeamento (lead.gclid / lead.fbclid) — integração que não mapeia segue idêntica.
   const inUtm: Record<string, string> = {};
-  for (const c of ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term"]) {
+  for (const c of ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "gclid", "fbclid"]) {
     const v = asString(pickByMapping(dados, mapping, `lead.${c}`), 255);
     if (v) inUtm[c] = v;
   }
@@ -648,7 +651,7 @@ Deno.serve(async (req) => {
     if (email) {
       const { data } = await admin
         .from("leads")
-        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, meta_campaign_id, meta_campaign_name, meta_adset_id, meta_adset_name, meta_ad_id, meta_ad_name, meta_form_id, meta_form_name, meta_platform, utm_source, utm_medium, utm_campaign, utm_content, utm_term, arquivado, arquivado_em")
+        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, meta_campaign_id, meta_campaign_name, meta_adset_id, meta_adset_name, meta_ad_id, meta_ad_name, meta_form_id, meta_form_name, meta_platform, utm_source, utm_medium, utm_campaign, utm_content, utm_term, gclid, fbclid, arquivado, arquivado_em")
         .eq("email", email)
         .limit(1);
       existing = data?.[0] ?? null;
@@ -662,7 +665,7 @@ Deno.serve(async (req) => {
       if (canonId) {
         const { data } = await admin
           .from("leads")
-          .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, meta_campaign_id, meta_campaign_name, meta_adset_id, meta_adset_name, meta_ad_id, meta_ad_name, meta_form_id, meta_form_name, meta_platform, utm_source, utm_medium, utm_campaign, utm_content, utm_term, arquivado, arquivado_em")
+          .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, meta_campaign_id, meta_campaign_name, meta_adset_id, meta_adset_name, meta_ad_id, meta_ad_name, meta_form_id, meta_form_name, meta_platform, utm_source, utm_medium, utm_campaign, utm_content, utm_term, gclid, fbclid, arquivado, arquivado_em")
           .eq("id", canonId as string)
           .maybeSingle();
         existing = data ?? null;
