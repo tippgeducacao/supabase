@@ -133,14 +133,14 @@ Deno.serve(async (req) => {
 
         // === MENSAGENS ===
         if (field === "messages") {
-          // Número do PODCAST → só qualifica interesse (marca o candidato 'respondeu')
-          if (podcastPhoneId && value?.metadata?.phone_number_id === podcastPhoneId) {
-            try { await handlePodcastInbound(supabase, value, podcastWaAccountId); } catch (e) {
-              console.error("[whatsapp-webhook] podcast inbound erro", String(e));
-            }
-            continue;
-          }
           // === STATUS UPDATES (sent/delivered/read/failed) ===
+          // (!) ANTES do roteamento do podcast, de propósito. O `wa_message_id` é único
+          // GLOBAL, então o status serve a QUALQUER número — inclusive o do podcast, cujas
+          // mensagens vivem nas mesmas `ped_conversas_mensagens`/`sac_mensagens`. Enquanto
+          // este bloco ficou DEPOIS do `continue` do podcast, todo status daquele número era
+          // descartado: medido em 2026-08-03, as threads de podcast tinham 98 outbound com
+          // wamid e ZERO com `lida_em` (nas demais, 624 de 984) — o atendente nunca via
+          // entregue/lido, e falha ASSÍNCRONA da Meta (que só chega por aqui) sumia.
           const statuses = Array.isArray(value?.statuses) ? value.statuses : [];
           for (const status of statuses) {
             try {
@@ -186,6 +186,16 @@ Deno.serve(async (req) => {
             } catch (sErr: any) {
               console.log("[whatsapp-webhook] erro status:", sErr.message, sErr.stack);
             }
+          }
+
+          // Número do PODCAST → só qualifica interesse (marca o candidato 'respondeu').
+          // Fica DEPOIS dos status (acima): o `continue` aqui pula apenas o processamento
+          // das MENSAGENS, não o dos status.
+          if (podcastPhoneId && value?.metadata?.phone_number_id === podcastPhoneId) {
+            try { await handlePodcastInbound(supabase, value, podcastWaAccountId); } catch (e) {
+              console.error("[whatsapp-webhook] podcast inbound erro", String(e));
+            }
+            continue;
           }
 
           const messages = Array.isArray(value?.messages) ? value.messages : [];

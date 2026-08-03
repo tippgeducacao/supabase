@@ -148,6 +148,15 @@ Deno.serve(async (req) => {
     try {
       if (tplCadastro?.wa_account_id) {
         wa = await carregarConta(tplCadastro.wa_account_id);
+        // Conta dona inativa/removida (o toggle e a lixeira de contas não pedem confirmação):
+        // cai no fallback e o envio falha com 132001 na certa. Sem este log não há como saber
+        // POR QUE — o payload logado não carrega o phone_number_id (ele vai na URL).
+        if (!wa) {
+          console.log(
+            `[whatsapp-send-message] conta dona do template "${template_name}" (${tplCadastro.wa_account_id})` +
+            ` indisponível (inativa ou removida) — caindo no fallback; o envio deve falhar com 132001`,
+          );
+        }
       }
       if (!wa) {
         const { data: convRow } = await admin
@@ -233,7 +242,9 @@ Deno.serve(async (req) => {
           conteudo: `[falha ao enviar ${tipo}] ${errMsg}`,
           enviada_em: new Date().toISOString(),
           anexos: tipo !== "text" && tipo !== "template" ? [{ tipo, url: media_url, filename: media_filename ?? null }] : [],
-          classificacao_ia: { erro_envio: true, status: r.status, meta_response: waResp, payload_enviado: waPayload },
+          // phone_number_id no rastro: o payload NÃO o carrega (vai na URL), e sem ele não dá
+          // pra saber por qual WABA a mensagem saiu — que é a causa nº 1 do 132001.
+          classificacao_ia: { erro_envio: true, status: r.status, meta_response: waResp, payload_enviado: waPayload, phone_number_id: phoneNumberId },
         });
       } catch (logErr) {
         console.log("[whatsapp-send-message] não foi possível salvar mensagem de erro:", (logErr as Error).message);
