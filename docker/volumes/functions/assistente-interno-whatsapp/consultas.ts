@@ -1,7 +1,7 @@
 // Consultas ao vivo (BI) — cada número vem da FONTE CANÔNICA do sistema (bate com o dashboard).
 // SOMENTE LEITURA. Assinaturas de RPC confirmadas no banco.
 import type { Ctx } from "./db.ts";
-import { resolverPeriodo, hojeSP, addDiasYmd, semanaComercial } from "./datas.ts";
+import { resolverPeriodo, hojeSP, addDiasYmd } from "./datas.ts";
 
 const TIPOS_VENDA = ["pos_graduacao", "curso_livre", "modulo_pratico"];
 const r2 = (n: number) => Number((Number(n) || 0).toFixed(2));
@@ -203,12 +203,20 @@ export const FERRAMENTAS_CONSULTA = [
       "⚠️ USE SEMPRE, E ANTES DE ESCREVER, quando ele pedir um DOCUMENTO/RELATÓRIO/RESUMO/PDF de algo que foi conversado ao longo do tempo " +
       "('monta o relatório do dia', 'faz o PDF de tudo que vimos hoje', 'junta o que falamos ontem', 'documento do evento'). " +
       "Você só enxerga as últimas mensagens do chat — o resto do dia SÓ existe aqui. Sem chamar isto, o documento sai curto e incompleto. " +
-      "Dica: a sua própria resposta a cada foto contém a descrição do slide (a imagem em si não fica guardada).",
+      "Dica: a sua própria resposta a cada foto contém a descrição do slide (a imagem em si não fica guardada). " +
+      "O histórico é PERMANENTE (nada é apagado) — dá para pedir qualquer período, inclusive semanas/meses atrás.",
     input_schema: {
       type: "object",
       properties: {
-        periodo: { type: "string", enum: ["hoje", "ontem", "semana", "ultimos_2_dias", "ultimos_7_dias"] },
-        de: { type: "string", description: "YYYY-MM-DD (opcional, período custom)" },
+        periodo: {
+          type: "string",
+          enum: [
+            "hoje", "ontem", "ultimos_2_dias", "ultimos_7_dias", "ultimos_15_dias", "ultimos_30_dias",
+            "semana", "semana_passada", "mes", "mes_passado",
+          ],
+          description: "'semana' = semana comercial (quarta→terça), a mesma régua do resto do sistema",
+        },
+        de: { type: "string", description: "YYYY-MM-DD (período custom — use para qualquer intervalo, ex.: os 2 dias de um evento)" },
         ate: { type: "string", description: "YYYY-MM-DD (opcional)" },
       },
     },
@@ -746,54 +754,99 @@ async function cRecuperarConversa(input: any, ctx: Ctx) {
   const hoje = hojeSP();
   let de: string, ate: string, label: string;
   const p = String(input?.periodo || "");
-  if (input?.de) {
-    de = String(input.de).slice(0, 10);
-    ate = String(input.ate || input.de).slice(0, 10);
-    label = de === ate ? de : `${de} a ${ate}`;
-  } else if (p === "ontem") { de = ate = addDiasYmd(hoje, -1); label = "ontem"; }
-  else if (p === "ultimos_2_dias") { de = addDiasYmd(hoje, -1); ate = hoje; label = "ontem e hoje"; }
-  else if (p === "ultimos_7_dias") { de = addDiasYmd(hoje, -6); ate = hoje; label = "últimos 7 dias"; }
-  else if (p === "semana") { const s = semanaComercial(hoje); de = s.ini; ate = s.fim; label = "esta semana"; }
-  else { de = ate = hoje; label = "hoje"; }
+  // Períodos "últimos N dias" são próprios (o helper canônico não os tem); o RESTO delega a
+  // `resolverPeriodo` — mesma régua de semana comercial/mês do resto do BI, sem duplicar lógica.
+  const ultimosN: Record<string, number> = {
+    ultimos_2_dias: 2, ultimos_7_dias: 7, ultimos_15_dias: 15, ultimos_30_dias: 30,
+  };
+  if (!input?.de && ultimosN[p]) {
+    de = addDiasYmd(hoje, -(ultimosN[p] - 1)); ate = hoje;
+    label = p === "ultimos_2_dias" ? "ontem e hoje" : `últimos ${ultimosN[p]} dias`;
+  } else {
+    const r = resolverPeriodo(input?.de || input?.periodo ? input : { periodo: "hoje" });
+    de = r.de; ate = r.ate; label = r.label;
+  }
 
+  // ⚠️ SEM .limit() de linhas: com `ascending: true` o Postgres devolveria as N mais ANTIGAS e
+  // descartaria as recentes — e como o corte de tamanho abaixo remove as antigas, o modelo
+  // receberia uma FATIA DO MEIO do período, com uma nota dizendo que só faltavam as antigas.
+  // (Achado da revisão adversarial 2026-08-03: passaria a morder com ~600 msgs, ~3 dias de uso.)
   const { data, error } = await ctx.admin
     .from("assistente_mensagens")
     .select("direcao, tipo, conteudo, criado_em")
     .eq("canon", ctx.canon)
     .gte("criado_em", `${de}T00:00:00-03:00`)
     .lt("criado_em", `${addDiasYmd(ate, 1)}T00:00:00-03:00`)
-    .order("criado_em", { ascending: true })
-    .limit(600);
+    .order("criado_em", { ascending: true });
   if (error) throw new Error(error.message);
 
-  const hhmm = (iso: string) =>
-    new Date(new Date(iso).getTime() - 3 * 3600 * 1000).toISOString().slice(5, 16).replace("T", " ");
+  const msgs = data ?? [];
 
-  // Teto de segurança: um dia MUITO conversado não pode estourar o contexto do modelo.
-  // Corta pelas mensagens mais ANTIGAS (o fim da conversa já está no histórico recente dele).
-  const LIMITE = 120_000;
+  // Período SEM material: NUNCA mandar o modelo escrever assim mesmo. Com a instrução normal
+  // ("aproveite TUDO, não resuma") e nenhum conteúdo, ele ALUCINA o documento — que é pior que
+  // qualquer corte. Caso real: pedir "relatório de hoje" depois da meia-noite (o dia virou).
+  if (!msgs.length) {
+    const { count: ontem } = await ctx.admin
+      .from("assistente_mensagens")
+      .select("id", { count: "exact", head: true })
+      .eq("canon", ctx.canon)
+      .gte("criado_em", `${addDiasYmd(de, -1)}T00:00:00-03:00`)
+      .lt("criado_em", `${de}T00:00:00-03:00`);
+    return {
+      periodo: label, de, ate, mensagens: 0, vazio: true,
+      ...(ontem ? { mensagens_no_dia_anterior: ontem } : {}),
+      _instrucao:
+        "NÃO existe material registrado neste período. NÃO escreva o documento e NÃO invente conteúdo. " +
+        "Avise o dono que não achou nada nesse período e pergunte qual é o certo" +
+        (ontem ? ` (o dia anterior tem ${ontem} mensagens — pode ser o que ele quer).` : "."),
+    };
+  }
+
+  const hhmm = (iso: string) =>
+    new Date(new Date(iso).getTime() - 3 * 3600 * 1000).toISOString().slice(0, 16).replace("T", " ");
+
+  // Teto de segurança. 400k chars ≈ 125k tokens ≈ 12% da janela de 1M do Opus 4.8 — cobre
+  // "tudo desde sempre" de um dono (medido 2026-08-03: 30 dias = 269k chars) com folga de
+  // sobra para o modelo ESCREVER o documento. Corta preservando o FIM (o começo de um período
+  // longo é o mais dispensável); a nota diz o recorte REAL, nunca uma contagem parcial.
+  const LIMITE = 400_000;
   const linhas: string[] = [];
-  let total = 0, cortadas = 0;
-  for (let i = (data ?? []).length - 1; i >= 0; i--) {
-    const m: any = data![i];
+  let total = 0, cortadas = 0, primeiraIncluida = "";
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m: any = msgs[i];
     const txt = String(m.conteudo ?? "").trim();
     if (!txt) continue;
-    const linha = `[${hhmm(m.criado_em)}] ${m.direcao === "inbound" ? ctx.dono.nome : "Você"}${
+    const quando = hhmm(m.criado_em);
+    const linha = `[${quando}] ${m.direcao === "inbound" ? ctx.dono.nome : "Você"}${
       m.tipo && m.tipo !== "texto" ? ` (${m.tipo})` : ""}: ${txt}`;
-    if (total + linha.length > LIMITE) { cortadas = i + 1; break; }
+    // Garante que ao menos UMA mensagem entra: uma transcrição gigante sozinha não pode
+    // devolver conversa vazia (o modelo escreveria no vácuo).
+    if (linhas.length && total + linha.length > LIMITE) { cortadas = i + 1; break; }
     linhas.unshift(linha);
     total += linha.length;
+    primeiraIncluida = quando;
   }
 
   return {
     periodo: label,
     de, ate,
+    mensagens_no_periodo: msgs.length,
     mensagens: linhas.length,
-    ...(cortadas ? { nota_corte: `As ${cortadas} mensagens mais antigas do período ficaram de fora (limite de tamanho).` } : {}),
+    caracteres: total,
+    ...(cortadas
+      ? {
+        nota_corte:
+          `O período tem ${msgs.length} mensagens. Devolvi as ${linhas.length} MAIS RECENTES ` +
+          `(de ${primeiraIncluida} em diante); as ${cortadas} anteriores ficaram de fora por tamanho. ` +
+          `Se precisar do trecho anterior, chame de novo com de/ate cobrindo só aquele intervalo — ` +
+          `e AVISE o dono que o documento cobre a partir de ${primeiraIncluida}.`,
+      }
+      : {}),
     conversa: linhas.join("\n"),
     _instrucao:
-      "Este é o material bruto do período. Suas PRÓPRIAS respostas contêm a leitura de cada foto/slide que o dono " +
-      "mandou (a imagem não fica guardada) — use-as como fonte do conteúdo. Ao montar um documento, aproveite TUDO " +
-      "o que for relevante: cada slide, cada número e cada insight que o dono ditou. Não resuma em poucas linhas.",
+      "Este é o material bruto do período, em ordem cronológica. Suas PRÓPRIAS respostas contêm a leitura de " +
+      "cada foto/slide que o dono mandou (a imagem não fica guardada) — use-as como fonte do conteúdo. " +
+      "Ao montar um documento, aproveite TUDO o que for relevante: cada slide, cada número e cada insight que " +
+      "o dono ditou. Não resuma em poucas linhas.",
   };
 }

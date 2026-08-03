@@ -50,7 +50,7 @@ Deno.serve(async (req) => {
 
   // ⚠️ BUMPE esta string a cada deploy: é o ÚNICO jeito de confirmar, de fora, que a versão
   // nova já está servindo (o edge-runtime serve o worker antigo por ~1 min após o push).
-  if (req.method === "GET") return new Response("assistente-interno ok · build 20260803a", { headers: cors });
+  if (req.method === "GET") return new Response("assistente-interno ok · build 20260803b", { headers: cors });
 
   // Autenticação do webhook (anti-spoofing): se ASSIST_WEBHOOK_SECRET estiver setado, exige ?k igual.
   // O número declarado no payload NÃO é autenticação (quem POSTa controla msg.fromDigits).

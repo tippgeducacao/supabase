@@ -363,10 +363,50 @@ export async function gerarPdf(titulo: string, conteudo: string, opts: PdfOpts =
   return await doc.save();
 }
 
-/** Rascunhos acumulados por dono (documento escrito em PARTES, quando não cabe numa resposta só).
- *  Vive no isolate: some se o edge reciclar — por isso o modelo deve fechar o documento na
- *  sequência, e a ferramenta AVISA quantos caracteres já tem acumulado a cada parte. */
-const rascunhos = new Map<string, { titulo: string; partes: string[] }>();
+// ── Rascunho de documento longo (escrito em PARTES) ──────────────────────────
+// ⚠️ VIVE NO BANCO (`assistente_rascunhos`), não em memória. A versão anterior usava um Map no
+// isolate do edge e quebrava em 3 cenários prováveis num documento que leva minutos: o isolate
+// reciclar no meio (partes somem, mas o fechamento diz "enviado" e o bot ANUNCIA sucesso com o
+// PDF pela metade); o dono mandar outra mensagem no meio ("tá saindo?" — é outra requisição,
+// possivelmente outro isolate); e rascunho velho sobrando e sendo prependado ao documento
+// seguinte. Chave = (canon, parte_num): um documento por dono de cada vez.
+const TTL_RASCUNHO_MS = 2 * 3600 * 1000;
+
+async function lerRascunho(ctx: Ctx): Promise<{ titulo: string; partes: string[] } | null> {
+  const { data } = await ctx.admin
+    .from("assistente_rascunhos")
+    .select("titulo, parte_num, conteudo")
+    .eq("canon", ctx.canon)
+    .order("parte_num", { ascending: true });
+  if (!data?.length) return null;
+  // O título da PRIMEIRA parte prevalece (o modelo às vezes varia o título entre as chamadas).
+  return { titulo: String(data[0].titulo), partes: data.map((d: any) => String(d.conteudo)) };
+}
+
+async function limparRascunho(ctx: Ctx) {
+  await ctx.admin.from("assistente_rascunhos").delete().eq("canon", ctx.canon);
+}
+
+/** Fecha o documento pendente com o que já foi escrito. Chamado quando o loop de ferramentas
+ *  se esgota com rascunho aberto — melhor entregar o parcial MARCADO do que descartar tudo. */
+export async function fecharRascunhoPendente(ctx: Ctx): Promise<string | null> {
+  const r = await lerRascunho(ctx);
+  if (!r) return null;
+  const aviso =
+    "\n\n## Documento incompleto\n" +
+    "Este PDF foi fechado automaticamente com as partes que deram tempo de ser escritas. " +
+    "Peça a continuação para completar o restante.";
+  try {
+    const out: any = await gerarEnviarPdf({ titulo: r.titulo, conteudo: aviso }, ctx);
+    return out?.status === "enviado"
+      ? `📄 Te mandei o PDF "${out.arquivo}" com o que consegui montar até aqui — o documento ficou grande e ` +
+        `precisei fechar antes do fim. Me diz "continua o documento" que eu monto o restante.`
+      : null;
+  } catch {
+    await limparRascunho(ctx); // nunca deixa rascunho órfão envenenando o próximo documento
+    return null;
+  }
+}
 
 export async function gerarEnviarPdf(input: any, ctx: Ctx) {
   const titulo = String(input?.titulo || "Documento").trim();
@@ -375,31 +415,38 @@ export async function gerarEnviarPdf(input: any, ctx: Ctx) {
   if (!conteudo) return { status: "sem_conteudo", mensagem: "Preciso do conteúdo do documento." };
   if (!ctx.linha || !ctx.numero) return { status: "erro", mensagem: "Sem linha de WhatsApp para enviar o arquivo." };
 
+  // TTL: rascunho abandonado (dono desistiu, edge caiu) não pode contaminar o próximo documento.
+  await ctx.admin.from("assistente_rascunhos").delete()
+    .eq("canon", ctx.canon)
+    .lt("criado_em", new Date(Date.now() - TTL_RASCUNHO_MS).toISOString());
+
+  const acumulado = await lerRascunho(ctx);
+
   // Documento em PARTES: acumula e só gera o PDF quando o modelo fecha (continuar = false).
-  const chave = ctx.canon;
-  const acumulado = rascunhos.get(chave);
   if (continua) {
-    const partes = acumulado && acumulado.titulo === titulo ? [...acumulado.partes, conteudo] : [conteudo];
-    rascunhos.set(chave, { titulo, partes });
-    const chars = partes.join("\n").length;
+    const proxima = (acumulado?.partes.length ?? 0) + 1;
+    const { error } = await ctx.admin.from("assistente_rascunhos").insert({
+      canon: ctx.canon, titulo: acumulado?.titulo ?? titulo, parte_num: proxima, conteudo,
+    });
+    if (error) throw new Error(`não consegui guardar a parte ${proxima}: ${error.message}`);
+    const chars = (acumulado?.partes.join("\n").length ?? 0) + conteudo.length;
     return {
       status: "parte_recebida",
-      partes: partes.length,
+      partes: proxima,
       caracteres_acumulados: chars,
-      mensagem: `Parte ${partes.length} guardada (${chars} caracteres no total). O PDF ainda NÃO foi enviado.`,
+      mensagem: `Parte ${proxima} guardada (${chars} caracteres no total). O PDF ainda NÃO foi enviado.`,
       _instrucao:
-        "NÃO responda ao dono ainda e NÃO diga que enviou. Chame gerar_pdf de novo com a PRÓXIMA parte " +
-        "(mesmo titulo). Na ÚLTIMA parte, use continuar=false para fechar e enviar o PDF.",
+        "NÃO responda ao dono ainda e NÃO diga que enviou. Chame gerar_pdf de novo com a PRÓXIMA parte. " +
+        "Na ÚLTIMA parte, use continuar=false para fechar e enviar o PDF.",
     };
   }
 
-  const texto = acumulado && acumulado.titulo === titulo
-    ? [...acumulado.partes, conteudo].join("\n")
-    : conteudo;
-  rascunhos.delete(chave);
+  const texto = acumulado ? [...acumulado.partes, conteudo].join("\n") : conteudo;
+  const tituloFinal = acumulado?.titulo ?? titulo;
+  await limparRascunho(ctx);
 
-  const bytes = await gerarPdf(titulo, texto);
-  const nome = `${slug(titulo)}.pdf`;
+  const bytes = await gerarPdf(tituloFinal, texto);
+  const nome = `${slug(tituloFinal)}.pdf`;
   const caminho = `assistente/${ctx.canon}/${Date.now()}-${nome}`;
 
   const { error } = await ctx.admin.storage.from("gt-doc-assets")
@@ -410,7 +457,7 @@ export async function gerarEnviarPdf(input: any, ctx: Ctx) {
   const url = toPublicUrl(pub?.publicUrl ?? "");
   if (!url) throw new Error("sem URL pública do arquivo");
 
-  await enviarDocumento(ctx.linha, ctx.numero, url, nome, titulo);
+  await enviarDocumento(ctx.linha, ctx.numero, url, nome, tituloFinal);
   return {
     status: "enviado", arquivo: nome, url, caracteres: texto.length,
     mensagem: `✅ PDF "${nome}" gerado e enviado aqui no WhatsApp.`,

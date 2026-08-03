@@ -5,6 +5,7 @@ import { getAnthropicKey, chamarOpus } from "./anthropic.ts";
 import { FERRAMENTAS, executarFerramenta } from "./tools.ts";
 import { FERRAMENTAS_CONSULTA, ehConsulta, executarConsulta } from "./consultas.ts";
 import { FERRAMENTAS_EXTERNAS, ehExterna, executarExterna } from "./externo.ts";
+import { fecharRascunhoPendente } from "./documento.ts";
 
 /** Busca na web — ferramenta NATIVA da Anthropic (roda no servidor deles, sem código nosso). */
 const FERRAMENTA_WEB = { type: "web_search_20260209", name: "web_search", max_uses: 5 };
@@ -92,7 +93,10 @@ REGRA DE OURO — NUNCA PROMETA, FAÇA:
 DOCUMENTO / RELATÓRIO — COMO FAZER DIREITO:
 1) Se o pedido cobre algo conversado ao longo do tempo ("o dia de hoje", "o evento", "o que vimos"),
    chame ANTES a ferramenta recuperar_conversa. Você só enxerga as últimas mensagens do chat — o resto
-   do material (inclusive a SUA leitura de cada foto que ele mandou) só existe lá.
+   do material (inclusive a SUA leitura de cada foto que ele mandou) só existe lá. Nosso histórico é
+   PERMANENTE e você alcança QUALQUER período (dias, semanas, meses atrás) — nunca diga que não tem
+   acesso ao que foi conversado antes; busque. Se a conversa cobre 2 dias específicos (um evento, uma
+   viagem), use de/ate com as datas exatas em vez de um período pronto.
 2) O documento é PROPORCIONAL ao material: um dia inteiro de evento com dezenas de slides vira um
    relatório de dezenas de páginas, não duas folhas. Aproveite CADA slide, número e insight — com a
    leitura estratégica e o espelho pra PPGVET. Cortar conteúdo é o erro mais grave aqui.
@@ -117,6 +121,34 @@ Hoje é ${hojeSP()} (fuso de Brasília).`;
 Se ${dono.nome} confirmar, chame "confirmar". Se recusar ou pedir ajuste, chame "cancelar" (e proponha de novo, se for o caso).`;
   }
   return s;
+}
+
+/**
+ * Marca o FIM do prefixo atual como ponto de cache — a volta seguinte do loop lê tudo o que veio
+ * antes do cache em vez de reprocessar. Sem isso, um dossiê grande (ex.: `recuperar_conversa` de
+ * 30 dias ≈ 84k tokens) é REENVIADO INTEIRO a cada volta: num documento de 5 partes dá ~560k
+ * tokens de input pagos, contra ~160k com cache (medido na API: 2ª chamada leu 14.849 do cache).
+ *
+ * ⚠️ Só UM breakpoint por requisição (a API aceita no máx. 4 e o prefixo cresce a cada volta):
+ * limpa os anteriores antes de marcar o novo. Bloco menor que o mínimo do modelo simplesmente
+ * não é cacheado — não é erro.
+ */
+function marcarPontoDeCache(msgs: any[]) {
+  for (const m of msgs) {
+    if (Array.isArray(m?.content)) {
+      for (const b of m.content) if (b && typeof b === "object") delete b.cache_control;
+    }
+  }
+  const ult = msgs[msgs.length - 1];
+  if (!ult) return;
+  if (typeof ult.content === "string") {
+    ult.content = [{ type: "text", text: ult.content, cache_control: { type: "ephemeral" } }];
+  } else if (Array.isArray(ult.content) && ult.content.length) {
+    const b = ult.content[ult.content.length - 1];
+    if (b && typeof b === "object" && b.type !== "thinking" && b.type !== "redacted_thinking") {
+      b.cache_control = { type: "ephemeral" };
+    }
+  }
 }
 
 export async function pensar(
@@ -146,7 +178,13 @@ export async function pensar(
     msgs[msgs.length - 1] = { role: "user", content: [anexo, { type: "text", text: txt || pedidoPadrao }] };
   }
 
-  for (let i = 0; i < 10; i++) {
+  // Documento longo consome UMA volta por parte escrita (+ as consultas). Com o teto antigo de 10
+  // um relatório de 4-5 partes estourava o loop e caía na frase genérica — jogando fora tudo o que
+  // já tinha sido escrito. 20 dá folga; o orçamento restante é INJETADO no tool_result (abaixo)
+  // para o modelo poder decidir fechar — ele não tem como enxergar o contador sozinho.
+  const MAX_VOLTAS = 20;
+  for (let i = 0; i < MAX_VOLTAS; i++) {
+    marcarPontoDeCache(msgs);
     const data = await chamarOpus(key, {
       // ⚠️ TETO ALTO DE PROPÓSITO (era 2000): o conteúdo do PDF é escrito PELO MODELO, dentro do
       // input da ferramenta gerar_pdf. Com 2000 tokens o documento NUNCA passava de ~2 folhas, e
@@ -166,11 +204,18 @@ export async function pensar(
         // Só executamos as ferramentas NOSSAS ('tool_use'); as do servidor (web_search =
         // 'server_tool_use') a Anthropic já resolveu sozinha.
         if (b.type === "tool_use") {
-          const out = ehConsulta(b.name)
+          const out: any = ehConsulta(b.name)
             ? await executarConsulta(b.name, b.input, ctx)
             : ehExterna(b.name)
             ? await executarExterna(b.name, b.input, ctx.admin)
             : await executarFerramenta(b.name, b.input, ctx);
+          // Orçamento de etapas: o modelo não vê o contador do loop. Sem este aviso ele planeja
+          // um documento de N partes sem saber que vai faltar volta — e o trabalho todo se perde.
+          const restam = MAX_VOLTAS - i - 1;
+          if (restam <= 3 && out && typeof out === "object") {
+            out._orcamento = `⚠️ Restam ${restam} etapas nesta rodada. Se estiver escrevendo um documento ` +
+              `em partes, FECHE AGORA com continuar=false — o que passar disso se perde.`;
+          }
           results.push({ type: "tool_result", tool_use_id: b.id, content: JSON.stringify(out) });
         }
       }
@@ -194,5 +239,8 @@ export async function pensar(
     }
     return txt || "Ok 👍";
   }
-  return "Precisei de muitas etapas — pode repetir de forma mais direta? 🙏";
+  // Esgotou as voltas. Se havia um documento em construção, ENTREGA o parcial marcado em vez de
+  // descartar o trabalho inteiro (e o rascunho, que ficaria órfão envenenando o próximo pedido).
+  const parcial = await fecharRascunhoPendente(ctx);
+  return parcial ?? "Precisei de muitas etapas — pode repetir de forma mais direta? 🙏";
 }
