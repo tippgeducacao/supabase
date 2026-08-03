@@ -145,11 +145,9 @@ Deno.serve(async (req) => {
     // Resolver aqui conserta as 4 telas manuais de uma vez (Nova conversa, Enviar modelo,
     // Agendar mensagem, Conversas avulsas) — nenhuma delas precisa saber de conta.
     let wa: any = null;
-    let contaVeioDoTemplate = false;
     try {
       if (tplCadastro?.wa_account_id) {
         wa = await carregarConta(tplCadastro.wa_account_id);
-        contaVeioDoTemplate = !!wa;
       }
       if (!wa) {
         const { data: convRow } = await admin
@@ -283,22 +281,16 @@ Deno.serve(async (req) => {
     });
     if (msgErr) console.log("[whatsapp-send-message] insert msg erro:", msgErr.message);
 
-    // Conta veio do TEMPLATE → carimba na conversa (só quando ela ainda não tem uma): a
-    // resposta do lead e as mensagens seguintes precisam sair pelo MESMO número, senão a
-    // thread se parte entre dois remetentes. Não sobrescreve escolha já existente, e é
-    // best-effort — não pode derrubar um envio que JÁ saiu.
-    if (contaVeioDoTemplate && wa?.id) {
-      try {
-        const { data: convRow } = await admin
-          .from("ped_conversas_avulsas").select("metadata").eq("id", conversa_id).maybeSingle();
-        const meta = (convRow?.metadata as Record<string, unknown> | null) ?? {};
-        if (!meta.wa_account_id) {
-          await admin.from("ped_conversas_avulsas")
-            .update({ metadata: { ...meta, wa_account_id: wa.id } })
-            .eq("id", conversa_id);
-        }
-      } catch (_e) { /* carimbo é conveniência, não pode falhar o envio */ }
-    }
+    // (!) NÃO carimbar a conta na conversa aqui. Já tentei e é uma armadilha: um template de
+    // podcast enviado dentro de uma thread PEDAGÓGICA (o seletor das telas manuais oferece
+    // todos os modelos ativos, sem filtro de conta) gravaria `metadata.wa_account_id` = podcast
+    // PARA SEMPRE — e daí em diante os ~34 modelos pedagógicos (dona NULL) resolveriam por essa
+    // conta e voltariam com o MESMO (#132001), enquanto texto livre e anexo sairiam por um
+    // número sem janela de 24h aberta (131047). Não é hipotético: das 10 conversas que falharam
+    // com 132001, 2 são threads pedagógicas com histórico de inbound.
+    // E o carimbo não entregaria o que prometia: quem roteia a RESPOSTA do convidado é o
+    // `whatsapp-webhook`, pelo `phone_number_id` que recebeu — não este metadata. A conversa do
+    // motor de podcast já nasce carimbada em `_shared/podcastSac.ts`.
 
     await admin
       .from("ped_conversas_avulsas")
