@@ -191,21 +191,34 @@ async function processarUma(
     // (ex.: os de podcast, na WABA "Podcast - PPGVET") tem que sair por ela.
     // Mesma régua do `whatsapp-send-message` — mudou lá, mude aqui.
     let waEnvio = wa;
-    if (row.tipo_mensagem === "template" && row.template_name) {
-      try {
+    try {
+      const carregar = async (accId: string) => {
+        const { data: acc } = await admin
+          .from("wa_accounts").select("phone_number_id, access_token")
+          .eq("id", accId).eq("is_active", true).maybeSingle();
+        const a = acc as { phone_number_id: string; access_token: string } | null;
+        return a?.phone_number_id && a?.access_token ? a : null;
+      };
+
+      if (row.tipo_mensagem === "template" && row.template_name) {
         const { data: tpl } = await admin
           .from("ped_wa_templates").select("wa_account_id")
           .eq("nome", row.template_name).maybeSingle();
         const accId = (tpl as { wa_account_id: string | null } | null)?.wa_account_id;
-        if (accId) {
-          const { data: acc } = await admin
-            .from("wa_accounts").select("phone_number_id, access_token")
-            .eq("id", accId).eq("is_active", true).maybeSingle();
-          const a = acc as { phone_number_id: string; access_token: string } | null;
-          if (a?.phone_number_id && a?.access_token) waEnvio = a;
-        }
-      } catch (_e) { /* mantém a conta padrão */ }
-    }
+        if (accId) waEnvio = (await carregar(accId)) ?? waEnvio;
+      }
+
+      // Sem conta pelo template (texto, áudio, arquivo — ou template sem dona): segue a
+      // CONVERSA, como o `whatsapp-send-message` faz. Sem isto, um texto agendado numa
+      // conversa de podcast sairia pelo número pedagógico e partiria a thread.
+      if (waEnvio === wa && row.conversa_id) {
+        const { data: conv } = await admin
+          .from("ped_conversas_avulsas").select("metadata").eq("id", row.conversa_id).maybeSingle();
+        const accId = ((conv as { metadata: Record<string, unknown> | null } | null)?.metadata
+          ?.wa_account_id) as string | undefined;
+        if (accId) waEnvio = (await carregar(accId)) ?? waEnvio;
+      }
+    } catch (_e) { /* mantém a conta padrão */ }
 
     console.log("[sac-agendadas-dispatch] ->", row.id, JSON.stringify(waPayload));
     const r = await fetch(`${META_GRAPH}/${waEnvio.phone_number_id}/messages`, {
