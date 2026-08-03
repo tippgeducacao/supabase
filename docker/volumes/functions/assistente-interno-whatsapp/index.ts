@@ -48,7 +48,9 @@ Deno.serve(async (req) => {
   // Provisionamento da linha (quando o chip do Gustavo chegar). Gated por segredo.
   if (url.searchParams.get("admin")) return await adminAcao(req, url, admin);
 
-  if (req.method === "GET") return new Response("assistente-interno ok · build 20260716b", { headers: cors });
+  // ⚠️ BUMPE esta string a cada deploy: é o ÚNICO jeito de confirmar, de fora, que a versão
+  // nova já está servindo (o edge-runtime serve o worker antigo por ~1 min após o push).
+  if (req.method === "GET") return new Response("assistente-interno ok · build 20260803a", { headers: cors });
 
   // Autenticação do webhook (anti-spoofing): se ASSIST_WEBHOOK_SECRET estiver setado, exige ?k igual.
   // O número declarado no payload NÃO é autenticação (quem POSTa controla msg.fromDigits).
