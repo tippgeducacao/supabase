@@ -81,6 +81,28 @@ WhatsApp) — nada de palestra nem citação decorativa.
 Ao informar valores em R$ ou porcentagens, use 2 casas decimais e NÃO arredonde para inteiro.
 Se uma consulta trouxer uma nota (_nota) explicando a régua, incorpore o essencial na resposta.
 
+REGRA DE OURO — NUNCA PROMETA, FAÇA:
+- É PROIBIDO dizer "vou gerar", "vou montar", "já te mando", "estou preparando" e terminar o turno.
+  Ou você CHAMA a ferramenta AGORA, na mesma resposta, ou diz honestamente o que falta pra você fazer.
+- Só afirme que enviou um arquivo DEPOIS que a ferramenta retornar status "enviado". Se ela não rodou,
+  o arquivo NÃO existe — dizer que mandou é mentir pro dono.
+- Se faltar informação, faça UMA pergunta objetiva e já adiante o que der. Não fique pedindo confirmação
+  de formato em looping: escolha o formato mais completo e entregue (ele ajusta depois se quiser).
+
+DOCUMENTO / RELATÓRIO — COMO FAZER DIREITO:
+1) Se o pedido cobre algo conversado ao longo do tempo ("o dia de hoje", "o evento", "o que vimos"),
+   chame ANTES a ferramenta recuperar_conversa. Você só enxerga as últimas mensagens do chat — o resto
+   do material (inclusive a SUA leitura de cada foto que ele mandou) só existe lá.
+2) O documento é PROPORCIONAL ao material: um dia inteiro de evento com dezenas de slides vira um
+   relatório de dezenas de páginas, não duas folhas. Aproveite CADA slide, número e insight — com a
+   leitura estratégica e o espelho pra PPGVET. Cortar conteúdo é o erro mais grave aqui.
+3) Estruture com a hierarquia do gerador: "# Parte" (grande bloco), "## Seção", "### Subtítulo",
+   "- tópico", "1. item", "> citação". Comece por um bloco "*Identificação*" com Assunto/Data/
+   Participantes e um "## Sumário executivo".
+4) Se o conteúdo for longo demais pra uma resposta só, use gerar_pdf com continuar=true e vá mandando
+   as partes EM SEQUÊNCIA (mesmo título); na última, continuar=false fecha e envia o PDF inteiro.
+   Enquanto estiver enviando partes, NÃO fale com o dono — só continue.
+
 REGRA DE OURO — CONFIRME ANTES DE AGIR:
 - Para CRIAR TAREFA, CRIAR REUNIÃO ou ENVIAR MENSAGEM: primeiro chame a ferramenta (ela só REGISTRA
   a proposta), depois mostre o resumo a ${dono.nome} e PEÇA CONFIRMAÇÃO. Só chame "confirmar" quando
@@ -124,9 +146,15 @@ export async function pensar(
     msgs[msgs.length - 1] = { role: "user", content: [anexo, { type: "text", text: txt || pedidoPadrao }] };
   }
 
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 10; i++) {
     const data = await chamarOpus(key, {
-      max_tokens: 2000, system, messages: msgs,
+      // ⚠️ TETO ALTO DE PROPÓSITO (era 2000): o conteúdo do PDF é escrito PELO MODELO, dentro do
+      // input da ferramenta gerar_pdf. Com 2000 tokens o documento NUNCA passava de ~2 folhas, e
+      // quando ele tentava escrever mais longo a resposta era cortada no meio do tool_use — não
+      // sobrava ferramenta válida, só o texto "vou montar o PDF agora". Foi o caso do relatório
+      // do evento de 30-31/07/2026: o bot prometeu ~10 vezes e entregou 2 folhas.
+      // Isto é TETO, não consumo: resposta curta de WhatsApp segue curta (o system manda ser conciso).
+      max_tokens: 16000, system, messages: msgs,
       tools: [...FERRAMENTAS, ...FERRAMENTAS_CONSULTA, ...FERRAMENTAS_EXTERNAS, FERRAMENTA_WEB],
     });
 
@@ -156,6 +184,14 @@ export async function pensar(
       .map((b: any) => b.text)
       .join("\n")
       .trim();
+
+    // Cortado no teto de tokens: o que sobrou pode ser meia-frase (ou uma promessa de fazer algo
+    // que a ferramenta nunca chegou a receber). Melhor avisar do que entregar texto truncado.
+    if (data.stop_reason === "max_tokens") {
+      return (txt ? `${txt}\n\n` : "") +
+        "⚠️ Essa resposta ficou grande demais e foi cortada no meio. Se era um documento, me peça de novo " +
+        "que eu monto em partes (o PDF sai completo).";
+    }
     return txt || "Ok 👍";
   }
   return "Precisei de muitas etapas — pode repetir de forma mais direta? 🙏";

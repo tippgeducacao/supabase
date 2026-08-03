@@ -1,7 +1,7 @@
 // Consultas ao vivo (BI) — cada número vem da FONTE CANÔNICA do sistema (bate com o dashboard).
 // SOMENTE LEITURA. Assinaturas de RPC confirmadas no banco.
 import type { Ctx } from "./db.ts";
-import { resolverPeriodo, hojeSP, addDiasYmd } from "./datas.ts";
+import { resolverPeriodo, hojeSP, addDiasYmd, semanaComercial } from "./datas.ts";
 
 const TIPOS_VENDA = ["pos_graduacao", "curso_livre", "modulo_pratico"];
 const r2 = (n: number) => Number((Number(n) || 0).toFixed(2));
@@ -196,6 +196,23 @@ export const FERRAMENTAS_CONSULTA = [
       "Busca uma tarefa no Gestor por texto (título/descrição) e traz status, responsáveis, prazo, descrição e TODOS os comentários — para você RESUMIR/ANALISAR a situação. Use para 'como está a tarefa X', 'me dá um resumo da tarefa Y'.",
     input_schema: { type: "object", properties: { busca: { type: "string" } }, required: ["busca"] },
   },
+  {
+    name: "recuperar_conversa",
+    description:
+      "Recupera TODA a nossa conversa de um período (o que o dono mandou e o que você respondeu, incluindo a SUA leitura de cada foto/slide que ele enviou). " +
+      "⚠️ USE SEMPRE, E ANTES DE ESCREVER, quando ele pedir um DOCUMENTO/RELATÓRIO/RESUMO/PDF de algo que foi conversado ao longo do tempo " +
+      "('monta o relatório do dia', 'faz o PDF de tudo que vimos hoje', 'junta o que falamos ontem', 'documento do evento'). " +
+      "Você só enxerga as últimas mensagens do chat — o resto do dia SÓ existe aqui. Sem chamar isto, o documento sai curto e incompleto. " +
+      "Dica: a sua própria resposta a cada foto contém a descrição do slide (a imagem em si não fica guardada).",
+    input_schema: {
+      type: "object",
+      properties: {
+        periodo: { type: "string", enum: ["hoje", "ontem", "semana", "ultimos_2_dias", "ultimos_7_dias"] },
+        de: { type: "string", description: "YYYY-MM-DD (opcional, período custom)" },
+        ate: { type: "string", description: "YYYY-MM-DD (opcional)" },
+      },
+    },
+  },
 ];
 
 const NOMES = new Set(FERRAMENTAS_CONSULTA.map((t) => t.name));
@@ -224,6 +241,7 @@ export async function executarConsulta(nome: string, input: any, ctx: Ctx): Prom
       case "consultar_cronograma_turma": return await cCronogramaTurma(input, ctx);
       case "consultar_tarefa": return await cTarefa(input, ctx);
       case "ultima_transcricao": return await cUltimaTranscricao(ctx);
+      case "recuperar_conversa": return await cRecuperarConversa(input, ctx);
       default: return { erro: `consulta desconhecida: ${nome}` };
     }
   } catch (e) {
@@ -711,5 +729,71 @@ async function cTarefa(input: any, ctx: Ctx) {
       texto: stripHtml(c.content),
     })),
     _instrucao: "Resuma a SITUAÇÃO da tarefa a partir da descrição + comentários (não liste tudo cru): onde está, o que falta, bloqueios, próximos passos.",
+  };
+}
+
+/**
+ * Recupera a conversa de um período direto de `assistente_mensagens`.
+ *
+ * ⚠️ POR QUE ISTO EXISTE (caso real de 30-31/07/2026, "relatório do evento"): o cérebro só
+ * enxerga as ÚLTIMAS 12 mensagens (`historicoRecente`), e a IMAGEM é efêmera — o log guarda
+ * só "[imagem]"; quem carrega a leitura do slide é a RESPOSTA que o bot deu na hora. Num dia
+ * de evento com 30+ fotos, na hora de montar o documento o material inteiro já tinha saído do
+ * contexto: o bot prometeu o PDF a manhã toda e entregou 2 folhas genéricas. Com esta consulta
+ * ele recupera o dia inteiro (pergunta + leitura de cada slide) antes de escrever.
+ */
+async function cRecuperarConversa(input: any, ctx: Ctx) {
+  const hoje = hojeSP();
+  let de: string, ate: string, label: string;
+  const p = String(input?.periodo || "");
+  if (input?.de) {
+    de = String(input.de).slice(0, 10);
+    ate = String(input.ate || input.de).slice(0, 10);
+    label = de === ate ? de : `${de} a ${ate}`;
+  } else if (p === "ontem") { de = ate = addDiasYmd(hoje, -1); label = "ontem"; }
+  else if (p === "ultimos_2_dias") { de = addDiasYmd(hoje, -1); ate = hoje; label = "ontem e hoje"; }
+  else if (p === "ultimos_7_dias") { de = addDiasYmd(hoje, -6); ate = hoje; label = "últimos 7 dias"; }
+  else if (p === "semana") { const s = semanaComercial(hoje); de = s.ini; ate = s.fim; label = "esta semana"; }
+  else { de = ate = hoje; label = "hoje"; }
+
+  const { data, error } = await ctx.admin
+    .from("assistente_mensagens")
+    .select("direcao, tipo, conteudo, criado_em")
+    .eq("canon", ctx.canon)
+    .gte("criado_em", `${de}T00:00:00-03:00`)
+    .lt("criado_em", `${addDiasYmd(ate, 1)}T00:00:00-03:00`)
+    .order("criado_em", { ascending: true })
+    .limit(600);
+  if (error) throw new Error(error.message);
+
+  const hhmm = (iso: string) =>
+    new Date(new Date(iso).getTime() - 3 * 3600 * 1000).toISOString().slice(5, 16).replace("T", " ");
+
+  // Teto de segurança: um dia MUITO conversado não pode estourar o contexto do modelo.
+  // Corta pelas mensagens mais ANTIGAS (o fim da conversa já está no histórico recente dele).
+  const LIMITE = 120_000;
+  const linhas: string[] = [];
+  let total = 0, cortadas = 0;
+  for (let i = (data ?? []).length - 1; i >= 0; i--) {
+    const m: any = data![i];
+    const txt = String(m.conteudo ?? "").trim();
+    if (!txt) continue;
+    const linha = `[${hhmm(m.criado_em)}] ${m.direcao === "inbound" ? ctx.dono.nome : "Você"}${
+      m.tipo && m.tipo !== "texto" ? ` (${m.tipo})` : ""}: ${txt}`;
+    if (total + linha.length > LIMITE) { cortadas = i + 1; break; }
+    linhas.unshift(linha);
+    total += linha.length;
+  }
+
+  return {
+    periodo: label,
+    de, ate,
+    mensagens: linhas.length,
+    ...(cortadas ? { nota_corte: `As ${cortadas} mensagens mais antigas do período ficaram de fora (limite de tamanho).` } : {}),
+    conversa: linhas.join("\n"),
+    _instrucao:
+      "Este é o material bruto do período. Suas PRÓPRIAS respostas contêm a leitura de cada foto/slide que o dono " +
+      "mandou (a imagem não fica guardada) — use-as como fonte do conteúdo. Ao montar um documento, aproveite TUDO " +
+      "o que for relevante: cada slide, cada número e cada insight que o dono ditou. Não resuma em poucas linhas.",
   };
 }

@@ -2,11 +2,18 @@
 // pdf-lib = ESM puro (roda no Deno). NÃO há headless browser no edge, então o layout é
 // montado à mão (quebra de linha/página manual) — simples e previsível.
 //
-// LAYOUT ESTILO "ATA DE REUNIÃO" (pedido do dono 2026-07-21, com print de referência):
+// LAYOUT ESTILO "ATA / RELATÓRIO" (pedido do dono 2026-07-21, com print de referência):
 // título + subtítulo, BLOCO DE IDENTIFICAÇÃO (Assunto/Participantes/… em linhas rótulo→valor),
 // SEÇÕES em caixa alta com filete, subtítulos por tema/pessoa, bullets e listas numeradas,
-// rodapé com "Página X de Y". O conteúdo continua sendo texto no formato do WhatsApp
-// (*Seção*, "- bullet", "1. item") — quem entende esse formato é o parser aqui embaixo.
+// rodapé com "Página X de Y".
+//
+// DOCUMENTO LONGO (2026-08-03, caso "relatório do evento em 2 folhas"): o conteúdo pode vir
+// com HIERARQUIA explícita, e aí o PDF ganha capa, sumário e partes em página própria:
+//   "# Parte"      → PARTE (página nova + título grande) — só em documento com 2+ partes
+//   "## Seção"     → SEÇÃO (caixa alta + filete)
+//   "### Subtítulo"→ subtítulo
+//   "> citação"    → bloco citado (recuo + barra lateral)
+//   "*Título*"     → seção (se estiver em SECOES) ou subtítulo — formato ANTIGO, preservado
 import type { Ctx } from "./db.ts";
 import { enviarDocumento } from "./wa.ts";
 import { hojeSP, fmtData } from "./datas.ts";
@@ -53,6 +60,64 @@ export type PdfOpts = {
   info?: Array<[string, string]>;
 };
 
+/** Um item do documento já classificado — o parser roda ANTES de desenhar (o sumário
+ *  precisa saber as seções e a capa precisa saber se o doc é longo). */
+type Item =
+  | { t: "parte"; txt: string }
+  | { t: "secao"; txt: string }
+  | { t: "sub"; txt: string }
+  | { t: "campo"; rot: string; val: string }
+  | { t: "bullet"; txt: string }
+  | { t: "num"; n: string; txt: string }
+  | { t: "quote"; txt: string }
+  | { t: "p"; txt: string }
+  | { t: "vazio" }
+  | { t: "ident" };
+
+function parsear(conteudo: string): Item[] {
+  const itens: Item[] = [];
+  let emIdent = false;
+  for (const bruto of sanitize(conteudo).split("\n")) {
+    const l = bruto.trimEnd();
+    if (!l.trim()) { itens.push({ t: "vazio" }); continue; }
+
+    const h = l.match(/^(#{1,3})\s+(.+)$/);
+    const marcado = l.trim().match(/^\*+\s*(.+?)\s*\*+:?$/);
+
+    if (h || marcado) {
+      const txt = (h ? h[2] : marcado![1]).trim();
+      // "Identificação" nunca vira título: o conteúdo dela É o cabeçalho do documento.
+      if (semAcento(txt).startsWith("identificacao")) { emIdent = true; itens.push({ t: "ident" }); continue; }
+      emIdent = false;
+      if (h) {
+        itens.push(h[1].length === 1 ? { t: "parte", txt } : h[1].length === 2 ? { t: "secao", txt } : { t: "sub", txt });
+      } else {
+        itens.push(ehSecao(txt) ? { t: "secao", txt } : { t: "sub", txt });
+      }
+      continue;
+    }
+
+    // Dentro da Identificação: "Campo: valor" vira linha do cabeçalho. Linha fora do padrão vira
+    // parágrafo mas NÃO fecha o bloco (senão um deslize do modelo derrubaria os campos seguintes).
+    if (emIdent) {
+      const campo = l.match(/^\s*\*?([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ /()]{2,30})\*?\s*:\s*(.+)$/);
+      if (campo) { itens.push({ t: "campo", rot: campo[1].trim(), val: campo[2].trim() }); continue; }
+    }
+
+    const quote = l.match(/^\s*>\s?(.*)$/);
+    if (quote) { itens.push({ t: "quote", txt: quote[1].replace(/\*/g, "") }); continue; }
+
+    const bullet = l.match(/^\s*[-*•]\s+(.+)$/);
+    if (bullet) { itens.push({ t: "bullet", txt: bullet[1].replace(/\*/g, "") }); continue; }
+
+    const num = l.match(/^\s*(\d{1,2})[.)]\s+(.+)$/);
+    if (num) { itens.push({ t: "num", n: num[1], txt: num[2].replace(/\*/g, "") }); continue; }
+
+    itens.push({ t: "p", txt: l.replace(/\*/g, "") });
+  }
+  return itens;
+}
+
 export async function gerarPdf(titulo: string, conteudo: string, opts: PdfOpts = {}): Promise<Uint8Array> {
   // Import DINÂMICO de propósito: se o pdf-lib falhar em carregar no runtime do edge, só ESTA
   // ferramenta quebra (erro tratado) — um import no topo derrubaria o bot inteiro no boot.
@@ -71,10 +136,18 @@ export async function gerarPdf(titulo: string, conteudo: string, opts: PdfOpts =
   const ACENTO = rgb(0.05, 0.42, 0.35);
   const FILETE = rgb(0.84, 0.86, 0.87);
 
+  const itens = parsear(conteudo);
+  const partes = itens.filter((i) => i.t === "parte") as Array<{ t: "parte"; txt: string }>;
+  const secoes = itens.filter((i) => i.t === "secao") as Array<{ t: "secao"; txt: string }>;
+  // Documento LONGO ganha capa + sumário. Curto (ata do dia a dia) segue igual — zero regressão.
+  const longo = partes.length >= 2 || secoes.length >= 8;
+
   const paginas: any[] = [];
   const novaPagina = () => { const p = doc.addPage([W, H]); paginas.push(p); return p; };
   let page = novaPagina();
   let y = H - M;
+  /** Páginas que NÃO levam rodapé (capa). */
+  const semRodape = new Set<number>();
 
   /** Token maior que a coluna (URL longa) é FATIADO — senão sangra pra fora da página. */
   const fatiar = (p: string, f: any, size: number, larg: number): string[] => {
@@ -124,14 +197,32 @@ export async function gerarPdf(titulo: string, conteudo: string, opts: PdfOpts =
     y -= 8;
   };
 
-  // ── Cabeçalho ──────────────────────────────────────────────────────────────
-  escrever(sanitize(titulo).toUpperCase(), { f: negrito, size: 20, gap: 5 });
-  escrever(sanitize(opts.subtitulo || `PPGVET Educacao  ·  ${fmtData(hojeSP())}`),
-    { f: fonte, size: 9, cor: CINZA, gap: 10 });
-  filete(ACENTO, 1.6);
+  const subtituloTxt = sanitize(opts.subtitulo || `PPGVET Educacao  ·  ${fmtData(hojeSP())}`);
+
+  // ── Capa (só documento longo) ──────────────────────────────────────────────
+  if (longo) {
+    semRodape.add(0);
+    y = H * 0.62;
+    page.drawLine({ start: { x: M, y: y + 34 }, end: { x: M + 78, y: y + 34 }, thickness: 2.6, color: ACENTO });
+    escrever(sanitize(titulo).toUpperCase(), { f: negrito, size: 27, gap: 8 });
+    y -= 6;
+    escrever(subtituloTxt, { f: fonte, size: 11, cor: CINZA, gap: 6 });
+    const resumoCapa = `${partes.length ? `${partes.length} partes · ` : ""}${secoes.length} secoes`;
+    escrever(resumoCapa, { f: fonte, size: 9.5, cor: CINZA, gap: 6 });
+    page = novaPagina();
+    y = H - M;
+  }
+
+  // ── Cabeçalho (documento curto: título direto no topo da 1ª página) ────────
+  if (!longo) {
+    escrever(sanitize(titulo).toUpperCase(), { f: negrito, size: 20, gap: 5 });
+    escrever(subtituloTxt, { f: fonte, size: 9, cor: CINZA, gap: 10 });
+    filete(ACENTO, 1.6);
+  }
 
   // ── Bloco de identificação (rótulo → valor), estilo ata ────────────────────
   const LARG_ROT = 116;
+  let temInfo = false;
   const linhaInfo = (rotulo: string, valor: string) => {
     const linhas = quebra(sanitize(valor), fonte, 10.5, LARG - LARG_ROT);
     let rotuloDesenhado = false;
@@ -145,77 +236,125 @@ export async function gerarPdf(titulo: string, conteudo: string, opts: PdfOpts =
       y -= 14;
     }
     y -= 2;
+    temInfo = true;
   };
 
-  let temInfo = false;
   for (const [rot, val] of opts.info ?? []) {
     if (!String(val ?? "").trim()) continue;
-    linhaInfo(rot, String(val)); temInfo = true;
+    linhaInfo(rot, String(val));
   }
 
-  // ── Corpo ──────────────────────────────────────────────────────────────────
-  let emIdent = false;      // dentro da seção *Identificação* → linhas "Campo: valor" viram cabeçalho
-  let primeiraSecao = true;
-
-  const fecharIdent = () => {
-    if (emIdent) { emIdent = false; if (temInfo) { y -= 2; filete(FILETE, 0.7); } }
+  // ── Sumário (só documento longo) ───────────────────────────────────────────
+  // Fica ANTES do corpo e sem nº de página: o layout é fluido (uma linha a mais muda tudo),
+  // então prometer página seria mentira. Serve como mapa do documento.
+  const desenharSumario = () => {
+    y -= 6;
+    escrever("SUMARIO", { f: negrito, size: 10.5, cor: ACENTO, gap: 4 });
+    filete(FILETE, 0.7);
+    let parteAtual = "";
+    for (const it of itens) {
+      if (it.t === "parte") {
+        parteAtual = it.txt;
+        y -= 4;
+        escrever(sanitize(it.txt).toUpperCase(), { f: negrito, size: 9.5, gap: 3 });
+      } else if (it.t === "secao") {
+        escrever(sanitize(it.txt), { f: fonte, size: 9.5, cor: CINZA, x: M + (parteAtual ? 14 : 0), gap: 3 });
+      }
+    }
+    y -= 4;
   };
 
-  for (const bruto of sanitize(conteudo).split("\n")) {
-    const l = bruto.trimEnd();
-    if (!l.trim()) { y -= 5; continue; }
+  // ── Corpo ──────────────────────────────────────────────────────────────────
+  let primeiraSecao = true;
+  let identAberta = false;
+  let sumarioFeito = false;
 
-    // Título entre *asteriscos* ocupando a linha inteira: seção (caixa alta + filete) ou subtítulo.
-    const marcado = l.trim().match(/^\*+\s*(.+?)\s*\*+:?$/);
-    const hash = l.match(/^#{1,3}\s+(.+)$/);
-    const tituloLinha = marcado?.[1] ?? hash?.[1];
+  const fecharIdent = () => {
+    if (identAberta) { identAberta = false; if (temInfo) { y -= 2; filete(FILETE, 0.7); } }
+  };
 
-    if (tituloLinha) {
-      if (ehSecao(tituloLinha)) {
-        // "Identificação" não vira título: o conteúdo dela É o cabeçalho da ata.
-        if (semAcento(tituloLinha).startsWith("identificacao")) { emIdent = true; primeiraSecao = false; continue; }
+  for (const it of itens) {
+    switch (it.t) {
+      case "ident":
+        identAberta = true; primeiraSecao = false;
+        break;
+
+      case "campo":
+        linhaInfo(it.rot, it.val);
+        break;
+
+      case "parte": {
         fecharIdent();
+        if (longo && !sumarioFeito) { desenharSumario(); sumarioFeito = true; }
+        // Parte SEMPRE começa em página nova (menos se a atual está praticamente vazia).
+        if (y < H - M - 24) { page = novaPagina(); y = H - M; }
+        y -= 10;
+        page.drawLine({ start: { x: M, y: y + 16 }, end: { x: M + 54, y: y + 16 }, thickness: 2.2, color: ACENTO });
+        escrever(sanitize(it.txt).toUpperCase(), { f: negrito, size: 16, gap: 6 });
+        y -= 4;
+        filete(ACENTO, 1.2);
+        primeiraSecao = true;
+        break;
+      }
+
+      case "secao":
+        fecharIdent();
+        if (longo && !sumarioFeito) { desenharSumario(); sumarioFeito = true; }
         y -= primeiraSecao ? 4 : 12;
         primeiraSecao = false;
         cabe(64); // título de seção nunca fica órfão no pé da página (precisa caber com algum conteúdo)
-        escrever(tituloLinha.toUpperCase(), { f: negrito, size: 10.5, cor: ACENTO, gap: 4 });
+        escrever(sanitize(it.txt).toUpperCase(), { f: negrito, size: 10.5, cor: ACENTO, gap: 4 });
         filete(FILETE, 0.7);
-      } else {
+        break;
+
+      case "sub":
         fecharIdent();
         y -= 7;
         cabe(46); // idem para o subtítulo (tema/pessoa) e sua primeira linha
-        escrever(tituloLinha, { f: negrito, size: 11.5, gap: 4 });
+        escrever(it.txt, { f: negrito, size: 11.5, gap: 4 });
+        break;
+
+      case "quote": {
+        y -= 3;
+        const linhas = quebra(it.txt, fonte, 10.5, LARG - 30);
+        cabe(linhas.length * 15 + 6);
+        const topo = y;
+        for (const l of linhas) {
+          page.drawText(l, { x: M + 22, y: y - 10.5, size: 10.5, font: fonte, color: rgb(0.25, 0.27, 0.31) });
+          y -= 15;
+        }
+        page.drawLine({
+          start: { x: M + 6, y: topo - 2 }, end: { x: M + 6, y: y + 4 },
+          thickness: 2.4, color: ACENTO,
+        });
+        y -= 4;
+        break;
       }
-      continue;
-    }
 
-    // Dentro da Identificação: "Campo: valor" vira linha do cabeçalho. Linha fora do padrão vira
-    // parágrafo mas NÃO fecha o bloco (senão um deslize do modelo derrubaria os campos seguintes) —
-    // a Identificação só termina no próximo título.
-    const campo = emIdent ? l.match(/^\s*\*?([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ /()]{2,30})\*?\s*:\s*(.+)$/) : null;
-    if (campo) { linhaInfo(campo[1].trim(), campo[2].trim()); temInfo = true; continue; }
+      case "bullet":
+        cabe(15);
+        page.drawText("-", { x: M + 4, y: y - 10.5, size: 10.5, font: fonte, color: ACENTO });
+        escrever(it.txt, { x: M + 16, gap: 3.5 });
+        break;
 
-    // Bullet (hanging indent: marcador fora, texto recuado).
-    const bullet = l.match(/^\s*[-*•]\s+(.+)$/);
-    if (bullet) {
-      cabe(15);
-      page.drawText("•", { x: M + 2, y: y - 10.5, size: 10.5, font: fonte, color: ACENTO });
-      escrever(bullet[1].replace(/\*/g, ""), { x: M + 16, gap: 3.5 });
-      continue;
+      case "num":
+        cabe(15);
+        page.drawText(`${it.n}.`, { x: M + 2, y: y - 10.5, size: 10.5, font: negrito, color: ACENTO });
+        escrever(it.txt, { x: M + 20, gap: 3.5 });
+        break;
+
+      case "vazio":
+        y -= 5;
+        break;
+
+      default:
+        escrever((it as any).txt, { gap: 4.5 });
     }
-    // Lista numerada.
-    const num = l.match(/^\s*(\d{1,2})[.)]\s+(.+)$/);
-    if (num) {
-      cabe(15);
-      page.drawText(`${num[1]}.`, { x: M + 2, y: y - 10.5, size: 10.5, font: negrito, color: ACENTO });
-      escrever(num[2].replace(/\*/g, ""), { x: M + 20, gap: 3.5 });
-      continue;
-    }
-    escrever(l.replace(/\*/g, ""), { gap: 4.5 });
   }
 
   // ── Rodapé (só faz sentido no fim: precisa do total de páginas) ────────────
   paginas.forEach((p, i) => {
+    if (semRodape.has(i)) return;
     const t = `Pagina ${i + 1} de ${paginas.length}`;
     p.drawLine({ start: { x: M, y: M - 6 }, end: { x: W - M, y: M - 6 }, thickness: 0.5, color: FILETE });
     p.drawText(t, { x: (W - fonte.widthOfTextAtSize(t, 8)) / 2, y: M - 18, size: 8, font: fonte, color: CINZA });
@@ -224,13 +363,42 @@ export async function gerarPdf(titulo: string, conteudo: string, opts: PdfOpts =
   return await doc.save();
 }
 
+/** Rascunhos acumulados por dono (documento escrito em PARTES, quando não cabe numa resposta só).
+ *  Vive no isolate: some se o edge reciclar — por isso o modelo deve fechar o documento na
+ *  sequência, e a ferramenta AVISA quantos caracteres já tem acumulado a cada parte. */
+const rascunhos = new Map<string, { titulo: string; partes: string[] }>();
+
 export async function gerarEnviarPdf(input: any, ctx: Ctx) {
   const titulo = String(input?.titulo || "Documento").trim();
   const conteudo = String(input?.conteudo || "").trim();
+  const continua = input?.continuar === true || input?.continua === true;
   if (!conteudo) return { status: "sem_conteudo", mensagem: "Preciso do conteúdo do documento." };
   if (!ctx.linha || !ctx.numero) return { status: "erro", mensagem: "Sem linha de WhatsApp para enviar o arquivo." };
 
-  const bytes = await gerarPdf(titulo, conteudo);
+  // Documento em PARTES: acumula e só gera o PDF quando o modelo fecha (continuar = false).
+  const chave = ctx.canon;
+  const acumulado = rascunhos.get(chave);
+  if (continua) {
+    const partes = acumulado && acumulado.titulo === titulo ? [...acumulado.partes, conteudo] : [conteudo];
+    rascunhos.set(chave, { titulo, partes });
+    const chars = partes.join("\n").length;
+    return {
+      status: "parte_recebida",
+      partes: partes.length,
+      caracteres_acumulados: chars,
+      mensagem: `Parte ${partes.length} guardada (${chars} caracteres no total). O PDF ainda NÃO foi enviado.`,
+      _instrucao:
+        "NÃO responda ao dono ainda e NÃO diga que enviou. Chame gerar_pdf de novo com a PRÓXIMA parte " +
+        "(mesmo titulo). Na ÚLTIMA parte, use continuar=false para fechar e enviar o PDF.",
+    };
+  }
+
+  const texto = acumulado && acumulado.titulo === titulo
+    ? [...acumulado.partes, conteudo].join("\n")
+    : conteudo;
+  rascunhos.delete(chave);
+
+  const bytes = await gerarPdf(titulo, texto);
   const nome = `${slug(titulo)}.pdf`;
   const caminho = `assistente/${ctx.canon}/${Date.now()}-${nome}`;
 
@@ -244,7 +412,7 @@ export async function gerarEnviarPdf(input: any, ctx: Ctx) {
 
   await enviarDocumento(ctx.linha, ctx.numero, url, nome, titulo);
   return {
-    status: "enviado", arquivo: nome, url,
+    status: "enviado", arquivo: nome, url, caracteres: texto.length,
     mensagem: `✅ PDF "${nome}" gerado e enviado aqui no WhatsApp.`,
     _instrucao: "O arquivo JÁ foi enviado ao dono. Responda em 1 linha avisando — NÃO repita o conteúdo inteiro.",
   };

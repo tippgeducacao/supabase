@@ -102,7 +102,13 @@ export const FERRAMENTAS = [
   {
     name: "gerar_pdf",
     description:
-      "Gera um PDF e ENVIA aqui no WhatsApp do dono. VOCÊ escreve o conteúdo — a ferramenta só formata e entrega. Use quando ele pedir um PDF/documento/relatório/arquivo de algo: alinhamento de reunião, resumo de uma pesquisa, plano, análise, ata. Envia DIRETO (não precisa de confirmação — é para o próprio dono).",
+      "Gera um PDF e ENVIA aqui no WhatsApp do dono. VOCÊ escreve o conteúdo — a ferramenta só formata e entrega. " +
+      "Use quando ele pedir um PDF/documento/relatório/arquivo de algo: relatório de evento, alinhamento de reunião, " +
+      "resumo de pesquisa, plano, análise, ata. Envia DIRETO (não precisa de confirmação — é para o próprio dono). " +
+      "⚠️ CHAME AGORA, na mesma resposta: nunca diga que 'vai gerar' sem chamar. " +
+      "⚠️ O documento é PROPORCIONAL ao material — se houver muito conteúdo (um dia de evento, uma reunião longa), " +
+      "escreva um documento LONGO e detalhado; resumir tudo em 2 folhas é erro. " +
+      "Se o material vier de uma conversa ao longo do tempo, chame recuperar_conversa ANTES para ter tudo em mãos.",
     input_schema: {
       type: "object",
       properties: {
@@ -110,7 +116,18 @@ export const FERRAMENTAS = [
         conteudo: {
           type: "string",
           description:
-            "O texto COMPLETO do documento, já organizado e pronto (é o documento em si — não um resumo). Formatação: linha começando com '# ' = título de seção; '- ' = tópico; linha em branco = parágrafo.",
+            "O texto COMPLETO do documento, já organizado e pronto (é o documento em si — não um resumo dele). " +
+            "Hierarquia: '# ' = PARTE (começa em página nova) · '## ' = seção · '### ' = subtítulo · " +
+            "'- ' = tópico · '1. ' = lista numerada · '> ' = citação/destaque · linha em branco = parágrafo. " +
+            "Um bloco '*Identificação*' com linhas 'Campo: valor' vira o cabeçalho do documento. " +
+            "Documento com 2+ partes (ou 8+ seções) ganha capa e sumário automáticos.",
+        },
+        continuar: {
+          type: "boolean",
+          description:
+            "true = esta é uma PARTE de um documento maior: o texto é guardado e o PDF NÃO é enviado ainda. " +
+            "Chame de novo com a próxima parte (mesmo titulo) e, na ÚLTIMA, use continuar=false (ou omita) " +
+            "para fechar e enviar o PDF completo. Use quando o documento não couber numa resposta só.",
         },
       },
       required: ["titulo", "conteudo"],
