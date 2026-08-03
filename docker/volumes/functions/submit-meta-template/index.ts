@@ -170,10 +170,23 @@ Deno.serve(async (req) => {
       });
     }
 
-    const { data: account, error: accErr } = await supabase.rpc('get_wa_account_pedagogico');
-    if (accErr) throw accErr;
-
-    const acct = Array.isArray(account) ? account[0] : account;
+    // WABA onde o template será CRIADO: a conta dona (ped_wa_templates.wa_account_id), senão
+    // a pedagógica padrão. Submeter na WABA errada é o mecanismo de RECORRÊNCIA do bug do
+    // (#132001): o modelo passa a existir numa conta e o envio o procura na outra.
+    // Ex.: reenviar `podcast_agenda_1` para aprovação criaria uma cópia na WABA pedagógica,
+    // enquanto o envio (que resolve pela coluna) continuaria apontando para a do podcast.
+    let acct: { waba_id?: string; access_token?: string } | null = null;
+    if (template.wa_account_id) {
+      const { data: dona } = await supabase
+        .from('wa_accounts').select('waba_id, access_token')
+        .eq('id', template.wa_account_id).eq('is_active', true).maybeSingle();
+      if (dona?.waba_id && dona?.access_token) acct = dona;
+    }
+    if (!acct) {
+      const { data: account, error: accErr } = await supabase.rpc('get_wa_account_pedagogico');
+      if (accErr) throw accErr;
+      acct = Array.isArray(account) ? account[0] : account;
+    }
     const waba_id = acct?.waba_id;
     const access_token = acct?.access_token;
     if (!waba_id || !access_token) {

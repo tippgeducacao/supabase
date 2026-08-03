@@ -196,11 +196,31 @@ Deno.serve(async (req) => {
     const admin = createClient(SUPABASE_URL, SERVICE_ROLE, {
       auth: { persistSession: false },
     });
-    const { data: waRow, error: waErr } = await admin.rpc("get_wa_account_pedagogico");
-    if (waErr || !waRow) {
-      return jsonResp({ error: `WA account: ${waErr?.message ?? "vazio"}` }, 500);
+    // Conta que envia: a da CONVERSA (metadata.wa_account_id), senão o número pedagógico
+    // padrão. Paridade com o `whatsapp-send-message` — sem isto, o texto de uma conversa de
+    // podcast sai pelo número do podcast e o ANEXO sai pelo pedagógico: o convidado recebe o
+    // arquivo de um número desconhecido e, ao responder nele, abre uma thread paralela.
+    // (Mídia não tem template, então aqui quem manda é a conversa.)
+    let wa: any = null;
+    try {
+      const { data: convRow } = await admin
+        .from("ped_conversas_avulsas").select("metadata").eq("id", conversa_id).maybeSingle();
+      const waAccId = (convRow?.metadata as Record<string, unknown> | null)?.wa_account_id as string | undefined;
+      if (waAccId) {
+        const { data: acc } = await admin
+          .from("wa_accounts").select("phone_number_id, access_token")
+          .eq("id", waAccId).eq("is_active", true).maybeSingle();
+        if (acc?.phone_number_id && acc?.access_token) wa = acc;
+      }
+    } catch (_e) { /* cai no número pedagógico padrão */ }
+
+    if (!wa) {
+      const { data: waRow, error: waErr } = await admin.rpc("get_wa_account_pedagogico");
+      if (waErr || !waRow) {
+        return jsonResp({ error: `WA account: ${waErr?.message ?? "vazio"}` }, 500);
+      }
+      wa = Array.isArray(waRow) ? waRow[0] : waRow;
     }
-    const wa = Array.isArray(waRow) ? waRow[0] : waRow;
     const phoneNumberId = wa?.phone_number_id;
     const accessToken = wa?.access_token;
     if (!phoneNumberId || !accessToken) {
