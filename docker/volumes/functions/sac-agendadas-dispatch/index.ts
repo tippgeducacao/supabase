@@ -185,10 +185,32 @@ async function processarUma(
       anexos = [{ tipo: tipoMidia, url: ax.url, mime_type: ax.mime_type ?? null, filename: ax.filename ?? null }];
     }
 
+    // Conta que envia: o TEMPLATE manda na conta. A Meta resolve o nome do modelo DENTRO da
+    // WABA do phone_number_id que envia — mandar por outra devolve (#132001) e a mensagem não
+    // sai. A conta padrão é resolvida uma vez fora do laço, mas um template com dona própria
+    // (ex.: os de podcast, na WABA "Podcast - PPGVET") tem que sair por ela.
+    // Mesma régua do `whatsapp-send-message` — mudou lá, mude aqui.
+    let waEnvio = wa;
+    if (row.tipo_mensagem === "template" && row.template_name) {
+      try {
+        const { data: tpl } = await admin
+          .from("ped_wa_templates").select("wa_account_id")
+          .eq("nome", row.template_name).maybeSingle();
+        const accId = (tpl as { wa_account_id: string | null } | null)?.wa_account_id;
+        if (accId) {
+          const { data: acc } = await admin
+            .from("wa_accounts").select("phone_number_id, access_token")
+            .eq("id", accId).eq("is_active", true).maybeSingle();
+          const a = acc as { phone_number_id: string; access_token: string } | null;
+          if (a?.phone_number_id && a?.access_token) waEnvio = a;
+        }
+      } catch (_e) { /* mantém a conta padrão */ }
+    }
+
     console.log("[sac-agendadas-dispatch] ->", row.id, JSON.stringify(waPayload));
-    const r = await fetch(`${META_GRAPH}/${wa.phone_number_id}/messages`, {
+    const r = await fetch(`${META_GRAPH}/${waEnvio.phone_number_id}/messages`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${wa.access_token}`, "Content-Type": "application/json" },
+      headers: { Authorization: `Bearer ${waEnvio.access_token}`, "Content-Type": "application/json" },
       body: JSON.stringify(waPayload),
     });
     const waResp = await r.json().catch(() => ({}));

@@ -111,19 +111,51 @@ Deno.serve(async (req) => {
 
     const admin = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 
-    // Conta que envia: se a conversa carrega uma wa_account_id no metadata (ex.: convite de
-    // PODCAST → responder pelo NÚMERO do podcast, não pelo pedagógico geral), usa essa conta;
-    // senão cai no número pedagógico padrão (get_wa_account_pedagogico).
+    // Template: carrega o cadastro ANTES de resolver a conta — é ele que decide POR QUAL
+    // NÚMERO a mensagem sai (ver abaixo) e ainda serve pra renderizar o corpo e guardar os
+    // botões. Antes, o SAC gravava só "[template] <nome>" — o atendente não via o texto que
+    // o contato recebeu nem quais botões estavam na mensagem.
+    let tplCadastro: { corpo: string | null; botoes: unknown; wa_account_id: string | null } | null = null;
+    if (tipo === "template" && template_name) {
+      const { data: t } = await admin
+        .from("ped_wa_templates")
+        .select("corpo,botoes,wa_account_id")
+        .eq("nome", template_name)
+        .maybeSingle();
+      tplCadastro = t ?? null;
+    }
+
+    const carregarConta = async (accId: string) => {
+      const { data: acc } = await admin
+        .from("wa_accounts").select("id, phone_number_id, access_token")
+        .eq("id", accId).eq("is_active", true).maybeSingle();
+      return acc?.phone_number_id && acc?.access_token ? acc : null;
+    };
+
+    // Conta que envia, em ordem de prioridade:
+    //   1) a conta DONA do template (ped_wa_templates.wa_account_id)
+    //   2) a conta da conversa (metadata.wa_account_id — o que _shared/podcastSac.ts grava)
+    //   3) o número pedagógico padrão (get_wa_account_pedagogico)
+    //
+    // (!) O template VENCE a conversa de propósito: a Meta resolve o nome do template DENTRO
+    // da WABA do phone_number_id que envia — mandar por outra devolve (#132001) "Template
+    // name does not exist in the translation" e a mensagem não sai. Foi exatamente o caso dos
+    // 6 templates de podcast (criados na WABA "Podcast - PPGVET") enviados pelo número
+    // pedagógico: 11 falhas em 10 conversas desde 14/07, com total_disparos=0 nos 6.
+    // Resolver aqui conserta as 4 telas manuais de uma vez (Nova conversa, Enviar modelo,
+    // Agendar mensagem, Conversas avulsas) — nenhuma delas precisa saber de conta.
     let wa: any = null;
+    let contaVeioDoTemplate = false;
     try {
-      const { data: convRow } = await admin
-        .from("ped_conversas_avulsas").select("metadata").eq("id", conversa_id).maybeSingle();
-      const waAccId = (convRow?.metadata as Record<string, unknown> | null)?.wa_account_id as string | undefined;
-      if (waAccId) {
-        const { data: acc } = await admin
-          .from("wa_accounts").select("phone_number_id, access_token")
-          .eq("id", waAccId).eq("is_active", true).maybeSingle();
-        if (acc?.phone_number_id && acc?.access_token) wa = acc;
+      if (tplCadastro?.wa_account_id) {
+        wa = await carregarConta(tplCadastro.wa_account_id);
+        contaVeioDoTemplate = !!wa;
+      }
+      if (!wa) {
+        const { data: convRow } = await admin
+          .from("ped_conversas_avulsas").select("metadata").eq("id", conversa_id).maybeSingle();
+        const waAccId = (convRow?.metadata as Record<string, unknown> | null)?.wa_account_id as string | undefined;
+        if (waAccId) wa = await carregarConta(waAccId);
       }
     } catch (_e) { /* cai no número pedagógico padrão */ }
 
@@ -142,19 +174,6 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ error: "WA account incompleto" }), {
         status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
-    }
-
-    // Template: carrega o cadastro pra poder RENDERIZAR o corpo e guardar os botões.
-    // Antes, o SAC gravava só "[template] <nome>" — o atendente não via o texto que o
-    // contato recebeu nem quais botões estavam na mensagem.
-    let tplCadastro: { corpo: string | null; botoes: unknown } | null = null;
-    if (tipo === "template" && template_name) {
-      const { data: t } = await admin
-        .from("ped_wa_templates")
-        .select("corpo,botoes")
-        .eq("nome", template_name)
-        .maybeSingle();
-      tplCadastro = t ?? null;
     }
 
     let waPayload: Record<string, unknown>;
@@ -263,6 +282,23 @@ Deno.serve(async (req) => {
       reply_to_wa_message_id: reply_to_wa_message_id || null,
     });
     if (msgErr) console.log("[whatsapp-send-message] insert msg erro:", msgErr.message);
+
+    // Conta veio do TEMPLATE → carimba na conversa (só quando ela ainda não tem uma): a
+    // resposta do lead e as mensagens seguintes precisam sair pelo MESMO número, senão a
+    // thread se parte entre dois remetentes. Não sobrescreve escolha já existente, e é
+    // best-effort — não pode derrubar um envio que JÁ saiu.
+    if (contaVeioDoTemplate && wa?.id) {
+      try {
+        const { data: convRow } = await admin
+          .from("ped_conversas_avulsas").select("metadata").eq("id", conversa_id).maybeSingle();
+        const meta = (convRow?.metadata as Record<string, unknown> | null) ?? {};
+        if (!meta.wa_account_id) {
+          await admin.from("ped_conversas_avulsas")
+            .update({ metadata: { ...meta, wa_account_id: wa.id } })
+            .eq("id", conversa_id);
+        }
+      } catch (_e) { /* carimbo é conveniência, não pode falhar o envio */ }
+    }
 
     await admin
       .from("ped_conversas_avulsas")
