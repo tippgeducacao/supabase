@@ -12,6 +12,7 @@
 //   { task_id, etapa_key, funil_tipo, funil_ref?,
 //     variaveis_override?: Record<string,string>,   // ex.: docs_faltantes, observacoes
 //     destinatarios_override?: Array<{nome?,email}>, // força destinatários
+//     template_id_override?: string,                 // outro modelo p/ a MESMA etapa (envio manual)
 //     force?: boolean }                              // ignora idempotência (reenvio manual)
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.0'
 
@@ -39,6 +40,11 @@ interface DispatchBody {
   variaveis_override?: Record<string, string>
   destinatarios_override?: Array<{ nome?: string; email: string }>
   anexos_override?: Array<{ filename: string; content_base64: string; content_type?: string }>
+  // Modelo diferente do configurado na automação da etapa. Existe porque a MESMA etapa
+  // pode ter dois e-mails: o automático (aviso, sem anexo) e o manual (que encaminha
+  // arquivos). Ex.: APROVACAO — automático "TCC - Ata de Aprovação"; manual, pela aba
+  // Comunicação, "TCC - Aprovação (ata e declaração)" com os documentos anexos.
+  template_id_override?: string
   // E-mail personalizado: assunto/corpo digitados na hora (ignora o template).
   assunto_override?: string
   corpo_html_override?: string
@@ -88,7 +94,7 @@ Deno.serve(async (req) => {
   const {
     task_id, etapa_key, etapa_key_log, funil_tipo, funil_ref,
     variaveis_override, destinatarios_override, anexos_override,
-    assunto_override, corpo_html_override, force,
+    template_id_override, assunto_override, corpo_html_override, force,
   } = body
   if (!task_id || !etapa_key || !funil_tipo) {
     return json({ ok: false, error: 'task_id, etapa_key, funil_tipo obrigatórios' }, 400)
@@ -112,6 +118,11 @@ Deno.serve(async (req) => {
     console.log('[funil-email-dispatch] sem automação ativa para', funil_tipo, etapa_key)
     return json({ ok: true, skipped: 'no_automation' })
   }
+
+  // Modelo efetivo do envio: o da automação da etapa, salvo quando o chamador pede
+  // outro explicitamente (envio manual de etapa que tem dois e-mails — ver DispatchBody).
+  // Só vale em envio manual: o disparo automático do trigger nunca manda override.
+  const templateId = (force && template_id_override) || automacao.template_id
 
   // 2) Resolve tarefa
   const { data: task, error: tErr } = await supabase
@@ -201,7 +212,7 @@ Deno.serve(async (req) => {
     const { data: tpl } = await supabase
       .from('email_templates')
       .select('remetente_id')
-      .eq('id', automacao.template_id)
+      .eq('id', templateId)
       .maybeSingle()
     remetenteCustom = (tpl?.remetente_id as string | null) ?? null
     if (!remetenteCustom) {
@@ -266,7 +277,7 @@ Deno.serve(async (req) => {
           ...(anexos_override?.length ? { anexos: anexos_override } : {}),
         }
       : {
-          template_id: automacao.template_id,
+          template_id: templateId,
           automacao_id: automacao.id,
           destinatario_email: r.email,
           destinatario_nome: r.nome || null,
