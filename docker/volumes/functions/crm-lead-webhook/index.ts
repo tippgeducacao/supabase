@@ -1224,6 +1224,43 @@ Deno.serve(async (req) => {
           acoesAplicadas.push("atualizar_lead");
           await logAtividade(leadId, "acao_webhook", "Ação de Webhook Integrado executada", acaoChip("atualizar_lead"));
         }
+      } else if (a?.tipo === "salvar_utm" && leadId) {
+        // "Salvar tags UTM" — ESTE é o lugar das UTMs no modelo do builder (espelha o
+        // SprintHub: campos do contato na Criação Automática, UTM nas Ações Extras, e o
+        // Mapeamento de Entrada só lê o payload + marca o Identificador). Cada um dos 5
+        // campos aceita `{webhook=Campo}` ou um valor FIXO (ex.: utm_medium = "form").
+        // Token inexistente resolve para "" (resolveWebhookVar) ⇒ typo no config não grava
+        // lixo, só não preenche.
+        //
+        // ⚠️ FILL-IF-EMPTY, sempre: só escreve em coluna VAZIA. A primeira atribuição do
+        // lead é a que vale — recadastro por outra campanha NÃO reescreve a origem já
+        // registrada (mesma régua do `inUtm` no find-or-create). Nenhum lead existente com
+        // UTM é tocado, e não há backfill: vale só para quem chegar daqui pra frente.
+        //
+        // A ação existia na UI (AcaoUtmModal) e no rótulo desde o builder, mas nunca foi
+        // executada aqui — 106 integrações ativas a tinham configurada sem efeito.
+        const UTM_ACAO_COLS = ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term"] as const;
+        const desejado: Record<string, string> = {};
+        for (const c of UTM_ACAO_COLS) {
+          const v = asString(resolveWebhookVar((a?.params as any)?.[c], dados), 255);
+          if (v) desejado[c] = v;
+        }
+        if (Object.keys(desejado).length) {
+          const { data: atual } = await admin
+            .from("leads")
+            .select("utm_source, utm_medium, utm_campaign, utm_content, utm_term")
+            .eq("id", leadId)
+            .maybeSingle();
+          const patch: Record<string, string> = {};
+          for (const [c, v] of Object.entries(desejado)) {
+            if (!(atual as any)?.[c]) patch[c] = v; // não sobrescreve o que já existe
+          }
+          if (Object.keys(patch).length) {
+            await admin.from("leads").update(patch).eq("id", leadId);
+            acoesAplicadas.push("salvar_utm");
+            await logAtividade(leadId, "acao_webhook", "Ação de Webhook Integrado executada", acaoChip("salvar_utm"));
+          }
+        }
       } else if (a?.tipo === "enviar_mensagem_whatsapp") {
         // "Enviar template WhatsApp": dispara um template aprovado já com as variáveis
         // mapeadas dos campos do webhook ({webhook=Campo}, na ordem {{1}},{{2}}…). Encurta o
