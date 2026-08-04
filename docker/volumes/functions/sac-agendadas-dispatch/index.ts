@@ -185,12 +185,14 @@ async function processarUma(
       anexos = [{ tipo: tipoMidia, url: ax.url, mime_type: ax.mime_type ?? null, filename: ax.filename ?? null }];
     }
 
-    // Conta que envia: o TEMPLATE manda na conta. A Meta resolve o nome do modelo DENTRO da
-    // WABA do phone_number_id que envia — mandar por outra devolve (#132001) e a mensagem não
-    // sai. A conta padrão é resolvida uma vez fora do laço, mas um template com dona própria
-    // (ex.: os de podcast, na WABA "Podcast - PPGVET") tem que sair por ela.
-    // Mesma régua do `whatsapp-send-message` — mudou lá, mude aqui.
+    // Conta que envia — MESMA régua do `whatsapp-send-message` (mudou lá, mude aqui):
+    //   TEMPLATE com cadastro: quem decide é O TEMPLATE, nunca a conversa.
+    //     dona definida -> essa conta ; dona NULL -> conta padrão pedagógica.
+    //   Texto / áudio / arquivo, ou template sem cadastro: conta da CONVERSA -> senão padrão.
+    // A Meta resolve o nome do modelo DENTRO da WABA do phone_number_id que envia; herdar a
+    // conta da conversa em template é palpite e volta (#132001) nos DOIS sentidos.
     let waEnvio = wa;
+    let templateDecideAConta = false;
     try {
       const carregar = async (accId: string) => {
         const { data: acc } = await admin
@@ -204,14 +206,15 @@ async function processarUma(
         const { data: tpl } = await admin
           .from("ped_wa_templates").select("wa_account_id")
           .eq("nome", row.template_name).maybeSingle();
-        const accId = (tpl as { wa_account_id: string | null } | null)?.wa_account_id;
-        if (accId) waEnvio = (await carregar(accId)) ?? waEnvio;
+        const cad = tpl as { wa_account_id: string | null } | null;
+        templateDecideAConta = cad !== null;
+        if (cad?.wa_account_id) waEnvio = (await carregar(cad.wa_account_id)) ?? waEnvio;
       }
 
-      // Sem conta pelo template (texto, áudio, arquivo — ou template sem dona): segue a
-      // CONVERSA, como o `whatsapp-send-message` faz. Sem isto, um texto agendado numa
-      // conversa de podcast sairia pelo número pedagógico e partiria a thread.
-      if (waEnvio === wa && row.conversa_id) {
+      // Texto, áudio, arquivo (ou template sem cadastro): segue a CONVERSA — neles o que manda
+      // é a janela de 24h, que é POR NÚMERO. Sem isto, um texto agendado numa conversa de
+      // podcast sairia pelo número pedagógico e partiria a thread.
+      if (waEnvio === wa && !templateDecideAConta && row.conversa_id) {
         const { data: conv } = await admin
           .from("ped_conversas_avulsas").select("metadata").eq("id", row.conversa_id).maybeSingle();
         const accId = ((conv as { metadata: Record<string, unknown> | null } | null)?.metadata

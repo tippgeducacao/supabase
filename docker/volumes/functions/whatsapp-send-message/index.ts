@@ -132,19 +132,32 @@ Deno.serve(async (req) => {
       return acc?.phone_number_id && acc?.access_token ? acc : null;
     };
 
-    // Conta que envia, em ordem de prioridade:
-    //   1) a conta DONA do template (ped_wa_templates.wa_account_id)
-    //   2) a conta da conversa (metadata.wa_account_id — o que _shared/podcastSac.ts grava)
-    //   3) o número pedagógico padrão (get_wa_account_pedagogico)
+    // Conta que envia. A régua depende de SER TEMPLATE ou não:
     //
-    // (!) O template VENCE a conversa de propósito: a Meta resolve o nome do template DENTRO
-    // da WABA do phone_number_id que envia — mandar por outra devolve (#132001) "Template
-    // name does not exist in the translation" e a mensagem não sai. Foi exatamente o caso dos
-    // 6 templates de podcast (criados na WABA "Podcast - PPGVET") enviados pelo número
-    // pedagógico: 11 falhas em 10 conversas desde 14/07, com total_disparos=0 nos 6.
-    // Resolver aqui conserta as 4 telas manuais de uma vez (Nova conversa, Enviar modelo,
-    // Agendar mensagem, Conversas avulsas) — nenhuma delas precisa saber de conta.
+    //   TEMPLATE (com cadastro): quem decide é O TEMPLATE, nunca a conversa.
+    //     dona definida (wa_account_id) -> essa conta
+    //     dona NULL                     -> número pedagógico padrão (é onde o
+    //                                      `submit-meta-template` cria os modelos)
+    //   Texto / mídia, ou template sem cadastro: conta da CONVERSA
+    //     (metadata.wa_account_id, o que `_shared/podcastSac.ts` grava) -> senão padrão.
+    //
+    // (!) POR QUE o template ignora a conversa: a Meta resolve o nome do modelo DENTRO da WABA
+    // do phone_number_id que envia — mandar por outra devolve (#132001) e nada sai. Isso vale
+    // NOS DOIS SENTIDOS, e o segundo custou um erro em produção (03/08, relato da Jana):
+    //   * modelo de podcast (WABA "Podcast - PPGVET") saindo pelo número pedagógico — o caso
+    //     original, 11 falhas em 10 conversas desde 14/07;
+    //   * modelo PEDAGÓGICO (`retomada_podcast_jana`, que vive na WABA pedagógica) enviado
+    //     DENTRO de uma thread de podcast: a conversa carrega a conta do podcast, o modelo não
+    //     existe lá e voltava o MESMO 132001. Herdar a conta da conversa em template é
+    //     sempre um palpite — o modelo sabe onde mora, a conversa não.
+    // Texto livre e mídia continuam seguindo a conversa de propósito: neles o que manda é a
+    // janela de 24h, que é POR NÚMERO (mandar por outro dá 131047).
+    //
+    // ⚠️ Consequência aceita: um modelo pedagógico numa thread de podcast SAI pelo número
+    // pedagógico — o contato o recebe de outro número e responde nele. É isso ou não enviar.
+    // Para sair pelo número do podcast, o modelo precisa ser aprovado TAMBÉM naquela WABA.
     let wa: any = null;
+    const templateDecideAConta = tipo === "template" && tplCadastro !== null;
     try {
       if (tplCadastro?.wa_account_id) {
         wa = await carregarConta(tplCadastro.wa_account_id);
@@ -158,7 +171,7 @@ Deno.serve(async (req) => {
           );
         }
       }
-      if (!wa) {
+      if (!wa && !templateDecideAConta) {
         const { data: convRow } = await admin
           .from("ped_conversas_avulsas").select("metadata").eq("id", conversa_id).maybeSingle();
         const waAccId = (convRow?.metadata as Record<string, unknown> | null)?.wa_account_id as string | undefined;
