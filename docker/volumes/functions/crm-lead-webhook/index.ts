@@ -622,6 +622,16 @@ Deno.serve(async (req) => {
             col = meta.lead_coluna;
           }
         }
+        // `fonte` e `pagina_nome` não são campos do catálogo (não têm `campo:<alias>`) e
+        // só existiam como destino do Mapeamento de Entrada. Aceitá-los aqui é o que
+        // permite a aba 1 ficar só com o Identificador. NÃO entram no LEAD_COL global de
+        // propósito: lá eles virariam alvo do "Atualizar campo do contato", que
+        // SOBRESCREVE — e reescrever `fonte` dispara apply_fonte_segmento → segmento →
+        // fluxo publicado (WhatsApp). Aqui o uso é fill-if-empty, como já era com o
+        // Mapeamento.
+        if (!col && (c?.campo === "lead.fonte" || c?.campo === "lead.pagina_nome")) {
+          col = c.campo === "lead.fonte" ? "fonte" : "pagina_nome";
+        }
         if (!col) continue;
         const val = resolveWebhookVar(c?.valor, dados).trim();
         if (!val) continue;
@@ -707,8 +717,8 @@ Deno.serve(async (req) => {
       if (!existing.area_interesse && (inArea ?? criacaoDefaults.area_interesse))     patch.area_interesse = (inArea ?? criacaoDefaults.area_interesse)!;
       if (!existing.tempo_formacao && (inTempo ?? criacaoDefaults.tempo_formacao))    patch.tempo_formacao = (inTempo ?? criacaoDefaults.tempo_formacao)!;
       if (!existing.regiao && (inRegiao ?? criacaoDefaults.regiao))               patch.regiao = (inRegiao ?? criacaoDefaults.regiao)!;
-      if (!existing.pagina_nome && inPagina)                                      patch.pagina_nome = inPagina;
-      if (!existing.fonte && inFonte)                                             patch.fonte = inFonte;
+      if (!existing.pagina_nome && (inPagina ?? criacaoDefaults.pagina_nome))     patch.pagina_nome = (inPagina ?? criacaoDefaults.pagina_nome)!;
+      if (!existing.fonte && (inFonte ?? criacaoDefaults.fonte))                  patch.fonte = (inFonte ?? criacaoDefaults.fonte)!;
       for (const [c, v] of Object.entries(inMeta)) if (!existing[c])              patch[c] = v;
       for (const [c, v] of Object.entries(inUtm))  if (!existing[c])              patch[c] = v;
       if (Object.keys(patch).length) {
@@ -730,9 +740,10 @@ Deno.serve(async (req) => {
           regiao: inRegiao ?? criacaoDefaults.regiao ?? null,
           // Página = URL da LP (auto). Fonte/fonte_referencia ficam VAZIAS de propósito
           // (default 'GreatPages' removido + trigger não força 'Orgânico' sem sinal).
-          pagina_nome: inPagina ?? null,
-          // Fonte só quando mapeada explicitamente (lead.fonte); senão NULL, como antes.
-          ...(inFonte ? { fonte: inFonte } : {}),
+          pagina_nome: inPagina ?? criacaoDefaults.pagina_nome ?? null,
+          // Fonte só quando mapeada explicitamente (Mapeamento `lead.fonte` OU valor de
+          // criação); senão NULL, como antes — o trigger compute_lead_fonte decide.
+          ...(inFonte ?? criacaoDefaults.fonte ? { fonte: (inFonte ?? criacaoDefaults.fonte) } : {}),
           ...inMeta,
           ...inUtm,
           // Origem da criação → evento "Criado por <webhook>" na timeline (via trigger).
@@ -1239,7 +1250,9 @@ Deno.serve(async (req) => {
         //
         // A ação existia na UI (AcaoUtmModal) e no rótulo desde o builder, mas nunca foi
         // executada aqui — 106 integrações ativas a tinham configurada sem efeito.
-        const UTM_ACAO_COLS = ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term"] as const;
+        // gclid/fbclid entram aqui (mesma natureza: rastreio de campanha) — é o que
+        // permite o Mapeamento de Entrada ficar só com o Identificador.
+        const UTM_ACAO_COLS = ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "gclid", "fbclid"] as const;
         const desejado: Record<string, string> = {};
         for (const c of UTM_ACAO_COLS) {
           const v = asString(resolveWebhookVar((a?.params as any)?.[c], dados), 255);
@@ -1248,7 +1261,7 @@ Deno.serve(async (req) => {
         if (Object.keys(desejado).length) {
           const { data: atual } = await admin
             .from("leads")
-            .select("utm_source, utm_medium, utm_campaign, utm_content, utm_term")
+            .select("utm_source, utm_medium, utm_campaign, utm_content, utm_term, gclid, fbclid")
             .eq("id", leadId)
             .maybeSingle();
           const patch: Record<string, string> = {};
@@ -1429,8 +1442,10 @@ Deno.serve(async (req) => {
       await admin.from("lead_entries").insert({
         lead_id: leadId,
         raw_payload: payload as any,
-        pagina_nome: inPagina ?? integration.pagina_nome ?? null,
-        fonte: inFonte ?? null,
+        // Mesmo fallback do lead: página/fonte podem vir do Mapeamento OU da Criação
+        // Automática — senão o Histórico do Contato 360 perderia a origem do envio.
+        pagina_nome: inPagina ?? criacaoDefaults.pagina_nome ?? integration.pagina_nome ?? null,
+        fonte: inFonte ?? criacaoDefaults.fonte ?? null,
         criou_oportunidade: !!oportunidadeId,
         motivo: oportunidadeId ? "nova_oportunidade" : (duplicado ? "duplicado" : "sem_oportunidade"),
         criado_por: integration.nome ?? `Webhook ${slug}`,
