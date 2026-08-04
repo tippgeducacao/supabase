@@ -471,7 +471,16 @@ function normalizeUazapiMessageType(m: any, tipoRaw: string): {
     };
   }
   if (tipoRaw.includes("reaction")) {
-    const emoji = pick<string>(m, ["reaction", "text", "message.reactionMessage.text"]) ?? "";
+    // ⚠️ `reaction` NÃO é o emoji — é o ID da mensagem reagida. Payload real da Uazapi:
+    //   { type:"reaction", text:"❤️", reaction:"A5F99CBF…",
+    //     content:{ key:{ ID:"A5F99CBF…" }, text:"❤️" } }
+    // Ele estava PRIMEIRO no pick e, como `pick` devolve a primeira chave não-nula
+    // (string vazia inclusive), vencia sempre → 374 de 421 reações da linha Web (88,8%)
+    // foram gravadas com o hexadecimal no lugar do emoji, e o chat mostrava o id.
+    // O emoji mora em `content.text` (sempre) e em `text` (nem sempre).
+    const emoji = (pick<string>(m, ["content.text", "text", "message.reactionMessage.text"]) ?? "").trim();
+    // Texto vazio = o usuário REMOVEU a reação. Mantemos o marcador sem emoji; quem
+    // traduz para "removeu a reação" é o `lerReacao` do front (fonte única).
     return { tipo: "reaction", conteudo: `[reacao]${emoji}`, caption: "", mediaUrl: null, mediaBase64: null, mediaMime: null, mediaFilename: null };
   }
   // default: texto
