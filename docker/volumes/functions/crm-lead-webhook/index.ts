@@ -164,6 +164,33 @@ function pickUrlAuto(dados: Record<string, unknown>): string | undefined {
 // IMPORTANTE: tudo aqui é opt-in. Config vazio (webhooks antigos) => comportamento
 // idêntico ao anterior. Cada bloco é defensivo (try/catch) e nunca derruba o core.
 
+/**
+ * Destinos aceitos SÓ na Criação Automática (fill-if-empty), nunca no LEAD_COL global.
+ * São os campos que antes só existiam como destino do Mapeamento de Entrada e por isso
+ * prendiam a coluna "Campo do contato" na aba 1.
+ *
+ * ⚠️ Fora do LEAD_COL de propósito: lá eles virariam alvo do "Atualizar campo do contato",
+ * que SOBRESCREVE — e reescrever `fonte` dispara apply_fonte_segmento → segmento → fluxo
+ * publicado (WhatsApp). Aqui o uso é sempre fill-if-empty, como já era pelo Mapeamento.
+ *
+ * Os `meta_*` alimentam o filtro "por formulário" da Gestão de Leads (useMetaFormNames) e
+ * o bloco de campanha/criativo do Contato 360 — sem eles aqui, as integrações do
+ * formulário instantâneo do Meta não poderiam sair do Mapeamento.
+ */
+const LEAD_COL_SO_CRIACAO: Record<string, string> = {
+  "lead.fonte": "fonte",
+  "lead.pagina_nome": "pagina_nome",
+  "lead.meta_campaign_id": "meta_campaign_id",
+  "lead.meta_campaign_name": "meta_campaign_name",
+  "lead.meta_adset_id": "meta_adset_id",
+  "lead.meta_adset_name": "meta_adset_name",
+  "lead.meta_ad_id": "meta_ad_id",
+  "lead.meta_ad_name": "meta_ad_name",
+  "lead.meta_form_id": "meta_form_id",
+  "lead.meta_form_name": "meta_form_name",
+  "lead.meta_platform": "meta_platform",
+};
+
 const LEAD_COL: Record<string, string> = {
   "lead.nome": "nome",
   "lead.email": "email",
@@ -629,8 +656,8 @@ Deno.serve(async (req) => {
         // SOBRESCREVE — e reescrever `fonte` dispara apply_fonte_segmento → segmento →
         // fluxo publicado (WhatsApp). Aqui o uso é fill-if-empty, como já era com o
         // Mapeamento.
-        if (!col && (c?.campo === "lead.fonte" || c?.campo === "lead.pagina_nome")) {
-          col = c.campo === "lead.fonte" ? "fonte" : "pagina_nome";
+        if (!col && typeof c?.campo === "string" && LEAD_COL_SO_CRIACAO[c.campo]) {
+          col = LEAD_COL_SO_CRIACAO[c.campo];
         }
         if (!col) continue;
         const val = resolveWebhookVar(c?.valor, dados).trim();
@@ -643,6 +670,18 @@ Deno.serve(async (req) => {
   } catch (e: any) {
     console.error("[crm-lead-webhook] criacaoAutomatica defaults erro:", e?.message);
   }
+
+  // Os meta_* que vieram da Criação Automática entram no MESMO balde do Mapeamento
+  // (fill-if-empty) — assim todo ponto que já lê `inMeta` funciona sem mudança: INSERT do
+  // lead, patch do existente e o forward. O Mapeamento continua tendo prioridade.
+  for (const col of Object.values(LEAD_COL_SO_CRIACAO)) {
+    if (col.startsWith("meta_") && !inMeta[col] && criacaoDefaults[col]) inMeta[col] = criacaoDefaults[col];
+  }
+  // Reaplica o proxy campanha/conjunto/anúncio → utm_campaign/term/content agora que os
+  // meta_* podem ter chegado pela Criação Automática (é idempotente: só age se vazio).
+  if (!inUtm.utm_campaign && inMeta.meta_campaign_name) inUtm.utm_campaign = inMeta.meta_campaign_name;
+  if (!inUtm.utm_content  && inMeta.meta_ad_name)       inUtm.utm_content  = inMeta.meta_ad_name;
+  if (!inUtm.utm_term     && inMeta.meta_adset_name)    inUtm.utm_term     = inMeta.meta_adset_name;
 
   // (5) find-or-create lead — dedup OR email/whatsapp (com variantes de prefixo 55)
   let leadId: string | null = null;
