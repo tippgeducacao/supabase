@@ -178,7 +178,7 @@ async function enviarViaConexao(admin: any, p: {
   lead_id?: string | null; oportunidade_id?: string | null; origemFinal: string | null;
   reaction_message_id?: string | null;
   enviadoPorId?: string | null; enviadoPorNome?: string | null;
-  fluxoId?: string | null;
+  fluxoId?: string | null; sacV2AutomacaoId?: string | null;
 }): Promise<Response> {
   const { data: conex } = await admin
     .from("wa_conexoes")
@@ -245,6 +245,7 @@ async function enviarViaConexao(admin: any, p: {
       provider: conex.provider,
       ...(p.origemFinal ? { origem: p.origemFinal } : {}),
       ...(p.fluxoId ? { fluxo_id: p.fluxoId } : {}),
+      ...(p.sacV2AutomacaoId ? { sac_v2_automacao_id: p.sacV2AutomacaoId } : {}),
       ...(p.enviadoPorId ? { enviado_por_id: p.enviadoPorId, enviado_por_nome: p.enviadoPorNome } : {}),
     },
   });
@@ -293,6 +294,12 @@ Deno.serve(async (req) => {
       // a aba Entregas contar mensagem SEM template (texto/mídia) — que não tem template_name
       // por onde casar. Só o motor do fluxo manda (crm_fluxo_exec_acao).
       fluxo_id,
+      // Automação do SAC v2 (sac_v2_automacoes) que originou o envio. Vai pra
+      // metadata.sac_v2_automacao_id e é o ÚNICO vínculo disparo→mensagem da v2: ela envia
+      // por pg_net (fire-and-forget), fora da fila `crm_mensagens_agendadas`, então sem este
+      // carimbo não há como medir entrega nem reenviar aos que não receberam.
+      // Só o motor manda (sac_v2_acao_executar).
+      sac_v2_automacao_id,
       // tipo=reaction: wamid da mensagem alvo (emoji vai em `conteudo`)
       reaction_message_id,
       // tipo=interactive (mensagem de SESSÃO — só dentro da janela de 24h aberta):
@@ -414,6 +421,7 @@ Deno.serve(async (req) => {
         conexaoId: conexaoIdRota, to, tipo, conteudo, anexo_url, filename, mime_type,
         lead_id, oportunidade_id, origemFinal, reaction_message_id, enviadoPorId, enviadoPorNome,
         fluxoId: fluxo_id ? String(fluxo_id) : null,
+        sacV2AutomacaoId: sac_v2_automacao_id ? String(sac_v2_automacao_id) : null,
       });
     }
 
@@ -854,6 +862,7 @@ Deno.serve(async (req) => {
         payload_enviado: waPayload,
         ...(origemFinal ? { origem: origemFinal } : {}),
         ...(fluxo_id ? { fluxo_id: String(fluxo_id) } : {}),
+        ...(sac_v2_automacao_id ? { sac_v2_automacao_id: String(sac_v2_automacao_id) } : {}),
         ...(enviadoPorId ? { enviado_por_id: enviadoPorId, enviado_por_nome: enviadoPorNome } : {}),
       },
     });
