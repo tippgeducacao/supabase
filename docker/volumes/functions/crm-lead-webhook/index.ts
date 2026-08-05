@@ -1389,6 +1389,15 @@ Deno.serve(async (req) => {
                 template_name: templateName,
                 template_lang: pc.template_lang || "pt_BR",
                 template_components: components,
+                // Imagem/mídia do CABEÇALHO escolhida nesta ação (opcional). Vazio = a
+                // mídia FIXA do template (crm_whatsapp_template_media). É PARÂMETRO do
+                // envio — não altera o template na Meta (sem re-aprovação).
+                ...(typeof pc.header_media_url === "string" && pc.header_media_url.trim()
+                  ? {
+                      header_media_url: pc.header_media_url.trim(),
+                      header_media_format: String(pc.header_media_format ?? "").trim() || undefined,
+                    }
+                  : {}),
               }),
             });
             if (resp.ok) {
