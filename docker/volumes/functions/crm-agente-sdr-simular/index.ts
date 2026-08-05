@@ -20,6 +20,7 @@ import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO } from '../crm-agente-sdr/prompts
 import { AGENTE_CAMPANHA_DIRETA } from '../crm-agente-sdr/prompts-campanha-direta.ts';
 import { carregarTools, chamarAgentePrincipal } from '../crm-agente-sdr/agente.ts';
 import { montarContextoTemporal, montarPerguntaFormacao, renderPrompt } from '../crm-agente-sdr/contexto.ts';
+import { comPresenteEscola } from '../crm-agente-sdr/escolaGratuita.ts';
 import { humanizarTexto } from '../crm-agente-sdr/saida.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
@@ -161,7 +162,15 @@ Deno.serve(async (req) => {
   // Serve pra validar redação nova ANTES de commitá-la em prompts.ts (que é
   // código e, uma vez deployado, já vale pra produção).
   const promptExtra = String(body?.prompt_extra ?? '').trim();
-  const promptAgente = renderPrompt(promptBase, vars) + (promptExtra ? `\n\n${promptExtra}` : '');
+  // ⚠️ ESPELHO do index.ts: em produção o "presente da Escola" é apensado ao prompt DEPOIS
+  // do render, no ponto único das 4 personas. Sem aplicá-lo aqui, todo teste de ENCERRAMENTO
+  // passaria sem o convite e daria falso negativo — a mesma armadilha do mock que não espelha
+  // o executor real (caso consulta_pos_disponiveis). `sem_presente_escola: true` desliga.
+  const semPresente = body?.sem_presente_escola === true;
+  const promptRenderizado = semPresente
+    ? renderPrompt(promptBase, vars)
+    : comPresenteEscola(renderPrompt(promptBase, vars));
+  const promptAgente = promptRenderizado + (promptExtra ? `\n\n${promptExtra}` : '');
   const contextoTemporal = montarContextoTemporal();
   const tools = await carregarTools(supabase, agente);
 
