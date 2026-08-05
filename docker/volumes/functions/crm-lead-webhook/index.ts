@@ -12,8 +12,10 @@
 //   (3.5) MODO MAPEAMENTO: se a integracao tem escuta ativa (crm_webhook_escutas), a chamada
 //       e' SO LOGADA (status='escuta') e NADA e' processado — ver secao "escuta" no CLAUDE.md
 //   (4) find-or-create lead (dedup OR email/whatsapp)
-//   (5) DEDUP por (telefone, curso, lote) via crm_saudacao_guard (ON CONFLICT DO NOTHING):
-//       gateia a CRIACAO da captacao/card. Lote repetido -> nao recria.
+//   (5) ANTI-RAJADA da saudacao por (telefone, curso, lote, INTEGRACAO) via
+//       crm_saudacao_guard: gateia a CRIACAO da captacao/card dentro de uma JANELA
+//       (CRM_SAUDACAO_GUARD_TTL_MIN, default 60 min). Fora da janela a chave e renovada
+//       e o card volta a ser decidido pelo naoCriarRepetidas da acao (passo 9b).
 //   (6) atribui segmento default da integracao (idempotente, sempre)
 //   (7) SE passou o dedup: lead_oportunidades (captacao). O CARD do pipeline
 //       (crm_oportunidades) NAO e mais criado automaticamente — so nasce via a ACAO
@@ -864,27 +866,63 @@ Deno.serve(async (req) => {
   const fonte        = asString(pickByMapping(dados, mapping, "lead_op.fonte"), 200);
   const profissao    = asString(pickByMapping(dados, mapping, "lead_op.profissao"), 200);
 
-  // (7) DEDUP por (telefone, curso, lote) — guard ANTES de criar a oportunidade.
-  // A saudacao e enviada pela ENGINE DE AUTOMACAO quando o card entra na etapa de
-  // entrada (NAO por este webhook). Entao o dedup gateia a CRIACAO da oportunidade:
-  // lote repetido -> nao cria 2a oportunidade -> a engine nao re-dispara o template.
-  // = 1 card + 1 saudacao por (telefone, curso, lote). Lead sem whatsapp cria normal
+  // (7) ANTI-RAJADA da saudacao por (telefone, curso, lote, INTEGRACAO) — guard ANTES
+  // de criar a oportunidade. A saudacao e enviada pela ENGINE DE AUTOMACAO quando o
+  // card entra na etapa de entrada (NAO por este webhook). Entao o guard gateia a
+  // CRIACAO da oportunidade: submissao repetida na MESMA LP dentro da janela -> nao
+  // cria 2o card -> a engine nao re-dispara o template. Lead sem whatsapp cria normal
   // (nao ha WhatsApp pra saudar, nao da pra deduplicar por telefone).
+  //
+  // ⚠️ A INTEGRACAO faz parte da chave (2026-08-05). Sem ela a chave COLAPSAVA em so
+  // telefone quando o curso vem vazio (as LPs do GreatPages nao mandam curso), e quem
+  // preenchia duas LPs seguidas so ganhava o card da primeira. Quem decide "cria outro
+  // card ou nao" e o naoCriarRepetidas/origem_acao_id da acao (passo 9b), nao este guard.
+  //
+  // ⚠️ O TTL vive AQUI, na leitura, nao na chave: linha fora da janela e RENOVADA por um
+  // UPDATE CONDICIONAL (compare-and-swap em enviada_em). Isso preserva a atomicidade que
+  // o ON CONFLICT dava — dois POSTs simultaneos disputam o mesmo UPDATE e so um afeta a
+  // linha, entao nao ha janela de corrida em que os dois criem card.
   let duplicadoLote = false;
   let criarOportunidade = true;
   let telCanon: string | null = null;
   if (whatsapp) {
     telCanon = canonicalBrPhone(whatsapp);
+    const guardKey = {
+      telefone: telCanon,
+      curso_interesse: cursoInteresse ?? "",
+      lote: lote ?? "",
+      integration_id: integration.id,
+    };
     const { data: guardRows, error: guardErr } = await admin
       .from("crm_saudacao_guard")
       .upsert(
-        { telefone: telCanon, curso_interesse: cursoInteresse ?? "", lote: lote ?? "", lead_id: leadId },
-        { onConflict: "telefone,curso_interesse,lote", ignoreDuplicates: true },
+        { ...guardKey, lead_id: leadId },
+        { onConflict: "telefone,curso_interesse,lote,integration_id", ignoreDuplicates: true },
       )
       .select("id");
     if (guardErr) console.error("[crm-lead-webhook] guard erro:", guardErr.message);
-    criarOportunidade = !guardErr && Array.isArray(guardRows) && guardRows.length > 0;
-    duplicadoLote = !guardErr && Array.isArray(guardRows) && guardRows.length === 0;
+
+    const inseriu = !guardErr && Array.isArray(guardRows) && guardRows.length > 0;
+    let renovou = false;
+
+    // ja existia: so bloqueia se a chave e RECENTE. Fora da janela, renova (CAS) e libera.
+    if (!guardErr && !inseriu) {
+      const ttlMin = Number(Deno.env.get("CRM_SAUDACAO_GUARD_TTL_MIN") ?? "60");
+      const limite = new Date(
+        Date.now() - Math.max(1, Number.isFinite(ttlMin) ? ttlMin : 60) * 60_000,
+      ).toISOString();
+      const { data: renovadas, error: renovaErr } = await admin
+        .from("crm_saudacao_guard")
+        .update({ enviada_em: new Date().toISOString(), lead_id: leadId })
+        .match(guardKey)
+        .lt("enviada_em", limite)
+        .select("id");
+      if (renovaErr) console.error("[crm-lead-webhook] guard renovacao erro:", renovaErr.message);
+      renovou = !renovaErr && Array.isArray(renovadas) && renovadas.length > 0;
+    }
+
+    criarOportunidade = !guardErr && (inseriu || renovou);
+    duplicadoLote = !guardErr && !inseriu && !renovou;
   }
 
   // (8) Segmento NAO e mais atribuido no nivel da integracao. A categorizacao por
@@ -1157,7 +1195,9 @@ Deno.serve(async (req) => {
     if (whatsapp && telCanon && oportunidadeId) {
       await admin.from("crm_saudacao_guard")
         .update({ oportunidade_id: oportunidadeId })
-        .eq("telefone", telCanon).eq("curso_interesse", cursoInteresse ?? "").eq("lote", lote ?? "");
+        .eq("telefone", telCanon).eq("curso_interesse", cursoInteresse ?? "").eq("lote", lote ?? "")
+        // ⚠️ escopo da integracao: sem isso o carimbo cai na linha de OUTRA LP do mesmo telefone
+        .eq("integration_id", integration.id);
     }
   }
 
