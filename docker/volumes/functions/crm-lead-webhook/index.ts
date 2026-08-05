@@ -442,6 +442,17 @@ Deno.serve(async (req) => {
   // gravando o `payload` (corpo) cru; query/headers já vão no log via ...reqMeta.
   const dados: Record<string, unknown> = { ...queryParams, ...headersObj, ...(payload as Record<string, unknown>) };
 
+  // Grafias LEGADAS de UTM (typos herdados do GreatPages/prompt antigo do Pages):
+  // "utm_campaing"→"utm_campaign" e "utm_contet"→"utm_content", fill-if-missing nos DOIS
+  // sentidos, SÓ na resolução (`dados`) — o log segue gravando o corpo cru. É o que permite
+  // padronizar todo config em {webhook=utm_campaign}/{webhook=utm_content} sem tocar as LPs
+  // antigas, que seguem enviando o typo (2026-08-05). ⚠️ Espelho: webhookSample.ts
+  // (valorAmostra) aplica o MESMO alias na prévia "o que veio" do builder.
+  for (const [certo, typo] of [["utm_campaign", "utm_campaing"], ["utm_content", "utm_contet"]]) {
+    if (dados[certo] === undefined && dados[typo] !== undefined) dados[certo] = dados[typo];
+    else if (dados[typo] === undefined && dados[certo] !== undefined) dados[typo] = dados[certo];
+  }
+
   // (4) extrai campos do lead via mapping
   const nome     = asString(pickByMapping(dados, mapping, "lead.nome"), 200);
   const email    = normalizeEmail(pickByMapping(dados, mapping, "lead.email"));
