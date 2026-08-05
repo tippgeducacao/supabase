@@ -15,6 +15,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3';
 import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO } from './prompts.ts';
 import { AGENTE_RECONTATO, montarDossieRecontato } from './prompts-recontato.ts';
 import { AGENTE_CAMPANHA_DIRETA } from './prompts-campanha-direta.ts';
+import { comPresenteEscola, LINK_ESCOLA_GRATUITA } from './escolaGratuita.ts';
 import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, renderPrompt } from './contexto.ts';
 import { atualizarAgenteComRatchet, atualizarLead, buscarLead, carregarHistorico, criarLead, excluirDadosLead, gravarMensagem, limparParaRouter, sanitizarHistorico } from './historico.ts';
 import { carregarTools, chamarAgentePrincipal, chamarRouter } from './agente.ts';
@@ -368,6 +369,11 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     );
     tools = await carregarTools(supabase, agenteAtual);
   }
+  // PRESENTE DA ESCOLA (2026-08-05): conversa que acaba sem reunião leva o convite da
+  // biblioteca gratuita junto da despedida. Apensado AQUI, no ponto único onde o prompt
+  // já foi renderizado, para valer nas QUATRO personas sem editar o prompts.ts (gerado
+  // pela extração do n8n). Régua e link em escolaGratuita.ts.
+  promptAgente = comPresenteEscola(promptAgente);
   const renovar = lockRenovar(remotejid);
 
   // Tools que pausam a IA por decisão do PRÓPRIO agente (pausa_ia, e o
@@ -385,10 +391,18 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   // momento exato, COM a despedida-exemplo. Vai anexada ao contexto temporal (que já
   // muda a cada minuto ⇒ não custa cache) e é EFÊMERA: não é gravada no histórico,
   // então não polui as rodadas seguintes nem vira turno que o modelo reinterprete.
+  // ⚠️ A despedida-exemplo daqui carrega o PRESENTE DA ESCOLA (2026-08-05): na telemetria,
+  // a esmagadora maioria das pausas vem SEM texto junto, então é NESTA volta que a última
+  // mensagem ao lead nasce — sem o convite aqui, o presente simplesmente não sairia.
   const INSTRUCAO_POS_PAUSA = '[SISTEMA — você acabou de encerrar/pausar este atendimento. '
     + 'NÃO relate isso e NÃO descreva o estado do atendimento.]\n'
-    + 'Se você ainda NÃO se despediu nesta conversa, escreva SÓ a despedida curta ao lead, por exemplo: '
-    + '"tranquilo, agradeço sua preferência pelo Grupo PPG e fico à disposição se precisar no futuro."\n'
+    + 'Se você ainda NÃO se despediu nesta conversa, escreva SÓ a despedida curta ao lead, JÁ COM o '
+    + 'presente da Escola (a conversa acabou sem reunião), por exemplo: '
+    + '"tranquilo, agradeço sua preferência pelo Grupo PPG e fico à disposição se precisar no futuro. '
+    + 'antes de te deixar ir: a ppgvet tem uma biblioteca de conteúdo aberta e totalmente gratuita, '
+    + 'com mais de 30 cursos, artigos, e-books, aulas abertas de pós e certificados. '
+    + 'é um presente da ppgvet educação pra vc, aproveita: ' + LINK_ESCOLA_GRATUITA + '"\n'
+    + 'Se você JÁ mandou o convite da Escola nesta conversa, não repita — mande só a despedida.\n'
     + 'Se a despedida já foi enviada, responda com texto vazio.\n'
     + 'NUNCA escreva frases como "sem nova mensagem do lead", "*sem resposta necessária*", '
     + '"atendimento pausado" ou "nenhuma ação necessária": elas são enviadas ao WhatsApp do lead.';

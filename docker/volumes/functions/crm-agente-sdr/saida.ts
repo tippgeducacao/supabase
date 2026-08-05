@@ -181,14 +181,24 @@ export function humanizarTexto(texto: string): string {
 // ⚠️ A guarda vive aqui, dentro do fracionador, para valer também no follow-up e
 // no webchat (que importam esta função direto). Não resolve o truncamento geral —
 // esse é estrutural (tirar o dribble do background / enfileirar os chunks).
+// ⚠️ Desde 2026-08-05 a mesma guarda cobre o PRESENTE DA ESCOLA (a biblioteca gratuita
+// mandada na despedida de quem encerra sem reunião): é a ÚLTIMA mensagem daquele lead, e
+// o link vem no fim dela — exatamente a posição que o truncamento come. Sem balão único,
+// o presente viraria "tranquilo, agradeço sua preferência" e mais nada.
 const RE_LINK_REUNIAO = /https?:\/\/(?:meet\.google\.com|[\w.-]*\bzoom\.us|teams\.(?:live|microsoft)\.com)\/\S+/i;
+const RE_LINK_ESCOLA = /escoladeespecializacao\.ppgvet\.com\.br/i;
 
 export function contemLinkReuniao(texto: string): boolean {
   return RE_LINK_REUNIAO.test(texto ?? '');
 }
 
+/** Link que não pode se perder num balão truncado ⇒ a mensagem vai inteira, num balão só. */
+export function contemLinkCritico(texto: string): boolean {
+  return contemLinkReuniao(texto) || RE_LINK_ESCOLA.test(texto ?? '');
+}
+
 export async function fracionarResposta(texto: string): Promise<string[]> {
-  if (contemLinkReuniao(texto)) return [texto];
+  if (contemLinkCritico(texto)) return [texto];
   try {
     const res = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
@@ -284,8 +294,10 @@ export async function enviarResposta(
     sanitizado: textoLimpo !== texto,
     raciocinio_removido: raciocinioRemovido || undefined,
     meta_removida: metaRemovida || undefined,
-    // balão único proposital (link de reunião) — não confundir com chunking que falhou
+    // balão único proposital (link crítico: reunião ou presente da Escola) — não
+    // confundir com chunking que falhou, que também devolve 1 chunk
     balao_unico_link_reuniao: contemLinkReuniao(textoLimpo) || undefined,
+    balao_unico_link_escola: (!contemLinkReuniao(textoLimpo) && contemLinkCritico(textoLimpo)) || undefined,
   });
   let enviados = 0;
   let primeiro = true;

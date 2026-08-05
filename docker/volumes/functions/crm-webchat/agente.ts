@@ -9,6 +9,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO } from "../crm-agente-sdr/prompts.ts";
 import { montarContextoTemporal, renderPrompt } from "../crm-agente-sdr/contexto.ts";
+import { comPresenteEscola } from "../crm-agente-sdr/escolaGratuita.ts";
 import { carregarTools, chamarAgentePrincipal, chamarRouter } from "../crm-agente-sdr/agente.ts";
 import { executarTool, montarToolResults } from "../crm-agente-sdr/tools.ts";
 import { limparParaRouter, sanitizarHistorico } from "../crm-agente-sdr/historico.ts";
@@ -60,7 +61,10 @@ function promptDoEstagio(nome: string, curso: string | null, estagio: Estagio): 
     curso_interesse_original: limparCurso(curso) || "(não informado — descubra sem inventar)",
     pergunta_formacao: "me confirma rapidinho: qual é a sua formação (graduação)? e o que te levou a buscar essa pós agora?",
   });
-  return rendered + notaCanal(curso);
+  // Presente da Escola (2026-08-05): mesma régua do WhatsApp — conversa que acaba sem
+  // reunião leva o convite da biblioteca gratuita junto da despedida. Fonte única em
+  // crm-agente-sdr/escolaGratuita.ts; apensado DEPOIS do render (o bloco não tem placeholder).
+  return comPresenteEscola(rendered) + notaCanal(curso);
 }
 
 function ctxDe(telefone: string, leadId: string | null): CtxConversa {
