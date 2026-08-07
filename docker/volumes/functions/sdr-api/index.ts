@@ -282,6 +282,11 @@ async function handleDisponibilidade(_sdrId: string, url: URL): Promise<Response
   const limite = Math.min(Math.max(parseInt(url.searchParams.get('limite') || '20', 10) || 20, 1), 100)
   const params: Record<string, unknown> = { p_pos: pos, p_limite: limite }
 
+  // ?telefone= → a RPC resolve o DONO DO CONTATO e oferece a agenda dele (quem recebeu
+  // o lead recebe a reunião). Opcional: sem ele a RPC mantém o rodízio de sempre.
+  const telefone = (url.searchParams.get('telefone') || '').trim()
+  if (telefone) params.p_telefone = telefone
+
   let de = (url.searchParams.get('de') || '').trim()
   let ate = (url.searchParams.get('ate') || '').trim()
   // Sem janela explícita? Monta de/ate a partir de data + periodo/horario_inicio (Brasília).

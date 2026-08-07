@@ -95,7 +95,11 @@ function hojeBrasilia() {
   return { iso, display: `${DIA_SEMANA_BR[br.getUTCDay()]}, ${pad(br.getUTCDate())}/${pad(br.getUTCMonth() + 1)}/${br.getUTCFullYear()}` };
 }
 
-async function consultaDisponibilidade(input: any, toolUseId: string) {
+// ⚠️ Recebe o ctx (telefone) porque a agenda oferecida é a de QUEM RECEBEU O LEAD:
+// o telefone identifica a pessoa e a fn_sdr_api_disponibilidade resolve o dono do
+// contato (leads.vendedor_atribuido → responsável do card aberto) por fn_canon_ddd8.
+// Sem telefone a RPC cai no rodízio de sempre — então a chamada nunca fica sem oferta.
+async function consultaDisponibilidade(input: any, ctx: CtxConversa, toolUseId: string) {
   const hoje = hojeBrasilia();
 
   // Data PASSADA nunca chega à agenda: devolve correção explícita com o HOJE real.
@@ -111,6 +115,7 @@ async function consultaDisponibilidade(input: any, toolUseId: string) {
   }
 
   const qs = new URLSearchParams({ pos: input.curso_escolhido ?? '', limite: '6' });
+  if (ctx.telefone) qs.set('telefone', ctx.telefone);
   if (input.data_desejada) qs.set('data', input.data_desejada);
   if (input.periodo_desejado) qs.set('periodo', input.periodo_desejado);
   if (input.horario_inicio_desejado) qs.set('horario_inicio', input.horario_inicio_desejado);
@@ -1002,7 +1007,7 @@ export async function executarTool(
   const { id, name, input } = toolUse;
   try {
     switch (name) {
-      case 'consulta_disponibilidade': return await consultaDisponibilidade(input, id);
+      case 'consulta_disponibilidade': return await consultaDisponibilidade(input, ctx, id);
       case 'confirmar_agendamento': return await confirmarAgendamento(supabase, input, ctx, id);
       case 'remarcar_agendamento': return await remarcarAgendamento(supabase, input, ctx, id);
       case 'verificar_compatibilidade_curso': return await verificarCompatibilidade(supabase, input, ctx, id);
