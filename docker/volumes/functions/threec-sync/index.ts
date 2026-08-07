@@ -18,6 +18,8 @@
 //   metrics.manual_calls_made (int)    → outgoing_calls
 // NÃO existem neste endpoint: missed/reject/incoming/break/login acumulado → 0.
 // raw_json guarda a resposta crua pra auditoria.
+//
+// ⚠️ O endpoint é PAGINADO (15 por página) — ver a nota em syncPerformance().
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0'
 
@@ -97,41 +99,90 @@ interface SyncResult {
   error?: string
 }
 
-// Busca AgentStatusMetrics do dia e faz upsert em threec_daily_performance.
-async function syncPerformance(dateStr: string): Promise<SyncResult> {
+// Teto de segurança: se a API mudar e devolver um total_pages absurdo, não
+// disparamos centenas de chamadas (rate limit do 3C = 30 req/min).
+const MAX_PAGINAS = 20
+
+// Extrai a lista de agentes do envelope { status, data: [...] } — `data` pode
+// vir como array direto ou aninhado.
+function listaDoEnvelope(parsed: AnyRec): AnyRec[] {
+  const dataField = (parsed.data ?? parsed) as unknown
+  if (Array.isArray(dataField)) return dataField as AnyRec[]
+  if (dataField && typeof dataField === 'object') {
+    const d = dataField as AnyRec
+    const nested = (d.agents ?? d.data ?? d.metrics) as unknown
+    if (Array.isArray(nested)) return nested as AnyRec[]
+    return [d]
+  }
+  return []
+}
+
+// Busca UMA página do endpoint. Devolve a lista + quantas páginas existem.
+async function buscarPagina(
+  dateStr: string,
+  page?: number,
+): Promise<{ list: AnyRec[]; totalPages: number; error?: string }> {
   const url = new URL(`${THREEC_BASE_URL}/agents/status/metrics/total`)
   url.searchParams.set('start_date', dateStr)
   url.searchParams.set('end_date', dateStr)
   url.searchParams.set('api_token', THREEC_TOKEN)
+  if (page && page > 1) url.searchParams.set('page', String(page))
 
   let resp: Response
   try {
     resp = await fetch(url.toString(), { method: 'GET', headers: { Accept: 'application/json' } })
   } catch (err) {
-    return { count: 0, error: `fetch failed: ${String(err)}` }
+    return { list: [], totalPages: 1, error: `fetch failed: ${String(err)}` }
   }
 
   const text = await resp.text()
   if (!resp.ok) {
-    return { count: 0, error: `3C ${resp.status}: ${text.slice(0, 300)}` }
+    return { list: [], totalPages: 1, error: `3C ${resp.status}: ${text.slice(0, 300)}` }
   }
 
   let parsed: AnyRec
   try {
     parsed = JSON.parse(text) as AnyRec
   } catch {
-    return { count: 0, error: 'invalid JSON from 3C' }
+    return { list: [], totalPages: 1, error: 'invalid JSON from 3C' }
   }
 
-  // Envelope { status, data: [...] } — data pode ser array direto ou aninhado.
-  const dataField = (parsed.data ?? parsed) as unknown
-  let list: AnyRec[] = []
-  if (Array.isArray(dataField)) list = dataField as AnyRec[]
-  else if (dataField && typeof dataField === 'object') {
-    const d = dataField as AnyRec
-    const nested = (d.agents ?? d.data ?? d.metrics) as unknown
-    if (Array.isArray(nested)) list = nested as AnyRec[]
-    else list = [d]
+  const pag = (parsed.meta as AnyRec | undefined)?.pagination as AnyRec | undefined
+  const totalPages = Math.max(1, Number(pag?.total_pages ?? 1) || 1)
+  return { list: listaDoEnvelope(parsed), totalPages }
+}
+
+// Busca AgentStatusMetrics do dia e faz upsert em threec_daily_performance.
+//
+// ⚠️ PAGINA — NÃO voltar a ler só a 1ª página. O endpoint devolve no máximo
+// **15 agentes por página** (confirmado em 2026-08-01 contra o envelope real,
+// ver threec-api-docs.ts) e o corte é SILENCIOSO: HTTP 200, lista curta, sem
+// erro. Quem fica de fora não é zerado — o trigger monotônico
+// `trg_threec_daily_perf_guard` CONGELA o acumulado dele —, então o número dele
+// simplesmente para no tempo e passa a mentir em toda tela que lê esta tabela:
+// ranking do Dash Ligação, "Horas no 3C" (Processos), meta de tempo do Feedback
+// Diário e Ranking dos Artilheiros da Cobrança.
+// Caso que motivou (2026-08-07): 18 agentes no dia, rodada gravava 15, e a
+// Ana Ligia ficou com o dado parado por mais de 2 horas aparecendo como 0.
+async function syncPerformance(dateStr: string): Promise<SyncResult> {
+  const primeira = await buscarPagina(dateStr)
+  if (primeira.error) return { count: 0, error: primeira.error }
+
+  const list: AnyRec[] = [...primeira.list]
+
+  if (primeira.totalPages > 1) {
+    const paginas = Array.from(
+      { length: Math.min(primeira.totalPages, MAX_PAGINAS) - 1 },
+      (_, i) => i + 2,
+    )
+    // Sequencial de propósito: o 3C limita a 30 req/min e este worker roda a
+    // cada 60s. Com 2–3 páginas o custo é irrelevante e evita rajada.
+    for (const page of paginas) {
+      const r = await buscarPagina(dateStr, page)
+      // Falha numa página não pode derrubar as que já vieram — melhor gravar
+      // parcial (e manter o resto congelado por 1 min) do que perder tudo.
+      if (!r.error) list.push(...r.list)
+    }
   }
 
   if (list.length === 0) return { count: 0 }
