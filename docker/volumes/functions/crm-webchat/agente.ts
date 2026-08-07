@@ -9,7 +9,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO } from "../crm-agente-sdr/prompts.ts";
 import { montarContextoTemporal, renderPrompt } from "../crm-agente-sdr/contexto.ts";
-import { comPresenteEscola } from "../crm-agente-sdr/escolaGratuita.ts";
+import { comPresenteEscola, LINK_ESCOLA_GRATUITA } from "../crm-agente-sdr/escolaGratuita.ts";
 import { carregarTools, chamarAgentePrincipal, chamarRouter } from "../crm-agente-sdr/agente.ts";
 import { executarTool, montarToolResults } from "../crm-agente-sdr/tools.ts";
 import { limparParaRouter, sanitizarHistorico } from "../crm-agente-sdr/historico.ts";
@@ -179,6 +179,33 @@ export async function aberturaWebchat(nome: string, curso: string | null, produt
   }
 }
 
+// ── ENCERRAMENTO: a tool que pausa vem SEM texto junto ───────────────────────────
+// Medido no WhatsApp (67 de 69 casos) e reproduzido aqui pelo harness da Escola: quando o
+// modelo chama `pausa_ia`, o loop dá mais uma volta pro texto — e nessa volta, sem nada a
+// dizer, ele devolve VAZIO. Sem a instrução abaixo o webchat caía no fallback genérico
+// "Pode me contar um pouco mais? 😊" logo depois de "não tenho faculdade, só ensino médio"
+// ou "quero falar com uma pessoa de verdade" — o pior momento possível pra pedir mais.
+// ⚠️ EFÊMERA (vai no contexto temporal, fora do prefixo cacheado; nunca no histórico).
+const TOOLS_QUE_PAUSAM = new Set(["pausa_ia", "temporizador_proxima_turma", "agendar_retorno"]);
+
+function instrucaoPosPausa(produto: Produto): string {
+  const presente = produto === "escola"
+    // ⛔ a pessoa JÁ está dentro da Escola — convidá-la pra lá seria absurdo.
+    ? "NÃO convide pra Escola de Especialização nem mande link dela: a pessoa já está dentro."
+    : "Se ainda não convidou nesta conversa, inclua o presente da Escola: "
+      + `"a ppgvet tem uma biblioteca aberta e gratuita, com mais de 30 cursos, artigos, e-books e certificados — aproveita: ${LINK_ESCOLA_GRATUITA}"`;
+  return [
+    "[SISTEMA — você acabou de encerrar/pausar este atendimento. NÃO relate isso e NÃO descreva o estado do atendimento.]",
+    'Escreva SÓ a despedida curta ao visitante, no seu tom (ex.: "tranquilo, agradeço sua preferência pelo Grupo PPG e fico à disposição se precisar").',
+    presente,
+    'NUNCA escreva frases como "sem resposta necessária", "atendimento pausado" ou "nenhuma ação necessária": elas aparecem na tela do visitante.',
+    "Se a despedida já foi enviada nesta conversa, responda com texto vazio.",
+  ].join("\n");
+}
+
+/** Despedida usada quando o modelo devolve vazio DEPOIS de pausar (nunca o fallback genérico). */
+const DESPEDIDA_FALLBACK = "tranquilo, agradeço sua preferência pelo Grupo PPG e fico à disposição se precisar. 🙌";
+
 // ── Turno do João: router (validação×qualificador c/ ratchet) + loop de tools REAIS ──
 export async function responderWebchat(
   nome: string,
@@ -215,13 +242,19 @@ export async function responderWebchat(
   try { tools = await carregarTools(supabase, agente); } catch (e) { console.error(`[crm-webchat] carregarTools: ${(e as Error).message}`); }
 
   const messages: Msg[] = [...base];
+  let pausouPorTool = false;
   for (let rodada = 0; rodada < MAX_RODADAS; rodada++) {
-    const resp = await chamarAgentePrincipal({ promptAgente, contextoTemporal, messages, tools });
+    const resp = await chamarAgentePrincipal({
+      promptAgente,
+      contextoTemporal: pausouPorTool ? `${contextoTemporal}\n\n${instrucaoPosPausa(produto)}` : contextoTemporal,
+      messages,
+      tools,
+    });
     const blocos: any[] = resp.content ?? [];
     const toolUses = blocos.filter((b) => b.type === "tool_use");
 
     if (!toolUses.length) {
-      const fallback = "Pode me contar um pouco mais? 😊";
+      const fallback = pausouPorTool ? DESPEDIDA_FALLBACK : "Pode me contar um pouco mais? 😊";
       let chunks = await emChunks(textoDe(blocos) || fallback);
       if (!chunks.length) chunks = [fallback];
       // ESCOLA: link de matrícula só sai se a pessoa pediu (régua em código — ver escola.ts).
@@ -240,6 +273,7 @@ export async function responderWebchat(
     messages.push({ role: "assistant", content: blocos });
     const outputs: Record<string, unknown>[] = [];
     for (const tu of toolUses) {
+      if (TOOLS_QUE_PAUSAM.has(tu.name)) pausouPorTool = true;
       if (tu.name === "envia_informacoes") outputs.push(await webchatEnviaInformacoes(tu, telefone, curso));
       else outputs.push(await executarTool(supabase, tu, ctx));
     }
