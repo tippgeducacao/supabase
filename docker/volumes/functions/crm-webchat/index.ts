@@ -377,10 +377,10 @@ async function acaoIniciar(body: Record<string, unknown>, req: Request) {
 async function carregarSessao(sessaoId: string) {
   const { data } = await supabase
     .from("webchat_sessoes")
-    .select("id, bloqueada, nome, telefone, curso, produto, estagio, lead_id, chat_visivel, presenca_em, origem_url")
+    .select("id, bloqueada, nome, telefone, curso, produto, estagio, lead_id, chat_visivel, presenca_em, origem_url, atendimento_humano")
     .eq("id", sessaoId)
     .maybeSingle();
-  return data as { id: string; bloqueada: boolean; nome: string | null; telefone: string | null; curso: string | null; produto: string | null; estagio: "validacao" | "qualificador" | null; lead_id: string | null; chat_visivel: boolean | null; presenca_em: string | null; origem_url: string | null } | null;
+  return data as { id: string; bloqueada: boolean; nome: string | null; telefone: string | null; curso: string | null; produto: string | null; estagio: "validacao" | "qualificador" | null; lead_id: string | null; chat_visivel: boolean | null; presenca_em: string | null; origem_url: string | null; atendimento_humano: boolean | null } | null;
 }
 
 // Espelha a mensagem no SAC (funil "Webchat") — a conversa aparece no Contato 360 /
@@ -437,6 +437,13 @@ async function acaoResponder(body: Record<string, unknown>) {
   const sessao = await carregarSessao(sessaoId);
   if (!sessao) return json({ ok: false, erro: "sessao_nao_encontrada" }, 404);
   if (sessao.bloqueada) return json({ ok: false, erro: "sessao_bloqueada" }, 403);
+
+  /*
+    Um atendente assumiu a conversa pelo SAC 2.0 (`sac_v2_webchat_enviar` marca
+    `atendimento_humano`): o João CALA até alguém devolver a conversa a ele. Sem isso,
+    a resposta do humano e a do agente sairiam intercaladas no mesmo chat.
+  */
+  if (sessao.atendimento_humano) return json({ ok: true, skip: "atendimento_humano" });
 
   const { data: ult } = await supabase
     .from("webchat_mensagens")
