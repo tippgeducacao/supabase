@@ -37,6 +37,9 @@ export function notaCanalEscola(cursoLimpo: string): string {
     cursoLimpo
       ? `- ⭐ No cadastro da Escola ela marcou interesse em **"${cursoLimpo}"** — ancore nessa pós.`
       : "- ⭐ Você ainda não sabe qual pós interessa a ela: descubra numa pergunta curta (sem inventar) e ancore nela.",
+    cursoLimpo
+      ? `- ⛔ Escreva o nome da pós **EXATAMENTE** assim: "${cursoLimpo}". Não troque, encurte nem "melhore" nenhuma palavra (ex.: "Avícola" NUNCA vira "Aviária"). É o nome do nosso produto — errar passa amadorismo e ainda quebra a busca de horários.`
+      : "",
   ].filter(Boolean).join("\n");
 }
 
@@ -45,7 +48,9 @@ export function instrucaoAberturaEscola(cursoLimpo: string): string {
   return [
     "[SISTEMA — não é o visitante] A pessoa acabou de abrir o chat DENTRO da Escola de Especialização (biblioteca gratuita) e ainda NÃO escreveu nada.",
     "Faça a ABERTURA: cumprimente pelo primeiro nome, reconheça em meia frase que ela está na Escola e vá DIRETO pra oferta — uma conversa rápida no Google Meet com um monitor especialista sobre a pós.",
-    cursoLimpo ? `Mencione a pós de interesse dela ("${cursoLimpo}") com naturalidade.` : "Não invente o nome de nenhuma pós.",
+    cursoLimpo
+      ? `Mencione a pós de interesse dela com naturalidade, escrevendo o nome EXATAMENTE assim: "${cursoLimpo}" (sem trocar nenhuma palavra).`
+      : "Não invente o nome de nenhuma pós.",
     "Termine com uma pergunta convidando a marcar.",
     "⛔ NÃO pergunte a formação/graduação agora. ⛔ NÃO comente conteúdo de aula, ementa ou material. ⛔ NÃO convide pra Escola (ela já está lá dentro).",
     "Envie só a mensagem final, curta e calorosa.",
