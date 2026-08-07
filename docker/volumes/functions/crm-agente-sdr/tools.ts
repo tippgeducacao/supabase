@@ -35,6 +35,10 @@ export type CtxConversa = {
   waAccountId: string | null;
   leadId: string | null;
   oportunidadeId: string | null;
+  // Canal da conversa. Só o WhatsApp oferece a agenda do DONO do contato (decisão do
+  // usuário 2026-08-07: "webchat pode agendar aleatório, foco no WhatsApp, que é o canal
+  // maior"). Ausente = whatsapp (o crm-agente-sdr não precisa declarar).
+  canal?: 'whatsapp' | 'webchat';
 };
 
 function sdrApi(path: string, init: RequestInit = {}): Promise<Response> {
@@ -99,6 +103,8 @@ function hojeBrasilia() {
 // o telefone identifica a pessoa e a fn_sdr_api_disponibilidade resolve o dono do
 // contato (leads.vendedor_atribuido → responsável do card aberto) por fn_canon_ddd8.
 // Sem telefone a RPC cai no rodízio de sempre — então a chamada nunca fica sem oferta.
+// ⚠️ SÓ NO WHATSAPP: no webchat o telefone NÃO é enviado de propósito (ctx.canal),
+// então lá a agenda continua sendo o rodízio entre os vendedores da pós.
 async function consultaDisponibilidade(input: any, ctx: CtxConversa, toolUseId: string) {
   const hoje = hojeBrasilia();
 
@@ -115,7 +121,7 @@ async function consultaDisponibilidade(input: any, ctx: CtxConversa, toolUseId: 
   }
 
   const qs = new URLSearchParams({ pos: input.curso_escolhido ?? '', limite: '6' });
-  if (ctx.telefone) qs.set('telefone', ctx.telefone);
+  if (ctx.telefone && ctx.canal !== 'webchat') qs.set('telefone', ctx.telefone);
   if (input.data_desejada) qs.set('data', input.data_desejada);
   if (input.periodo_desejado) qs.set('periodo', input.periodo_desejado);
   if (input.horario_inicio_desejado) qs.set('horario_inicio', input.horario_inicio_desejado);

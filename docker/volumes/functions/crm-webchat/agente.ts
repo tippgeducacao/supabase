@@ -74,8 +74,12 @@ function promptDoEstagio(nome: string, curso: string | null, estagio: Estagio, p
   return comPresenteEscola(rendered) + notaCanal(curso);
 }
 
+// ⚠️ canal:'webchat' — marca o canal pras tools compartilhadas. Efeito hoje: a
+// consulta_disponibilidade NÃO manda o telefone, então o webchat segue no RODÍZIO
+// entre os vendedores da pós (decisão do usuário 2026-08-07: a régua "quem recebeu o
+// lead recebe a reunião" é só do WhatsApp, o canal maior).
 function ctxDe(telefone: string, leadId: string | null): CtxConversa {
-  return { remotejid: telefone, telefone, waAccountId: null, leadId, oportunidadeId: null };
+  return { remotejid: telefone, telefone, waAccountId: null, leadId, oportunidadeId: null, canal: 'webchat' };
 }
 
 function textoDe(blocos: any[]): string {
