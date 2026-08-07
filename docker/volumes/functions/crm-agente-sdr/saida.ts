@@ -103,6 +103,13 @@ const RE_META: RegExp[] = [
   // ⚠️ "nenhuma mensagem" EXIGE "do lead": sem isso barra a despedida de opt-out
   // ("não receberá mais nenhuma mensagem nossa"), que é fala legítima ao lead.
   /\bnenhuma\s+mensagem\s+(?:nova\s+)?d[oa]\s+lead\b/i,
+  // ⚠️ Regra de FAMÍLIA, não de frase: o modelo TROCA o molde quando um é barrado.
+  // "nenhuma AÇÃO" passou a ser barrada em 27/07 e ele migrou pra "nenhuma RESPOSTA
+  // necessária" — 35 casos em 15 dias, o último em 06/08 (caso Peterson), sempre
+  // com o lead tendo só REAGIDO com emoji. Cobre {nenhum|sem} + {resposta | ação |
+  // mensagem | retorno} … "necessária". Validado contra 45 dias de outbound da IA:
+  // 55 casamentos, TODOS relatório, zero falso positivo.
+  /\b(?:nenhum[ao]|sem)\s+(?:outr[ao]\s+)?(?:resposta|a[çc][ãa]o|mensagem|retorno)\b[^.!?]{0,40}\bnecess[áa]ri/i,
   /\bsem\s+resposta\s+necess/i,
   /\bsem\s+necessidade\s+de\s+resposta\b/i,
   /\b(?:nenhuma|sem)\s+a[çc][ãa]o\b/i,

@@ -3,6 +3,11 @@
 //   1. normalização da formação acadêmica do lead;
 //   2. contexto temporal (Brasília) com janelas de atendimento e períodos ofertáveis;
 //   3. pergunta_formacao pronta + render dos placeholders {{ $json.* }} dos prompts.
+//
+// ⚠️ O contexto temporal carrega TAMBÉM a data-limite de elegibilidade do estudante que
+// ainda cursa a graduação (elegibilidadeFormatura.ts) — pelo mesmo motivo do calendário
+// dos próximos dias: o modelo erra conta de calendário, então recebe a data pronta.
+import { blocoElegibilidadeFormatura } from './elegibilidadeFormatura.ts';
 
 export function extrairPrimeiroNome(nomeCompleto: string | null | undefined): string {
   if (!nomeCompleto) return '';
@@ -301,7 +306,9 @@ ${calendarioProximosDias()}
 • Sábado: 08:30-11:30
 • Domingo: Não atendemos
 
-**PERÍODO QUE VOCÊ PODE OFERECER HOJE: ${periodos.frase || 'nenhum — ofereça o próximo dia útil'}**`;
+**PERÍODO QUE VOCÊ PODE OFERECER HOJE: ${periodos.frase || 'nenhum — ofereça o próximo dia útil'}**
+
+${blocoElegibilidadeFormatura()}`;
 }
 
 // ── pergunta_formacao + render de placeholders dos prompts ──────────────────

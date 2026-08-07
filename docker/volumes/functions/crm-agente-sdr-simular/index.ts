@@ -84,22 +84,34 @@ async function mockTool(nome: string, input: any, mocks: any): Promise<string> {
       return `Cronograma enviado ao lead no WhatsApp (conteudo="${input?.conteudo ?? '?'}"). Valor integral: R$ 4.200,00.`;
     case 'verificar_compatibilidade_curso': {
       const m = mocks?.compatibilidade ?? 'aprovado';
+      // ⚠️ REPROVA POR PRAZO SEM DEPENDER DO MOCK — espelho do executor real (tools.ts),
+      // onde `estudante_fora_do_prazo` é reprovado DETERMINISTICAMENTE pelo input, antes de
+      // a matriz rodar. Enquanto isso dependia de `mocks.compatibilidade: 'prazo'`, o
+      // default ('aprovado') devolvia "APROVADO" para quem o modelo tinha acabado de
+      // classificar como fora do prazo — e o agente, confiando na ferramenta (comportamento
+      // CORRETO), oferecia horário. O teste reprovava o agente por culpa do mock: é a
+      // 3ª ocorrência dessa armadilha (consulta_pos_disponiveis, e o próprio prazo em
+      // 2026-07-16). Régua: o que o executor decide em CÓDIGO, o mock decide igual.
+      if (input?.contexto_qualificacao === 'estudante_fora_do_prazo') {
+        return 'REPROVADO_PRAZO. O lead ainda está cursando e conclui DEPOIS da data-limite de ' +
+          'elegibilidade. NÃO agende reunião, NÃO diga que a formação atende e NÃO empurre a ' +
+          'decisão pro monitor. Este lead NÃO está desinteressado: vai poder cursar quando ' +
+          'terminar a graduação. Na MESMA resposta, chame agendar_retorno com tipo="formatura" ' +
+          'e meses = quantos meses faltam pra ele concluir (o sistema limita ao teto). NÃO ' +
+          'chame pausa_ia. Encerre dizendo, de forma aproximada, que vai chamá-lo quando ele ' +
+          'estiver terminando o curso — nunca mencione a data-limite nem "prazo".';
+      }
       if (m === 'reprovado') {
         return 'REPROVADO. A formação do lead não é compatível com esta pós e NÃO há curso alternativo. Encerre com respeito e chame pausa_ia.';
       }
       if (m === 'alternativa') {
         return 'REPROVADO para esta pós (exclusiva de médico veterinário). curso_alternativo: "Gestão de Pessoas e Extensão Rural". Ofereça a alternativa.';
       }
+      // `mocks.compatibilidade: 'prazo'` continua aceito por compatibilidade com cenários
+      // antigos, mas hoje é redundante: quem decide é o contexto_qualificacao, acima.
       if (m === 'prazo') {
-        // ⚠️ ESPELHO da instrução REAL do handler (tools.ts, ramo estudante_fora_do_prazo).
-        // Estava congelado na versão antiga ("chame pausa_ia") e por isso o teste
-        // reprovava o comportamento novo — era o MOCK mandando pausar, não o agente.
-        return 'REPROVADO_PRAZO. O lead ainda está cursando e conclui fora do prazo. NÃO agende reunião, ' +
-          'NÃO diga que a formação atende e NÃO empurre a decisão pro monitor. Este lead NÃO está ' +
-          'desinteressado: vai poder cursar quando terminar a graduação. Na MESMA resposta, chame ' +
-          'agendar_retorno com tipo="formatura" e meses = quantos meses faltam pra ele concluir ' +
-          '(o sistema limita ao teto). NÃO chame pausa_ia. Encerre dizendo, de forma aproximada, que ' +
-          'vai chamá-lo quando ele estiver terminando o curso — nunca mencione "90 dias" ou "prazo".';
+        return mockTool('verificar_compatibilidade_curso',
+          { ...input, contexto_qualificacao: 'estudante_fora_do_prazo' }, mocks);
       }
       return 'APROVADO. A formação do lead é compatível com a pós de interesse.';
     }

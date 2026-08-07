@@ -14,6 +14,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { MATRIZ_SYSTEM, MATRIZ_USER_TEMPLATE } from './prompts.ts';
 import { renderPrompt } from './contexto.ts';
+import { limiteFormaturaFormatado } from './elegibilidadeFormatura.ts';
 import { atualizarLead, buscarLead } from './historico.ts';
 import { chamarAnthropic } from './agente.ts';
 
@@ -544,7 +545,7 @@ async function verificarCompatibilidade(supabase: any, input: any, ctx: CtxConve
   }
 
   // Guarda determinística de PRAZO (2026-07-16, caso Jaqueline): estudante que só
-  // conclui a graduação FORA da janela de elegibilidade (90 dias) não pode ser
+  // conclui a graduação FORA da janela de elegibilidade não pode ser
   // agendado. A matriz avalia só a ÁREA — com contexto 'normal' ela aprovava o
   // estudante fora do prazo e o veredito "APROVADO" atropelava a regra do prompt.
   // O enum novo dá ao modelo um jeito de expressar o caso, e a reprovação sai
@@ -559,7 +560,7 @@ async function verificarCompatibilidade(supabase: any, input: any, ctx: CtxConve
       curso_alternativo: null,
       curso_alternativo_recomendado: false,
       formacao_identificada: input.formacao_academica ?? null,
-      motivo_alteracao: 'Lead ainda cursando a graduação, com conclusão prevista fora do prazo de elegibilidade (90 dias).',
+      motivo_alteracao: `Lead ainda cursando a graduação, com conclusão prevista depois da data-limite de elegibilidade (${limiteFormaturaFormatado()}).`,
       mensagem_para_lead: null,
       // ⚠️ NÃO é desinteresse — é um lead que fica elegível DEPOIS. Pausar aqui o
       // descartava pra sempre (609 casos antes desta mudança). Agora agenda o
@@ -569,7 +570,7 @@ async function verificarCompatibilidade(supabase: any, input: any, ctx: CtxConve
         'Na MESMA resposta, chame agendar_retorno com tipo="formatura" e meses = quantos meses faltam ' +
         'pra ele concluir (ex.: conclui em 2 anos → 24; o sistema limita ao teto). ' +
         'NÃO chame pausa_ia. Encerre dizendo, de forma aproximada, que vai chamá-lo quando ele ' +
-        'estiver terminando o curso — nunca mencione "90 dias", "prazo" ou "elegibilidade".',
+        'estiver terminando o curso — nunca mencione a data-limite, "prazo" ou "elegibilidade".',
     };
   }
 
@@ -846,7 +847,7 @@ async function agendarRetorno(supabase: any, input: any, ctx: CtxConversa, toolU
       (limitado ? ` O prazo pedido foi limitado ao teto de 12 meses — NÃO prometa data exata ao lead, fale de forma aproximada ("quando vc estiver terminando a graduação").` : '') +
       ` O lead fica fora dos disparos até lá e o time o retoma. ` +
       `Encerre com cordialidade dizendo que vai chamá-lo quando ele estiver concluindo o curso. ` +
-      `NUNCA cite "90 dias", "prazo" ou "elegibilidade". NÃO chame pausa_ia.`,
+      `NUNCA cite a data-limite, "prazo" ou "elegibilidade". NÃO chame pausa_ia.`,
     );
   }
 

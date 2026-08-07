@@ -406,6 +406,32 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     + 'Se a despedida já foi enviada, responda com texto vazio.\n'
     + 'NUNCA escreva frases como "sem nova mensagem do lead", "*sem resposta necessária*", '
     + '"atendimento pausado" ou "nenhuma ação necessária": elas são enviadas ao WhatsApp do lead.';
+  // ── LEVA SÓ DE REAÇÃO (2026-08-06, caso Peterson) ─────────────────────────
+  // O lead reage com 👍 e não escreve nada. O agente acorda, não tem o que dizer
+  // e RELATA ao sistema ("nenhuma resposta necessária, o lead apenas reagiu com
+  // um emoji") — 35 balões desses em 15 dias, 6 dos 8 últimos com reação como
+  // gatilho. Não adianta proibir: LLM não produz vazio de forma confiável, ele
+  // PREENCHE. Então a instrução dá um ALVO CURTO pra ele acertar, no momento exato
+  // (mesmo padrão da INSTRUCAO_POS_PAUSA — efêmera, anexada ao contexto temporal,
+  // fora do prefixo cacheado, nunca gravada no histórico).
+  // ⚠️ Reação NÃO é sempre "nada a dizer": quando responde uma PERGUNTA nossa
+  // (o caso Peterson era 👍 em "passando só pra confirmar nossa reunião às 17h"),
+  // ela é um SIM e o fluxo tem que seguir. Por isso a instrução ramifica.
+  // ⚠️ SEM emoji nos exemplos: o prompt do João proíbe emoji fora da confirmação
+  // final — sugerir "👍" aqui brigaria com a régua de voz dele.
+  const RE_SO_REACAO = /^\[reacao\]/;
+  const levaSoReacao = conteudo.trim().length > 0
+    && conteudo.split('\n').map((l) => l.trim()).filter(Boolean).every((l) => RE_SO_REACAO.test(l));
+  const INSTRUCAO_REACAO = '[SISTEMA — o lead NÃO escreveu nada: ele apenas REAGIU com um emoji '
+    + 'à sua última mensagem. Isso é o "ok" dele.]\n'
+    + 'Se a sua última mensagem tinha uma PERGUNTA ou pedia confirmação, trate a reação como um SIM '
+    + 'e siga o fluxo normalmente (confirme e siga adiante).\n'
+    + 'Se NÃO havia pergunta pendente, mande SÓ uma confirmação curtíssima e informal, no seu tom: '
+    + '"beleza", "é nois", "combinado", "show", "tmj". No máximo 3 palavras, sem pergunta nova, '
+    + 'sem recomeçar assunto e sem repetir o que já foi combinado.\n'
+    + 'NUNCA descreva a situação ("o lead apenas reagiu", "nenhuma resposta necessária", '
+    + '"sem ação necessária"): esse texto é enviado ao WhatsApp dele.';
+  if (levaSoReacao) tel.registrar('leva_so_reacao', { conteudo: conteudo.slice(0, 40) });
   let corrigiuHorario = false; // guarda de horário inventado: re-instrui só 1x
 
   // ── RETENÇÃO PENDENTE ⇒ DESLIGA AS ESTEIRAS (2026-07-14) ──────────────────
@@ -436,7 +462,12 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     const inicioLlm = Date.now();
     const resp = await chamarAgentePrincipal({
       promptAgente,
-      contextoTemporal: pausouPorTool ? `${contextoEfetivo}\n\n${INSTRUCAO_POS_PAUSA}` : contextoEfetivo,
+      // Pausa vence reação: a despedida é o que importa nessa volta.
+      contextoTemporal: pausouPorTool
+        ? `${contextoEfetivo}\n\n${INSTRUCAO_POS_PAUSA}`
+        : levaSoReacao
+          ? `${contextoEfetivo}\n\n${INSTRUCAO_REACAO}`
+          : contextoEfetivo,
       messages,
       tools,
     });

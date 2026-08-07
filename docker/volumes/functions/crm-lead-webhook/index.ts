@@ -248,6 +248,7 @@ const ACAO_LABELS: Record<string, string> = {
   salvar_utm:          "Salvar tags UTM",
   atualizar_lead:      "Atualizar campo do contato",
   definir_responsavel: "Mudar permissões de acesso ao contato",
+  definir_responsavel_contato: "Definir responsável do contato",
   criar_oportunidade:  "Criar oportunidade",
   enviar_mensagem_whatsapp: "Enviar template WhatsApp",
   add_segmento:        "Adicionar a um segmento",
@@ -1274,6 +1275,22 @@ Deno.serve(async (req) => {
           await admin.from("crm_lead_segmentos").delete().eq("lead_id", leadId).in("segmento_id", ids);
           acoesAplicadas.push("remove_segmento");
           await logAtividade(leadId, "acao_webhook", "Ação de Webhook Integrado executada", acaoChip("remove_segmento"));
+        }
+      } else if (a?.tipo === "definir_responsavel_contato" && leadId) {
+        // "Definir responsável do contato" → grava `leads.vendedor_atribuido`.
+        // ⚠️ TODA a régua (identificar a pós → escolher o vendedor → equalizar a semana
+        // comercial com o piso de qualificados) vive na RPC, NUNCA aqui: ela é a FONTE
+        // ÚNICA e precisa dar o mesmo resultado se for chamada por outro caminho.
+        // ⚠️ Roda DEPOIS de criar_oportunidade (9b) de propósito: o título do card já
+        // existe e é o 3º sinal de identificação da pós.
+        const { data: respOut, error: respErr } = await admin.rpc(
+          "crm_webhook_definir_responsavel_contato",
+          { p_lead_id: leadId, p_params: a?.params ?? {}, p_integration_id: integration.id },
+        );
+        if (respErr) throw respErr;
+        if ((respOut as any)?.ok) {
+          acoesAplicadas.push("definir_responsavel_contato");
+          await logAtividade(leadId, "acao_webhook", "Ação de Webhook Integrado executada", acaoChip("definir_responsavel_contato"));
         }
       } else if (a?.tipo === "definir_responsavel" && a?.valor && oportunidadeId) {
         await admin.from("crm_oportunidades").update({ responsavel_id: a.valor }).eq("id", oportunidadeId);

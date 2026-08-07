@@ -13,9 +13,22 @@ const corsHeaders = {
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-// App Secret do Meta App comercial. Quando definido, a assinatura X-Hub-Signature-256
-// é validada e payloads não assinados são rejeitados. Setar no Dokploy.
-const META_APP_SECRET = Deno.env.get("CRM_META_APP_SECRET") ?? "";
+// App Secret(s) do(s) Meta App(s). Quando há pelo menos um, a assinatura
+// X-Hub-Signature-256 é validada e payload não assinado é rejeitado. Setar no Dokploy.
+//
+// ⚠️ ACEITA VÁRIOS, separados por vírgula — a assinatura é feita pelo APP QUE ENVIA, e
+// cada app tem o SEU secret. Com um secret só, a WABA que estiver assinada em outro app
+// (BM diferente) tem TODOS os eventos rejeitados com 401 — e o modo de falha é MUDO: a
+// mensagem sai normalmente, mas não chega status nem inbound, nenhum card nasce no SAC e
+// as respostas do lead se perdem (caso 2026-08-07: conta "PPGVET Educação (Escola)" no app
+// "CRM API OFICIAL BM 01", 265 enviadas / 0 inbound / 0 delivered).
+// Diagnóstico rápido: `select ... from crm_whatsapp_messages` por conta — 0 inbound + 0
+// delivered com outbound alto = assinatura rejeitada; confirme com um POST sem assinatura
+// no endpoint (deve dar 401) e com `GET /{waba_id}/subscribed_apps` (qual app entrega).
+const META_APP_SECRETS = (Deno.env.get("CRM_META_APP_SECRET") ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 // Relay do inbound pro agente SDR. CRM_N8N_INBOUND_URL funciona como liga/desliga
 // (vazio = relay off), mas a CHAMADA usa o kong INTERNO (SUPABASE_URL=http://kong:8000),
 // não a URL pública: o container do edge-runtime não alcança o próprio domínio
@@ -286,10 +299,19 @@ Deno.serve(async (req) => {
   // Corpo cru: necessário para validar a assinatura HMAC sobre os bytes exatos.
   const rawBody = await req.text();
   const signature = req.headers.get("x-hub-signature-256");
-  if (META_APP_SECRET) {
-    const valid = await validMetaSignature(rawBody, signature, META_APP_SECRET);
+  if (META_APP_SECRETS.length) {
+    // Basta UM secret conferir: cada Meta App assina com o seu, e a mesma instalação
+    // pode ter WABAs em apps/BMs diferentes.
+    let valid = false;
+    for (const secret of META_APP_SECRETS) {
+      if (await validMetaSignature(rawBody, signature, secret)) { valid = true; break; }
+    }
     if (!valid) {
-      console.warn("[crm-whatsapp-webhook] assinatura X-Hub-Signature-256 inválida — rejeitado");
+      console.warn(
+        `[crm-whatsapp-webhook] assinatura X-Hub-Signature-256 inválida — rejeitado ` +
+        `(secrets configurados: ${META_APP_SECRETS.length}; se a WABA está num app novo, ` +
+        `acrescente o App Secret dele em CRM_META_APP_SECRET, separado por vírgula)`,
+      );
       return json({ error: "assinatura inválida" }, 401);
     }
   } else {
