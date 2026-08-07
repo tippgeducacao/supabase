@@ -115,8 +115,28 @@ async function mockTool(nome: string, input: any, mocks: any): Promise<string> {
       }
       return 'APROVADO. A formação do lead é compatível com a pós de interesse.';
     }
-    case 'consulta_disponibilidade':
-      return '- 15:00 de quinta, dia 30/07 (vendedor_id: v1, nome: Ana)\n- 16:30 de quinta, dia 30/07 (vendedor_id: v1, nome: Ana)';
+    // ⚠️ Datas FUTURAS calculadas na hora. O mock era fixo em "dia 30/07" e, depois que
+    // essa data passou, o agente recebia slots VENCIDOS, reconsultava em loop e nunca
+    // agendava — falso negativo do harness (4ª vez que mock estático reprova o agente;
+    // antes: consulta_pos_disponiveis e o prazo de formatura). Formato = espelho do
+    // executor real (tools.ts): "- 15h de quinta, dia YYYY-MM-DD (vendedor_id:…, nome:…)".
+    // ⚠️ UM vendedor só por padrão: desde 2026-08-07 a agenda oferecida é a do DONO do
+    // contato (fn_sdr_api_dono_do_contato). mocks.disponibilidade='pool' devolve vários
+    // vendedores — é o fallback (dono sem slot na janela) e o webchat, que segue no rodízio.
+    case 'consulta_disponibilidade': {
+      const pool = mocks?.disponibilidade === 'pool';
+      const slot = (dias: number, hora: string, vid: string, nome: string) => {
+        const d = new Date(Date.now() + dias * 86_400_000);
+        const f = (o: Intl.DateTimeFormatOptions) =>
+          new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', ...o }).format(d);
+        const [dd, mm, yyyy] = f({ day: '2-digit', month: '2-digit', year: 'numeric' }).split('/');
+        const semana = f({ weekday: 'long' }).replace('-feira', '');
+        return `- ${hora} de ${semana}, dia ${yyyy}-${mm}-${dd} (vendedor_id: ${vid}, nome: ${nome})`;
+      };
+      return pool
+        ? [slot(1, '15h', 'v1', 'Ana'), slot(1, '16h30', 'v2', 'Bruno'), slot(2, '10h', 'v3', 'Carla')].join('\n')
+        : [slot(1, '15h', 'v1', 'Ana'), slot(1, '16h30', 'v1', 'Ana'), slot(2, '10h', 'v1', 'Ana')].join('\n');
+    }
     case 'consulta_objecoes':
       return 'resposta_objecao: "a conversa com o monitor é rápida, uns 15 minutos, e é onde vc vê a condição especial". Adapte ao contexto e reconduza pro agendamento.';
     case 'pausa_ia':
