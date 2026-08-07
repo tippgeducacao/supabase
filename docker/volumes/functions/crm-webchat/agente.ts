@@ -17,6 +17,8 @@ import { limparParaRouter, sanitizarHistorico } from "../crm-agente-sdr/historic
 // travessão) e quebra em 2-3 frases via gpt-4o-mini. Aqui só GERA os chunks; o espaçamento
 // temporal ("digitando" entre balões) é feito no widget (client-side), não no servidor.
 import { fracionarResposta, humanizarTexto } from "../crm-agente-sdr/saida.ts";
+// Persona da ESCOLA DE ESPECIALIZAÇÃO (produto='escola') — bloco próprio, ver escola.ts.
+import { fallbackAberturaEscola, instrucaoAberturaEscola, notaCanalEscola } from "./escola.ts";
 
 const ANTHROPIC_KEY = Deno.env.get("AGENTE_SDR_ANTHROPIC_KEY") ?? Deno.env.get("ANTHROPIC_API_KEY") ?? "";
 const MODELO = Deno.env.get("AGENTE_SDR_MODEL") ?? "claude-sonnet-5";
@@ -31,6 +33,8 @@ const supabase = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_SERVICE_ROLE_
 const MAX_RODADAS = 6;
 
 export type Estagio = "validacao" | "qualificador";
+/** De onde veio a sessão: LP de pós (padrão) ou a Escola de Especialização. */
+export type Produto = "pos" | "escola";
 type Msg = { role: "user" | "assistant"; content: any };
 // CtxConversa do agente real — no webchat waAccountId/oportunidadeId ficam nulos.
 type CtxConversa = { remotejid: string; telefone: string; waAccountId: string | null; leadId: string | null; oportunidadeId: string | null };
@@ -54,13 +58,16 @@ function notaCanal(curso: string | null): string {
   ].filter(Boolean).join("\n");
 }
 
-function promptDoEstagio(nome: string, curso: string | null, estagio: Estagio): string {
+function promptDoEstagio(nome: string, curso: string | null, estagio: Estagio, produto: Produto = "pos"): string {
   const base = estagio === "qualificador" ? AGENTE_QUALIFICADOR : AGENTE_VALIDACAO;
   const rendered = renderPrompt(base, {
     nome: (nome || "").trim(),
     curso_interesse_original: limparCurso(curso) || "(não informado — descubra sem inventar)",
     pergunta_formacao: "me confirma rapidinho: qual é a sua formação (graduação)? e o que te levou a buscar essa pós agora?",
   });
+  // ESCOLA: o chat roda DENTRO da biblioteca gratuita → nota de canal própria e SEM o
+  // presente da Escola (convidar pra Escola quem já está lá dentro é absurdo).
+  if (produto === "escola") return rendered + notaCanalEscola(limparCurso(curso));
   // Presente da Escola (2026-08-05): mesma régua do WhatsApp — conversa que acaba sem
   // reunião leva o convite da biblioteca gratuita junto da despedida. Fonte única em
   // crm-agente-sdr/escolaGratuita.ts; apensado DEPOIS do render (o bloco não tem placeholder).
@@ -131,10 +138,13 @@ async function webchatEnviaInformacoes(tu: any, telefone: string, curso: string 
 
 // ── Abertura PROATIVA (estágio validação): oferece o Meet, não pergunta formação ──────
 // Devolve os BALÕES (chunks) da abertura — o widget mostra um a um com "digitando".
-export async function aberturaWebchat(nome: string, curso: string | null): Promise<string[]> {
+export async function aberturaWebchat(nome: string, curso: string | null, produto: Produto = "pos"): Promise<string[]> {
   const primeiro = (nome || "").trim().split(/\s+/)[0] || "";
-  const fallback = `Oi${primeiro ? ", " + primeiro : ""}! 👋 Vi seu interesse na nossa pós — que tal uma conversa rápida no Google Meet com um monitor especialista pra te mostrar tudo? Topa que eu já procuro um horário?`;
-  if (!ANTHROPIC_KEY) return [fallback];
+  const escola = produto === "escola";
+  const fallback = escola
+    ? fallbackAberturaEscola(primeiro, limparCurso(curso))
+    : `Oi${primeiro ? ", " + primeiro : ""}! 👋 Vi seu interesse na nossa pós — que tal uma conversa rápida no Google Meet com um monitor especialista pra te mostrar tudo? Topa que eu já procuro um horário?`;
+  if (!ANTHROPIC_KEY) return dividirAberturaEm2(fallback);
   try {
     // sem tools na abertura (é só a saudação/oferta); usa o prompt real de validação +
     // o contexto temporal (pra não falar de horário fora da hora).
@@ -148,12 +158,14 @@ export async function aberturaWebchat(nome: string, curso: string | null): Promi
         // 400 tokens engoliria a saudação inteira e cairia sempre no fallback estático.
         thinking: { type: "disabled" },
         system: [
-          { type: "text", text: promptDoEstagio(nome, curso, "validacao") },
+          { type: "text", text: promptDoEstagio(nome, curso, "validacao", produto) },
           { type: "text", text: montarContextoTemporal() },
         ],
         messages: [{
           role: "user",
-          content: "[SISTEMA — não é o visitante] O visitante acabou de abrir o chat vindo da página da pós de interesse e ainda NÃO escreveu nada. Faça a ABERTURA conforme o SEU roteiro de validação: cumprimente pelo primeiro nome, diga que viu o interesse na pós (mencione o curso) e conduza OFERECENDO a conversa rápida no Google Meet com um monitor especialista. Termine com uma pergunta convidando a marcar. ⛔ NÃO pergunte a formação/graduação agora. Envie só a mensagem final, curta e calorosa.",
+          content: escola
+            ? instrucaoAberturaEscola(limparCurso(curso))
+            : "[SISTEMA — não é o visitante] O visitante acabou de abrir o chat vindo da página da pós de interesse e ainda NÃO escreveu nada. Faça a ABERTURA conforme o SEU roteiro de validação: cumprimente pelo primeiro nome, diga que viu o interesse na pós (mencione o curso) e conduza OFERECENDO a conversa rápida no Google Meet com um monitor especialista. Termine com uma pergunta convidando a marcar. ⛔ NÃO pergunte a formação/graduação agora. Envie só a mensagem final, curta e calorosa.",
         }],
       }),
     });
@@ -161,9 +173,9 @@ export async function aberturaWebchat(nome: string, curso: string | null): Promi
     const texto = textoDe(data.content);
     // abertura em 2 balões MANUAIS (sem fracionador) — pedido do diretor
     const baloes = texto ? dividirAberturaEm2(texto) : [];
-    return baloes.length ? baloes : [fallback];
+    return baloes.length ? baloes : dividirAberturaEm2(fallback);
   } catch (_e) {
-    return [fallback];
+    return dividirAberturaEm2(fallback);
   }
 }
 
@@ -175,6 +187,7 @@ export async function responderWebchat(
   history: { role: "user" | "assistant"; text: string }[],
   estagioSalvo: Estagio = "validacao",
   leadId: string | null = null,
+  produto: Produto = "pos",
 ): Promise<{ chunks: string[]; estagio: Estagio }> {
   const raw: Msg[] = history.map((m) => ({ role: m.role, content: m.text })).filter((m) => m.content);
   if (!ANTHROPIC_KEY || !raw.length) {
@@ -194,7 +207,7 @@ export async function responderWebchat(
     } catch { estagio = "validacao"; }
   }
   const agente = estagio === "qualificador" ? "agente_qualificador" : "agente_validacao";
-  const promptAgente = promptDoEstagio(nome, curso, estagio);
+  const promptAgente = promptDoEstagio(nome, curso, estagio, produto);
   const contextoTemporal = montarContextoTemporal();
   const ctx = ctxDe(telefone, leadId);
 

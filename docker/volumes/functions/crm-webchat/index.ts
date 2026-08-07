@@ -3,7 +3,9 @@
 // Chamado pelo widget public/webchat-widget.js (anônimo, CORS aberto — é página pública).
 //
 // Ações (body JSON { acao, ... }):
-//   iniciar → { nome, telefone, pagina?, curso?, origem_url? }  cria sessão + LEAD, devolve { sessao_id }
+//   iniciar → { nome, telefone, pagina?, curso?, origem_url?, produto? }  cria sessão + LEAD, devolve { sessao_id }
+//             produto: 'pos' (padrão, LPs de pós) | 'escola' (chat DENTRO da Escola de
+//             Especialização — persona própria do João, ver escola.ts)
 //   enviar  → { sessao_id, conteudo }   grava inbound + resposta do João (IA), devolve { mensagem_id }
 //   poll    → { sessao_id, apos }       mensagens com id > apos (cursor do widget)
 //
@@ -230,6 +232,7 @@ async function responderComoJoao(
       history,
       sessao.estagio === "qualificador" ? "qualificador" : "validacao",
       sessao.lead_id ?? null,
+      sessao.produto === "escola" ? "escola" : "pos",
     );
     // ratchet: promoção validação→qualificador é persistida (nunca regride)
     if (estagio === "qualificador" && sessao.estagio !== "qualificador") {
@@ -313,11 +316,16 @@ async function acaoIniciar(body: Record<string, unknown>, req: Request) {
     return json({ ok: false, erro: "ocupado" }, 429);
   }
 
+  // Produto da sessão: 'escola' (chat DENTRO da Escola de Especialização, persona própria)
+  // ou 'pos' (LPs de pós-graduação, comportamento de sempre). Valor desconhecido → 'pos'.
+  const produto = texto(body.produto, 20).toLowerCase() === "escola" ? "escola" : "pos";
+
   const { data, error } = await supabase
     .from("webchat_sessoes")
     .insert({
       nome,
       telefone,
+      produto,
       pagina: texto(body.pagina, 200) || null,
       curso: texto(body.curso, 120) || null,
       origem_url: texto(body.origem_url, 500) || null,
@@ -352,7 +360,7 @@ async function acaoIniciar(body: Record<string, unknown>, req: Request) {
   // thread e o 1º poll do widget a exibe. Vem FRACIONADA em balões (o widget espaça).
   let chunks: string[] = [`Oi, ${nome.split(" ")[0]}! 👋 Que bom te ver por aqui. Me conta: qual pós ou área você tem em mente?`];
   try {
-    chunks = await aberturaWebchat(nome, texto(body.curso, 120) || null);
+    chunks = await aberturaWebchat(nome, texto(body.curso, 120) || null, produto);
   } catch (e) {
     console.error(`[crm-webchat] abertura: ${(e as Error).message}`);
   }
@@ -369,10 +377,10 @@ async function acaoIniciar(body: Record<string, unknown>, req: Request) {
 async function carregarSessao(sessaoId: string) {
   const { data } = await supabase
     .from("webchat_sessoes")
-    .select("id, bloqueada, nome, telefone, curso, estagio, lead_id, chat_visivel, presenca_em, origem_url")
+    .select("id, bloqueada, nome, telefone, curso, produto, estagio, lead_id, chat_visivel, presenca_em, origem_url")
     .eq("id", sessaoId)
     .maybeSingle();
-  return data as { id: string; bloqueada: boolean; nome: string | null; telefone: string | null; curso: string | null; estagio: "validacao" | "qualificador" | null; lead_id: string | null; chat_visivel: boolean | null; presenca_em: string | null; origem_url: string | null } | null;
+  return data as { id: string; bloqueada: boolean; nome: string | null; telefone: string | null; curso: string | null; produto: string | null; estagio: "validacao" | "qualificador" | null; lead_id: string | null; chat_visivel: boolean | null; presenca_em: string | null; origem_url: string | null } | null;
 }
 
 // Espelha a mensagem no SAC (funil "Webchat") — a conversa aparece no Contato 360 /
