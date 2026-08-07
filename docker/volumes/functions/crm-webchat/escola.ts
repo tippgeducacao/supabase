@@ -59,8 +59,10 @@ export function notaCanalEscola(cursoLimpo: string): string {
 export function instrucaoAberturaEscola(cursoLimpo: string): string {
   return [
     "[SISTEMA — não é o visitante] A pessoa acabou de abrir o chat DENTRO da Escola de Especialização (biblioteca gratuita) e ainda NÃO escreveu nada.",
-    "Faça a ABERTURA CURTA e LEVE: cumprimente pelo primeiro nome, reconheça em meia frase que ela está na Escola e ofereça a conversa rápida no Google Meet com um monitor especialista sobre a pós.",
-    "⛔ NÃO cite condição especial, desconto, valor nem link nesta primeira mensagem — é a porta de entrada, não o fechamento. Máximo 2 frases curtas.",
+    "Faça a ABERTURA em DOIS PARÁGRAFOS, separados por uma linha em branco:",
+    "1º parágrafo — SÓ a saudação, do jeito que se manda no WhatsApp: 'oi, <primeiro nome>, tudo bem?' (pode variar: 'oi <nome>, tudo bom?'). Nada além disso.",
+    "2º parágrafo — reconheça em meia frase que ela está na Escola e ofereça a conversa rápida no Google Meet com um monitor especialista sobre a pós, terminando com uma pergunta convidando a marcar.",
+    "⛔ NÃO cite condição especial, desconto, valor nem link nesta primeira mensagem — é a porta de entrada, não o fechamento. O 2º parágrafo tem no máximo 2 frases curtas.",
     cursoLimpo
       ? `Mencione a pós de interesse dela com naturalidade, escrevendo o nome EXATAMENTE assim: "${cursoLimpo}" (sem trocar nenhuma palavra).`
       : "Não invente o nome de nenhuma pós.",
@@ -93,7 +95,8 @@ export function filtrarLinkMatricula(chunks: string[], ultimaMsgLead: string): s
 
 /** Fallback estático da abertura (sem chave da Anthropic ou erro na chamada). */
 export function fallbackAberturaEscola(primeiroNome: string, cursoLimpo: string): string {
-  const oi = primeiroNome ? `Oi, ${primeiroNome}!` : "Oi!";
+  // 1º parágrafo = só a saudação (vira o 1º balão em dividirAberturaEm2), 2º = a oferta.
+  const oi = primeiroNome ? `oi, ${primeiroNome}, tudo bem?` : "oi, tudo bem?";
   const pos = cursoLimpo ? ` sobre a pós em ${cursoLimpo}` : " sobre a pós";
-  return `${oi} 👋 Sou o João, monitor aqui da Escola.\n\nQue tal uma conversa rápida no Google Meet com um monitor especialista${pos}? Posso já procurar um horário pra você?`;
+  return `${oi} 👋\n\nvi que vc tá aqui na Escola — que tal uma conversa rápida no meet com um monitor especialista${pos}? posso já ver um horário pra vc?`;
 }
