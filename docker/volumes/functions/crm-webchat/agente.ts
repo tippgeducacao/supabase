@@ -18,7 +18,7 @@ import { limparParaRouter, sanitizarHistorico } from "../crm-agente-sdr/historic
 // temporal ("digitando" entre balões) é feito no widget (client-side), não no servidor.
 import { fracionarResposta, humanizarTexto } from "../crm-agente-sdr/saida.ts";
 // Persona da ESCOLA DE ESPECIALIZAÇÃO (produto='escola') — bloco próprio, ver escola.ts.
-import { fallbackAberturaEscola, instrucaoAberturaEscola, notaCanalEscola } from "./escola.ts";
+import { fallbackAberturaEscola, filtrarLinkMatricula, instrucaoAberturaEscola, notaCanalEscola } from "./escola.ts";
 
 const ANTHROPIC_KEY = Deno.env.get("AGENTE_SDR_ANTHROPIC_KEY") ?? Deno.env.get("ANTHROPIC_API_KEY") ?? "";
 const MODELO = Deno.env.get("AGENTE_SDR_MODEL") ?? "claude-sonnet-5";
@@ -222,8 +222,16 @@ export async function responderWebchat(
 
     if (!toolUses.length) {
       const fallback = "Pode me contar um pouco mais? 😊";
-      const chunks = await emChunks(textoDe(blocos) || fallback);
-      return { chunks: chunks.length ? chunks : [fallback], estagio };
+      let chunks = await emChunks(textoDe(blocos) || fallback);
+      if (!chunks.length) chunks = [fallback];
+      // ESCOLA: link de matrícula só sai se a pessoa pediu (régua em código — ver escola.ts).
+      if (produto === "escola") {
+        const ultimaDoLead = [...history].reverse().find((m) => m.role === "user")?.text ?? "";
+        const antes = chunks.length;
+        chunks = filtrarLinkMatricula(chunks, ultimaDoLead);
+        if (chunks.length !== antes) console.log("[crm-webchat] escola: link de matrícula removido (não foi pedido)");
+      }
+      return { chunks, estagio };
     }
 
     // executa as tools REAIS (mesma implementação do WhatsApp) e continua o loop.

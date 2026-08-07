@@ -70,6 +70,27 @@ export function instrucaoAberturaEscola(cursoLimpo: string): string {
   ].join(" ");
 }
 
+// ── Link de matrícula: régua em CÓDIGO, porque o prompt não segura ───────────────
+// O prompt do qualificador (compartilhado com o WhatsApp) manda enviar o link junto do
+// valor, e o modelo obedece a ele mesmo com a proibição da Escola logo abaixo (medido
+// 2026-08-07, teste do Rafael). Aqui o chat é a PORTA DE ENTRADA: despejar checkout em
+// quem está assistindo aula grátis é o oposto de fluido — o destino é a reunião.
+// ⚠️ Só vale pro produto 'escola'. Se a pessoa PEDIR (matrícula/inscrição/link/pagar),
+// o balão passa normalmente — negar o que foi pedido seria pior que mandar sem pedir.
+const RE_LINK_MATRICULA = /go\.eduq\.tec\.br|eduq\.tec\.br\/r\/|checkout|pagar\.me|hotmart|kiwify/i;
+const RE_PEDIU_MATRICULA = /matr[íi]cul|inscri[çc]|inscrever|me inscre|quero (fechar|garantir|pagar)|como (fa[çc]o|pago|pagar)|link (de|do|pra|para)|manda o link|garantir (a )?vaga|pagamento/i;
+
+/**
+ * Tira do lote os balões que carregam link de matrícula quando ninguém pediu.
+ * Devolve o que sobra; se sobrar NADA (o modelo só mandou o link), devolve o lote
+ * original — silêncio seria pior que um link a mais.
+ */
+export function filtrarLinkMatricula(chunks: string[], ultimaMsgLead: string): string[] {
+  if (RE_PEDIU_MATRICULA.test(ultimaMsgLead || "")) return chunks;
+  const limpos = chunks.filter((c) => !RE_LINK_MATRICULA.test(c));
+  return limpos.length ? limpos : chunks;
+}
+
 /** Fallback estático da abertura (sem chave da Anthropic ou erro na chamada). */
 export function fallbackAberturaEscola(primeiroNome: string, cursoLimpo: string): string {
   const oi = primeiroNome ? `Oi, ${primeiroNome}!` : "Oi!";
