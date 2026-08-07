@@ -8,6 +8,8 @@
 //             Especialização — persona própria do João, ver escola.ts)
 //   enviar  → { sessao_id, conteudo }   grava inbound + resposta do João (IA), devolve { mensagem_id }
 //   poll    → { sessao_id, apos }       mensagens com id > apos (cursor do widget)
+//   push_status → { sessao_id }        a sessão já tem Web Push ativo? (a LP não sabe:
+//                                      a permissão foi dada no popup, em OUTRA origem)
 //
 // FASE 2: o João (cérebro ISOLADO em agente.ts, reusa a sdr-api pra agenda/reunião —
 // NÃO toca o crm-agente-sdr de WhatsApp) atende no chat, qualifica e AGENDA; e a sessão
@@ -586,6 +588,24 @@ async function acaoPushSubscribe(body: Record<string, unknown>, req: Request) {
   return json({ ok: true });
 }
 
+// A LP não consegue saber se a pessoa já ativou os avisos: a permissão foi dada no POPUP,
+// que roda na NOSSA origem (Notification.permission é POR ORIGEM). Quem sabe é o servidor —
+// a sessão tem subscription registrada. Sem isto o convite de push reaparecia no chat pra
+// quem tinha acabado de aceitar no cadastro (relatado 2026-08-07).
+async function acaoPushStatus(body: Record<string, unknown>) {
+  const sessaoId = texto(body.sessao_id, 40);
+  if (!UUID_RE.test(sessaoId)) return json({ ok: false, erro: "sessao_invalida" }, 400);
+  const { count, error } = await supabase
+    .from("webchat_push_subscriptions")
+    .select("id", { count: "exact", head: true })
+    .eq("sessao_id", sessaoId);
+  if (error) {
+    console.error(`[crm-webchat] push_status: ${error.message}`);
+    return json({ ok: true, ativo: false }); // fail-open: melhor convidar de novo que travar
+  }
+  return json({ ok: true, ativo: (count ?? 0) > 0 });
+}
+
 async function acaoPoll(body: Record<string, unknown>) {
   const sessaoId = texto(body.sessao_id, 40);
   if (!UUID_RE.test(sessaoId)) return json({ ok: false, erro: "sessao_invalida" }, 400);
@@ -653,6 +673,8 @@ Deno.serve(async (req) => {
         return json({ ok: true, chave: VAPID_PUBLIC });
       case "push_subscribe":
         return await acaoPushSubscribe(body, req);
+      case "push_status":
+        return await acaoPushStatus(body);
       case "presenca":
         return await acaoPresenca(body);
       case "push_log":
