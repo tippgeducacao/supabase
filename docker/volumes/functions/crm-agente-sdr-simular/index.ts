@@ -125,8 +125,19 @@ async function mockTool(nome: string, input: any, mocks: any): Promise<string> {
     // vendedores — é o fallback (dono sem slot na janela) e o webchat, que segue no rodízio.
     case 'consulta_disponibilidade': {
       const pool = mocks?.disponibilidade === 'pool';
-      const slot = (dias: number, hora: string, vid: string, nome: string) => {
+      // ⚠️ Só DIA ÚTIL: com "amanhã" caindo no sábado, o mock oferecia 15h — horário que
+      // o expediente de sábado (só manhã) não tem. O agente REJEITAVA o slot (certo!) e
+      // reconsultava em loop, e o harness lia isso como "não agendou". O mock tem que ser
+      // coerente com as regras que o próprio prompt conhece.
+      const semanaSP = (d: Date) =>
+        new Intl.DateTimeFormat('en-US', { timeZone: 'America/Sao_Paulo', weekday: 'short' }).format(d);
+      const proximoUtil = (dias: number) => {
         const d = new Date(Date.now() + dias * 86_400_000);
+        while (semanaSP(d) === 'Sat' || semanaSP(d) === 'Sun') d.setDate(d.getDate() + 1);
+        return d;
+      };
+      const slot = (dias: number, hora: string, vid: string, nome: string) => {
+        const d = proximoUtil(dias);
         const f = (o: Intl.DateTimeFormatOptions) =>
           new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', ...o }).format(d);
         const [dd, mm, yyyy] = f({ day: '2-digit', month: '2-digit', year: 'numeric' }).split('/');
