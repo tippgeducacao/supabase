@@ -382,7 +382,19 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   // pausa existe pra honrar pausa de ATENDENTE durante a geração, não pra
   // engolir a própria despedida do agente.
   const TOOLS_QUE_PAUSAM = new Set(['pausa_ia', 'temporizador_proxima_turma']);
+  // ⚠️ ENCERRAR ≠ PAUSAR. `agendar_retorno` também termina o atendimento (o lead volta
+  // perto da formatura / no prazo que pediu) e a despedida vem NA MESMA volta da tool —
+  // mas ela NÃO pausa a IA, então o recheck de pausa continua valendo pra ela.
+  // Caso Matheus (2026-08-08): o modelo escreveu a mensagem CERTA ("como ainda falta um
+  // caminho pra concluir a graduação, no momento não dá pra seguir… vou te procurar mais
+  // pra frente") e ela foi ENGOLIDA pelo `continue`, porque só as tools de PAUSA tinham
+  // o envio. O lead ficou com "Show, 10h30 então" como última informação e no dia
+  // seguinte mandou "Bom dia" esperando a reunião. Medido: 33 de 238 rodadas com
+  // agendar_retorno (13,9%) terminaram MUDAS em 30 dias.
+  const TOOLS_QUE_ENCERRAM = new Set([...TOOLS_QUE_PAUSAM, 'agendar_retorno']);
   let pausouPorTool = false;
+  let encerrouPorTool = false;
+  let retornoPorFormatura = false;
 
   // Quando a tool de pausa vem SEM texto junto, o loop dá mais uma volta pro modelo
   // escrever a despedida — e é EXATAMENTE nessa volta que ele, sem nada a dizer,
@@ -406,6 +418,22 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     + 'Se a despedida já foi enviada, responda com texto vazio.\n'
     + 'NUNCA escreva frases como "sem nova mensagem do lead", "*sem resposta necessária*", '
     + '"atendimento pausado" ou "nenhuma ação necessária": elas são enviadas ao WhatsApp do lead.';
+  // Retorno agendado por FORMATURA: o lead segue interessado e volta a ser elegível quando
+  // se formar — a despedida é OUTRA (não é "agradeço a preferência"), e precisa dizer POR QUE
+  // não dá agora. Sem isso o lead não entende que a pós exige graduação concluída e, se um
+  // horário chegou a ser oferecido, fica esperando a reunião (caso Matheus).
+  const INSTRUCAO_POS_RETORNO = '[SISTEMA — você acabou de agendar o retorno deste lead pra perto '
+    + 'da formatura dele. NÃO relate isso e NÃO descreva o estado do atendimento.]\n'
+    + 'Escreva SÓ a mensagem ao lead, deixando DUAS coisas claras com as suas palavras: '
+    + '(1) a pós é lato sensu e a matrícula exige a GRADUAÇÃO CONCLUÍDA, então agora ainda não dá; '
+    + '(2) vc vai procurá-lo quando ele estiver terminando o curso.\n'
+    + 'Se vc ofereceu ou combinou algum HORÁRIO de reunião nesta conversa, desfaça de forma '
+    + 'explícita ("não vou marcar aquele horário que falei") — senão ele fica esperando uma '
+    + 'reunião que não vai acontecer.\n'
+    + 'Feche com o presente da Escola (a conversa acabou sem reunião), a menos que vc já tenha '
+    + 'mandado o convite nesta conversa.\n'
+    + 'Nunca mencione a data-limite, "prazo" ou "elegibilidade". Se a mensagem já foi enviada, '
+    + 'responda com texto vazio.';
   // ── LEVA SÓ DE REAÇÃO (2026-08-06, caso Peterson) ─────────────────────────
   // O lead reage com 👍 e não escreve nada. O agente acorda, não tem o que dizer
   // e RELATA ao sistema ("nenhuma resposta necessária, o lead apenas reagiu com
@@ -462,9 +490,9 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     const inicioLlm = Date.now();
     const resp = await chamarAgentePrincipal({
       promptAgente,
-      // Pausa vence reação: a despedida é o que importa nessa volta.
-      contextoTemporal: pausouPorTool
-        ? `${contextoEfetivo}\n\n${INSTRUCAO_POS_PAUSA}`
+      // Encerramento vence reação: a despedida é o que importa nessa volta.
+      contextoTemporal: encerrouPorTool
+        ? `${contextoEfetivo}\n\n${retornoPorFormatura ? INSTRUCAO_POS_RETORNO : INSTRUCAO_POS_PAUSA}`
         : levaSoReacao
           ? `${contextoEfetivo}\n\n${INSTRUCAO_REACAO}`
           : contextoEfetivo,
@@ -514,14 +542,22 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
         outputs.push(output);
       }
       await gravarMensagem(supabase, remotejid, { role: 'user', content: montarToolResults(outputs) });
-      if (toolUses.some((tu: any) => TOOLS_QUE_PAUSAM.has(tu.name))) {
-        pausouPorTool = true;
-        // O prompt manda a despedida vir NA MESMA resposta da tool de pausa;
+      if (toolUses.some((tu: any) => TOOLS_QUE_ENCERRAM.has(tu.name))) {
+        encerrouPorTool = true;
+        if (toolUses.some((tu: any) => TOOLS_QUE_PAUSAM.has(tu.name))) pausouPorTool = true;
+        retornoPorFormatura = toolUses.some(
+          (tu: any) => tu.name === 'agendar_retorno' && tu.input?.tipo === 'formatura',
+        );
+        // O prompt manda a despedida vir NA MESMA resposta da tool que encerra;
         // sem este envio ela era descartada pelo `continue` e a rodada acabava
-        // muda pro lead (caso Claudia, 2026-07-06). Sem recheck de pausa aqui:
-        // a pausa é a que o próprio agente acabou de aplicar.
+        // muda pro lead (casos Claudia 2026-07-06 e Matheus 2026-08-08).
+        // ⚠️ Sem recheck de pausa SÓ quando quem pausou foi o próprio agente; em
+        // `agendar_retorno` a IA segue ativa, então pausa de ATENDENTE ainda vale.
         if (iaTexto) {
-          await enviarResposta(ctx, iaTexto, renovar, tel);
+          await enviarResposta(
+            ctx, iaTexto, renovar, tel,
+            pausouPorTool ? undefined : () => iaPausada(remotejid),
+          );
           tel.registrar('rodada_fim', { voltas_llm: rodada + 1, respondeu: true }, Date.now() - inicioRodada);
           return;
         }

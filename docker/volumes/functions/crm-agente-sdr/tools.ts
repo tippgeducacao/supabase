@@ -105,7 +105,7 @@ function hojeBrasilia() {
 // Sem telefone a RPC cai no rodízio de sempre — então a chamada nunca fica sem oferta.
 // ⚠️ SÓ NO WHATSAPP: no webchat o telefone NÃO é enviado de propósito (ctx.canal),
 // então lá a agenda continua sendo o rodízio entre os vendedores da pós.
-async function consultaDisponibilidade(input: any, ctx: CtxConversa, toolUseId: string) {
+async function consultaDisponibilidade(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
   const hoje = hojeBrasilia();
 
   // Data PASSADA nunca chega à agenda: devolve correção explícita com o HOJE real.
@@ -171,6 +171,26 @@ async function consultaDisponibilidade(input: any, ctx: CtxConversa, toolUseId: 
     conteudo = `Horários disponíveis (Brasília):\n${formatted.join('\n')}\n` +
       `(O dia da semana informado acima é o correto — use-o exatamente, não recalcule.)`;
   }
+
+  // Formação ainda NÃO verificada ⇒ o horário é uma OPÇÃO, não um combinado.
+  // Caso Matheus (2026-08-08): ofereceu slots, o lead escolheu, o agente respondeu
+  // "Show, 10h30 então." e SÓ ENTÃO perguntou a graduação — que reprovou. O lead
+  // passou a noite achando que tinha reunião. Medido: 112 dos 442 reprovados por
+  // prazo em 30 dias (25,3%) receberam oferta de horário ANTES da checagem.
+  // ⚠️ AVISO, não bloqueio: a maioria dos leads é elegível e travar a consulta
+  // quebraria o fluxo normal do qualificador. Fail-open em erro de leitura.
+  let avisoFormacao = '';
+  try {
+    const lead = await buscarLead(supabase, ctx.remotejid);
+    if (lead && !String(lead.formacao_academica ?? '').trim()) {
+      avisoFormacao = '\n⚠️ A graduação deste lead ainda NÃO foi verificada. Ofereça os horários '
+        + 'como OPÇÕES e, se ele escolher um, NÃO responda como se estivesse fechado ("show, 10h30 então") '
+        + '— pergunte a graduação ANTES de confirmar qualquer horário, porque ela ainda pode reprovar.';
+    }
+  } catch (e) {
+    console.log(`[crm-agente-sdr] aviso de formação na disponibilidade falhou (segue): ${(e as Error).message}`);
+  }
+  conteudo += avisoFormacao;
 
   return {
     resultado: conteudo,
@@ -580,8 +600,17 @@ async function verificarCompatibilidade(supabase: any, input: any, ctx: CtxConve
         'Este lead NÃO está desinteressado: ele vai poder cursar quando terminar a graduação. ' +
         'Na MESMA resposta, chame agendar_retorno com tipo="formatura" e meses = quantos meses faltam ' +
         'pra ele concluir (ex.: conclui em 2 anos → 24; o sistema limita ao teto). ' +
-        'NÃO chame pausa_ia. Encerre dizendo, de forma aproximada, que vai chamá-lo quando ele ' +
-        'estiver terminando o curso — nunca mencione a data-limite, "prazo" ou "elegibilidade".',
+        'NÃO chame pausa_ia. ' +
+        // ⚠️ Caso Matheus (2026-08-08): a mensagem dizia só "no momento não dá pra seguir" e o
+        // lead — que já tinha ouvido "Show, 10h30 então" — passou a noite achando que a reunião
+        // estava marcada. Dizer o REQUISITO e DESFAZER o horário não é detalhe de redação: é o
+        // que impede o lead de esperar uma reunião que não vai acontecer.
+        'A MENSAGEM AO LEAD É OBRIGATÓRIA e precisa deixar DUAS coisas claras, com as suas palavras: ' +
+        '(1) a pós é lato sensu e a matrícula exige a GRADUAÇÃO CONCLUÍDA, então agora ainda não dá; ' +
+        '(2) vc vai procurá-lo quando ele estiver terminando o curso. ' +
+        'Se vc ofereceu ou combinou algum HORÁRIO de reunião nesta conversa, DESFAÇA de forma ' +
+        'explícita ("não vou marcar aquele horário que falei") — senão ele fica esperando a reunião. ' +
+        'Nunca mencione a data-limite, "prazo" ou "elegibilidade".',
     };
   }
 
@@ -1013,7 +1042,7 @@ export async function executarTool(
   const { id, name, input } = toolUse;
   try {
     switch (name) {
-      case 'consulta_disponibilidade': return await consultaDisponibilidade(input, ctx, id);
+      case 'consulta_disponibilidade': return await consultaDisponibilidade(supabase, input, ctx, id);
       case 'confirmar_agendamento': return await confirmarAgendamento(supabase, input, ctx, id);
       case 'remarcar_agendamento': return await remarcarAgendamento(supabase, input, ctx, id);
       case 'verificar_compatibilidade_curso': return await verificarCompatibilidade(supabase, input, ctx, id);

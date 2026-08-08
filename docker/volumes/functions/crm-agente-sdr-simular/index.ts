@@ -98,8 +98,12 @@ async function mockTool(nome: string, input: any, mocks: any): Promise<string> {
           'decisão pro monitor. Este lead NÃO está desinteressado: vai poder cursar quando ' +
           'terminar a graduação. Na MESMA resposta, chame agendar_retorno com tipo="formatura" ' +
           'e meses = quantos meses faltam pra ele concluir (o sistema limita ao teto). NÃO ' +
-          'chame pausa_ia. Encerre dizendo, de forma aproximada, que vai chamá-lo quando ele ' +
-          'estiver terminando o curso — nunca mencione a data-limite nem "prazo".';
+          'chame pausa_ia. A MENSAGEM AO LEAD É OBRIGATÓRIA e precisa deixar DUAS coisas claras, ' +
+          'com as suas palavras: (1) a pós é lato sensu e a matrícula exige a GRADUAÇÃO CONCLUÍDA, ' +
+          'então agora ainda não dá; (2) vc vai procurá-lo quando ele estiver terminando o curso. ' +
+          'Se vc ofereceu ou combinou algum HORÁRIO de reunião nesta conversa, DESFAÇA de forma ' +
+          'explícita ("não vou marcar aquele horário que falei") — senão ele fica esperando a ' +
+          'reunião. Nunca mencione a data-limite, "prazo" ou "elegibilidade".';
       }
       if (m === 'reprovado') {
         return 'REPROVADO. A formação do lead não é compatível com esta pós e NÃO há curso alternativo. Encerre com respeito e chame pausa_ia.';
@@ -144,9 +148,17 @@ async function mockTool(nome: string, input: any, mocks: any): Promise<string> {
         const semana = f({ weekday: 'long' }).replace('-feira', '');
         return `- ${hora} de ${semana}, dia ${yyyy}-${mm}-${dd} (vendedor_id: ${vid}, nome: ${nome})`;
       };
-      return pool
+      const lista = pool
         ? [slot(1, '15h', 'v1', 'Ana'), slot(1, '16h30', 'v2', 'Bruno'), slot(2, '10h', 'v3', 'Carla')].join('\n')
         : [slot(1, '15h', 'v1', 'Ana'), slot(1, '16h30', 'v1', 'Ana'), slot(2, '10h', 'v1', 'Ana')].join('\n');
+      // Espelho do executor real: com a graduação ainda não verificada, a tool avisa que
+      // o horário é OPÇÃO, não combinado (caso Matheus 2026-08-08). Liga com
+      // `mocks.formacao_nao_verificada: true`.
+      return mocks?.formacao_nao_verificada
+        ? lista + '\n⚠️ A graduação deste lead ainda NÃO foi verificada. Ofereça os horários como '
+          + 'OPÇÕES e, se ele escolher um, NÃO responda como se estivesse fechado ("show, 10h30 então") '
+          + '— pergunte a graduação ANTES de confirmar qualquer horário, porque ela ainda pode reprovar.'
+        : lista;
     }
     case 'consulta_objecoes':
       return 'resposta_objecao: "a conversa com o monitor é rápida, uns 15 minutos, e é onde vc vê a condição especial". Adapte ao contexto e reconduza pro agendamento.';
