@@ -573,7 +573,11 @@ async function cMidia(input: any, ctx: Ctx) {
   if (error) throw new Error(error.message);
   return {
     ...data,
-    _nota: "A 'conta' já é o BM (o nome carrega o rótulo). Gasto é líquido (sem imposto). 'Hoje' é parcial; 'ontem' é o dia fechado.",
+    _nota:
+      "A 'conta' já é o BM (o nome carrega o rótulo). Gasto é líquido (sem imposto). 'Hoje' é parcial; 'ontem' é o dia fechado. " +
+      "⚠️ 'orcado' é o teto da COMPETÊNCIA pedida (herda a última competência <= o mês). A primeira competência cadastrada é agosto/2026: " +
+      "para julho/2026 e antes ele vem 0 porque NÃO HÁ ORÇADO DEFINIDO naquele mês — nunca diga 'o orçado foi R$ 0,00' nem trate como teto zero; " +
+      "diga que não há orçado cadastrado para esse mês e compare só o gasto.",
   };
 }
 
