@@ -95,6 +95,11 @@ type Toque = {
   /** Régua POR CONTA: id da conta Meta dona desta régua; null = régua PADRÃO.
    *  A esteira escolhe a régua pela conta onde o LEAD conversa (contaDoLead). */
   regua_wa_account_id: string | null;
+  /** Corte "de agora em diante" (epoch ms; null = sem corte). Lead cuja ÂNCORA seja
+   *  ANTERIOR a isso nunca entra nesta régua — nem hoje, nem depois (a âncora não
+   *  anda sozinha). Existe porque criar régua para uma conta que nunca teve deixaria
+   *  TODO o estoque parado dela devido de uma vez (2.262 pessoas em 2026-08-10). */
+  vigencia_inicio: number | null;
 };
 
 /** Régua do lead = SEMPRE a da conta onde ele conversa. A "régua padrão" (NULL) foi
@@ -159,6 +164,9 @@ async function carregarToques(supabase: any): Promise<Toque[]> {
       hora_inicio: Number.isFinite(Number(r.hora_inicio)) && r.hora_inicio !== null ? Number(r.hora_inicio) : null,
       hora_fim: Number.isFinite(Number(r.hora_fim)) && r.hora_fim !== null ? Number(r.hora_fim) : null,
       regua_wa_account_id: r.regua_wa_account_id ? String(r.regua_wa_account_id) : null,
+      // Coluna pode não existir ainda (migration pendente) → undefined → null = sem corte.
+      vigencia_inicio: Number.isFinite(Date.parse(r.vigencia_inicio ?? ''))
+        ? Date.parse(r.vigencia_inicio) : null,
     }));
 }
 
@@ -209,6 +217,10 @@ function devido(lead: any, now: number, t: Toque): boolean {
     if (!Number.isFinite(tsTpl)) return false; // sem âncora nenhuma: fora da esteira
     fechamento = tsTpl;
   }
+  // VIGÊNCIA da régua ("de agora em diante"): âncora anterior ao corte fica FORA para
+  // sempre. Sem isso, ligar uma régua numa conta que nunca teve deixa o estoque parado
+  // dela inteiro devido no primeiro tick — todos os toques vencidos de uma só vez.
+  if (t.vigencia_inicio !== null && fechamento < t.vigencia_inicio) return false;
   const elapsedDias = (now - fechamento) / 86_400_000;
   return elapsedDias >= t.dia;
 }
