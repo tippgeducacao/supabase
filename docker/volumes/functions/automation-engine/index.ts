@@ -216,7 +216,18 @@ Deno.serve(async (req) => {
               if (moveErr) {
                 executedActions.push({ type: 'move_to_list', status: 'failed', error: moveErr.message });
               } else {
-                executedActions.push({ type: 'move_to_list', status: 'success', list_id: cfg.list_id, status_id: targetStatusId });
+                // De ONDE a tarefa saiu — é o que permite desfazer o envio pela
+                // tela (gt_automacao_desfazer_move). Sem isso a origem só pode
+                // ser INFERIDA da automação, o que falha em automação de funil.
+                // ⚠️ O status de volta é o ANTERIOR ao gatilho (old_status_id),
+                // nunca o que disparou: voltar para o status disparador deixaria
+                // a tarefa a um passo de ser reenviada.
+                executedActions.push({
+                  type: 'move_to_list', status: 'success',
+                  list_id: cfg.list_id, status_id: targetStatusId,
+                  from_list_id: task.list_id ?? null,
+                  from_status_id: old_status_id ?? trigger?.from_status_id ?? null,
+                });
               }
               break;
             }
