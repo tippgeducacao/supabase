@@ -36,8 +36,13 @@ function dataBR(iso?: string | null): string {
   const m = String(iso ?? "").match(/^(\d{4})-(\d{2})-(\d{2})/);
   return m ? `${m[3]}/${m[2]}/${m[1]}` : "";
 }
-/** 9.7 → "9,70". Regra de ouro do projeto: 2 casas, nunca arredondar para inteiro. */
+/**
+ * 9.7 → "9,70". Regra de ouro do projeto: 2 casas, nunca arredondar para inteiro.
+ * ⚠️ null/undefined/"" viram "—", NUNCA "0,00": `Number(null)` é 0 e passaria por finito,
+ * publicando "0,00 de 10" — que se lê como "os alunos deram zero ao professor".
+ */
 function nota2(v: unknown): string {
+  if (v === null || v === undefined || v === "") return "—";
   const n = Number(v);
   return Number.isFinite(n) ? n.toFixed(2).replace(".", ",") : "—";
 }
@@ -144,9 +149,32 @@ Deno.serve(async (req) => {
     // 3) o que a equipe DECIDIU mandar (o painel manda; o dossiê é o default)
     const destinatario = String(body?.email ?? dossie.professor?.email ?? "").trim();
     if (!destinatario) return json({ erro: "Sem e-mail de destino" }, 422);
+    // ⚠️ header To com string sem cara de e-mail faz o Gmail recusar com erro críptico — melhor
+    // dizer aqui o que está errado.
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(destinatario)) {
+      return json({ erro: `E-mail de destino inválido: ${destinatario}` }, 422);
+    }
 
-    const nota = body?.nota ?? dossie.nota_media;
-    const total = Number(body?.total_respostas ?? dossie.total_respostas ?? 0);
+    // ⚠️ VALIDAR, nunca "consertar sozinho". O `??` sozinho tratava `nota: null` como "não
+    // informado" e RESTAURAVA a média do aluno — a equipe aprovava um número na prévia e o
+    // professor recebia outro. E `Number(null)` é 0, então null "válido" viraria 0,00 de 10.
+    // Régua ESPELHADA de src/components/pedagogico-v2/planilha/avaliacaoEnvioCampos.ts.
+    const temNota = body != null && Object.prototype.hasOwnProperty.call(body, "nota");
+    const notaBruta = temNota ? body.nota : dossie.nota_media;
+    const nota =
+      notaBruta === null || notaBruta === undefined || notaBruta === "" ? NaN : Number(notaBruta);
+    if (!Number.isFinite(nota) || nota < 0 || nota > 10) {
+      return json({ erro: "Nota inválida — precisa ser um número de 0 a 10." }, 422);
+    }
+
+    const temTotal = body != null && Object.prototype.hasOwnProperty.call(body, "total_respostas");
+    const totalBruto = temTotal ? body.total_respostas : dossie.total_respostas;
+    const total =
+      totalBruto === null || totalBruto === undefined || totalBruto === "" ? NaN : Number(totalBruto);
+    // 0 respostas com nota é número sem denominador: o e-mail diria "9,37 de 10 · 0 respostas".
+    if (!Number.isInteger(total) || total < 1) {
+      return json({ erro: "Número de respostas inválido — precisa ser um inteiro de 1 ou mais." }, 422);
+    }
     // ⚠️ comentários vêm do PAINEL (só os marcados, já editados). Array vazio é LEGÍTIMO:
     // a equipe pode mandar só a nota, sem nenhum comentário.
     const comentarios: string[] = Array.isArray(body?.comentarios)
