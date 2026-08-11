@@ -857,6 +857,24 @@ Deno.serve(async (req) => {
       status: "duplicado",
       ip_origem: ipOrigem,
     });
+    // ⚠️ A resposta HONRA o config.retorno mesmo neste descarte: manter arquivado é um
+    // desfecho DELIBERADO da integração, não um erro. O shape antigo ({ok, discarded})
+    // não trazia o {"sucesso":"true"} que o IF do n8n valida antes de marcar a linha da
+    // planilha como enviada → a MESMA linha re-entrava a cada 5 min por até 14 dias
+    // (loop medido em 2026-08-11: ~100 logs/dia por lead arquivado, inflando o
+    // "Por chegada" da Gestão de Leads).
+    const retornoArq = Array.isArray(config?.retorno) ? config.retorno : [];
+    if (retornoArq.length > 0) {
+      const ctxArq: Record<string, unknown> = {
+        "lead.id": leadId, "oportunidade.id": null, "lead_oportunidade.id": null,
+        "segmento": null, "duplicado": true, "duplicado_lote": false,
+      };
+      const outArq: Record<string, string> = {};
+      for (const r of retornoArq) {
+        if (r?.chave) outArq[String(r.chave)] = resolveRetornoVal(r?.valor, ctxArq);
+      }
+      return json(outArq, Number(integration.codigo_status) || 200);
+    }
     return json({ ok: true, discarded: true, reason: "lead_arquivado_recente", lead_id: leadId }, 200);
   }
 
