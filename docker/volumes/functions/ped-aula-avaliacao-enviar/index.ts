@@ -239,7 +239,7 @@ Deno.serve(async (req) => {
     const enviado = await r.json().catch(() => ({}));
 
     // 5) registra DEPOIS do Gmail aceitar — nunca antes (senão grava envio que não saiu)
-    await admin.rpc("ped_aula_avaliacao_registrar_envio", {
+    const { error: errRegistro } = await admin.rpc("ped_aula_avaliacao_registrar_envio", {
       p_aula_id: aulaId,
       p_email: destinatario,
       p_nome: dossie.professor?.nome ?? null,
@@ -249,6 +249,21 @@ Deno.serve(async (req) => {
       p_user_id: user.id,
       p_gmail_id: enviado?.id ?? null,
     });
+
+    // ⚠️ O e-mail JÁ SAIU — falhar aqui não pode virar erro (a equipe reenviaria e o professor
+    // receberia duas vezes). Mas também não pode passar em SILÊNCIO: sem o registro, o painel
+    // não mostra "já enviada Nx" e a auditoria do que o professor recebeu some.
+    if (errRegistro) {
+      console.error("[aval-enviar] registro falhou", aulaId, errRegistro.message);
+      return json({
+        ok: true,
+        para: destinatario,
+        comentarios_enviados: comentarios.length,
+        aviso:
+          "O e-mail FOI enviado, mas o registro no histórico falhou — esta aula não vai aparecer " +
+          "como 'já enviada'. Avise a TI antes de tentar de novo, para o professor não receber duas vezes.",
+      });
+    }
 
     return json({ ok: true, para: destinatario, comentarios_enviados: comentarios.length });
   } catch (e) {
