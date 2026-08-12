@@ -101,6 +101,20 @@ function canonicalBrPhone(whats55: string): string {
   return `55${d}`;
 }
 
+// Telefone BR plausível: 55 + DDD (2 dígitos, nenhum começa com 0) + celular (9 + 8
+// dígitos) OU fixo (8 dígitos começando 2-5). Existe pra pegar o caso da LP da Escola
+// (2026-08): ela prefixa "55" MESMO quando o valor já tem o DDI e trunca o resultado em
+// 13 chars — perde os 2 últimos dígitos e gera um número que PARECE celular válido mas
+// nunca existiu (Meta só devolve 131026 "Message undeliverable" depois de queimar o
+// template). Roda em cima do valor JÁ canonicalizado (9º dígito inserido quando
+// faltava) pra não gerar falso positivo em número antigo sem o 9, e aceita fixo pra não
+// rejeitar contato B2B/decisor que usa WhatsApp Business numa linha fixa. Não valida DDD
+// contra a lista real de 67 códigos (ambicioso demais pra uma guarda de intake) — só
+// descarta o formato estruturalmente impossível.
+function isTelefoneBrPlausivel(canon55: string): boolean {
+  return /^55[1-9][1-9](?:9\d{8}|[2-5]\d{7})$/.test(canon55);
+}
+
 // Lê uma chave de `dados` aceitando CAMINHO ANINHADO com "." (ex.: "dados_completos.email" —
 // n8n/Meta que manda o formulário inteiro dentro de um objeto). Regras (2026-07-17):
 // - 1º tenta a chave EXATA no primeiro nível: chave com ponto LITERAL (ex.: "eu_sou...")
@@ -459,7 +473,17 @@ Deno.serve(async (req) => {
   // (4) extrai campos do lead via mapping
   const nome     = asString(pickByMapping(dados, mapping, "lead.nome"), 200);
   const email    = normalizeEmail(pickByMapping(dados, mapping, "lead.email"));
-  const whatsapp = normalizeWhatsapp(pickByMapping(dados, mapping, "lead.whatsapp"));
+  let   whatsapp = normalizeWhatsapp(pickByMapping(dados, mapping, "lead.whatsapp"));
+
+  // Guarda de formato — descarta ANTES de gravar/disparar (não depois de queimar o
+  // template): número que não bate com o formato de celular BR não vira lead.whatsapp
+  // nem identificador de dedup. O valor bruto segue recuperável no `payload` cru do log
+  // abaixo, então nada se perde — só não contamina o cadastro nem dispara pra Meta.
+  let whatsappBrutoInvalido: string | null = null;
+  if (whatsapp && !isTelefoneBrPlausivel(canonicalBrPhone(whatsapp))) {
+    whatsappBrutoInvalido = whatsapp;
+    whatsapp = null;
+  }
 
   // campos adicionais do lead (gravados em public.leads) + lote (controle de dedup)
   const cursoInteresse = asString(pickByMapping(dados, mapping, "lead.curso_interesse"), 200);
@@ -1562,6 +1586,9 @@ Deno.serve(async (req) => {
       // observabilidade da normalização: null = título não resolvido (candidato a alias)
       curso_canonico: cursoCanonico,
       lead_arquivado_reativado: leadArquivadoReativado || undefined,
+      // Telefone chegou fora do formato plausível BR (guarda em isTelefoneBrPlausivel) —
+      // não foi gravado em leads.whatsapp; o valor bruto fica aqui pra recuperação manual.
+      telefone_invalido: whatsappBrutoInvalido ?? undefined,
     },
     status: duplicado ? "duplicado" : "ok",
     ip_origem: ipOrigem,
