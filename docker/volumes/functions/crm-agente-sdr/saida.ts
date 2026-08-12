@@ -189,6 +189,23 @@ const RE_META: RegExp[] = [
   // "isso foi só uma mensagem automática que passou torta por aqui"), em que o
   // adjetivo vem colado no substantivo, antes de qualquer cópula.
   /^(?:essa|esse|esta|este|isso|ainda|a\s+mensagem|a\s+resposta)\b[^.!?]{0,40}\b(?:é|foi|era|parece(?:\s+ser)?)\b[^.!?]{0,30}\b(?:resposta|mensagem)s?\s+autom[áa]tic/i,
+
+  // ── RESÍDUO MEDIDO NO HARNESS (50 rodadas do cenário Carolina, 2026-08-12) ──
+  // Com as famílias acima no ar, 2 de 50 rodadas AINDA entregaram bastidor — a
+  // narração sem nenhuma das palavras internas ("lead", "contorno", "presente"):
+  //   "Não vou insistir mais, respeito e sigo o roteiro de despedida com o presente."
+  //   "Vou reconhecer a dificuldade dele com respeito e não forçar mais, sem agendar."
+  // O que sobrou é o modelo falando do PRÓPRIO ROTEIRO e do lead na 3ª pessoa por
+  // PRONOME (dele/dela) em vez do substantivo. Validado no corpus de 45 dias: os
+  // quatro padrões somam 6 casamentos, TODOS relatório, zero falso positivo.
+  // ⚠️ "não VOU insistir mais" fica de fora de propósito — é fala legítima e comum
+  // na despedida; o que denuncia bastidor é o "devo/posso" (o modelo comentando a
+  // regra que recebeu), não a intenção.
+  /\b(?:sigo|seguir|segue)\s+o\s+roteiro\b/i,
+  /\broteiro\s+de\s+despedida\b/i,
+  /^vou\s+(?:reconhecer|acolher|respeitar|encerrar|seguir|manter|evitar|for[çc]ar|deixar)\b[^.!?]*\bd(?:ele|ela)\b/i,
+  /\bsem\s+agendar\b/i,
+  /\bn[ãa]o\s+(?:devo|posso)\s+insistir\b/i,
 ];
 
 // Só valem quando a frase NÃO fala com o lead em 2ª pessoa: "não uma mensagem real
