@@ -492,28 +492,22 @@ Deno.serve(async (req) => {
   const tempoFormacao  = asString(pickByMapping(dados, mapping, "lead.tempo_formacao"), 200);
   const lote           = asString(pickByMapping(dados, mapping, "control.lote"), 200);
 
-  if (!email && !whatsapp) {
-    await admin.from("crm_webhook_logs").insert({
-      integration_id: integration.id, slug, payload, status: "sem_identificador",
-      erro: "Nem email nem whatsapp encontrados via field_mapping", ip_origem: ipOrigem, ...reqMeta,
-    });
-    return json({ error: "no_identifier" }, 422);
-  }
+  // ⚠️ NÃO há gate de identificador aqui (2026-08-12). O identificador (aba Entrada,
+  // coluna "Identificador Para") serve pra ENCONTRAR o contato na base — é a chave de
+  // DEDUP, não o cadastro. Quem cadastra é a Criação Automática. Até 2026-08-12 a falta
+  // dele derrubava a chamada inteira em 422 `sem_identificador`, o que (a) impedia
+  // integração deliberadamente sem identificador (todo POST vira contato novo) e (b)
+  // descartava o formulário inteiro quando SÓ o identificador vinha torto — ex.: LP de
+  // processo seletivo com WhatsApp como identificador e telefone digitado errado perdia
+  // nome, e-mail, currículo e todas as respostas. Agora o intake segue: sem identificador
+  // = sem dedup (cria direto). O descarte por "nada pra cadastrar" ficou logo antes do
+  // passo (5), depois que a Criação Automática já foi resolvida.
 
-  // (4.5) VALIDAÇÃO DE ENTRADA (config.validacao) — opt-in. Se alguma condição não
-  // for atendida, descarta a chamada (não cria lead/oportunidade). Só roda se houver
-  // condições configuradas; condições baseadas no contato (tag/segmento) não bloqueiam aqui.
-  const validacao = Array.isArray(config?.validacao) ? config.validacao : [];
-  if (validacao.length > 0) {
-    const reprovou = validacao.find((c: any) => !condicaoPassa(c, dados, email, whatsapp));
-    if (reprovou) {
-      await admin.from("crm_webhook_logs").insert({
-        integration_id: integration.id, slug, payload, status: "erro",
-        erro: `Validação de entrada não atendida: ${reprovou?.tipo ?? "?"}`, ip_origem: ipOrigem, ...reqMeta,
-      });
-      return json({ ok: false, discarded: true, reason: "validacao", condicao: reprovou?.tipo ?? null }, 200);
-    }
-  }
+  // ⚠️ A VALIDAÇÃO DE ENTRADA (config.validacao) NÃO roda mais aqui — desceu pro passo
+  // (4.6), depois da Criação Automática. `tem_email`/`tem_whatsapp` perguntam se O CONTATO
+  // tem o dado, e o dado pode vir só da Criação Automática; rodando antes dela, a condição
+  // só enxergava o identificador e descartava envio legítimo. Nada entre um ponto e outro
+  // escreve no banco, então o descarte continua acontecendo antes de qualquer gravação.
 
   // ── Campos do contato (catálogo crm_campos) mapeados como `campo:<alias>` ──────
   // O builder agora oferece TODOS os campos de contato (sistema + customizados, ex.:
@@ -701,7 +695,14 @@ Deno.serve(async (req) => {
         const val = resolveWebhookVar(c?.valor, dados).trim();
         if (!val) continue;
         if (col === "email") { const e = normalizeEmail(val); if (e) criacaoDefaults.email = e; }
-        else if (col === "whatsapp") { const w = normalizeWhatsapp(val); if (w) criacaoDefaults.whatsapp = w; }
+        else if (col === "whatsapp") {
+          // MESMA guarda de formato do identificador: número estruturalmente impossível
+          // não entra em leads.whatsapp por nenhuma das duas portas (senão a Criação
+          // Automática reabriria o furo do 131026 "Message undeliverable" da Meta).
+          const w = normalizeWhatsapp(val);
+          if (w && isTelefoneBrPlausivel(canonicalBrPhone(w))) criacaoDefaults.whatsapp = w;
+          else if (w) whatsappBrutoInvalido ??= val;
+        }
         else criacaoDefaults[col] = val;
       }
     }
@@ -720,6 +721,63 @@ Deno.serve(async (req) => {
   if (!inUtm.utm_campaign && inMeta.meta_campaign_name) inUtm.utm_campaign = inMeta.meta_campaign_name;
   if (!inUtm.utm_content  && inMeta.meta_ad_name)       inUtm.utm_content  = inMeta.meta_ad_name;
   if (!inUtm.utm_term     && inMeta.meta_adset_name)    inUtm.utm_term     = inMeta.meta_adset_name;
+
+  // ── Contato EFETIVO vs IDENTIFICADOR (2026-08-12) ────────────────────────────
+  // `email`/`whatsapp` = IDENTIFICADOR (aba Entrada) e servem SÓ pra dedup no passo (5).
+  // `emailLead`/`whatsappLead` = o que o contato realmente tem depois de somar a Criação
+  // Automática — é isso que grava em `leads`, alimenta o guard anti-rajada, o template, o
+  // seed da IA e o forward. Antes esses pontos liam o identificador direto, então
+  // integração que punha o WhatsApp só na Criação Automática criava o contato COM número
+  // e mesmo assim não mandava template nem ligava a IA (meio-comportamento silencioso).
+  const emailLead    = email ?? criacaoDefaults.email ?? null;
+  const whatsappLead = whatsapp ?? criacaoDefaults.whatsapp ?? null;
+
+  // Descarte por "não há NADA pra cadastrar" — substitui o antigo gate de identificador.
+  // Não é sobre dedup: é sobre webhook que chegou sem nenhum dado de contato aproveitável
+  // (mapeamento vazio / payload que não casa com nada). Sem isso, integração mal
+  // configurada viraria fábrica de contato "Sem nome" vazio.
+  //
+  // Só conta valor da Criação Automática que VEIO DO PAYLOAD (token {webhook=...}
+  // resolvido). Valor literal fixo (ex.: fonte = "Formulário PS") não conta: ele existe em
+  // TODA chamada, então sozinho transformaria um POST vazio (probe, bot, teste) em contato.
+  const criacaoVeioDoPayload = (() => {
+    try {
+      const criacao = config?.criacaoAutomatica;
+      if (!criacao?.habilitada || !Array.isArray(criacao.campos)) return false;
+      return criacao.campos.some((c: any) =>
+        String(c?.valor ?? "").includes("{webhook=") && resolveWebhookVar(c?.valor, dados).trim() !== "");
+    } catch { return false; }
+  })();
+  const temDadosDeContato = Boolean(
+    emailLead || whatsappLead || inNome || criacaoDefaults.nome ||
+    campoEav.length > 0 || Object.keys(campoFisico).length > 0 || criacaoVeioDoPayload,
+  );
+  if (!temDadosDeContato) {
+    const motivo = whatsappBrutoInvalido
+      ? `Sem dados de contato: WhatsApp "${whatsappBrutoInvalido}" não é um telefone BR válido e nada mais foi mapeado`
+      : "Sem dados de contato: nenhum campo do Mapeamento de Entrada nem da Criação Automática casou com o payload";
+    await admin.from("crm_webhook_logs").insert({
+      integration_id: integration.id, slug, payload, status: "sem_identificador",
+      erro: motivo, ip_origem: ipOrigem, ...reqMeta,
+    });
+    return json({ error: "no_contact_data" }, 422);
+  }
+
+  // (4.6) VALIDAÇÃO DE ENTRADA (config.validacao) — opt-in. Se alguma condição não
+  // for atendida, descarta a chamada (não cria lead/oportunidade). Só roda se houver
+  // condições configuradas; condições baseadas no contato (tag/segmento) não bloqueiam aqui.
+  // `tem_email`/`tem_whatsapp` leem o contato EFETIVO (identificador + Criação Automática).
+  const validacao = Array.isArray(config?.validacao) ? config.validacao : [];
+  if (validacao.length > 0) {
+    const reprovou = validacao.find((c: any) => !condicaoPassa(c, dados, emailLead, whatsappLead));
+    if (reprovou) {
+      await admin.from("crm_webhook_logs").insert({
+        integration_id: integration.id, slug, payload, status: "erro",
+        erro: `Validação de entrada não atendida: ${reprovou?.tipo ?? "?"}`, ip_origem: ipOrigem, ...reqMeta,
+      });
+      return json({ ok: false, discarded: true, reason: "validacao", condicao: reprovou?.tipo ?? null }, 200);
+    }
+  }
 
   // (5) find-or-create lead — dedup OR email/whatsapp (com variantes de prefixo 55)
   let leadId: string | null = null;
@@ -787,8 +845,8 @@ Deno.serve(async (req) => {
         !s || !s.trim() || s.trim().toLowerCase() === "sem nome";
       const nomeNovo = inNome ?? criacaoDefaults.nome;
       if (nomeVazio(existing.nome) && nomeNovo && !nomeVazio(nomeNovo))           patch.nome = nomeNovo;
-      if (!existing.email && (email ?? criacaoDefaults.email))                    patch.email = (email ?? criacaoDefaults.email)!;
-      if (!existing.whatsapp && (whatsapp ?? criacaoDefaults.whatsapp))           patch.whatsapp = (whatsapp ?? criacaoDefaults.whatsapp)!;
+      if (!existing.email && emailLead)                                           patch.email = emailLead;
+      if (!existing.whatsapp && whatsappLead)                                     patch.whatsapp = whatsappLead;
       if (!existing.curso_interesse && (inCurso ?? criacaoDefaults.curso_interesse))   patch.curso_interesse = (inCurso ?? criacaoDefaults.curso_interesse)!;
       if (!existing.profissao && (inProf ?? criacaoDefaults.profissao))          patch.profissao = (inProf ?? criacaoDefaults.profissao)!;
       if (!existing.area_interesse && (inArea ?? criacaoDefaults.area_interesse))     patch.area_interesse = (inArea ?? criacaoDefaults.area_interesse)!;
@@ -808,8 +866,8 @@ Deno.serve(async (req) => {
           nome: inNome ?? criacaoDefaults.nome ?? "Sem nome",
           // identificador (Entrada) tem prioridade; senão usa o valor de criação da
           // Criação Automática. dedup já rodou acima — o default aqui só preenche o campo.
-          email: email ?? criacaoDefaults.email ?? null,
-          whatsapp: whatsapp ?? criacaoDefaults.whatsapp ?? null,
+          email: emailLead,
+          whatsapp: whatsappLead,
           curso_interesse: inCurso ?? criacaoDefaults.curso_interesse ?? null,
           profissao: inProf ?? criacaoDefaults.profissao ?? null,
           area_interesse: inArea ?? criacaoDefaults.area_interesse ?? null,
@@ -928,8 +986,8 @@ Deno.serve(async (req) => {
   let duplicadoLote = false;
   let criarOportunidade = true;
   let telCanon: string | null = null;
-  if (whatsapp) {
-    telCanon = canonicalBrPhone(whatsapp);
+  if (whatsappLead) {
+    telCanon = canonicalBrPhone(whatsappLead);
     const guardKey = {
       telefone: telCanon,
       curso_interesse: cursoInteresse ?? "",
@@ -1235,7 +1293,7 @@ Deno.serve(async (req) => {
     }
 
     // vincula a 1a oportunidade no guard (auditoria) — best-effort
-    if (whatsapp && telCanon && oportunidadeId) {
+    if (whatsappLead && telCanon && oportunidadeId) {
       await admin.from("crm_saudacao_guard")
         .update({ oportunidade_id: oportunidadeId })
         .eq("telefone", telCanon).eq("curso_interesse", cursoInteresse ?? "").eq("lote", lote ?? "")
@@ -1430,7 +1488,7 @@ Deno.serve(async (req) => {
         // params (builder) OU config (legado SQL). ativar_ia liga o agente João p/ o lead.
         const pc: any = a?.params ?? (a as any)?.config ?? {};
         const templateName = String(pc.template_id ?? pc.template_name ?? "").trim();
-        if (templateName && telCanon && whatsapp) {
+        if (templateName && telCanon && whatsappLead) {
           const variaveis = Array.isArray(pc.variaveis) ? pc.variaveis : [];
           const parameters = variaveis
             .map((v: unknown) => resolveWebhookVar(v, dados))
@@ -1443,7 +1501,7 @@ Deno.serve(async (req) => {
               body: JSON.stringify({
                 // Número escolhido na ação (seletor do builder) > conta ancorada no fluxo.
                 wa_account_id: (typeof pc.wa_account_id === "string" && pc.wa_account_id) || waAccId,
-                telefone: whatsapp,
+                telefone: whatsappLead,
                 tipo: "template",
                 template_name: templateName,
                 template_lang: pc.template_lang || "pt_BR",
@@ -1480,7 +1538,7 @@ Deno.serve(async (req) => {
   // NAO envia mensagem — quem manda o template e a engine de automacao. So dispara quando
   // vamos abrir card (abrirCards — inclui lead IDENTIFICADO com acao) E ha whatsapp.
   let novoLeadDisparado = false;
-  if (abrirCards && whatsapp && telCanon) {
+  if (abrirCards && whatsappLead && telCanon) {
     // (10a) Seed cliente_ppg_leads_sdr (CONTEXTO do agente). O n8n só escuta eventos de
     // MENSAGEM (webhook apioficial), NÃO o webhook do SprintHub — então o lead é semeado
     // aqui, server-side. Upsert manual por remotejid (não há unique no remotejid): insere
@@ -1496,9 +1554,9 @@ Deno.serve(async (req) => {
       if (!leadSdr) {
         await admin.from("cliente_ppg_leads_sdr").insert({
           remotejid: remoteJid,
-          nome: nome ?? null,
-          numero_formatado: whatsapp ?? null,
-          email: email ?? null,
+          nome: inNome ?? criacaoDefaults.nome ?? null,
+          numero_formatado: whatsappLead,
+          email: emailLead,
           curso_interesse_original: cursoParaAgente ?? null,
           formacao_academica: novaForm ?? null,
           fonte: "sprinthub",
@@ -1558,8 +1616,8 @@ Deno.serve(async (req) => {
             event: "novo_lead",
             lead_id: leadId,
             oportunidade_id: oportunidadeId,
-            nome,
-            telefone: whatsapp,
+            nome: inNome ?? criacaoDefaults.nome ?? null,
+            telefone: whatsappLead,
             remotejid: `${telCanon}@s.whatsapp.net`,
             curso_interesse: cursoParaAgente,
             formacao: formacaoLead ?? tempoFormacao ?? areaLead,
@@ -1589,6 +1647,9 @@ Deno.serve(async (req) => {
       // Telefone chegou fora do formato plausível BR (guarda em isTelefoneBrPlausivel) —
       // não foi gravado em leads.whatsapp; o valor bruto fica aqui pra recuperação manual.
       telefone_invalido: whatsappBrutoInvalido ?? undefined,
+      // Nenhum identificador resolvido: o contato foi criado SEM passar por dedup (ou a
+      // integração não define identificador, ou o valor dele não veio/veio inválido).
+      sem_dedup: (!email && !whatsapp) || undefined,
     },
     status: duplicado ? "duplicado" : "ok",
     ip_origem: ipOrigem,
