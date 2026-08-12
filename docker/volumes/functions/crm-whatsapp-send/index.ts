@@ -477,6 +477,11 @@ Deno.serve(async (req) => {
     // Mídia do cabeçalho do template — capturada p/ persistir como anexo e a imagem
     // do template APARECER no chat (CRM + SAC via mirror), não só o texto do corpo.
     let templateHeaderMedia: { tipo: string; url: string; mime: string } | null = null;
+    // Cabeçalho de template enviado por media_id: guardamos a URL/formato pra (a) persistir o
+    // anexo no chat e (b) refazer por `link` se a Meta recusar o id.
+    let headerMediaUrl: string | null = null;
+    let headerMediaKey: string | null = null;
+    let headerMediaId: string | null = null;
     if (tipo === "text") {
       waPayload = {
         messaging_product: "whatsapp",
@@ -495,37 +500,56 @@ Deno.serve(async (req) => {
       const jaTemHeader = comps.some((c: any) => String(c?.type ?? "").toLowerCase() === "header");
       if (!jaTemHeader) {
         const overrideUrl = String(header_media_url ?? "").trim();
+        let hdrUrl = "";
+        let hdrFmt = "";
         if (overrideUrl) {
           // Override por envio: usa a URL passada (fluxo/automação escolheu a imagem).
           // Formato vem explícito ou é derivado da extensão (default IMAGE).
-          const fmt =
+          hdrUrl = overrideUrl;
+          hdrFmt =
             String(header_media_format ?? "").toUpperCase() ||
             (/\.(mp4|3gp|mov)(\?|$)/i.test(overrideUrl)
               ? "VIDEO"
               : /\.(pdf)(\?|$)/i.test(overrideUrl)
                 ? "DOCUMENT"
                 : "IMAGE");
-          const key = fmt === "VIDEO" ? "video" : fmt === "DOCUMENT" ? "document" : "image";
-          comps.push({ type: "header", parameters: [{ type: key, [key]: { link: overrideUrl } }] });
         } else {
-          // Sem override: imagem FIXA configurada por template (crm_whatsapp_template_media).
+          // Sem override: mídia FIXA configurada por template (crm_whatsapp_template_media).
           const { data: media } = await admin
             .from("crm_whatsapp_template_media")
             .select("header_format, media_url")
             .eq("template_name", template_name)
             .maybeSingle();
           if (media?.media_url && media?.header_format) {
-            const fmt = String(media.header_format).toUpperCase();
-            const key = fmt === "VIDEO" ? "video" : fmt === "DOCUMENT" ? "document" : "image";
-            comps.push({ type: "header", parameters: [{ type: key, [key]: { link: String(media.media_url) } }] });
+            hdrUrl = String(media.media_url);
+            hdrFmt = String(media.header_format).toUpperCase();
           }
+        }
+        if (hdrUrl) {
+          const key = hdrFmt === "VIDEO" ? "video" : hdrFmt === "DOCUMENT" ? "document" : "image";
+          // Cabeçalho por media_id, MESMO motivo do document/image/video soltos: por `link`
+          // a Meta baixa o arquivo do nosso storage a CADA envio e, em volume, passa a
+          // recusar — 739 falhas 131053 em 1.600 envios (46%) num reenvio de imagem de
+          // 658 KB com URL sadia (2026-07-30). Com id ela não baixa nada: 1 upload por
+          // (arquivo × número). Upload falhou ⇒ `link`, o comportamento antigo.
+          const mime = key === "video" ? "video/mp4" : key === "document" ? "application/pdf" : "image/jpeg";
+          const nomeArq = key === "video" ? "header.mp4" : key === "document" ? "header.pdf" : "header.jpg";
+          headerMediaUrl = hdrUrl;
+          headerMediaKey = key;
+          headerMediaId = await resolverMediaId(admin, phoneNumberId, accessToken, hdrUrl, mime, nomeArq);
+          comps.push({
+            type: "header",
+            parameters: [{ type: key, [key]: headerMediaId ? { id: headerMediaId } : { link: hdrUrl } }],
+          });
         }
       }
       // Captura a mídia do cabeçalho (injetada acima OU já vinda do chamador) p/ o anexo.
       const headerComp = comps.find((c: any) => String(c?.type ?? "").toLowerCase() === "header");
       const hp: any = Array.isArray(headerComp?.parameters) ? headerComp.parameters[0] : null;
       const ht = String(hp?.type ?? "").toLowerCase();
-      const hlink = ht ? hp?.[ht]?.link : null;
+      // `link` some quando mandamos por media_id — aí a URL de origem vem de headerMediaUrl,
+      // senão o anexo não é persistido e a mídia do template não aparece no chat.
+      const hlink = (ht ? hp?.[ht]?.link : null) ?? (ht && ht === headerMediaKey ? headerMediaUrl : null);
       if (hlink && (ht === "image" || ht === "video" || ht === "document")) {
         templateHeaderMedia = {
           tipo: ht,
@@ -706,6 +730,20 @@ Deno.serve(async (req) => {
       const obj = (waPayload as any)[tipo as string];
       if (obj && typeof obj === "object") { delete obj.id; obj.link = docUrl; }
       mediaIdUsado = null;
+      r = await postMeta(waPayload);
+      waResp = await r.json().catch(() => ({}));
+    }
+    // Mesma rede de segurança para o CABEÇALHO do template (id em `components`, não no topo
+    // do payload — o bloco acima não o alcança).
+    if (!r.ok && headerMediaId && headerMediaUrl && headerMediaKey) {
+      console.warn("[crm-whatsapp-send] Meta recusou media_id do header, refazendo por link:", JSON.stringify(waResp?.error ?? {}));
+      await invalidarMediaId(admin, headerMediaUrl, phoneNumberId);
+      const hc = ((waPayload as any)?.template?.components ?? []).find(
+        (c: any) => String(c?.type ?? "").toLowerCase() === "header",
+      );
+      const hpar = Array.isArray(hc?.parameters) ? hc.parameters[0] : null;
+      if (hpar?.[headerMediaKey]) hpar[headerMediaKey] = { link: headerMediaUrl };
+      headerMediaId = null;
       r = await postMeta(waPayload);
       waResp = await r.json().catch(() => ({}));
     }
