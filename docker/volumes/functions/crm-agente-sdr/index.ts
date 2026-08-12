@@ -580,12 +580,26 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       if (inventados.length && !corrigiuHorario) {
         corrigiuHorario = true;
         tel.registrar('horario_inventado', { horarios: inventados, acao: 'reinstruido', texto: resumir(texto, 600) });
+        // ⚠️ A correção é CIRÚRGICA: só o horário está errado, o resto da mensagem
+        // não (caso Carolina 2026-08-12). A lead objetou preço, o modelo respondeu
+        // com a quebra certa ("é justamente isso que a condição especial resolve")
+        // e fechou com "mais cedo ou mais perto das 19h?" — o 19h caiu aqui, a
+        // mensagem inteira foi descartada, e como a reinstrução só falava de
+        // horário o modelo reescreveu SÓ a logística: "consigo hoje às 17h, 17h30
+        // ou 19h. qual fica melhor?". A quebra de objeção evaporou junto com o
+        // rascunho e a lead levou um balão robótico em cima de uma dor de dinheiro.
+        // Por isso o texto barrado volta no corpo da correção, com ordem explícita
+        // de preservar o conteúdo e trocar SÓ os horários.
         await gravarMensagem(supabase, remotejid, {
           role: 'user',
           content: '[CORRECAO_INTERNA_AUTO_IGNORE] Sua última mensagem NÃO foi enviada ao lead: ela oferece horário(s) ' +
             `(${inventados.join(', ')}) que não vieram de consulta_disponibilidade nesta conversa — é proibido inventar ` +
-            'horário (Regra de ouro nº 2). Refaça agora: rode consulta_disponibilidade e ofereça SÓ o que ela devolver, ' +
-            'ou responda sem citar horário específico. Não mencione esta correção ao lead.',
+            'horário (Regra de ouro nº 2). O texto barrado foi:\n' +
+            `"""\n${resumir(texto, 600)}\n"""\n` +
+            'Refaça agora PRESERVANDO todo o conteúdo dele que não é horário — em especial a quebra de objeção, o ' +
+            'acolhimento e o argumento que você já tinha construído. A ÚNICA coisa que muda são os horários: rode ' +
+            'consulta_disponibilidade e ofereça SÓ o que ela devolver, ou repita a mesma mensagem sem citar horário ' +
+            'específico. Não corte a mensagem pra "só perguntar o horário", e não mencione esta correção ao lead.',
         });
         continue;
       }

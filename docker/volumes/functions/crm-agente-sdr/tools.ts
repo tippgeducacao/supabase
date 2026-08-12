@@ -658,6 +658,43 @@ async function verificarCompatibilidade(supabase: any, input: any, ctx: CtxConve
 // fica no free tier (3 RPM) e devolve 429 em rajada; o catch genérico ("conduza normalmente")
 // deixava o modelo INVENTAR a quebra — ele afirmou que "a reunião é por chat, sem ligação".
 // Aqui: retry curto no 429/5xx + fallback GUIADO que proíbe inventar característica/quebra.
+// Categorias que EXISTEM em rag_ppg_voyage.metadata.tipo_objecao (75 linhas, 12
+// clusters de 6). O modelo às vezes inventa rótulo fora dessa lista — rótulo
+// desconhecido vira filtro vazio (top-1 global), nunca busca que volta seca.
+const TIPOS_OBJECAO = new Set([
+  'objecao_adiamento', 'objecao_canal', 'objecao_desconfianca', 'objecao_duvida',
+  'objecao_tempo', 'objecao_terceiro', 'pergunta_condicao', 'pergunta_conteudo',
+  'pergunta_duracao', 'pergunta_instituicao', 'pergunta_modalidade', 'pergunta_preco',
+]);
+
+// ── DOR DE DINHEIRO NÃO É PERGUNTA DE PREÇO (2026-08-12, caso Carolina) ──────
+// "é uma parcela que não consigo assumir" / "tô entre empregos" é a objeção mais
+// comum do funil e a base NÃO TEM cluster pra ela: os 12 clusters cobrem preço
+// (quanto custa), condição (tem desconto), tempo, canal, adiamento, terceiro,
+// desconfiança e 5 perguntas de produto. Sem entrada própria, o top-1 global caiu
+// no cluster de MODALIDADE e devolveu "os MBAs são online com aulas ao vivo…" pra
+// quem tinha acabado de dizer que não consegue pagar.
+// Até a base ganhar um cluster `objecao_financeira` (precisa de embedding Voyage,
+// fora do alcance do deploy por git push), a dor de dinheiro é roteada por LÉXICO
+// para `pergunta_condicao` — que é a resposta comercialmente correta: existe uma
+// condição especial, e ela só é apresentada na reunião.
+// ⚠️ `pergunta_preco` é o cluster de "quanto custa?" e devolve INSTRUÇÃO INTERNA
+// pra chamar envia_informacoes com o valor integral — mandar o valor cheio pra
+// quem já disse que não cabe no bolso é o oposto do que a conversa pede.
+const RE_DOR_FINANCEIRA =
+  /\b(?:n[ãa]o\s+(?:tenho|tenho\s+como|consigo|dá\s+pra|da\s+pra|teria)\s+(?:condi[çc][õo]es|condi[çc][ãa]o|pagar|assumir|arcar|bancar)|sem\s+(?:condi[çc][õo]es|dinheiro|renda|grana|or[çc]amento)|fora\s+do\s+(?:meu\s+)?or[çc]amento|apertad[oa]\s+(?:agora|no\s+momento)|desempregad[oa]|entre\s+empregos|n[ãa]o\s+cabe\s+no\s+(?:meu\s+)?bolso|parcela\s+(?:alta|pesada|salgada)|t[áa]\s+caro\s+demais|muito\s+caro\s+pra\s+mim)\b/i;
+
+// Rótulo que o modelo pode emitir mas que não tem cluster próprio na base.
+const APELIDO_TIPO: Record<string, string> = { objecao_financeira: 'pergunta_condicao' };
+
+function filtroDaObjecao(input: any): Record<string, string> {
+  const mensagem = String(input?.mensagem_lead ?? '');
+  if (RE_DOR_FINANCEIRA.test(mensagem)) return { tipo_objecao: 'pergunta_condicao' };
+  const bruto = String(input?.tipo_objecao ?? '');
+  const tipo = APELIDO_TIPO[bruto] ?? bruto;
+  return TIPOS_OBJECAO.has(tipo) ? { tipo_objecao: tipo } : {};
+}
+
 async function consultaObjecoes(supabase: any, input: any, toolUseId: string) {
   try {
     let vRes: Response | null = null;
@@ -684,14 +721,25 @@ async function consultaObjecoes(supabase: any, input: any, toolUseId: string) {
     const embedding = vJson.data?.[0]?.embedding;
     if (!embedding) throw new Error('Voyage não retornou embedding');
 
-    const { data, error } = await supabase.rpc('match_ppg_voyage', {
+    const filtro = filtroDaObjecao(input);
+    let { data, error } = await supabase.rpc('match_ppg_voyage', {
       query_embedding: `[${embedding.join(',')}]`,
       match_count: 1,
-      filter: {},
+      filter: filtro,
     });
     if (error) throw new Error(`match_ppg_voyage: ${error.message}`);
+    // Categoria sem linha na base (ou filtro que não casou): cai no top-1 global,
+    // que é o comportamento antigo — filtrar nunca pode devolver VAZIO.
+    if (Object.keys(filtro).length && !data?.length) {
+      ({ data, error } = await supabase.rpc('match_ppg_voyage', {
+        query_embedding: `[${embedding.join(',')}]`,
+        match_count: 1,
+        filter: {},
+      }));
+      if (error) throw new Error(`match_ppg_voyage (fallback): ${error.message}`);
+    }
 
-    // top-1 sempre — retriever burro (idem n8n).
+    // top-1 dentro da categoria — retriever burro, mas não mais CEGO.
     const resposta = data?.[0]?.metadata?.resposta;
     return { resposta_objecao: resposta || 'CONFIANCA_BAIXA', id: toolUseId };
   } catch (e) {

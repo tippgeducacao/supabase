@@ -130,26 +130,128 @@ const RE_META: RegExp[] = [
   /\bn[ãa]o\s+(?:é|e)\s+(?:uma\s+)?(?:mensagem|resposta)\s+real\b/i,
   /\bthe\s+(?:lead|user)\b/i, // raciocínio em inglês que escapou sem tag
   /\bn[ãa]o\s+veio\s+do\s+lead\b/i,
+  // ── NARRAÇÃO DE INTENÇÃO e RELATÓRIO DE ESTADO DO FLUXO (2026-08-11, caso Kelen) ──
+  // Irmãs mais novas do relatório pós-pausa: com o Sonnet 5 o modelo passou a
+  // ANUNCIAR o que vai fazer ("Vou apenas responder de forma natural à mensagem do
+  // lead, sem repetir agendamento nem comentar o contexto temporal.") e a RESUMIR o
+  // estado do fluxo ("A reunião já foi confirmada anteriormente, então não há mais
+  // fluxo de agendamento a seguir aqui.") como se falasse com o sistema — e o balão
+  // vai pro WhatsApp. Validado contra 45 dias de outbound da IA: 17 casamentos,
+  // TODOS meta, zero falso positivo. ⚠️ O verbo é o discriminador, não o "vou":
+  // "vou confirmar com o time e já te retorno" e "vou explicar rapidinho" são fala
+  // LEGÍTIMA e frequente do João — por isso a família cobre só "responder" e
+  // "(seguir|continuar|ficar) aguardando". "A reunião já foi" também é seguro: o
+  // João falando COM o lead diz "já está confirmada"/"já tá marcada", nunca "já foi".
+  // Mexeu aqui → revalide contra o corpus (query no CLAUDE.md) ANTES de subir.
+  /^vou\s+(?:apenas\s+)?responder\b/i,
+  /^vou\s+(?:seguir|continuar|ficar)\s+aguardando\b/i,
+  /^a\s+reuni[aã]o\s+j[aá]\s+foi\b/i,
+
+  // ── RELATÓRIO DE PROGRESSO DO FUNIL, em vocabulário INTERNO (2026-08-12, caso
+  // Carolina) ──────────────────────────────────────────────────────────────────
+  // A lead objetou preço ("é uma parcela que não consigo assumir") e recebeu, em
+  // dois balões: "Carolina, já foi feita a segunda tentativa de contorno nessa
+  // objeção, e o lead segue firme dizendo que não consegue se comprometer agora
+  // por estar entre empregos." + "Vou encerrar respeitando a posição dela e mandar
+  // o presente da escola." Nenhuma régua pegou, por DOIS motivos:
+  //   (a) as famílias de 27/07 e 11/08 cobrem "não há resposta" e "vou responder";
+  //       aqui o molde é outro — RELATO de progresso, na 3ª pessoa, com o nome
+  //       interno de cada peça do fluxo ("tentativa de contorno", "presente da
+  //       escola", "sem link de reunião", e a chamada CRUA da tool);
+  //   (b) o detector rodava por LINHA e o modelo escreve a narração no MEIO do
+  //       parágrafo, então tudo que é ancorado em ^ nunca casava. Agora roda por
+  //       FRASE (ver `trechosDe`), e por isso as famílias antigas também passaram
+  //       a pegar narração colada depois de uma frase legítima.
+  // Medido no corpus (45 dias de outbound real da IA, 225.808 frases): "lead" na
+  // cara do lead 227×, "tentativa de contorno" 12×, brinde pelo nome interno 7×,
+  // chamada crua de tool 2× — nada disso é caso raro, é vazamento contínuo.
+  // ⚠️ "lead" é o discriminador mais forte que existe (o João falando COM a pessoa
+  // nunca a chama de "lead") — mas o corpus achou DUAS falas legítimas que citam a
+  // palavra, e elas viram exceção em RE_META_EXCECAO, não pattern mais frouxo.
+  // Mexeu aqui → revalide contra o corpus (query no CLAUDE.md) ANTES de subir.
+  /\bleads?\b/i,
+  /\btentativas?\s+de\s+contorno\b/i,
+  /\bpresente\s+d[ao]\s+(?:escola|biblioteca)\b/i,
+  /\bsem\s+link\s+de\s+reuni[ãa]o\b/i,
+  // nome de ferramenta e chamada crua ("pausa_ia({"motivo": …})") — o modelo
+  // escreveu a tool como TEXTO em vez de emitir o bloco tool_use.
+  /\b(?:consulta_objecoes|consulta_disponibilidade|consulta_pos_disponiveis|envia_informacoes|pausa_ia|agendar_reuniao|agendar_retorno|atualizar_dados_lead|verificar_compatibilidade_curso)\b/i,
+  /^\w+\(\s*\{/,
+  // "atendimento" é o nome INTERNO do card; o João falando com a pessoa diz "vou
+  // pausar por aqui" / "vou encerrar por aqui" (dezenas de casos legítimos), nunca
+  // "vou pausar o atendimento". 2 casamentos no corpus, ambos relatório.
+  /^vou\s+(?:pausar|encerrar|finalizar)\s+(?:o\s+)?atendimento\b/i,
+  // CLASSIFICAR a mensagem que chegou ("Essa é uma resposta automática do
+  // WhatsApp Business", "Ainda é a mesma resposta automática, então mantenho:")
+  // é análise, não conversa. ⚠️ Exige a forma COPULATIVA (demonstrativo + é/foi/
+  // parece + "resposta automática"): sem isso pega o PEDIDO DE DESCULPA legítimo
+  // por um disparo torto ("essa mensagem automática deve ter subido sem querer",
+  // "isso foi só uma mensagem automática que passou torta por aqui"), em que o
+  // adjetivo vem colado no substantivo, antes de qualquer cópula.
+  /^(?:essa|esse|esta|este|isso|ainda|a\s+mensagem|a\s+resposta)\b[^.!?]{0,40}\b(?:é|foi|era|parece(?:\s+ser)?)\b[^.!?]{0,30}\b(?:resposta|mensagem)s?\s+autom[áa]tic/i,
 ];
 
-const linhaEhMeta = (linha: string): boolean => {
-  const t = linha.trim();
-  return t.length > 0 && RE_META.some((re) => re.test(t));
+// Só valem quando a frase NÃO fala com o lead em 2ª pessoa: "não uma mensagem real
+// da Alice" é relatório; "vou aguardar sua resposta real por aqui" é fala legítima
+// (2 casos no corpus, ambos com "seu/sua"). Mesma lógica para o encerramento
+// narrado na 3ª pessoa ("respeitando a posição dela").
+const RE_META_SE_3A_PESSOA: RegExp[] = [
+  /\b(?:mensagem|resposta)s?\s+(?:real|reais|leg[íi]tima)\b/i,
+  /\brespeitando\s+a\s+(?:posi[çc][ãa]o|decis[ãa]o)\s+d(?:ele|ela)\b/i,
+];
+
+const RE_2A_PESSOA = /\b(?:voc[êe]|vc|seu|sua|seus|suas|te|ti|contigo)\b/i;
+
+// Fugas validadas no corpus: as ÚNICAS frases lead-facing que citam "lead".
+// Sem elas, `\bleads?\b` engoliria a regra de elegibilidade e a abertura de
+// campanha — que são a mensagem inteira, não um detalhe dela.
+const RE_META_EXCECAO: RegExp[] = [
+  /\b(?:exige|exigem|pede|pedem)\s+que\s+o\s+lead\b/i,
+  /\blista\s+de\s+leads\b/i,
+];
+
+// Grão do detector: LINHA quebrada em FRASES. O modelo cola a narração de bastidor
+// no fim de um parágrafo que começa lead-facing ("Carolina, …objeção. Vou encerrar
+// …"), então cortar por linha deixava tudo passar OU derrubava a fala legítima
+// junto. Por frase, sai só o que é relatório.
+export function trechosDe(texto: string): string[] {
+  return (texto ?? '')
+    .split('\n')
+    .flatMap((linha) => linha.split(/(?<=[.!?])\s+/))
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
+}
+
+const trechoEhMeta = (trecho: string): boolean => {
+  const t = trecho.trim();
+  if (!t) return false;
+  if (RE_META_EXCECAO.some((re) => re.test(t))) return false;
+  if (RE_META.some((re) => re.test(t))) return true;
+  return !RE_2A_PESSOA.test(t) && RE_META_SE_3A_PESSOA.some((re) => re.test(t));
 };
 
 export function contemMeta(texto: string): boolean {
-  return (texto ?? '').split('\n').some(linhaEhMeta);
+  return trechosDe(texto).some(trechoEhMeta);
 }
 
-// Remove a LINHA inteira que é relatório (grão do removerRaciocinioVazado): nos
-// 212 casos reais a mensagem é inteiramente meta, então sobra vazio e o
+// Remove o TRECHO que é relatório (grão do removerRaciocinioVazado): na maioria
+// dos casos reais a mensagem é inteiramente meta, então sobra vazio e o
 // enviarResposta cai no silêncio. Quando o relatório vem junto de uma despedida
 // de verdade, só o relatório sai e a despedida segue pro lead.
+// ⚠️ O grão é a FRASE, não a linha (caso Carolina 2026-08-12): a narração vinha
+// colada no mesmo parágrafo da fala, e cortar por linha era tudo-ou-nada.
 export function removerLinhasMeta(texto: string): string {
   if (!contemMeta(texto)) return texto ?? '';
   return (texto ?? '')
     .split('\n')
-    .filter((l) => !linhaEhMeta(l))
+    .map((linha) =>
+      linha
+        .split(/(?<=[.!?])\s+/)
+        .filter((frase) => !trechoEhMeta(frase))
+        .join(' ')
+        .trim()
+    )
+    .filter((linha) => linha.length > 0)
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
