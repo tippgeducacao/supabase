@@ -21,7 +21,7 @@ import { atualizarAgenteComRatchet, atualizarLead, buscarLead, carregarHistorico
 import { carregarTools, chamarAgentePrincipal, chamarRouter } from './agente.ts';
 import { type CtxConversa, executarTool, montarToolResults } from './tools.ts';
 import { prepararMensagem } from './midia.ts';
-import { conversaTexto, enviarResposta, horariosInventados, removerRaciocinioVazado } from './saida.ts';
+import { conversaTexto, enviarResposta, horariosInventados, humanizarTexto, removerRaciocinioVazado } from './saida.ts';
 import { contaDoLead } from './conta.ts';
 import { rodarEsteiraFollowup } from './followup.ts';
 import { rodarEsteiraFollowupTemplate } from './followup-template.ts';
@@ -461,6 +461,25 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     + '"sem ação necessária"): esse texto é enviado ao WhatsApp dele.';
   if (levaSoReacao) tel.registrar('leva_so_reacao', { conteudo: conteudo.slice(0, 40) });
   let corrigiuHorario = false; // guarda de horário inventado: re-instrui só 1x
+  let corrigiuVazio = false;   // resposta 100% bastidor: pede de novo 1x antes de calar
+
+  // ── SILÊNCIO NÃO É RESPOSTA (2026-08-12, medido no harness) ─────────────────
+  // Quando a limpeza de saída derruba a mensagem INTEIRA (era só narração), o
+  // agente ficava mudo — em 2 de 50 rodadas do cenário Carolina a última fala do
+  // lead ficou sem resposta. Calar é melhor que vazar, mas é o pior dos dois
+  // resultados aceitáveis: o lead falou e ninguém respondeu. Agora pedimos a
+  // mensagem DE NOVO, uma vez, dizendo o que estava errado — mesma mecânica da
+  // trava de horário inventado. Se a segunda também vier só de bastidor, aí sim
+  // silêncio (a rodada fica no Debug do Agente com `resposta_vazia_reinstruida`).
+  const CORRECAO_VAZIO =
+    '[CORRECAO_INTERNA_AUTO_IGNORE] Sua última mensagem NÃO foi enviada: ela era inteiramente ' +
+    'raciocínio/relatório de bastidor, e depois da limpeza não sobrou NADA para o lead ler. ' +
+    'O texto barrado foi:\n"""\n%TEXTO%\n"""\n' +
+    'Escreva agora a mensagem que o lead vai LER, na voz do João, começando direto na primeira ' +
+    'palavra dela. Nada de comentar a conversa, o roteiro, as tentativas de contorno, o que você ' +
+    'decidiu ou o que vai fazer; nada de falar do lead na terceira pessoa ("ele", "ela", "o lead") ' +
+    '— fale COM a pessoa. Se o certo aqui é se despedir, mande só a despedida. ' +
+    'Não mencione esta correção ao lead.';
 
   // ── RETENÇÃO PENDENTE ⇒ DESLIGA AS ESTEIRAS (2026-07-14) ──────────────────
   // Quando o lead demonstra desinteresse, o prompt manda fazer UMA pergunta de
@@ -553,6 +572,18 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
         // muda pro lead (casos Claudia 2026-07-06 e Matheus 2026-08-08).
         // ⚠️ Sem recheck de pausa SÓ quando quem pausou foi o próprio agente; em
         // `agendar_retorno` a IA segue ativa, então pausa de ATENDENTE ainda vale.
+        // ⚠️ Aqui é onde a despedida mais se perde: se o texto que veio junto da tool
+        // é 100% bastidor, a limpeza zera e o lead fica sem NADA depois de ter dito
+        // "não consigo pagar" (caso Carolina). Pede a despedida de novo, 1x.
+        if (iaTexto && !humanizarTexto(iaTexto) && !corrigiuVazio) {
+          corrigiuVazio = true;
+          tel.registrar('resposta_vazia_reinstruida', { onde: 'despedida_pos_tool', texto: resumir(iaTexto, 600) });
+          await gravarMensagem(supabase, remotejid, {
+            role: 'user',
+            content: CORRECAO_VAZIO.replace('%TEXTO%', resumir(iaTexto, 600)),
+          });
+          continue;
+        }
         if (iaTexto) {
           await enviarResposta(
             ctx, iaTexto, renovar, tel,
@@ -607,6 +638,16 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
         tel.registrar('horario_inventado', { horarios: inventados, acao: 'descartado', texto: resumir(texto, 600) });
         tel.registrar('rodada_fim', { voltas_llm: rodada + 1, respondeu: false }, Date.now() - inicioRodada);
         return;
+      }
+      // Resposta que só existia como bastidor: pede de novo em vez de calar.
+      if (!humanizarTexto(texto) && !corrigiuVazio) {
+        corrigiuVazio = true;
+        tel.registrar('resposta_vazia_reinstruida', { onde: 'resposta', texto: resumir(texto, 600) });
+        await gravarMensagem(supabase, remotejid, {
+          role: 'user',
+          content: CORRECAO_VAZIO.replace('%TEXTO%', resumir(texto, 600)),
+        });
+        continue;
       }
       // Última checagem antes de falar: a geração do LLM (com tools) pode ter levado
       // dezenas de segundos; se o atendente pausou nesse meio, NÃO envia. O recheck
