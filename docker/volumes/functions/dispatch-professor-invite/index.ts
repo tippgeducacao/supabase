@@ -43,7 +43,10 @@ type ConviteStatus = (typeof STATUSES_DISPATCHABLE)[number];
 
 const STATUS_TO_CADENCIA: Record<string, string> = {
   fase2_reconfirmacao_30d: "lembrete_30d",
-  fase2_reconfirmacao_14d: "lembrete_14d",
+  // fase2_reconfirmacao_14d NÃO tem cadência: o toque de 14 dias foi aposentado em
+  // 2026-07-16. O status continua em STATUSES_DISPATCHABLE de propósito (ver o ramo
+  // "STATUS APOSENTADO" adiante) — sem mapa aqui, nada é enviado; com o status na
+  // lista, o convite continua sendo LIDO pelo cron e é remigrado pro marco vivo.
   fase2_reconfirmacao_7d: "lembrete_7d",
   fase2_lembrete_1d: "lembrete_1d",
   dia_aula_link_enviado: "dia_aula_link",
@@ -837,6 +840,74 @@ Deno.serve(async (req) => {
             .eq("id", convite.id);
           detail.skipped = "aula_muito_antiga";
           detail.dias_desde_aula = diasDesdeAula;
+          details.push(detail);
+          continue;
+        }
+
+        // ── STATUS APOSENTADO: reconfirmação de 14 DIAS (removida em 2026-07-16).
+        // O status CONTINUA em STATUSES_DISPATCHABLE de propósito: fora da lista o convite
+        // vira ÓRFÃO — não dispara, não erra, e a Fila segue verde "ENVIADO E CONFIRMADO".
+        // Foi assim que 137 convites ficaram semanas sem lembrete (caso Pansera, 13/08).
+        // Aqui ele é RE-ROTEADO pro marco vivo da régua (30 → 7 → 1 → dia da aula) e NADA
+        // é enviado. Tem que ficar DEPOIS do guard de aula antiga (senão aula velha viraria
+        // link de sala) e ANTES do fetch do professor (que dá throw e joga na escalação) e
+        // do resolveCadencia (que sem o mapa cairia em "cadencia_nao_mapeada", um `continue`
+        // que NÃO mexe em proxima_acao_em ⇒ o convite voltaria em todo run comendo vaga do
+        // BATCH_LIMIT, que é ordenado por proxima_acao_em ASC).
+        if (convite.status === "fase2_reconfirmacao_14d") {
+          const next = pickNextFase2Marco(aula);
+          // Aula já ocorrida (até 7 dias atrás, o guard acima barra o resto): NÃO reproduzir
+          // o `dia_aula_link_enviado` imediato do pickNextFase2Marco — mandaria "segue o link
+          // da sua sala" pra aula da semana passada. Encerra a cadência.
+          const encerrar = next.dias <= 0;
+          const patch = encerrar
+            ? { proxima_acao_em: null }
+            : { status: next.status, proxima_acao_em: next.proxima_acao_em };
+          const { error: migErr } = await supabase
+            .from("ped_convites")
+            .update(patch)
+            .eq("id", convite.id);
+          if (migErr) {
+            // NÃO usar registrarFalhaEnvio aqui: pra status de fase 2 ela não troca o status
+            // e, na 3ª falha, grava proxima_acao_em = NULL — o convite sairia do universo do
+            // cron (a query exige .lte("proxima_acao_em", now), e NULL nunca casa) e viraria
+            // órfão PERMANENTE. Migração de status aposentado não é falha de envio: só backoff,
+            // e o evento entra como erro_state_machine, que o aviso do portal vigia.
+            console.error(
+              `[dispatch] migracao 14d FALHOU convite=${convite.id}: ${migErr.message}`,
+            );
+            await supabase
+              .from("ped_convites")
+              .update({ proxima_acao_em: nowPlus(BACKOFF_FALHA_MS) })
+              .eq("id", convite.id);
+          }
+          const { error: evErr } = await supabase.from("ped_convites_eventos").insert({
+            convite_id: convite.id,
+            aula_id: convite.aula_id,
+            tipo: migErr ? "erro_state_machine" : "status_aposentado_migrado",
+            ator: "sistema",
+            status_anterior: "fase2_reconfirmacao_14d",
+            status_novo: migErr || encerrar ? null : next.status,
+            payload: {
+              motivo: "toque_14d_removido_2026-07-16",
+              dias_restantes: next.dias,
+              marco: encerrar ? "cadencia_encerrada_aula_ja_ocorrida" : next.marco,
+              enviado: false,
+              erro: migErr?.message ?? null,
+            },
+          });
+          if (evErr) {
+            console.error(
+              `[dispatch] evento da migracao 14d FALHOU convite=${convite.id}: ${evErr.message}`,
+            );
+          }
+          console.log(
+            `[dispatch] 14d APOSENTADO convite=${convite.id} dias=${next.dias} → ${
+              encerrar ? "cadência encerrada" : next.status
+            } (sem envio)`,
+          );
+          detail.skipped = "status_aposentado_14d";
+          detail.next_status = encerrar ? null : next.status;
           details.push(detail);
           continue;
         }
