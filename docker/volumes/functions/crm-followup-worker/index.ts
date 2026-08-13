@@ -72,6 +72,7 @@ async function jobFicouObsoleto(job: JobFilaFollowup): Promise<boolean> {
     'timestamp_mensagem',
     'template_inicial_em',
     'pausa_ia',
+    'nao_perturbe',
     'atendimento_finalizado',
     'followup_ativado',
     'iniciar_atendimento',
@@ -89,14 +90,33 @@ async function jobFicouObsoleto(job: JobFilaFollowup): Promise<boolean> {
   const ancoraAtual = job.toque === 0
     ? job.referencia_em
     : data.timestamp_mensagem ?? data.template_inicial_em;
-  return (coluna ? data[coluna] === true : false)
+  if ((coluna ? data[coluna] === true : false)
     || mudouReferencia(ancoraAtual, job.referencia_em)
     || data.pausa_ia === true
+    || data.nao_perturbe === true
     || data.atendimento_finalizado === true
     || data.followup_ativado !== true
     || data.iniciar_atendimento !== true
     || data.modo_recontato === true
-    || data.agendado === true;
+    || data.agendado === true) return true;
+
+  // Arquivamento e temporizador vivem em fontes diferentes do lead SDR. A função de
+  // envio já aplica essas guardas; espelhá-las aqui diferencia "pulado definitivo" de
+  // falha transitória e evita gastar cinco retries com um lead que não pode receber.
+  const telefone = String(job.remotejid).split('@')[0];
+  const { data: flags, error: flagsErro } = await supabase.rpc('crm_lead_flags_por_telefone', {
+    p_telefone: telefone,
+  });
+  if (flagsErro) throw flagsErro;
+  const estado = Array.isArray(flags) ? flags[0] : flags;
+  if (estado?.arquivado === true || estado?.timer_ativo === true) return true;
+
+  // Resgate é uma sondagem: o webhook de status da Meta pode chegar depois do primeiro
+  // check. Damos três avaliações; se nenhuma confirmar uma falha resgatável, o job é
+  // concluído como pulado, não como dead. Um envio realmente falho costuma aparecer
+  // nesse intervalo e será processado por uma das tentativas.
+  if (job.payload?.resgate === true && job.tentativas >= 3) return true;
+  return false;
 }
 
 async function concluir(job: JobFilaFollowup, workerId: string, resultado: Record<string, unknown>) {
