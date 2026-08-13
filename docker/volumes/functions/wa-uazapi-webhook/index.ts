@@ -196,13 +196,17 @@ Deno.serve(async (req) => {
         }
       }
 
-      // resolve lead/oportunidade pelo telefone (mesma heurística do webhook Meta)
-      const phoneVariants = [telefone, telefone.startsWith("55") ? telefone.slice(2) : `55${telefone}`];
-      const { data: leadRows } = await admin
-        .from("leads").select("id")
-        .or(phoneVariants.map((p) => `whatsapp.eq.${p}`).join(","))
-        .limit(1);
-      const leadId = leadRows?.[0]?.id ?? null;
+      // Mesma fonte única do webhook Meta: DDI, pontuação e ±9º dígito precisam
+      // resolver para a mesma pessoa. A comparação exata antiga criava mensagens
+      // órfãs quando o provedor devolvia o telefone em outra representação válida.
+      const { data: leadIdResolvido, error: leadResolveErr } = await admin.rpc(
+        "crm_lead_find_by_canon",
+        { p_telefone: telefone },
+      );
+      if (leadResolveErr) {
+        console.error("[wa-uazapi-webhook] resolver lead por telefone:", leadResolveErr.message);
+      }
+      const leadId = typeof leadIdResolvido === "string" ? leadIdResolvido : null;
       let oportunidadeId: string | null = null;
       if (leadId) {
         const { data: opRows } = await admin

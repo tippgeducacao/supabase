@@ -552,20 +552,19 @@ Deno.serve(async (req) => {
             ? `[Em resposta à mensagem: "${quotedConteudo}"] ${conteudo}`.trim()
             : conteudo;
 
-          // Busca lead pelo telefone normalizado
+          // Resolve a PESSOA pela régua canônica única do CRM. A Meta pode entregar o
+          // wa_id de celular BR sem o 9º dígito (ex.: 554688166051), enquanto `leads`
+          // guarda a forma com 9 (5546988166051). Comparar texto exato — mesmo com a
+          // variante ±55 — deixava o inbound órfão e a janela de 24h parecia fechada.
           const phoneDigits = (from ?? "").replace(/\D/g, "");
-          const phoneVariants = [
-            phoneDigits,
-            phoneDigits.startsWith("55") ? phoneDigits.slice(2) : `55${phoneDigits}`,
-          ];
-
-          const { data: leadRows } = await admin
-            .from("leads")
-            .select("id")
-            .or(phoneVariants.map((p) => `whatsapp.eq.${p}`).join(","))
-            .limit(1);
-
-          const leadId = leadRows?.[0]?.id ?? null;
+          const { data: leadIdResolvido, error: leadResolveErr } = await admin.rpc(
+            "crm_lead_find_by_canon",
+            { p_telefone: phoneDigits },
+          );
+          if (leadResolveErr) {
+            console.error("[crm-whatsapp-webhook] resolver lead por telefone:", leadResolveErr.message);
+          }
+          const leadId = typeof leadIdResolvido === "string" ? leadIdResolvido : null;
 
           // Busca oportunidade ativa do lead (se existir)
           let oportunidadeId: string | null = null;
