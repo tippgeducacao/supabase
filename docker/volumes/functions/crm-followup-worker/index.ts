@@ -184,7 +184,9 @@ Deno.serve(async (req) => {
   const totais = { enviados: 0, pulados: 0, retry: 0 };
   await comConcorrencia(jobs, concorrenciaWorker(tipo, jobs.length), async (job) => {
     const resultado = await processar(job, workerId);
-    totais[resultado]++;
+    if (resultado === 'enviado') totais.enviados++;
+    else if (resultado === 'pulado') totais.pulados++;
+    else totais.retry++;
   });
 
   return json({ ok: true, tipo, claimed: jobs.length, ...totais });
