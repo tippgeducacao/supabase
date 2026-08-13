@@ -20,10 +20,10 @@
 //   • demais minutos ............................. 4,9%
 // A correlação com o minuto do cron (4,5x) é o que fecha o diagnóstico.
 //
-// Com as esteiras aqui, elas queimam o CPU DESTE isolate — o da crm-agente-sdr fica
-// livre para atender e entregar as respostas. Nenhuma regra de negócio muda: os
-// módulos followup.ts / followup-template.ts são os MESMOS, importados do diretório
-// do agente (mesmo padrão de _shared/, que já é importado entre functions).
+// Desde 13/08/2026 o cron usa ?queue=1: esta function só DESCOBRE o trabalho e grava
+// intenções idempotentes em crm_followup_fila. O envio fica no consumidor
+// crm-followup-worker, em micro-lotes com lease/retry. Assim nem este isolate precisa
+// sustentar centenas de leads numa única requisição.
 //
 // ⚠️ Os modos ?mode=followup e ?mode=followup-template CONTINUAM existindo na
 // crm-agente-sdr (compatibilidade e disparo manual), mas os CRONS apontam para cá.
@@ -75,21 +75,25 @@ Deno.serve(async (req) => {
   if (!(await autorizado(req))) return json({ error: 'unauthorized' }, 401);
 
   const limite = numeroOuUndefined(url.searchParams.get('limite'));
+  const enfileirar = url.searchParams.get('queue') === '1';
 
   // ?wait=1 roda síncrono (o cron usa isso — o waitUntil é cortado neste runtime e a
   // esteira nunca terminaria); sem wait, responde na hora e processa em background.
   const trabalho = mode === 'followup'
-    ? rodarEsteiraFollowup(supabase, limite)
+    ? rodarEsteiraFollowup(supabase, limite, { enfileirar })
     : rodarEsteiraFollowupTemplate(supabase, {
       limite,
+      enfileirar,
       // ⚠️ Number(null) === 0 — sem o guard de presença, tick SEM ?hora= rodaria com
       // hora forçada 0 (= 21h BRT, fora de toda janela) e nada seria enviado.
       horaUtc: url.searchParams.get('hora') === null ? undefined : Number(url.searchParams.get('hora')),
       cadeia: numeroOuUndefined(url.searchParams.get('cadeia')),
     });
 
-  if (url.searchParams.get('wait') === '1') {
-    return json({ ok: true, esteira: mode, isolada: true, ...(await trabalho) });
+  // Enfileirar precisa terminar antes do HTTP 200; este runtime interrompe waitUntil
+  // depois da resposta. O modo direto antigo continua disponível para diagnóstico.
+  if (enfileirar || url.searchParams.get('wait') === '1') {
+    return json({ ok: true, esteira: mode, isolada: true, modo: enfileirar ? 'fila' : 'direto', ...(await trabalho) });
   }
   if (typeof EdgeRuntime !== 'undefined' && EdgeRuntime?.waitUntil) EdgeRuntime.waitUntil(trabalho);
   else await trabalho;

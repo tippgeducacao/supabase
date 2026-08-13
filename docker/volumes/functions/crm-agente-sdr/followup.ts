@@ -35,6 +35,7 @@ import { enviarResposta } from './saida.ts';
 import type { CtxConversa } from './tools.ts';
 import { criarTelemetria, resumir, type Telemetria } from './eventos.ts';
 import { contaDoLead } from './conta.ts';
+import { chaveJanelaAberta, enfileirarFollowups } from './fila.ts';
 
 // Cadência da JANELA ABERTA — 7 toques, em minutos desde a última msg do lead.
 const CADENCIA_MIN = [15, 60, 120, 240, 420, 720, 1380];
@@ -342,6 +343,10 @@ async function processarFollowupLead(supabase: any, leadSel: any, stageSel: numb
       tel.registrar('followup_pulado', { motivo: 'nao_mais_devido', elapsed_min: Math.round(elapsedMin) });
       return false; // lead respondeu / já fez o toque / janela fechou nesse meio-tempo
     }
+    if (stage !== stageSel) {
+      tel.registrar('followup_pulado', { motivo: 'job_obsoleto', stage_job: stageSel, stage_atual: stage });
+      return false;
+    }
 
     tel.registrar('followup_avaliacao', { stage, elapsed_min: Math.round(elapsedMin), ja_enviado: stageDoFollowUp(lead.follow_up) });
 
@@ -413,7 +418,11 @@ async function comConcorrencia<T>(itens: T[], limite: number, fn: (t: T) => Prom
 // ── entrada da esteira (chamada pelo index quando mode=followup) ────────────
 // limite: teto de leads neste disparo (default MAX_LEADS_POR_TICK). Use um valor
 // baixo (ex.: ?limite=3) pra um teste controlado antes de liberar geral.
-export async function rodarEsteiraFollowup(supabase: any, limite?: number): Promise<{ candidatos: number; devidos: number; enviados: number }> {
+export async function rodarEsteiraFollowup(
+  supabase: any,
+  limite?: number,
+  opcoes?: { enfileirar?: boolean },
+): Promise<{ candidatos: number; devidos: number; enviados: number; enfileirados?: number }> {
   const telSweep = criarTelemetria(supabase, 'followup-sweep');
   const inicio = Date.now();
 
@@ -437,6 +446,26 @@ export async function rodarEsteiraFollowup(supabase: any, limite?: number): Prom
     if (devidos.length >= cap) break;
   }
 
+  if (opcoes?.enfileirar) {
+    const enfileirados = await enfileirarFollowups(supabase, devidos.map(({ lead, stage }) => ({
+      tipo: 'janela_aberta' as const,
+      remotejid: String(lead.remotejid),
+      toque: stage,
+      referencia_em: new Date(Date.parse(lead.timestamp_mensagem)).toISOString(),
+      dedupe_key: chaveJanelaAberta(lead.remotejid, stage, lead.timestamp_mensagem),
+      payload: { stage },
+      // A janela aberta expira em 24h; ela tem precedência sobre templates no consumo.
+      prioridade: 10,
+    })));
+    telSweep.registrar('followup_tick', {
+      candidatos: candidatos.length,
+      devidos: devidos.length,
+      enfileirados,
+      modo: 'fila',
+    }, Date.now() - inicio);
+    return { candidatos: candidatos.length, devidos: devidos.length, enviados: 0, enfileirados };
+  }
+
   let enviados = 0;
   await comConcorrencia(devidos, CONCORRENCIA, async (d) => {
     const ok = await processarFollowupLead(supabase, d.lead, d.stage);
@@ -449,4 +478,15 @@ export async function rodarEsteiraFollowup(supabase: any, limite?: number): Prom
     enviados,
   }, Date.now() - inicio);
   return { candidatos: candidatos.length, devidos: devidos.length, enviados };
+}
+
+// Entrada estreita do consumidor da fila. O estado completo é buscado novamente por
+// processarFollowupLead; o payload não é fonte de verdade e só carrega o estágio que
+// estava devido quando o produtor criou o job.
+export async function processarFollowupEnfileirado(
+  supabase: any,
+  remotejid: string,
+  stage: number,
+): Promise<boolean> {
+  return processarFollowupLead(supabase, { remotejid }, stage);
 }

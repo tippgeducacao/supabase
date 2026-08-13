@@ -58,6 +58,11 @@ import { extrairPrimeiroNome } from './contexto.ts';
 import { buscarLead, atualizarLead } from './historico.ts';
 import { criarTelemetria, type Telemetria } from './eventos.ts';
 import { contaDoLead, phoneVariants } from './conta.ts';
+import {
+  chaveResgateTemplate,
+  chaveTemplate,
+  enfileirarFollowups,
+} from './fila.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
 const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
@@ -636,8 +641,16 @@ async function encadearProximaRodada(supabase: any, horaUtc: number, cadeia: num
 // opts.cadeia: nº da rodada encadeada (0 = a do cron; usado só pra freio/telemetria).
 export async function rodarEsteiraFollowupTemplate(
   supabase: any,
-  opts?: { limite?: number; horaUtc?: number; cadeia?: number },
-): Promise<{ candidatos: number; devidos: number; enviados: number; hora_utc: number; toques_ativos: number; cadeia: number }> {
+  opts?: { limite?: number; horaUtc?: number; cadeia?: number; enfileirar?: boolean },
+): Promise<{
+  candidatos: number;
+  devidos: number;
+  enviados: number;
+  hora_utc: number;
+  toques_ativos: number;
+  cadeia: number;
+  enfileirados?: number;
+}> {
   const inicio = Date.now();
   const tel = criarTelemetria(supabase, 'followup-template-sweep');
   const horaAtual = Number.isFinite(opts?.horaUtc) ? (opts!.horaUtc as number) : new Date(inicio).getUTCHours();
@@ -648,6 +661,31 @@ export async function rodarEsteiraFollowupTemplate(
   if (!toques.length) {
     tel.registrar('followup_template_tick', { hora_utc: horaAtual, candidatos: 0, devidos: 0, enviados: 0, motivo: 'sem_toques_ativos' }, Date.now() - inicio);
     return { candidatos: 0, devidos: 0, enviados: 0, hora_utc: horaAtual, toques_ativos: 0, cadeia };
+  }
+
+  // O cron roda a cada 3 minutos, mas a régua só possui sete horas elegíveis. Antes
+  // desta guarda, cada tick fora dessas horas percorria milhares de candidatos e fazia
+  // uma consulta de conta por lead para no fim não enviar nada. Foi a fonte do pico de
+  // CPU exatamente em */3 durante o incidente de 13/08/2026.
+  if (!toques.some((t) => horasElegiveis(t).includes(horaAtual))) {
+    tel.registrar('followup_template_tick', {
+      hora_utc: horaAtual,
+      candidatos: 0,
+      devidos: 0,
+      enviados: 0,
+      enfileirados: 0,
+      motivo: 'fora_dos_horarios_elegiveis',
+      modo: opts?.enfileirar ? 'fila' : 'direto',
+    }, Date.now() - inicio);
+    return {
+      candidatos: 0,
+      devidos: 0,
+      enviados: 0,
+      hora_utc: horaAtual,
+      toques_ativos: toques.length,
+      cadeia,
+      enfileirados: opts?.enfileirar ? 0 : undefined,
+    };
   }
 
   const candidatos = await selecionarCandidatos(supabase);
@@ -698,6 +736,49 @@ export async function rodarEsteiraFollowupTemplate(
     if (devidos.length >= cap) { capEstourado = true; break; }
   }
 
+  if (opts?.enfileirar) {
+    const enfileirados = await enfileirarFollowups(supabase, devidos.map((d) => {
+      const ancoraRaw = d.lead.timestamp_mensagem ?? d.lead.template_inicial_em ?? d.lead.template_followup_em;
+      const ancoraMs = Date.parse(String(ancoraRaw ?? ''));
+      const referencia = Number.isFinite(ancoraMs) ? new Date(ancoraMs).toISOString() : new Date(inicio).toISOString();
+      const toque = d.toque?.toque ?? 0;
+      return {
+        tipo: 'template' as const,
+        remotejid: String(d.lead.remotejid),
+        toque,
+        referencia_em: referencia,
+        dedupe_key: d.resgate
+          ? chaveResgateTemplate(String(d.lead.remotejid), new Date(inicio))
+          : chaveTemplate(String(d.lead.remotejid), toque, referencia),
+        payload: {
+          toque,
+          resgate: d.resgate,
+          conta: d.conta,
+          hora_utc: horaAtual,
+        },
+      };
+    }));
+    tel.registrar('followup_template_tick', {
+      hora_utc: horaAtual,
+      candidatos: candidatos.length,
+      devidos: devidos.length,
+      enfileirados,
+      toques_ativos: toques.length,
+      cadeia,
+      cap_estourado: capEstourado,
+      modo: 'fila',
+    }, Date.now() - inicio);
+    return {
+      candidatos: candidatos.length,
+      devidos: devidos.length,
+      enviados: 0,
+      hora_utc: horaAtual,
+      toques_ativos: toques.length,
+      cadeia,
+      enfileirados,
+    };
+  }
+
   let enviados = 0;
   await comConcorrencia(devidos, CONCORRENCIA, async (d) => {
     if (await processarLead(supabase, d.lead, d.toque, toques, d.resgate, tel, d.conta)) enviados++;
@@ -721,4 +802,29 @@ export async function rodarEsteiraFollowupTemplate(
   }
 
   return { candidatos: candidatos.length, devidos: devidos.length, enviados, hora_utc: horaAtual, toques_ativos: toques.length, cadeia };
+}
+
+// Reconstitui a régua a partir do banco e processa um único job. O worker nunca confia
+// no template/payload antigo: processarLead busca o lead fresco e revalida janela,
+// pausa, arquivamento, temporizador e próximo toque antes do envio.
+export async function processarFollowupTemplateEnfileirado(
+  supabase: any,
+  job: { remotejid: string; toque: number; resgate: boolean; conta: string | null },
+): Promise<boolean> {
+  const toques = await carregarToques(supabase);
+  const telefone = String(job.remotejid).split('@')[0];
+  const contaAtual = await contaDoLead(supabase, telefone).catch(() => null);
+  const toqueSel = job.resgate
+    ? null
+    : reguaPara(toques, contaAtual).find((t) => t.toque === job.toque) ?? null;
+  const tel = criarTelemetria(supabase, `followup-template-fila:${job.remotejid}`);
+  return processarLead(
+    supabase,
+    { remotejid: job.remotejid },
+    toqueSel,
+    toques,
+    job.resgate,
+    tel,
+    contaAtual,
+  );
 }
