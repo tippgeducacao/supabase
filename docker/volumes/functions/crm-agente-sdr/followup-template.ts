@@ -407,6 +407,23 @@ async function selecionarCandidatos(supabase: any): Promise<any[]> {
   return saida;
 }
 
+// Resolve contas de um BLOCO inteiro no Postgres. Além de eliminar o N+1 que queimava
+// o CPU do produtor, preenche NULL explicitamente para todo remotejid: se um lead não
+// tiver conta qualificadora, o loop não pode voltar sem querer para contaDoLead().
+async function contasCandidatosEmLote(supabase: any, candidatos: any[]): Promise<Map<string, string | null>> {
+  const mapa = new Map<string, string | null>();
+  for (const lead of candidatos) mapa.set(String(lead.remotejid), null);
+  if (!candidatos.length) return mapa;
+  const { data, error } = await supabase.rpc('crm_followup_contas_lote', {
+    p_remotejids: candidatos.map((lead) => String(lead.remotejid)),
+  });
+  if (error) throw new Error(`crm_followup_contas_lote: ${error.message}`);
+  for (const row of data ?? []) {
+    mapa.set(String(row.remotejid), row.wa_account_id ? String(row.wa_account_id) : null);
+  }
+  return mapa;
+}
+
 // Gates comuns (revalidados com o lead FRESCO, sob lock).
 function leadElegivel(lead: any): boolean {
   if (!lead) return false;
@@ -694,7 +711,19 @@ export async function rodarEsteiraFollowupTemplate(
   // Régua POR CONTA: resolve a conta onde cada candidato conversa (cache por telefone —
   // query indexada em crm_whatsapp_messages) e usa a régua daquela conta (fallback: padrão).
   const contaCache = new Map<string, string | null>();
-  for (const lead of candidatos) {
+  const BLOCO_CONTAS = 250;
+  for (let indice = 0; indice < candidatos.length; indice++) {
+    if (opts?.enfileirar && indice % BLOCO_CONTAS === 0) {
+      const bloco = candidatos.slice(indice, indice + BLOCO_CONTAS);
+      const contasBloco = await contasCandidatosEmLote(supabase, bloco);
+      for (const leadBloco of bloco) {
+        contaCache.set(
+          String(leadBloco.remotejid).split('@')[0],
+          contasBloco.get(String(leadBloco.remotejid)) ?? null,
+        );
+      }
+    }
+    const lead = candidatos[indice];
     const telefone = String(lead.remotejid).split('@')[0];
     let conta: string | null;
     if (contaCache.has(telefone)) {
