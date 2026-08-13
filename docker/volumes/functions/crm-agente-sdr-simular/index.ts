@@ -21,6 +21,10 @@ import { AGENTE_CAMPANHA_DIRETA } from '../crm-agente-sdr/prompts-campanha-diret
 import { carregarTools, chamarAgentePrincipal } from '../crm-agente-sdr/agente.ts';
 import { montarContextoTemporal, montarPerguntaFormacao, renderPrompt } from '../crm-agente-sdr/contexto.ts';
 import { comPresenteEscola } from '../crm-agente-sdr/escolaGratuita.ts';
+import {
+  decidirPrazoEstudante,
+  instrucaoPerguntarConclusao,
+} from '../crm-agente-sdr/elegibilidadeFormatura.ts';
 import { humanizarTexto } from '../crm-agente-sdr/saida.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
@@ -92,7 +96,15 @@ async function mockTool(nome: string, input: any, mocks: any): Promise<string> {
       // CORRETO), oferecia horário. O teste reprovava o agente por culpa do mock: é a
       // 3ª ocorrência dessa armadilha (consulta_pos_disponiveis, e o próprio prazo em
       // 2026-07-16). Régua: o que o executor decide em CÓDIGO, o mock decide igual.
-      if (input?.contexto_qualificacao === 'estudante_fora_do_prazo') {
+      // ⚠️ Mesmo motivo, 2º ato (2026-08-13, caso Edinara): o executor real agora RELÊ a
+      // resposta do lead e devolve PRECISA_DATA_CONCLUSAO quando ela é ambígua ("2 semestre"),
+      // mesmo com o modelo mandando "estudante_apto". Sem espelhar isso aqui, o harness
+      // aprovaria o cenário ambíguo e o teste diria que está tudo bem.
+      const decisao = decidirPrazoEstudante(input ?? {});
+      if (decisao.acao === 'pergunta_data') {
+        return `PRECISA_DATA_CONCLUSAO. ${instrucaoPerguntarConclusao(decisao.porque)}`;
+      }
+      if (decisao.acao === 'reprova') {
         return 'REPROVADO_PRAZO. O lead ainda está cursando e conclui DEPOIS da data-limite de ' +
           'elegibilidade. NÃO agende reunião, NÃO diga que a formação atende e NÃO empurre a ' +
           'decisão pro monitor. Este lead NÃO está desinteressado: vai poder cursar quando ' +

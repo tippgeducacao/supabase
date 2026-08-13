@@ -14,7 +14,11 @@
 // deno-lint-ignore-file no-explicit-any
 import { MATRIZ_SYSTEM, MATRIZ_USER_TEMPLATE } from './prompts.ts';
 import { renderPrompt } from './contexto.ts';
-import { limiteFormaturaFormatado } from './elegibilidadeFormatura.ts';
+import {
+  decidirPrazoEstudante,
+  instrucaoPerguntarConclusao,
+  limiteFormaturaFormatado,
+} from './elegibilidadeFormatura.ts';
 import { atualizarLead, buscarLead } from './historico.ts';
 import { chamarAnthropic } from './agente.ts';
 
@@ -581,7 +585,40 @@ async function verificarCompatibilidade(supabase: any, input: any, ctx: CtxConve
   // estudante fora do prazo e o veredito "APROVADO" atropelava a regra do prompt.
   // O enum novo dá ao modelo um jeito de expressar o caso, e a reprovação sai
   // daqui (código), não da obediência ao prompt. A matriz nem roda.
-  if (input.contexto_qualificacao === 'estudante_fora_do_prazo') {
+  //
+  // ⚠️ 2026-08-13, caso Edinara: o enum sozinho não bastava. Ele só expressa a CONCLUSÃO
+  // do modelo, e o modelo errou a leitura ("2 semestre" → "estudante_apto"), agendando uma
+  // aluna do 1º ano. Agora o código relê a resposta do lead (`avaliarConclusao`) e tem a
+  // palavra final, nas duas direções:
+  //   • disse "apto" mas a data cai fora da janela → REPROVADO_PRAZO assim mesmo;
+  //   • disse "apto" sem data legível (ou com resposta ambígua tipo "2 semestre")
+  //     → PRECISA_DATA_CONCLUSAO: a matriz NÃO roda e o João pergunta o mês/ano.
+  // O caminho REPROVAR nunca exige a data: `estudante_fora_do_prazo` sem data legível segue
+  // reprovando como antes — exigir prova pra recusar só criaria um buraco novo.
+  const decisao = decidirPrazoEstudante(input);
+  if (input.contexto_qualificacao?.startsWith?.('estudante')) {
+    console.log(`[crm-agente-sdr] prazo do estudante: enum=${input.contexto_qualificacao} `
+      + `bruto="${input.conclusao_graduacao_bruta ?? ''}" normalizado="${input.conclusao_graduacao ?? ''}" `
+      + `→ ${decisao.acao}${decisao.acao === 'pergunta_data' ? `/${decisao.porque}` : ''}`);
+  }
+
+  if (decisao.acao === 'pergunta_data') {
+    return {
+      id: toolUseId,
+      output: 'PRECISA_DATA_CONCLUSAO',
+      compativel: null,
+      pode_cursar: null,
+      curso_solicitado: input.curso_interesse ?? null,
+      formacao_identificada: input.formacao_academica ?? null,
+      motivo_alteracao: decisao.porque === 'posicao_no_curso'
+        ? 'O lead informou a POSIÇÃO no curso, não a data de conclusão.'
+        : 'O lead não informou quando conclui a graduação (ou a resposta não é uma data).',
+      mensagem_para_lead: null,
+      instrucao: instrucaoPerguntarConclusao(decisao.porque),
+    };
+  }
+
+  if (decisao.acao === 'reprova') {
     return {
       id: toolUseId,
       output: 'REPROVADO_PRAZO',
