@@ -65,6 +65,20 @@ function css(regras: Array<[string, string | number | null | undefined]>): strin
     .join(";");
 }
 
+/**
+ * Mesmo que `css`, com `!important` em cada declaração.
+ *
+ * Obrigatório dentro da media query: o estilo do desktop é INLINE, e inline vence
+ * folha de estilo. Sem `!important` o override de mobile é escrito, é enviado e não
+ * tem efeito nenhum — que era exatamente o bug.
+ */
+function cssImportante(regras: Array<[string, string | number | null | undefined]>): string {
+  return regras
+    .filter(([, v]) => v !== null && v !== undefined && v !== "")
+    .map(([k, v]) => `${k}:${v}!important`)
+    .join(";");
+}
+
 function px(v: number | string | null | undefined): string | null {
   if (v === null || v === undefined || v === "") return null;
   return typeof v === "number" ? `${v}px` : String(v);
@@ -197,10 +211,28 @@ function compilarVideo(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao): string {
       alt: b.props.alt ?? "Assistir ao vídeo",
     },
   };
-  return compilarImagem(thumb, g, o);
+
+  // Chamada explícita LOGO ABAIXO da miniatura. Sem ela o bloco saía idêntico a uma
+  // "imagem com link" e nada indicava que aquilo era um vídeo — sobrepor um ▶ na
+  // imagem não é opção: exigiria compor o PNG, porque Outlook não empilha camadas.
+  const href = prepararHref(txt(b.props.href, o, false), o);
+  const rotulo = esc(txt(b.props.texto, o, false) || "▶ Assistir ao vídeo");
+  const chamada = css([
+    ["font-family", b.estilo?.fonte ?? g.fonte],
+    ["font-size", px(b.estilo?.tamanhoFonte ?? 14)],
+    ["color", g.corLink],
+    ["text-decoration", "underline"],
+  ]);
+
+  return [
+    compilarImagem(thumb, g, o),
+    `<div style="${css([["text-align", "center"], ["padding-top", "8px"]])}">`,
+    `<a${attr("href", href)}${attr("target", b.props.alvo ?? "_blank")} style="${chamada}">${rotulo}</a>`,
+    `</div>`,
+  ].join("");
 }
 
-function compilarSeparador(b: Bloco, g: GlobaisDoc): string {
+function compilarSeparador(b: Bloco): string {
   const e = b.estilo ?? {};
   // <hr> renderiza diferente em cada cliente; uma <td> com border-top é previsível.
   const estilo = css([
@@ -229,7 +261,9 @@ function compilarLista(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao): string {
 }
 
 function compilarEspacador(b: Bloco): string {
-  const h = b.props.altura ?? 24;
+  // `estilo.altura` antes de `props.altura`: é por ela que o override de mobile passa
+  // ("no celular esse respiro é menor"), que é o ajuste mais pedido no espaçador.
+  const h = b.estilo?.altura ?? b.props.altura ?? 24;
   return `<table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%"><tr><td style="${css([["height", px(h)], ["font-size", "0"], ["line-height", "0"]])}">&nbsp;</td></tr></table>`;
 }
 
@@ -268,7 +302,7 @@ function compilarBloco(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao): string {
     case "imagem":
     case "imagem-link": return compilarImagem(b, g, o);
     case "video": return compilarVideo(b, g, o);
-    case "separador": return compilarSeparador(b, g);
+    case "separador": return compilarSeparador(b);
     case "lista": return compilarLista(b, g, o);
     case "espacador": return compilarEspacador(b);
     case "html": return compilarHtml(b, o);
@@ -287,13 +321,72 @@ function compilarBloco(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao): string {
 
 // ------------------------------------------------------------------ estrutura
 
-function compilarColuna(c: Coluna, g: GlobaisDoc, o: OpcoesCompilacao, total: number): string {
+/**
+ * Classe CSS estável de um bloco — é o que liga o elemento à regra dentro da
+ * `@media` de mobile. Deriva do id (não da posição) para que reordenar um bloco não
+ * troque o override de lugar. Sanitiza porque documento importado pode trazer id com
+ * caractere que não vale em seletor.
+ */
+export function classeBloco(id: string): string {
+  return `bl-${String(id).replace(/[^A-Za-z0-9_-]/g, "_")}`;
+}
+
+/**
+ * Blocos cuja CAIXA (fundo, borda, raio) vive no `<div>` que a coluna envolve, junto
+ * com o padding. Nos outros o estilo é consumido pelo próprio elemento: `corFundo` de
+ * botão é a cor do botão, `raio` de imagem arredonda a imagem — pintar o wrapper
+ * neles pintaria a faixa inteira.
+ */
+function caixaNoWrapper(tipo: Bloco["tipo"]): boolean {
+  return ["texto", "texto-composto", "lista", "link", "texto-dinamico", "link-dinamico", "html", "html-dinamico"]
+    .includes(tipo);
+}
+
+/**
+ * Onde a media query precisa mirar para vencer o estilo inline de cada tipo.
+ * `texto` = tipografia · `caixa` = fundo/borda/raio/tamanho. O padding fica sempre no
+ * wrapper (é lá que o desktop o escreve), por isso não entra aqui.
+ */
+function alvosMobile(tipo: Bloco["tipo"], classe: string): { texto: string; caixa: string } {
+  const c = `.${classe}`;
+  switch (tipo) {
+    // O texto do botão está no <a>; a caixa colorida é a <td> da tabela.
+    case "botao": return { texto: `${c} a`, caixa: `${c} td` };
+    case "imagem":
+    case "imagem-link":
+    case "imagem-dinamica":
+    case "video": return { texto: `${c} > div`, caixa: `${c} img` };
+    // Separador e espaçador são tabela de uma célula: tudo mora na <td>.
+    case "separador":
+    case "espacador": return { texto: `${c} td`, caixa: `${c} td` };
+    // O resto tem o estilo no elemento raiz que o wrapper envolve.
+    default: return { texto: `${c}, ${c} > *`, caixa: c };
+  }
+}
+
+function compilarColuna(c: Coluna, g: GlobaisDoc, o: OpcoesCompilacao, empilha: boolean): string {
   const blocos = c.blocos
-    .filter((b) => blocoVisivel(b, "desktop"))
+    // Visível em QUALQUER dispositivo entra na saída: um bloco só-mobile nasce
+    // escondido e a media query o revela. Antes o filtro era só `desktop`, e marcar
+    // "aparece só no celular" simplesmente apagava o bloco do e-mail.
+    .filter((b) => blocoVisivel(b, "desktop") || blocoVisivel(b, "mobile"))
     .map((b) => {
-      const p = padding(b.estilo?.padding);
-      const wrap = p ? ` style="${css([["padding", p]])}"` : "";
-      return `<div${wrap}>${compilarBloco(b, g, o)}</div>`;
+      const e = b.estilo ?? {};
+      const naCaixa = caixaNoWrapper(b.tipo);
+      const estiloWrap = css([
+        ["padding", padding(e.padding)],
+        ["background-color", naCaixa ? e.corFundo : null],
+        ["border", naCaixa ? borda(e.borda) : null],
+        ["border-radius", naCaixa ? px(e.raio) : null],
+        // Só-mobile: nasce oculto e a `@media` devolve o display.
+        ["display", blocoVisivel(b, "desktop") ? null : "none"],
+      ]);
+      // `forcar-cor` só onde a cor não foi escolhida à mão: em dark mode o cliente
+      // inverte o texto, e quem definiu a cor quis aquela cor.
+      const classes = [classeBloco(b.id), naCaixa && !e.corTexto ? "forcar-cor" : ""]
+        .filter(Boolean).join(" ");
+      const attrEstilo = estiloWrap ? ` style="${estiloWrap}"` : "";
+      return `<div class="${classes}"${attrEstilo}>${compilarBloco(b, g, o)}</div>`;
     })
     .join("");
 
@@ -307,12 +400,16 @@ function compilarColuna(c: Coluna, g: GlobaisDoc, o: OpcoesCompilacao, total: nu
 
   // width em ATRIBUTO além do style: Outlook ignora width no CSS de <td>.
   const largura = Math.round(c.larguraPct);
-  return `<td class="coluna"${attr("width", `${largura}%`)} style="${estilo}">${blocos}</td>`;
+  // A classe `coluna` É a instrução de empilhar (a media query mira ela). Linha com
+  // `empilharMobile:false` sai sem a classe — antes o switch não tinha efeito nenhum.
+  const classe = empilha ? ` class="coluna"` : "";
+  return `<td${classe}${attr("width", `${largura}%`)} style="${estilo}">${blocos}</td>`;
 }
 
 function compilarLinha(l: Linha, g: GlobaisDoc, o: OpcoesCompilacao): string {
   if (l.oculto) return "";
-  const colunas = l.colunas.map((c) => compilarColuna(c, g, o, l.colunas.length)).join("");
+  const empilha = l.empilharMobile !== false;
+  const colunas = l.colunas.map((c) => compilarColuna(c, g, o, empilha)).join("");
 
   const estiloInterno = css([
     ["background-color", l.estilo?.corFundo],
@@ -333,8 +430,76 @@ function compilarLinha(l: Linha, g: GlobaisDoc, o: OpcoesCompilacao): string {
 
 // ------------------------------------------------------------------ documento
 
+/**
+ * Traduz os overrides de mobile do documento em regras CSS.
+ *
+ * É o que faz o modo mobile do construtor existir de verdade. Antes `estiloMobile` e
+ * `visivel.mobile` eram gravados no documento, apareciam no canvas e o compilador os
+ * ignorava — a pessoa ajustava o celular, salvava, e o destinatário recebia o desktop.
+ *
+ * ⚠️ Vive dentro da `@media`, então é PROGRESSIVO por natureza: cliente que descarta
+ * `<style>` (parte do Gmail) mostra o desktop, que continua correto. Nada essencial
+ * pode depender daqui.
+ */
+function regrasMobile(doc: DocumentoEmail): string {
+  const regras: string[] = [];
+
+  for (const l of doc.linhas ?? []) {
+    if (l.oculto) continue;
+    for (const c of l.colunas) {
+      for (const b of c.blocos) {
+        const noDesktop = blocoVisivel(b, "desktop");
+        const noMobile = blocoVisivel(b, "mobile");
+        if (!noDesktop && !noMobile) continue;
+
+        const classe = classeBloco(b.id);
+
+        if (!noMobile) {
+          // Esconder de verdade: `display:none` sozinho é ignorado por parte dos
+          // clientes; max-height + overflow é o par que fecha em todos.
+          regras.push(`.${classe}{display:none!important;max-height:0!important;overflow:hidden!important}`);
+          continue;
+        }
+        if (!noDesktop) {
+          regras.push(`.${classe}{display:block!important;max-height:none!important;overflow:visible!important}`);
+        }
+
+        const m = b.estiloMobile;
+        if (!m) continue;
+
+        const { texto, caixa } = alvosMobile(b.tipo, classe);
+
+        // O padding do desktop é escrito no wrapper; o de mobile precisa mirar lá.
+        const wrapper = cssImportante([["padding", padding(m.padding)]]);
+        if (wrapper) regras.push(`.${classe}{${wrapper}}`);
+
+        const tipografia = cssImportante([
+          ["font-family", m.fonte],
+          ["font-size", px(m.tamanhoFonte)],
+          ["font-weight", m.pesoFonte],
+          ["line-height", m.alturaLinha],
+          ["color", m.corTexto],
+          ["text-align", m.alinhamento],
+        ]);
+        if (tipografia) regras.push(`${texto}{${tipografia}}`);
+
+        const box = cssImportante([
+          ["background-color", m.corFundo],
+          ["border", borda(m.borda)],
+          ["border-radius", px(m.raio)],
+          ["width", m.largura],
+          ["height", m.altura],
+        ]);
+        if (box) regras.push(`${caixa}{${box}}`);
+      }
+    }
+  }
+
+  return regras.join("\n      ");
+}
+
 /** CSS progressivo: só o que PODE ser perdido sem estragar o e-mail. */
-function estiloCabecalho(g: GlobaisDoc, cssCustomizado?: string): string {
+function estiloCabecalho(g: GlobaisDoc, doc: DocumentoEmail): string {
   return `
     /* Reset mínimo — cada regra existe por um cliente específico. */
     body{margin:0;padding:0;width:100%!important;-webkit-text-size-adjust:100%;-ms-text-size-adjust:100%}
@@ -346,17 +511,21 @@ function estiloCabecalho(g: GlobaisDoc, cssCustomizado?: string): string {
 
     @media only screen and (max-width:${g.breakpointMobile}px){
       .container{width:100%!important;max-width:100%!important}
-      /* Empilha as colunas: display:block numa <td> só funciona com width forçada. */
+      /* Empilha as colunas: display:block numa <td> só funciona com width forçada.
+         Só as colunas de linha que optam por empilhar recebem a classe. */
       .coluna{display:block!important;width:100%!important;max-width:100%!important;box-sizing:border-box!important}
-      .mobile-oculto{display:none!important;max-height:0!important;overflow:hidden!important}
+      /* Overrides por bloco vindos do modo mobile do construtor. */
+      ${regrasMobile(doc)}
     }
 
-    /* Dark mode: fixa as cores para o cliente não inverter texto sobre fundo claro. */
+    /* Dark mode: fixa as cores para o cliente não inverter texto sobre fundo claro.
+       O seletor pega o filho porque a cor do desktop é inline no elemento de dentro,
+       e inline vence folha de estilo — mirar só o wrapper não teria efeito. */
     @media (prefers-color-scheme:dark){
-      .forcar-cor{color:${g.corTexto}!important}
+      .forcar-cor,.forcar-cor>*{color:${g.corTexto}!important}
       .forcar-fundo{background-color:${g.corFundo}!important}
     }
-    ${cssCustomizado ?? ""}
+    ${doc.cssCustomizado ?? ""}
   `.trim();
 }
 
@@ -365,6 +534,64 @@ export interface ResultadoCompilacao {
   /** Versão text/plain derivada, para o multipart. */
   texto: string;
   avisos: string[];
+  /** Tamanho do HTML em bytes — o Gmail corta acima de 102 KB. */
+  bytes: number;
+}
+
+/**
+ * O Gmail trunca a mensagem acima de ~102 KB e esconde o resto atrás de "[Mensagem
+ * cortada]" — junto com o rodapé de descadastro, que é justamente o que não pode
+ * sumir. É limite de bytes do HTML, não da imagem (imagem é buscada por URL).
+ */
+export const LIMITE_GMAIL_BYTES = 102 * 1024;
+
+function bytesDe(s: string): number {
+  // TextEncoder existe no browser, no Deno e no Node ≥11 — sem Buffer, que é só Node.
+  return typeof TextEncoder !== "undefined" ? new TextEncoder().encode(s).length : s.length;
+}
+
+/**
+ * Conferência de pré-voo do documento. É o que alimenta o painel de avisos do
+ * construtor: problemas que só aparecem DEPOIS do envio, quando não há mais conserto.
+ */
+function conferir(doc: DocumentoEmail, o: OpcoesCompilacao, bytes: number): string[] {
+  const avisos: string[] = [];
+
+  if (!o.descadastroUrl) {
+    avisos.push("Sem link de descadastro: obrigatório em disparo de massa (LGPD/CAN-SPAM).");
+  }
+  if (!doc.preheader) {
+    avisos.push("Sem preheader: o cliente de e-mail vai usar a primeira frase do corpo.");
+  }
+  if (bytes > LIMITE_GMAIL_BYTES) {
+    const kb = Math.round(bytes / 1024);
+    avisos.push(`HTML com ${kb} KB: acima de 102 KB o Gmail corta a mensagem e esconde o rodapé de descadastro.`);
+  }
+
+  let semAlt = 0;
+  let linksVazios = 0;
+  for (const l of doc.linhas ?? []) {
+    if (l.oculto) continue;
+    for (const c of l.colunas) {
+      for (const b of c.blocos) {
+        if (!blocoVisivel(b, "desktop") && !blocoVisivel(b, "mobile")) continue;
+        const ehImagem = ["imagem", "imagem-link", "video"].includes(b.tipo);
+        if (ehImagem && !(b.props.alt ?? "").trim()) semAlt++;
+        const precisaHref = ["botao", "link", "imagem-link", "video"].includes(b.tipo);
+        const href = (b.props.href ?? "").trim();
+        // "https://" é o placeholder com que o bloco nasce: clicar nele não vai a lugar nenhum.
+        if (precisaHref && (!href || href === "https://" || href === "http://")) linksVazios++;
+      }
+    }
+  }
+  if (semAlt > 0) {
+    avisos.push(`${semAlt} imagem(ns) sem texto alternativo: com imagem bloqueada, o espaço fica vazio.`);
+  }
+  if (linksVazios > 0) {
+    avisos.push(`${linksVazios} link(s) ainda sem destino — o botão vai sair clicável para lugar nenhum.`);
+  }
+
+  return avisos;
 }
 
 export function compilarDocumento(
@@ -372,7 +599,6 @@ export function compilarDocumento(
   opcoes: OpcoesCompilacao = {},
 ): ResultadoCompilacao {
   const g = { ...GLOBAIS_PADRAO, ...(doc.globais ?? {}) };
-  const avisos: string[] = [];
 
   const linhasSimples: string[] = [];
   const linhasSangradas: string[] = [];
@@ -412,13 +638,6 @@ export function compilarDocumento(
     ])}"><a${attr("href", opcoes.descadastroUrl)} style="${css([["color", "#71717a"], ["text-decoration", "underline"]])}">${esc(opcoes.descadastroTexto ?? "Descadastrar deste tipo de e-mail")}</a></td></tr></table>`
     : "";
 
-  if (!opcoes.descadastroUrl) {
-    avisos.push("Sem link de descadastro: obrigatório em disparo de massa (LGPD/CAN-SPAM).");
-  }
-  if (!doc.preheader) {
-    avisos.push("Sem preheader: o cliente de e-mail vai usar a primeira frase do corpo.");
-  }
-
   const html = `<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" lang="pt-BR">
 <head>
@@ -431,7 +650,7 @@ export function compilarDocumento(
 <!--[if mso]>
 <noscript><xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml></noscript>
 <![endif]-->
-<style type="text/css">${estiloCabecalho(g, doc.cssCustomizado)}</style>
+<style type="text/css">${estiloCabecalho(g, doc)}</style>
 </head>
 <body id="corpo" class="forcar-fundo" style="${css([
     ["margin", "0"],
@@ -453,10 +672,14 @@ ${pixel}
 </body>
 </html>`;
 
+  const saida = opcoes.minificar ? minificar(html) : html;
+  const bytes = bytesDe(saida);
+
   return {
-    html: opcoes.minificar ? minificar(html) : html,
+    html: saida,
     texto: gerarTextoSimples(doc, opcoes),
-    avisos,
+    avisos: conferir(doc, opcoes, bytes),
+    bytes,
   };
 }
 
@@ -480,7 +703,8 @@ export function gerarTextoSimples(doc: DocumentoEmail, opcoes: OpcoesCompilacao 
     if (l.oculto) continue;
     for (const c of l.colunas) {
       for (const b of c.blocos) {
-        if (!blocoVisivel(b, "desktop")) continue;
+        // Mesma régua do HTML: bloco só-mobile também é conteúdo do e-mail.
+        if (!blocoVisivel(b, "desktop") && !blocoVisivel(b, "mobile")) continue;
         switch (b.tipo) {
           case "texto":
           case "texto-dinamico":

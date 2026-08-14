@@ -56,6 +56,73 @@ describe("estrutura do documento HTML", () => {
     const { html } = compilarDocumento(doc([TEXTO]));
     expect(html).toMatch(/@media only screen and \(max-width:480px\)/);
     expect(html).toMatch(/\.coluna\{[^}]*display:block!important/);
+    expect(html).toMatch(/<td class="coluna"/);
+  });
+
+  it("linha com empilharMobile:false sai SEM a classe que empilha", () => {
+    const d: DocumentoEmail = {
+      ...docVazio(),
+      linhas: [linha([TEXTO], { empilharMobile: false })],
+    };
+    const { html } = compilarDocumento(d);
+    // A regra continua na folha (outras linhas podem usá-la); a coluna é que não opta.
+    expect(html).not.toContain('<td class="coluna"');
+  });
+});
+
+/**
+ * O modo mobile do construtor só existe se o override CHEGAR no HTML. Estes testes
+ * existem porque ele não chegava: `estiloMobile` era gravado, aparecia no canvas e o
+ * compilador o ignorava — a pessoa ajustava o celular e o destinatário recebia o
+ * desktop. Verificar "existe uma media query" não prova nada; o que prova é a regra
+ * com o valor certo, no seletor certo, com `!important` (inline vence folha).
+ */
+describe("overrides de mobile", () => {
+  it("emite a regra do estiloMobile com !important dentro da media query", () => {
+    const { html } = compilarDocumento(doc([{
+      ...TEXTO,
+      estilo: { tamanhoFonte: 32 },
+      estiloMobile: { tamanhoFonte: 20 },
+    }]));
+    expect(html).toContain("font-size:32px");
+    const media = html.match(/@media only screen and \(max-width:480px\)\{[\s\S]*?\n\s*\}/)?.[0] ?? "";
+    expect(media).toContain("font-size:20px!important");
+    expect(media).toContain(".bl-b1");
+  });
+
+  it("bloco escondido no mobile vira display:none na media query", () => {
+    const { html } = compilarDocumento(doc([{ ...TEXTO, visivel: { desktop: true, mobile: false } }]));
+    expect(html).toContain("Olá mundo");
+    expect(html).toMatch(/\.bl-b1\{display:none!important/);
+  });
+
+  it("bloco SÓ de mobile sai no HTML escondido e a media query o revela", () => {
+    const { html } = compilarDocumento(doc([{ ...TEXTO, visivel: { desktop: false, mobile: true } }]));
+    // Antes o filtro era só desktop e este bloco sumia inteiro do e-mail.
+    expect(html).toContain("Olá mundo");
+    expect(html).toMatch(/<div class="bl-b1[^"]*"[^>]*style="[^"]*display:none/);
+    expect(html).toMatch(/\.bl-b1\{display:block!important/);
+  });
+
+  it("bloco oculto nos dois dispositivos não entra na saída", () => {
+    const { html } = compilarDocumento(doc([{ ...TEXTO, visivel: { desktop: false, mobile: false } }]));
+    expect(html).not.toContain("Olá mundo");
+  });
+
+  it("mira o <a> do botão e a <td> da caixa — inline no elemento errado não venceria", () => {
+    const { html } = compilarDocumento(doc([{
+      id: "b1", tipo: "botao",
+      props: { texto: "Ir", href: "https://e.com" },
+      estiloMobile: { tamanhoFonte: 14, corFundo: "#000000" },
+    }]));
+    expect(html).toMatch(/\.bl-b1 a\{[^}]*font-size:14px!important/);
+    expect(html).toMatch(/\.bl-b1 td\{[^}]*background-color:#000000!important/);
+  });
+
+  it("documento sem override não polui a media query", () => {
+    const { html } = compilarDocumento(doc([TEXTO]));
+    expect(html).not.toContain("!important;padding");
+    expect(html).not.toMatch(/\.bl-b1\{/);
   });
 });
 
@@ -124,6 +191,16 @@ describe("bloco de imagem", () => {
     expect(html).not.toContain("<video");
     expect(html).toContain("https://cdn/t.jpg");
     expect(html).toMatch(/href="https:\/\/youtu\.be\/x"/);
+  });
+
+  it("vídeo traz a chamada de assistir — senão sai idêntico a uma imagem com link", () => {
+    const { html } = compilarDocumento(doc([{
+      id: "v", tipo: "video",
+      props: { thumbnail: "https://cdn/t.jpg", href: "https://youtu.be/x", alt: "Aula 1" },
+    }]));
+    expect(html).toContain("Assistir ao vídeo");
+    // Dois links para o mesmo destino: a miniatura e a chamada abaixo dela.
+    expect(html.match(/href="https:\/\/youtu\.be\/x"/g) ?? []).toHaveLength(2);
   });
 });
 
@@ -222,6 +299,22 @@ describe("descadastro e conformidade", () => {
   it("AVISA quando o documento sai sem descadastro — exigência de LGPD/CAN-SPAM", () => {
     const { avisos } = compilarDocumento(doc([TEXTO]));
     expect(avisos.join(" ")).toMatch(/descadastro/i);
+  });
+
+  it("AVISA quando o HTML passa de 102 KB — acima disso o Gmail corta a mensagem", () => {
+    const gordo = doc([{ id: "h", tipo: "html", props: { html: "<p>x</p>".repeat(20_000) } }]);
+    const { avisos, bytes } = compilarDocumento(gordo);
+    expect(bytes).toBeGreaterThan(102 * 1024);
+    expect(avisos.join(" ")).toMatch(/102 KB/);
+  });
+
+  it("AVISA imagem sem alt e link ainda no placeholder https://", () => {
+    const { avisos } = compilarDocumento(doc([
+      { id: "i", tipo: "imagem", props: { src: "x.png" } },
+      { id: "b", tipo: "botao", props: { texto: "Clique", href: "https://" } },
+    ]));
+    expect(avisos.join(" ")).toMatch(/texto alternativo/i);
+    expect(avisos.join(" ")).toMatch(/sem destino/i);
   });
 
   it("preheader fica escondido no corpo mas presente no HTML", () => {

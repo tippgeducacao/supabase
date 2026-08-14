@@ -15,11 +15,42 @@ Deno.serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
 
-    const { template_id, destinatario_email, variaveis } = await req.json();
-    if (!template_id || !destinatario_email) {
-      return new Response(JSON.stringify({ error: "template_id e destinatario_email obrigatórios" }), {
+    const {
+      template_id, destinatario_email, variaveis,
+      // Conteúdo AVULSO (construtor visual): permite testar um e-mail que ainda não
+      // foi salvo como template. Antes só existia o caminho por `template_id`, e testar
+      // obrigava a montar → salvar → fechar → achar na lista → enviar.
+      assunto, corpo_html, corpo_texto, remetente_id,
+    } = await req.json();
+
+    const temAvulso = Boolean(corpo_html);
+    if (!destinatario_email || (!template_id && !temAvulso)) {
+      return new Response(JSON.stringify({ error: "destinatario_email e (template_id ou corpo_html) obrigatórios" }), {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
+    }
+
+    /**
+     * `email-send` exige remetente. No caminho do template ele sai do próprio template;
+     * no avulso, quem chama pode informar — e, se não informar, cai no primeiro
+     * remetente ATIVO. Escolher um default é melhor que recusar o teste: o objetivo
+     * aqui é ver o e-mail renderizado num cliente real, não exercitar o roteamento.
+     */
+    let remetenteAvulso: string | null = remetente_id ?? null;
+    if (temAvulso && !remetenteAvulso) {
+      const { data: rem } = await supabaseAdmin
+        .from("email_remetentes")
+        .select("id")
+        .eq("ativo", true)
+        .order("criado_em", { ascending: true })
+        .limit(1)
+        .maybeSingle();
+      remetenteAvulso = rem?.id ?? null;
+      if (!remetenteAvulso) {
+        return new Response(JSON.stringify({ error: "Nenhum remetente ativo para enviar o teste. Cadastre um em Remetentes." }), {
+          status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
     }
 
     // Variáveis fake default
@@ -43,7 +74,11 @@ Deno.serve(async (req) => {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        template_id,
+        // No avulso não vai `template_id`: o corpo já está pronto e o `email-send`
+        // usaria o template para SOBRESCREVER o html recebido.
+        ...(temAvulso
+          ? { assunto, corpo_html, corpo_texto, remetente_id: remetenteAvulso }
+          : { template_id }),
         destinatario_email,
         destinatario_nome: "Destinatário de teste",
         variaveis: varsFake,

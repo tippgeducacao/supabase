@@ -167,7 +167,10 @@ export const GLOBAIS_PADRAO: GlobaisDoc = {
 
 export interface DocumentoEmail {
   versao: number;
+  /** Nome interno — só a equipe vê, serve para achar na lista. */
   nome: string;
+  /** Assunto que o destinatário lê na caixa. Aceita merge tags. */
+  assunto?: string;
   globais: GlobaisDoc;
   linhas: Linha[];
   /** CSS extra injetado no <head> (aba "CÓDIGO CUSTOMIZADO"). */
