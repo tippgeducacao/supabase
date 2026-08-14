@@ -7,6 +7,7 @@
 //             produto: 'pos' (padrão, LPs de pós) | 'escola' (chat DENTRO da Escola de
 //             Especialização — persona própria do João, ver escola.ts)
 //   enviar  → { sessao_id, conteudo }   grava inbound + resposta do João (IA), devolve { mensagem_id }
+//   teste_* → mesmas etapas do chat, restritas a admin/diretor e sem efeitos externos
 //   poll    → { sessao_id, apos }       mensagens com id > apos (cursor do widget)
 //   push_status → { sessao_id }        a sessão já tem Web Push ativo? (a LP não sabe:
 //                                      a permissão foi dada no popup, em OUTRA origem)
@@ -100,6 +101,32 @@ function telefoneValido(raw: string): string | null {
   const semPais = dig.startsWith("55") && dig.length >= 12 ? dig.slice(2) : dig;
   if (semPais.length < 10 || semPais.length > 11) return null;
   return semPais;
+}
+
+/** Autorização explícita: a function é pública para o widget, então verify_jwt=false. */
+async function usuarioGestao(req: Request): Promise<string | null> {
+  const cabecalho = req.headers.get("authorization") ?? "";
+  const token = cabecalho.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
+  if (!token) return null;
+  const { data: auth, error: authError } = await supabase.auth.getUser(token);
+  if (authError || !auth.user?.id) return null;
+  const { data: permitido, error } = await supabase.rpc("has_admin_permission", {
+    _user_id: auth.user.id,
+  });
+  if (error || permitido !== true) return null;
+  return auth.user.id;
+}
+
+function telefoneSeguroDeTeste(id: string): string {
+  // Nunca é usado em saída externa; ainda assim mantém 11 dígitos para o agente receber
+  // o mesmo formato do canal real. O prefixo 000 também deixa a natureza sintética óbvia.
+  const cauda = id.replace(/-/g, "").slice(0, 8)
+    .split("").map((c) => String(Number.parseInt(c, 16) % 10)).join("");
+  return `000${cauda}`;
+}
+
+function nomeContatoTeste(cenario: string, execucaoId: string): string {
+  return `[TESTE IA] ${cenario} · ${execucaoId.slice(0, 8)}`.slice(0, 120);
 }
 
 // IP do cliente SEM confiar no que o cliente manda: o PRIMEIRO valor do
@@ -227,7 +254,7 @@ async function responderComoJoao(
       text: String(m.conteudo ?? ""),
     })).filter((m) => m.text);
 
-    const { chunks, estagio } = await responderWebchat(
+    const { chunks, estagio, tools } = await responderWebchat(
       sessao.nome ?? "",
       sessao.telefone ?? "",
       sessao.curso ?? null,
@@ -235,6 +262,7 @@ async function responderComoJoao(
       sessao.estagio === "qualificador" ? "qualificador" : "validacao",
       sessao.lead_id ?? null,
       sessao.produto === "escola" ? "escola" : "pos",
+      sessao.modo_teste === true,
     );
     // ratchet: promoção validação→qualificador é persistida (nunca regride)
     if (estagio === "qualificador" && sessao.estagio !== "qualificador") {
@@ -248,30 +276,40 @@ async function responderComoJoao(
       await syncSac(sessaoId, "outbound", "ia", chunk);
     }
 
+    if (sessao.modo_teste && tools.length) {
+      const anteriores = Array.isArray(sessao.teste_tool_chamadas) ? sessao.teste_tool_chamadas : [];
+      const em = new Date().toISOString();
+      await supabase.from("webchat_sessoes").update({
+        teste_tool_chamadas: [...anteriores, ...tools.map((tool) => ({ ...tool, em }))],
+      }).eq("id", sessaoId);
+    }
+
     // NOVA MENSAGEM em SEGUNDO PLANO → push imediato no navegador (com som do sistema).
     // Dispara quando a aba está OCULTA (widget avisa via acao 'presenca') OU quando o
     // sinal de presença é velho (>2min = navegador fechado sem o pagehide chegar).
     // Best-effort: sem subscription/lib, simplesmente não notifica (o cutucão de 20min
     // do cron segue como rede de segurança).
-    try {
-      const { data: pres } = await supabase
-        .from("webchat_sessoes")
-        .select("chat_visivel, presenca_em, origem_url, nome")
-        .eq("id", sessaoId)
-        .maybeSingle();
-      const presencaVelha = !pres?.presenca_em ||
-        (Date.now() - new Date(pres.presenca_em).getTime()) > 120_000;
-      if (pres && (pres.chat_visivel === false || presencaVelha)) {
-        const primeiro = (pres.nome ?? "").trim().split(/\s+/)[0];
-        await pushParaSessao(supabase, sessaoId, {
-          title: "💬 João te respondeu",
-          body: `${primeiro ? primeiro + ", a" : "A"} resposta chegou — volte pra conversa quando puder.`,
-          url: pres.origem_url || "/",
-          tag: "ppgwc-nova-mensagem",
-        });
+    if (!sessao.modo_teste) {
+      try {
+        const { data: pres } = await supabase
+          .from("webchat_sessoes")
+          .select("chat_visivel, presenca_em, origem_url, nome")
+          .eq("id", sessaoId)
+          .maybeSingle();
+        const presencaVelha = !pres?.presenca_em ||
+          (Date.now() - new Date(pres.presenca_em).getTime()) > 120_000;
+        if (pres && (pres.chat_visivel === false || presencaVelha)) {
+          const primeiro = (pres.nome ?? "").trim().split(/\s+/)[0];
+          await pushParaSessao(supabase, sessaoId, {
+            title: "💬 João te respondeu",
+            body: `${primeiro ? primeiro + ", a" : "A"} resposta chegou — volte pra conversa quando puder.`,
+            url: pres.origem_url || "/",
+            tag: "ppgwc-nova-mensagem",
+          });
+        }
+      } catch (e) {
+        console.error(`[crm-webchat] push nova mensagem: ${(e as Error).message}`);
       }
-    } catch (e) {
-      console.error(`[crm-webchat] push nova mensagem: ${(e as Error).message}`);
     }
   } catch (e) {
     console.error(`[crm-webchat] cerebro: ${(e as Error).message}`);
@@ -379,10 +417,16 @@ async function acaoIniciar(body: Record<string, unknown>, req: Request) {
 async function carregarSessao(sessaoId: string) {
   const { data } = await supabase
     .from("webchat_sessoes")
-    .select("id, bloqueada, nome, telefone, curso, produto, estagio, lead_id, chat_visivel, presenca_em, origem_url, atendimento_humano")
+    .select("id, bloqueada, nome, telefone, curso, produto, estagio, lead_id, chat_visivel, presenca_em, origem_url, atendimento_humano, modo_teste, teste_execucao_id, teste_cenario, teste_tool_chamadas")
     .eq("id", sessaoId)
     .maybeSingle();
-  return data as { id: string; bloqueada: boolean; nome: string | null; telefone: string | null; curso: string | null; produto: string | null; estagio: "validacao" | "qualificador" | null; lead_id: string | null; chat_visivel: boolean | null; presenca_em: string | null; origem_url: string | null; atendimento_humano: boolean | null } | null;
+  return data as {
+    id: string; bloqueada: boolean; nome: string | null; telefone: string | null;
+    curso: string | null; produto: string | null; estagio: "validacao" | "qualificador" | null;
+    lead_id: string | null; chat_visivel: boolean | null; presenca_em: string | null;
+    origem_url: string | null; atendimento_humano: boolean | null; modo_teste: boolean;
+    teste_execucao_id: string | null; teste_cenario: string | null; teste_tool_chamadas: unknown[];
+  } | null;
 }
 
 // Espelha a mensagem no SAC (funil "Webchat") — a conversa aparece no Contato 360 /
@@ -397,7 +441,7 @@ async function syncSac(sessaoId: string, direcao: string, origem: string, conteu
   }
 }
 
-async function acaoEnviar(body: Record<string, unknown>) {
+async function acaoEnviar(body: Record<string, unknown>, canal: "publico" | "teste" = "publico") {
   const sessaoId = texto(body.sessao_id, 40);
   const conteudo = texto(body.conteudo, MAX_CONTEUDO);
   if (!UUID_RE.test(sessaoId)) return json({ ok: false, erro: "sessao_invalida" }, 400);
@@ -406,9 +450,13 @@ async function acaoEnviar(body: Record<string, unknown>) {
   const sessao = await carregarSessao(sessaoId);
   if (!sessao) return json({ ok: false, erro: "sessao_nao_encontrada" }, 404);
   if (sessao.bloqueada) return json({ ok: false, erro: "sessao_bloqueada" }, 403);
+  if (canal === "publico" && sessao.modo_teste) return json({ ok: false, erro: "sessao_nao_encontrada" }, 404);
+  if (canal === "teste" && !sessao.modo_teste) return json({ ok: false, erro: "sessao_nao_encontrada" }, 404);
 
-  const limite = await checarLimitesInbound(sessaoId);
-  if (limite) return limite;
+  if (canal === "publico") {
+    const limite = await checarLimitesInbound(sessaoId);
+    if (limite) return limite;
+  }
 
   const { data: msg, error } = await supabase
     .from("webchat_mensagens")
@@ -433,12 +481,14 @@ async function acaoEnviar(body: Record<string, unknown>) {
 
 // Roda o cérebro do João (1 balão por chunk). Separado de 'enviar'/'audio' p/ caber no limite
 // de CPU/wall-clock do edge. Só responde se a última mensagem for do lead (anti-spam do LLM).
-async function acaoResponder(body: Record<string, unknown>) {
+async function acaoResponder(body: Record<string, unknown>, canal: "publico" | "teste" = "publico") {
   const sessaoId = texto(body.sessao_id, 40);
   if (!UUID_RE.test(sessaoId)) return json({ ok: false, erro: "sessao_invalida" }, 400);
   const sessao = await carregarSessao(sessaoId);
   if (!sessao) return json({ ok: false, erro: "sessao_nao_encontrada" }, 404);
   if (sessao.bloqueada) return json({ ok: false, erro: "sessao_bloqueada" }, 403);
+  if (canal === "publico" && sessao.modo_teste) return json({ ok: false, erro: "sessao_nao_encontrada" }, 404);
+  if (canal === "teste" && !sessao.modo_teste) return json({ ok: false, erro: "sessao_nao_encontrada" }, 404);
 
   /*
     Um atendente assumiu a conversa pelo SAC 2.0 (`sac_v2_webchat_enviar` marca
@@ -458,6 +508,84 @@ async function acaoResponder(body: Record<string, unknown>) {
 
   await responderComoJoao(sessao, sessaoId);
   return json({ ok: true });
+}
+
+/**
+ * Cria uma conversa sintética no MESMO SAC do chat ao vivo. Não passa por captcha,
+ * rate limit nem lead_upsert porque só gestão autenticada entra aqui. O cérebro e os
+ * prompts são os reais; as tools de efeito ficam mockadas em agente.ts.
+ */
+async function acaoTesteIniciar(body: Record<string, unknown>, req: Request) {
+  const userId = await usuarioGestao(req);
+  if (!userId) return json({ ok: false, erro: "acesso_negado" }, 403);
+
+  const execucaoId = texto(body.execucao_id, 40);
+  const cenarioId = texto(body.cenario_id, 80);
+  const cenarioNome = texto(body.cenario_nome, 100);
+  const nome = texto(body.nome_lead, 80);
+  if (!UUID_RE.test(execucaoId) || !cenarioId || !cenarioNome || nome.length < 2) {
+    return json({ ok: false, erro: "cenario_invalido" }, 400);
+  }
+  const produto = texto(body.produto, 20).toLowerCase() === "escola" ? "escola" : "pos";
+  const curso = texto(body.curso, 120) || null;
+  const id = crypto.randomUUID();
+  const telefone = telefoneSeguroDeTeste(id);
+  const marcador = nomeContatoTeste(cenarioNome, execucaoId);
+
+  const { error } = await supabase.from("webchat_sessoes").insert({
+    id,
+    nome,
+    telefone,
+    produto,
+    pagina: "Harness do SAC 2.0",
+    curso,
+    origem_url: null,
+    ip: "harness-interno",
+    user_agent: "SAC 2.0 · teste automatizado",
+    modo_teste: true,
+    teste_execucao_id: execucaoId,
+    teste_cenario: cenarioNome,
+    teste_criado_por: userId,
+    teste_tool_chamadas: [],
+  });
+  if (error) {
+    console.error(`[crm-webchat] teste_iniciar: ${error.message}`);
+    return json({ ok: false, erro: "erro_interno" }, 500);
+  }
+
+  let chunks = [`Oi, ${nome.split(" ")[0]}! 👋 Me conta como posso te ajudar.`];
+  try {
+    chunks = await aberturaWebchat(nome, curso, produto);
+  } catch (e) {
+    console.error(`[crm-webchat] teste abertura: ${(e as Error).message}`);
+  }
+  for (const chunk of chunks) {
+    await supabase.from("webchat_mensagens").insert({
+      sessao_id: id, direcao: "outbound", origem: "ia", conteudo: chunk,
+    });
+    await syncSac(id, "outbound", "ia", chunk);
+  }
+
+  const { data: funil } = await supabase.from("sac_v2_funis")
+    .select("id").eq("ativo", true).eq("canal_webchat", true).order("ordem").limit(1).maybeSingle();
+  return json({
+    ok: true,
+    sessao_id: id,
+    execucao_id: execucaoId,
+    cenario_id: cenarioId,
+    marcador,
+    sac_funil_id: funil?.id ?? null,
+  });
+}
+
+async function acaoTesteEnviar(body: Record<string, unknown>, req: Request) {
+  if (!(await usuarioGestao(req))) return json({ ok: false, erro: "acesso_negado" }, 403);
+  return acaoEnviar(body, "teste");
+}
+
+async function acaoTesteResponder(body: Record<string, unknown>, req: Request) {
+  if (!(await usuarioGestao(req))) return json({ ok: false, erro: "acesso_negado" }, 403);
+  return acaoResponder(body, "teste");
 }
 
 // Áudio do lead: base64 → Storage (whatsapp-anexos/webchat) → Whisper → vira a mensagem
@@ -641,7 +769,6 @@ async function acaoPoll(body: Record<string, unknown>) {
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return json({ ok: false, erro: "metodo" }, 405);
-  if (origemBloqueada(req)) return json({ ok: false, erro: "origem_nao_permitida" }, 403);
 
   let body: Record<string, unknown>;
   try {
@@ -657,8 +784,14 @@ Deno.serve(async (req) => {
     return json({ ok: false, erro: "json_invalido" }, 400);
   }
 
+  const acao = texto(body.acao, 40);
+  const acaoTeste = acao.startsWith("teste_");
+  if (!acaoTeste && origemBloqueada(req)) {
+    return json({ ok: false, erro: "origem_nao_permitida" }, 403);
+  }
+
   try {
-    switch (body.acao) {
+    switch (acao) {
       case "iniciar":
         return await acaoIniciar(body, req);
       case "enviar":
@@ -667,6 +800,12 @@ Deno.serve(async (req) => {
         return await acaoAudio(body, req);
       case "responder":
         return await acaoResponder(body);
+      case "teste_iniciar":
+        return await acaoTesteIniciar(body, req);
+      case "teste_enviar":
+        return await acaoTesteEnviar(body, req);
+      case "teste_responder":
+        return await acaoTesteResponder(body, req);
       case "poll":
         return await acaoPoll(body);
       case "push_vapid":

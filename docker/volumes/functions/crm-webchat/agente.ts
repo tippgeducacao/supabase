@@ -19,6 +19,7 @@ import { limparParaRouter, sanitizarHistorico } from "../crm-agente-sdr/historic
 import { fracionarResposta, humanizarTexto } from "../crm-agente-sdr/saida.ts";
 // Persona da ESCOLA DE ESPECIALIZAÇÃO (produto='escola') — bloco próprio, ver escola.ts.
 import { fallbackAberturaEscola, filtrarLinkMatricula, instrucaoAberturaEscola, notaCanalEscola } from "./escola.ts";
+import { resultadoToolMockado, toolDeveSerMockada } from "./modoTeste.ts";
 
 const ANTHROPIC_KEY = Deno.env.get("AGENTE_SDR_ANTHROPIC_KEY") ?? Deno.env.get("ANTHROPIC_API_KEY") ?? "";
 const MODELO = Deno.env.get("AGENTE_SDR_MODEL") ?? "claude-sonnet-5";
@@ -35,6 +36,11 @@ const MAX_RODADAS = 6;
 export type Estagio = "validacao" | "qualificador";
 /** De onde veio a sessão: LP de pós (padrão) ou a Escola de Especialização. */
 export type Produto = "pos" | "escola";
+export type WebchatToolChamada = {
+  nome: string;
+  input: Record<string, unknown>;
+  mockado: boolean;
+};
 type Msg = { role: "user" | "assistant"; content: any };
 // CtxConversa do agente real — no webchat waAccountId/oportunidadeId ficam nulos.
 type CtxConversa = { remotejid: string; telefone: string; waAccountId: string | null; leadId: string | null; oportunidadeId: string | null };
@@ -219,10 +225,12 @@ export async function responderWebchat(
   estagioSalvo: Estagio = "validacao",
   leadId: string | null = null,
   produto: Produto = "pos",
-): Promise<{ chunks: string[]; estagio: Estagio }> {
+  modoTeste = false,
+): Promise<{ chunks: string[]; estagio: Estagio; tools: WebchatToolChamada[] }> {
+  const chamadas: WebchatToolChamada[] = [];
   const raw: Msg[] = history.map((m) => ({ role: m.role, content: m.text })).filter((m) => m.content);
   if (!ANTHROPIC_KEY || !raw.length) {
-    return { chunks: ["Pode me contar um pouco mais sobre o que você procura? 😊"], estagio: estagioSalvo };
+    return { chunks: ["Pode me contar um pouco mais sobre o que você procura? 😊"], estagio: estagioSalvo, tools: chamadas };
   }
   // A conversa do webchat começa com a ABERTURA (assistant); a Anthropic exige início
   // 'user'. Prepende um marcador de abertura (o limparParaRouter/sanitizarHistorico do
@@ -268,7 +276,7 @@ export async function responderWebchat(
         chunks = filtrarLinkMatricula(chunks, ultimaDoLead);
         if (chunks.length !== antes) console.log("[crm-webchat] escola: link de matrícula removido (não foi pedido)");
       }
-      return { chunks, estagio };
+      return { chunks, estagio, tools: chamadas };
     }
 
     // executa as tools REAIS (mesma implementação do WhatsApp) e continua o loop.
@@ -278,10 +286,17 @@ export async function responderWebchat(
     const outputs: Record<string, unknown>[] = [];
     for (const tu of toolUses) {
       if (TOOLS_QUE_PAUSAM.has(tu.name)) pausouPorTool = true;
-      if (tu.name === "envia_informacoes") outputs.push(await webchatEnviaInformacoes(tu, telefone, curso));
+      const mockado = toolDeveSerMockada(modoTeste, String(tu.name ?? ""));
+      chamadas.push({
+        nome: String(tu.name ?? ""),
+        input: (tu.input && typeof tu.input === "object" ? tu.input : {}) as Record<string, unknown>,
+        mockado,
+      });
+      if (mockado) outputs.push(resultadoToolMockado(tu, limparCurso(curso)));
+      else if (tu.name === "envia_informacoes") outputs.push(await webchatEnviaInformacoes(tu, telefone, curso));
       else outputs.push(await executarTool(supabase, tu, ctx));
     }
     messages.push({ role: "user", content: montarToolResults(outputs) });
   }
-  return { chunks: ["Deixa eu confirmar uma coisa aqui rapidinho e já te falo. 🙌"], estagio };
+  return { chunks: ["Deixa eu confirmar uma coisa aqui rapidinho e já te falo. 🙌"], estagio, tools: chamadas };
 }
