@@ -120,6 +120,9 @@ Deno.serve(async (req) => {
 
     // ── messages ──────────────────────────────────────────────────────────────
     let processed = 0;
+    // Inbound que não conseguiu ser gravado. Com >0 devolvemos erro pro provider
+    // reentregar — 200 aqui é mensagem de lead perdida em silêncio.
+    let falhasPersistencia = 0;
     // resolve token 1x (só se precisar baixar mídia)
     let instToken: string | null = null;
     const getToken = async (): Promise<string | null> => {
@@ -242,10 +245,26 @@ Deno.serve(async (req) => {
         },
       });
       if (insErr) {
-        if ((insErr as { code?: string }).code === "23505") {
+        // 23505 só é reentrega benigna se o externalId JÁ ESTIVER gravado. Qualquer outra
+        // violação é perda de mensagem — foi assim que o espelho do SAC (card arquivado
+        // colidindo em uq_sac_atend_contato_funil_linha) sumiu com inbound por semanas.
+        const code = (insErr as { code?: string }).code ?? "";
+        let retryBenigno = false;
+        if (code === "23505" && m.externalId) {
+          const { data: jaGravada } = await admin
+            .from("crm_whatsapp_messages")
+            .select("id")
+            .eq("wa_message_id", m.externalId)
+            .limit(1);
+          retryBenigno = (jaGravada?.length ?? 0) > 0;
+        }
+        if (retryBenigno) {
           console.log("[wa-uazapi-webhook] msg duplicada, ignorada:", m.externalId);
         } else {
-          console.error("[wa-uazapi-webhook] insert msg erro:", insErr.message);
+          falhasPersistencia++;
+          console.error(
+            `[wa-uazapi-webhook] FALHA AO GRAVAR MENSAGEM (externalId=${m.externalId}, code=${code}): ${insErr.message}`,
+          );
         }
       } else {
         processed++;
@@ -253,11 +272,15 @@ Deno.serve(async (req) => {
     }
 
     // marca o log como processado
+    if (falhasPersistencia > 0) {
+      return json({ ok: false, erro: "falha ao persistir mensagem", falhas: falhasPersistencia, messages: processed }, 503);
+    }
     return json({ ok: true, messages: processed });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error("[wa-uazapi-webhook] erro:", msg);
-    // 200 sempre: não queremos que o provider suspenda o webhook por erro nosso.
-    return json({ ok: true, processed: false });
+    // Antes era 200 sempre (pra não suspender o webhook), mas isso vira perda silenciosa
+    // de mensagem. Erro é erro: 500 e o provider reentrega (idempotente pelo externalId).
+    return json({ ok: false, processed: false, erro: msg }, 500);
   }
 });

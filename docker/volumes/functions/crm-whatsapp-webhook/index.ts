@@ -329,6 +329,9 @@ Deno.serve(async (req) => {
     let processedMessages = 0;
     let processedStatuses = 0;
     let processedAlertas = 0;
+    // Inbound que NÃO conseguiu ser gravado. Com >0 devolvemos erro pra Meta reentregar —
+    // silêncio aqui significa mensagem de lead perdida pra sempre.
+    let falhasPersistencia = 0;
 
     for (const entry of entries) {
       const changes = entry?.changes ?? [];
@@ -601,11 +604,29 @@ Deno.serve(async (req) => {
           });
 
           if (insertErr) {
-            // 23505 = unique_violation: retry da Meta com o mesmo wamid. Benigno: não relaya de novo.
-            if ((insertErr as { code?: string }).code === "23505") {
+            // 23505 só é retry benigno da Meta se o wamid JÁ ESTIVER gravado. Tratar TODO
+            // unique_violation como retry escondeu por semanas uma perda total de inbound:
+            // o espelho do SAC batia em uq_sac_atend_contato_funil_linha (card arquivado),
+            // a transação abortava e a gente respondia 200 dizendo "duplicada".
+            // (incidente 13/08/2026 — ver docs/CRM Comercial.md)
+            const code = (insertErr as { code?: string }).code ?? "";
+            let retryBenigno = false;
+            if (code === "23505" && msgId) {
+              const { data: jaGravada } = await admin
+                .from("crm_whatsapp_messages")
+                .select("id")
+                .eq("wa_message_id", msgId)
+                .limit(1);
+              retryBenigno = (jaGravada?.length ?? 0) > 0;
+            }
+            if (retryBenigno) {
               console.log("[crm-whatsapp-webhook] msg duplicada (retry meta), ignorada:", msgId);
             } else {
-              console.error("[crm-whatsapp-webhook] insert msg erro:", insertErr.message);
+              falhasPersistencia++;
+              console.error(
+                `[crm-whatsapp-webhook] FALHA AO GRAVAR INBOUND de ${from} ` +
+                `(wamid=${msgId}, code=${code}): ${insertErr.message}`,
+              );
             }
           } else {
             processedMessages++;
@@ -683,11 +704,22 @@ Deno.serve(async (req) => {
     console.log(
       `[crm-whatsapp-webhook] processado: ${processedMessages} msgs, ${processedStatuses} statuses, ${processedAlertas} alertas`,
     );
+    // Falha de persistência NUNCA responde 200: a Meta reentrega e a mensagem se salva.
+    // A reentrega do que já gravou cai no "retry benigno" acima, então é idempotente.
+    if (falhasPersistencia > 0) {
+      return json({
+        ok: false,
+        erro: "falha ao persistir inbound",
+        falhas: falhasPersistencia,
+        messages: processedMessages,
+      }, 503);
+    }
     return json({ ok: true, messages: processedMessages, statuses: processedStatuses, alertas: processedAlertas });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error("[crm-whatsapp-webhook] erro de processamento:", msg);
-    // 200 mesmo em erro: evita retry/suspensão do webhook pela Meta. Detalhe fica no log.
-    return json({ ok: true, processed: false }, 200);
+    // Antes devolvíamos 200 aqui pra evitar retry da Meta — mas isso transforma qualquer
+    // exceção em perda silenciosa de mensagem. Erro é erro: 500 e a Meta reentrega.
+    return json({ ok: false, processed: false, erro: msg }, 500);
   }
 });
