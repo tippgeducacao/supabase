@@ -1,7 +1,25 @@
 // Edge Function: email-send
-// Renderiza template, checa idempotência, envia via Gmail API usando OAuth do Workspace
-// (mesma conexão reaproveitada do Google Calendar -> tabela calendar_integrations).
+// Renderiza template, checa idempotência e envia por UM DE DOIS MOTORES, escolhido
+// pelo `provider` do remetente (email_remetentes.provider):
+//
+//   gmail  -> Gmail API com OAuth do Workspace (calendar_integrations). E-mail 1:1:
+//             a resposta do aluno cai na caixa e o enviado aparece na thread.
+//   resend -> API do Resend. Disparo em massa/automação: métrica de entrega real,
+//             bounce/spam via webhook e domínio próprio.
+//
+// A separação é de propósito: bounce de campanha não pode queimar a reputação do
+// domínio que manda o e-mail de aprovação de TCC. Ver docs/E-mail e Caixas.md.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import {
+  chaveIdempotencia,
+  enviarEmail,
+  formatarFrom,
+  linkDescadastro,
+  tagSegura,
+  temResend,
+} from "../_shared/resend.ts";
+import { ErroEnvio, obterProvedor } from "../_shared/emailProviders/index.ts";
+import { buscarSupressao, supressaoSeAplica } from "../_shared/supressao.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -204,48 +222,75 @@ Deno.serve(async (req) => {
         status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
+    const provider: "gmail" | "resend" | "ses" =
+      rem.provider === "resend" ? "resend" : rem.provider === "ses" ? "ses" : "gmail";
     const caixaEmail = rem.gmail_caixa_email ?? rem.email_completo;
     const fromName = rem.nome_remetente;
     const replyTo = rem.reply_to_email;
+    const ehCampanha = payload.contexto_tipo === "campanha";
 
-    // Busca integração Gmail desse Workspace
-    const { data: integ } = await supabaseAdmin
-      .from("calendar_integrations")
-      .select("id, oauth_access_token, oauth_refresh_token, oauth_token_expires_at, scopes, account_email")
-      .eq("account_email", caixaEmail)
-      .not("oauth_refresh_token", "is", null)
-      .order("is_primary", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (!integ?.oauth_refresh_token) {
-      return new Response(JSON.stringify({
-        error: "Caixa não conectada ao Google. Conecte via Calendário e reautorize com escopos Gmail.",
-        caixa: caixaEmail,
-      }), { status: 412, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-    }
-    if (integ.scopes && !integ.scopes.includes("gmail.send")) {
-      return new Response(JSON.stringify({
-        error: "Conexão Google sem escopo gmail.send. Reconecte essa caixa para autorizar envio de email.",
-        caixa: caixaEmail,
-      }), { status: 412, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-    }
-
-    // Renova token se expirado/quase
-    let accessToken = integ.oauth_access_token as string;
-    const expiresAt = integ.oauth_token_expires_at ? new Date(integ.oauth_token_expires_at).getTime() : 0;
-    if (!accessToken || expiresAt - Date.now() < 60_000) {
-      const refreshed = await refreshGoogleToken(integ.oauth_refresh_token as string);
-      if (!refreshed) {
-        return new Response(JSON.stringify({ error: "Falha ao renovar token Google" }), {
-          status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
+    // Supressão: quem deu bounce duro/spam/descadastro não recebe mais DISPARO.
+    // Não vale para o 1:1 do Gmail (funil TCC) — lá a Secretaria decide reenviar.
+    if (supressaoSeAplica(provider, ehCampanha)) {
+      const suprimido = await buscarSupressao(supabaseAdmin, payload.destinatario_email);
+      if (suprimido) {
+        return new Response(JSON.stringify({
+          ok: true, suprimido: true, motivo: suprimido.motivo,
+          destinatario: payload.destinatario_email,
+        }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
       }
-      accessToken = refreshed.access_token;
-      await supabaseAdmin.from("calendar_integrations").update({
-        oauth_access_token: accessToken,
-        oauth_token_expires_at: new Date(Date.now() + refreshed.expires_in * 1000).toISOString(),
-      }).eq("id", integ.id);
+    }
+
+    // --- Motor Gmail: resolve a caixa conectada e o token ------------------------
+    let accessToken = "";
+    if (provider === "gmail") {
+      const { data: integ } = await supabaseAdmin
+        .from("calendar_integrations")
+        .select("id, oauth_access_token, oauth_refresh_token, oauth_token_expires_at, scopes, account_email")
+        .eq("account_email", caixaEmail)
+        .not("oauth_refresh_token", "is", null)
+        .order("is_primary", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (!integ?.oauth_refresh_token) {
+        return new Response(JSON.stringify({
+          error: "Caixa não conectada ao Google. Conecte via Calendário e reautorize com escopos Gmail.",
+          caixa: caixaEmail,
+        }), { status: 412, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
+      if (integ.scopes && !integ.scopes.includes("gmail.send")) {
+        return new Response(JSON.stringify({
+          error: "Conexão Google sem escopo gmail.send. Reconecte essa caixa para autorizar envio de email.",
+          caixa: caixaEmail,
+        }), { status: 412, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
+
+      // Renova token se expirado/quase
+      accessToken = integ.oauth_access_token as string;
+      const expiresAt = integ.oauth_token_expires_at ? new Date(integ.oauth_token_expires_at).getTime() : 0;
+      if (!accessToken || expiresAt - Date.now() < 60_000) {
+        const refreshed = await refreshGoogleToken(integ.oauth_refresh_token as string);
+        if (!refreshed) {
+          return new Response(JSON.stringify({ error: "Falha ao renovar token Google" }), {
+            status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+        accessToken = refreshed.access_token;
+        await supabaseAdmin.from("calendar_integrations").update({
+          oauth_access_token: accessToken,
+          oauth_token_expires_at: new Date(Date.now() + refreshed.expires_in * 1000).toISOString(),
+        }).eq("id", integ.id);
+      }
+      // `provider === "ses"` não precisa de checagem prévia: a AWS só é contatada no
+      // envio, e sem credencial o SDK devolve erro nomeado que o catch traduz.
+    } else if (provider === "resend" && !temResend()) {
+      // Falha cedo e com nome: sem a chave, o Resend devolveria 401 já com o log gravado.
+      return new Response(JSON.stringify({
+        error: "RESEND_API_KEY não configurada no ambiente das edge functions. " +
+          "Configure a secret antes de usar um remetente Resend.",
+        remetente: rem.email_completo,
+      }), { status: 412, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
     // Cria log enfileirado
@@ -262,6 +307,7 @@ Deno.serve(async (req) => {
       corpo_texto_render: corpoTexto,
       anexos: payload.anexos ?? [],
       status: "enfileirado",
+      provider,
       idempotencia_key: payload.idempotencia_key ?? null,
       enviado_por: userId,
     };
@@ -308,8 +354,13 @@ Deno.serve(async (req) => {
       });
     }
 
-    // Injeta pixel de tracking de abertura antes de </body> (ou no fim)
-    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+    // Injeta pixel de tracking de abertura antes de </body> (ou no fim).
+    // ⚠️ Tem que ser a URL PÚBLICA: no self-hosted, SUPABASE_URL é http://kong:8000,
+    // que nenhum cliente de e-mail alcança — o pixel apontou pra lá por muito tempo
+    // e por isso NENHUMA abertura foi registrada. Mesmo motivo vale pro descadastro.
+    const supabaseUrl = Deno.env.get("SUPABASE_PUBLIC_URL") ||
+      Deno.env.get("PUBLIC_SUPABASE_URL") ||
+      Deno.env.get("SUPABASE_URL")!;
     const pixelTag = `<img src="${supabaseUrl}/functions/v1/email-track-open?id=${log.id}" width="1" height="1" alt="" style="display:none" />`;
     if (/<\/body>/i.test(corpoHtml)) {
       corpoHtml = corpoHtml.replace(/<\/body>/i, `${pixelTag}</body>`);
@@ -317,7 +368,164 @@ Deno.serve(async (req) => {
       corpoHtml = `${corpoHtml}\n${pixelTag}`;
     }
 
-    // Monta RFC 2822 e envia via Gmail API (com 1 retry em 429)
+    // Descadastro: obrigatório em disparo de massa (Gmail/Yahoo exigem one-click
+    // de quem manda volume) e é o que alimenta a lista de supressão.
+    const urlDescadastro = provider !== "gmail"
+      ? await linkDescadastro(supabaseUrl, payload.destinatario_email)
+      : null;
+    if (urlDescadastro && ehCampanha) {
+      // O link só existe depois de resolvido o remetente, então a variável
+      // {{descadastro_url}} é substituída aqui, num segundo passe.
+      const usaVariavel = /\{\{\s*descadastro_url\s*\}\}/.test(corpoHtml);
+      if (usaVariavel) {
+        corpoHtml = corpoHtml.replace(/\{\{\s*descadastro_url\s*\}\}/g, urlDescadastro);
+      } else {
+        // Se o template não posiciona o link, pendura um rodapé discreto —
+        // disparo de massa sem descadastro visível é o caminho curto pro spam.
+        const rodape =
+          `<div style="margin-top:24px;padding-top:12px;border-top:1px solid #e5e7eb;` +
+          `font-size:12px;color:#6b7280;text-align:center">` +
+          `<a href="${urlDescadastro}" style="color:#6b7280">Descadastrar deste tipo de e-mail</a>` +
+          `</div>`;
+        if (/<\/body>/i.test(corpoHtml)) {
+          corpoHtml = corpoHtml.replace(/<\/body>/i, `${rodape}</body>`);
+        } else {
+          corpoHtml = `${corpoHtml}\n${rodape}`;
+        }
+      }
+    }
+
+    // --- Motor SES (e SMTP) --------------------------------------------------------
+    // Passa pela mesma abstração EmailProvider; o SMTP entra por aqui quando o
+    // remetente não declara provedor e EMAIL_PROVIDER=smtp (caminho de desenvolvimento).
+    if (provider === "ses") {
+      const cabecalhos: Record<string, string> = {};
+      if (urlDescadastro) {
+        cabecalhos["List-Unsubscribe"] = `<${urlDescadastro}>`;
+        cabecalhos["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click";
+      }
+
+      try {
+        const provedor = obterProvedor({ doRemetente: rem.provider });
+        const { providerMessageId } = await provedor.send({
+          from: formatarFrom(fromName, rem.email_completo),
+          to: payload.destinatario_email,
+          subject: assunto,
+          html: corpoHtml,
+          text: corpoTexto ?? undefined,
+          replyTo: replyTo ?? undefined,
+          headers: Object.keys(cabecalhos).length ? cabecalhos : undefined,
+          attachments: payload.anexos?.map((a) => ({
+            filename: a.filename,
+            content: a.content_base64,
+            contentType: a.content_type,
+          })),
+          tags: [
+            { name: "log_id", value: tagSegura(log.id) },
+            ...(payload.contexto_tipo ? [{ name: "contexto", value: tagSegura(payload.contexto_tipo) }] : []),
+          ],
+          // Conjunto de configuração separado por tipo: sem ele o SES não publica os
+          // eventos de bounce/complaint no SNS, e a supressão nunca é alimentada.
+          configurationSet: ehCampanha
+            ? Deno.env.get("SES_CONFIGURATION_SET_MKT")
+            : Deno.env.get("SES_CONFIGURATION_SET_TX"),
+        });
+
+        await supabaseAdmin.from("emails_enviados").update({
+          status: "enviado",
+          corpo_html_render: corpoHtml,
+          provider_message_id: providerMessageId,
+          enviado_em: new Date().toISOString(),
+        }).eq("id", log.id);
+
+        return new Response(JSON.stringify({
+          ok: true, log_id: log.id, provider: "ses", provider_message_id: providerMessageId,
+        }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      } catch (e) {
+        const erro = e instanceof ErroEnvio ? e : new ErroEnvio(String(e));
+        await supabaseAdmin.from("emails_enviados").update({
+          status: "falhou", erro_msg: `${erro.codigo ?? "erro"}: ${erro.message}`.slice(0, 500),
+        }).eq("id", log.id);
+
+        // Preserva o 429 para o dispatcher pausar a campanha em vez de insistir.
+        return new Response(JSON.stringify({
+          error: "SES falhou", details: erro.message, codigo: erro.codigo,
+          log_id: log.id, rate_limited: erro.rateLimited,
+        }), {
+          status: erro.rateLimited ? 429 : 502,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+    }
+
+    // --- Motor Resend ------------------------------------------------------------
+    if (provider === "resend") {
+      // Chave de idempotência ESTÁVEL entre tentativas do mesmo envio lógico: se o
+      // worker morrer depois do Resend aceitar mas antes de gravarmos o resultado, a
+      // repetição não entrega duas vezes. Deriva da entidade (chave do chamador ou
+      // contexto+destinatário), nunca de uuid/timestamp novo — que anularia o efeito.
+      const idempotencyKey = payload.idempotencia_key
+        ? chaveIdempotencia(payload.contexto_tipo ?? "email", payload.idempotencia_key)
+        : chaveIdempotencia(
+          payload.contexto_tipo ?? "email",
+          `${payload.contexto_id ?? templateId ?? remetenteId}:${payload.destinatario_email}`,
+        );
+
+      const res = await enviarEmail({
+        from: formatarFrom(fromName, rem.email_completo),
+        to: payload.destinatario_email,
+        subject: assunto,
+        html: corpoHtml,
+        text: corpoTexto ?? undefined,
+        reply_to: replyTo ?? undefined,
+        headers: urlDescadastro
+          ? {
+            "List-Unsubscribe": `<${urlDescadastro}>`,
+            "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+          }
+          : undefined,
+        attachments: payload.anexos?.map((a) => ({
+          filename: a.filename,
+          content: a.content_base64,
+          content_type: a.content_type,
+        })),
+        tags: [
+          { name: "log_id", value: tagSegura(log.id) },
+          ...(payload.contexto_tipo
+            ? [{ name: "contexto", value: tagSegura(payload.contexto_tipo) }]
+            : []),
+          ...(payload.contexto_id
+            ? [{ name: "contexto_id", value: tagSegura(payload.contexto_id) }]
+            : []),
+        ],
+      }, { idempotencyKey });
+
+      if (!res.ok) {
+        await supabaseAdmin.from("emails_enviados").update({
+          status: "falhou", erro_msg: res.erro ?? "Resend falhou",
+        }).eq("id", log.id);
+        // Preserva o 429 para o dispatcher pausar a campanha em vez de insistir.
+        return new Response(JSON.stringify({
+          error: "Resend falhou", details: res.erro, log_id: log.id, rate_limited: res.rateLimited,
+        }), {
+          status: res.rateLimited ? 429 : 502,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      await supabaseAdmin.from("emails_enviados").update({
+        status: "enviado",
+        corpo_html_render: corpoHtml,
+        resend_email_id: res.data?.id ?? null,
+        enviado_em: new Date().toISOString(),
+      }).eq("id", log.id);
+
+      return new Response(JSON.stringify({
+        ok: true, log_id: log.id, provider: "resend", resend_id: res.data?.id,
+      }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+
+    // --- Motor Gmail: monta RFC 2822 e envia (com 1 retry em 429) ----------------
     const rfc = buildRFC2822({
       fromEmail: caixaEmail, fromName,
       to: payload.destinatario_nome

@@ -3,6 +3,7 @@
 // ou 'enviando' (continuar), popula envios pendentes, envia em lote com throttle,
 // atualiza contadores. Respeita 'pausada' / 'cancelada'.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { buscarSupressoes, normalizarEmail } from "../_shared/supressao.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -95,14 +96,37 @@ async function processarCampanha(supabase: any, campanha: any) {
   }
 
   // Lote de até 50 envios pendentes
-  const { data: pendentes } = await supabase
+  const { data: loteBruto } = await supabase
     .from("email_campanhas_envios")
     .select("*")
     .eq("campanha_id", campanha.id)
     .eq("status", "pendente")
     .limit(50);
 
-  if (!pendentes || pendentes.length === 0) {
+  // Supressão em LOTE: quem deu bounce duro, marcou spam ou se descadastrou sai do
+  // lote antes de virar chamada de envio. O email-send confere de novo (defesa em
+  // profundidade), mas filtrar aqui evita até 50 chamadas inúteis por rodada de cron.
+  let pendentes = loteBruto ?? [];
+  if (pendentes.length) {
+    const normalizar = normalizarEmail;
+    const bloqueados = await buscarSupressoes(
+      supabase,
+      pendentes.map((p: any) => p.contato_email),
+    );
+
+    if (bloqueados.size) {
+      const pular = pendentes.filter((p: any) => bloqueados.has(normalizar(p.contato_email)));
+      if (pular.length) {
+        await supabase.from("email_campanhas_envios").update({
+          status: "pulado",
+          erro: "suprimido (bounce/spam/descadastro)",
+        }).in("id", pular.map((p: any) => p.id));
+        pendentes = pendentes.filter((p: any) => !bloqueados.has(normalizar(p.contato_email)));
+      }
+    }
+  }
+
+  if (pendentes.length === 0) {
     // Finaliza
     const { count: rest } = await supabase
       .from("email_campanhas_envios")
@@ -116,6 +140,17 @@ async function processarCampanha(supabase: any, campanha: any) {
     }
     return;
   }
+
+  // Throttle por provedor. O limite documentado do Resend é 10 req/s POR TIME (soma de
+  // todas as API keys), então o piso de 120 ms (~8,3/s) deixa folga para outra função
+  // disparar em paralelo sem estourar a cota compartilhada. Na prática o gargalo é o
+  // lote de 50 por rodada do cron, não a API.
+  const { data: remetente } = await supabase
+    .from("email_remetentes").select("provider").eq("id", campanha.remetente_id).maybeSingle();
+  const viaResend = remetente?.provider === "resend";
+  const throttleMs = viaResend
+    ? Math.max(campanha.throttle_ms ?? 150, 120)
+    : (campanha.throttle_ms ?? 150);
 
   let enviadosBatch = 0; let falhadosBatch = 0;
   for (const envio of pendentes) {
@@ -135,12 +170,24 @@ async function processarCampanha(supabase: any, campanha: any) {
           variaveis: { nome: envio.contato_nome ?? "", email: envio.contato_email, ...(envio.contato_metadata ?? {}) },
           contexto_tipo: "campanha",
           contexto_id: campanha.id,
+          // Chave ESTÁVEL por linha da fila: se o worker morrer depois de entregar mas
+          // antes de marcar 'enviado', a linha volta como 'pendente' na próxima rodada
+          // e esta chave impede a segunda entrega (no banco e no Resend).
+          idempotencia_key: `campanha:${envio.id}`,
         }),
       });
       const j = await sendRes.json();
-      if (sendRes.ok && j.ok !== false) {
+      // O email-send devolve 200 + suprimido:true quando o endereço entrou na lista de
+      // supressão entre a montagem do lote e o envio. Não é entrega — não pode contar.
+      if (sendRes.ok && j.suprimido) {
         await supabase.from("email_campanhas_envios").update({
-          status: "enviado", enviado_em: new Date().toISOString(), email_enviado_id: j.log_id ?? null,
+          status: "pulado", erro: `suprimido (${j.motivo ?? "bounce/spam/descadastro"})`,
+        }).eq("id", envio.id);
+      } else if (sendRes.ok && j.ok !== false) {
+        await supabase.from("email_campanhas_envios").update({
+          // Na resposta de duplicado o email-send devolve `id` (e não `log_id`); sem o
+          // fallback a linha ficaria sem vínculo e o webhook não acharia a campanha.
+          status: "enviado", enviado_em: new Date().toISOString(), email_enviado_id: j.log_id ?? j.id ?? null,
         }).eq("id", envio.id);
         enviadosBatch++;
       } else {
@@ -150,7 +197,10 @@ async function processarCampanha(supabase: any, campanha: any) {
         falhadosBatch++;
         // Se 429, pausa
         if (sendRes.status === 429) {
-          await supabase.from("email_campanhas").update({ status: "pausada", ultimo_erro: "Rate limit Gmail (429)" }).eq("id", campanha.id);
+          await supabase.from("email_campanhas").update({
+            status: "pausada",
+            ultimo_erro: `Rate limit ${viaResend ? "Resend" : "Gmail"} (429) — retome a campanha depois de alguns minutos`,
+          }).eq("id", campanha.id);
           break;
         }
       }
@@ -160,7 +210,7 @@ async function processarCampanha(supabase: any, campanha: any) {
       }).eq("id", envio.id);
       falhadosBatch++;
     }
-    await sleep(campanha.throttle_ms ?? 150);
+    await sleep(throttleMs);
   }
 
   // Update counters via RPC-like atomic increment
