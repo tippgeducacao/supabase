@@ -120,6 +120,62 @@ export class SesProvider implements EmailProvider {
   }
 }
 
+/** Credenciais presentes no ambiente? Não valida — só diz se há o que tentar. */
+export function temCredenciaisSes(): boolean {
+  return !!(lerEnv("AWS_ACCESS_KEY_ID") && lerEnv("AWS_SECRET_ACCESS_KEY"));
+}
+
+export interface StatusIdentidadesSes {
+  ok: boolean;
+  verificadas: string[];
+  pendentes: string[];
+  erro?: string;
+  codigo?: string;
+}
+
+/**
+ * Lista as identidades (domínios/endereços) do SES e diz quais estão verificadas.
+ *
+ * É a chamada mais barata que exige credencial válida — serve de teste de conexão.
+ * Mesmo padrão de injeção do `SesProvider`: o SDK só é importado quando não há
+ * cliente injetado, então o teste nunca toca a AWS.
+ */
+export async function listarIdentidadesSes(
+  opcoes: { cliente?: ClienteSesLike; criarComando?: (e: Record<string, unknown>) => unknown; region?: string } = {},
+): Promise<StatusIdentidadesSes> {
+  let cliente = opcoes.cliente;
+  let criarComando = opcoes.criarComando;
+
+  if (!cliente || !criarComando) {
+    try {
+      const mod = await import("npm:@aws-sdk/client-sesv2@3");
+      const { SESv2Client, ListEmailIdentitiesCommand } = mod as unknown as {
+        SESv2Client: new (cfg: { region: string }) => ClienteSesLike;
+        ListEmailIdentitiesCommand: new (input: Record<string, unknown>) => unknown;
+      };
+      cliente ??= new SESv2Client({ region: opcoes.region ?? lerEnv("AWS_REGION") ?? "us-east-1" });
+      criarComando ??= (e) => new ListEmailIdentitiesCommand(e);
+    } catch (e) {
+      return { ok: false, verificadas: [], pendentes: [], erro: `SDK do SES não carregou: ${String(e)}` };
+    }
+  }
+
+  try {
+    const resposta = await cliente!.send(criarComando!({ PageSize: 100 })) as unknown as {
+      EmailIdentities?: Array<{ IdentityName?: string; SendingEnabled?: boolean }>;
+    };
+    const itens = resposta?.EmailIdentities ?? [];
+    return {
+      ok: true,
+      verificadas: itens.filter((i) => i.SendingEnabled).map((i) => i.IdentityName ?? "?"),
+      pendentes: itens.filter((i) => !i.SendingEnabled).map((i) => i.IdentityName ?? "?"),
+    };
+  } catch (e) {
+    const erro = e as { name?: string; message?: string };
+    return { ok: false, verificadas: [], pendentes: [], erro: erro?.message ?? String(e), codigo: erro?.name };
+  }
+}
+
 function lerEnv(chave: string): string | undefined {
   // `Deno` não existe no vitest; o acesso é defensivo para o módulo continuar importável.
   const g = globalThis as { Deno?: { env: { get(k: string): string | undefined } } };
