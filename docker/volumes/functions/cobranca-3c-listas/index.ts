@@ -204,111 +204,134 @@ async function limparBaseDaCampanha(base: string, campanha: string) {
 }
 
 // -------------------------------------------------------- diagnostico ----
-// Responde a UNICA pergunta que o desenho depende: apagar a lista limpa a base de
-// mailing da CAMPANHA, ou o telefone fica preso nela e o reenvio de amanha e
-// descartado em silencio?
+// ⚠️ A 1a versao deste diagnostico deu um veredito ERRADO (17/08/2026): ela
+// assumia que a primeira insercao daria `imported_lines: 1` e, ao ver 0 na
+// reinsercao, cantou "dedup por campanha". Na verdade a PRIMEIRA insercao ja
+// vinha 0 — o mailing nunca importou nada, e "reinsercao" nao media coisa alguma.
+// Licao: sem baseline que funciona, o teste nao tem o que comparar.
 //
-// Sequencia: cria lista -> insere 1 telefone -> apaga a lista -> cria outra ->
-// insere O MESMO telefone -> le `imported_lines`.
-//   importados = 1  -> apagar limpa. O ciclo 19:00/10:30 funciona como esta.
-//   importados = 0  -> dedup por campanha confirmado; ai testa mailing/delete.
+// Agora e uma MATRIZ. Cada variacao cria a sua propria lista, insere UMA linha,
+// le `imported_lines` e apaga a lista. Como o unico fator que muda entre elas e o
+// formato do payload, a que importar 1 identifica a causa por eliminacao:
 //
-// Roda contra listas descartaveis que ele mesmo cria e apaga no fim.
+//   n8n-classico  6 colunas, exatamente as que o n8n usava e funcionavam
+//   com-dias      7 colunas, dias_atraso PREENCHIDO
+//   dias-vazio    7 colunas, dias_atraso VAZIO   (suspeito: coluna declarada e sem valor)
+//   minimo        3 colunas (identifier/areacode/phone), o menor payload possivel
+//   phone-sem-ddd 6 colunas, phone SEM o DDD      (talvez o 3C queira areacode separado)
+//
+// Se TODAS derem 0, o payload nao e a causa: ou o telefone ja esta preso na base
+// da campanha, ou ha algo mais fundamental — e ai o `reinsercao` (que so roda
+// quando alguma variacao funciona) responde se apagar a lista libera o numero.
 async function diagnostico(base: string, campanha: string, telefone: string) {
-  const passos: Array<Record<string, unknown>> = []
   const criadas: string[] = []
-
-  const inserir = async (listaId: string) => {
-    const resp = await fetch(alvo(base, `/campaigns/${campanha}/lists/${listaId}/mailing`), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({
-        header: HEADER,
-        mailing: [{
-          identifier: 'DIAGNOSTICO - nao ligar',
-          areacode: telefone.substring(0, 2),
-          phone: telefone,
-          nome: 'Diagnostico',
-          email: '',
-          formacao: '',
-          dias_atraso: '',
-        }],
-      }),
-    })
-    const txt = await resp.text()
-    let importados: number | null = null
-    try { const j = JSON.parse(txt); importados = typeof j?.imported_lines === 'number' ? j.imported_lines : null } catch { /* nao-JSON */ }
-    return { status: resp.status, importados, corpo: txt.slice(0, 200) }
-  }
+  const ddd = telefone.substring(0, 2)
 
   const apagar = async (listaId: string) => {
     const resp = await fetch(alvo(base, `/campaigns/${campanha}/lists/${listaId}`), { method: 'DELETE' })
     return { status: resp.status, ok: resp.ok || resp.status === 204 }
   }
 
+  const inserir = async (listaId: string, header: readonly string[], linha: Record<string, unknown>) => {
+    const resp = await fetch(alvo(base, `/campaigns/${campanha}/lists/${listaId}/mailing`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ header, mailing: [linha] }),
+    })
+    const txt = await resp.text()
+    let importados: number | null = null
+    try { const j = JSON.parse(txt); importados = typeof j?.imported_lines === 'number' ? j.imported_lines : null } catch { /* nao-JSON */ }
+    return { status: resp.status, importados, corpo: txt.slice(0, 300) }
+  }
+
+  const base6 = ['identifier', 'areacode', 'phone', 'nome', 'email', 'formacao'] as const
+  const linha6 = {
+    identifier: 'DIAGNOSTICO - nao ligar', areacode: ddd, phone: telefone,
+    nome: 'Diagnostico', email: 'diagnostico@ppgvet.com', formacao: 'Teste',
+  }
+
+  const variacoes: Array<{ chave: string; header: readonly string[]; linha: Record<string, unknown> }> = [
+    { chave: 'n8n-classico', header: base6, linha: linha6 },
+    { chave: 'com-dias', header: HEADER, linha: { ...linha6, dias_atraso: '30' } },
+    { chave: 'dias-vazio', header: HEADER, linha: { ...linha6, dias_atraso: '' } },
+    { chave: 'minimo', header: ['identifier', 'areacode', 'phone'], linha: { identifier: 'DIAGNOSTICO - nao ligar', areacode: ddd, phone: telefone } },
+    { chave: 'phone-sem-ddd', header: base6, linha: { ...linha6, phone: telefone.substring(2) } },
+  ]
+
+  const resultados: Array<Record<string, unknown>> = []
+  let vencedora: string | null = null
+  let corpoDaCriacao: string | null = null
+
   try {
-    // 0) valida token + base_url + paginacao de uma vez
     const antes = await listarTodasAsListas(base, campanha)
-    passos.push({ passo: '0. GET lists', ok: true, listas_na_campanha: antes.length })
+    const marca = new Date().toISOString().replace(/[^0-9]/g, '').slice(8, 14)
 
-    // 1) primeira insercao
-    const marca = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14)
-    const id1 = await criarLista(base, campanha, `ZZ DIAGNOSTICO A ${marca}`)
-    criadas.push(id1)
-    const ins1 = await inserir(id1)
-    passos.push({ passo: '1. insere na lista A', lista_id: id1, ...ins1 })
+    for (const v of variacoes) {
+      const nova = await criarListaBruto(base, campanha, `ZZ DIAG ${v.chave} ${marca}`, v.header)
+      criadas.push(nova.id)
+      // guarda o corpo da 1a criacao: mostra se o 3C devolve o header registrado
+      if (!corpoDaCriacao) corpoDaCriacao = nova.corpo.slice(0, 600)
 
-    // 2) apaga a lista A
-    const del1 = await apagar(id1)
-    passos.push({ passo: '2. apaga a lista A', lista_id: id1, ...del1 })
-
-    // 3) reinsere O MESMO telefone numa lista nova
-    const id2 = await criarLista(base, campanha, `ZZ DIAGNOSTICO B ${marca}`)
-    criadas.push(id2)
-    const ins2 = await inserir(id2)
-    passos.push({ passo: '3. reinsere o mesmo telefone na lista B', lista_id: id2, ...ins2 })
-
-    const dedupPorCampanha = ins2.importados === 0
-    let limpeza: unknown = null
-    let aposLimpeza: unknown = null
-
-    // 4) so se o dedup se confirmar: descobre qual corpo o mailing/delete aceita
-    if (dedupPorCampanha) {
-      await apagar(id2)
-      limpeza = await limparBaseDaCampanha(base, campanha)
-      const id3 = await criarLista(base, campanha, `ZZ DIAGNOSTICO C ${marca}`)
-      criadas.push(id3)
-      aposLimpeza = await inserir(id3)
-      passos.push({ passo: '4. reinsere depois de limpar a base da campanha', lista_id: id3, ...(aposLimpeza as object) })
+      const r = await inserir(nova.id, v.header, v.linha)
+      resultados.push({ variacao: v.chave, lista_id: nova.id, colunas: v.header.length, ...r })
+      if (r.importados && r.importados > 0 && !vencedora) vencedora = v.chave
+      await apagar(nova.id)
     }
 
-    // 5) faxina das listas de diagnostico (o prefixo ZZ nunca colide com as reais)
-    for (const id of criadas) await apagar(id)
+    // So faz sentido perguntar "apagar libera o numero?" se alguma variacao importa.
+    let reinsercao: Record<string, unknown> | null = null
+    if (vencedora) {
+      const v = variacoes.find((x) => x.chave === vencedora)!
+      const nova = await criarListaBruto(base, campanha, `ZZ DIAG reinsercao ${marca}`, v.header)
+      criadas.push(nova.id)
+      const r = await inserir(nova.id, v.header, v.linha)
+      reinsercao = { ...r, explicacao: 'mesmo telefone, depois de a lista anterior ter sido apagada' }
+      await apagar(nova.id)
+    }
+
+    const dedupPorCampanha = vencedora !== null && (reinsercao?.importados as number | null) === 0
+
+    let veredito: string
+    if (!vencedora) {
+      veredito = 'NENHUMA VARIACAO IMPORTOU — o problema NAO e o formato do payload. '
+        + 'Ou este telefone ja esta na base da campanha, ou o mailing depende de algo fora da API. '
+        + 'Rode de novo com um telefone que nunca entrou nesta campanha.'
+    } else if (dedupPorCampanha) {
+      veredito = `FORMATO OK ("${vencedora}") mas o telefone ficou PRESO na campanha depois de apagar a lista `
+        + '— o ciclo diario precisa limpar a base da campanha (cob_3c_config.limpar_base_campanha).'
+    } else {
+      veredito = `TUDO CERTO com o formato "${vencedora}": apagar a lista libera o telefone. `
+        + 'O ciclo 19:00/10:30 funciona como esta.'
+    }
+
+    for (const id of criadas) { try { await apagar(id) } catch { /* ja apagada */ } }
 
     return {
-      veredito: dedupPorCampanha
-        ? ((aposLimpeza as { importados?: number } | null)?.importados === 1
-          ? 'DEDUP POR CAMPANHA CONFIRMADO — e o mailing/delete resolve: ligue cob_3c_config.limpar_base_campanha'
-          : 'DEDUP POR CAMPANHA CONFIRMADO e o mailing/delete NAO resolveu — o desenho precisa mudar (ver docs/Financeiro e Cobranca.md)')
-        : 'SEM DEDUP POR CAMPANHA — apagar a lista libera o telefone; o ciclo 19:00/10:30 funciona como esta',
+      veredito,
+      formato_que_funciona: vencedora,
       dedup_por_campanha: dedupPorCampanha,
-      corpo_aceito_pelo_mailing_delete: (limpeza as { corpo_aceito?: unknown } | null)?.corpo_aceito ?? null,
-      passos,
+      listas_na_campanha_antes: antes.length,
+      resultados,
+      reinsercao,
+      corpo_da_criacao_da_lista: corpoDaCriacao,
       listas_de_teste_apagadas: criadas,
     }
   } catch (err) {
-    // nao deixa lixo na campanha se algo estourar no meio
     for (const id of criadas) { try { await apagar(id) } catch { /* ja era */ } }
-    return { veredito: 'FALHOU', erro: String(err), passos, listas_de_teste_apagadas: criadas }
+    return { veredito: 'FALHOU', erro: String(err), resultados, listas_de_teste_apagadas: criadas }
   }
 }
 
 // ------------------------------------------------------------- montar ----
-async function criarLista(base: string, campanha: string, nome: string): Promise<string> {
+// Devolve o id E o corpo cru: o diagnostico precisa ver com que header o 3C
+// registrou a lista (se ele nao registrar o header, o mailing e descartado).
+async function criarListaBruto(
+  base: string, campanha: string, nome: string, header: readonly string[],
+): Promise<{ id: string; corpo: string }> {
   // multipart-form-data com header[i]: e o formato que o n8n usava e que o 3C aceita.
   const form = new FormData()
   form.append('name', nome)
-  HEADER.forEach((h, i) => form.append(`header[${i}]`, h))
+  header.forEach((h, i) => form.append(`header[${i}]`, h))
 
   const resp = await fetch(alvo(base, `/campaigns/${campanha}/lists`), { method: 'POST', body: form })
   const txt = await resp.text()
@@ -320,8 +343,11 @@ async function criarLista(base: string, campanha: string, nome: string): Promise
     id = j?.data?.id ?? j?.id ?? null
   } catch { /* corpo nao-JSON */ }
   if (!id) throw new Error(`3C criou a lista mas nao devolveu id: ${txt.slice(0, 200)}`)
-  return String(id)
+  return { id: String(id), corpo: txt }
 }
+
+const criarLista = async (base: string, campanha: string, nome: string): Promise<string> =>
+  (await criarListaBruto(base, campanha, nome, HEADER)).id
 
 async function handler(req: Request): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders })
@@ -381,9 +407,9 @@ async function handler(req: Request): Promise<Response> {
     .maybeSingle()
   if (eCfg || !cfg) return json({ error: 'cob_3c_config indisponivel', detail: eCfg?.message }, 500)
 
-  // `ativo=false` pausa o pipeline, mas dry-run continua liberado: e como o time
-  // confere o que aconteceria ANTES de ligar.
-  if (!cfg.ativo && !dry) {
+  // `ativo=false` pausa o pipeline, mas dry-run e diagnostico continuam liberados:
+  // e como o time confere o que aconteceria ANTES de ligar.
+  if (!cfg.ativo && !dry && acao !== 'diagnostico') {
     return json({ ok: true, skip: 'pipeline pausado (cob_3c_config.ativo=false)' })
   }
 

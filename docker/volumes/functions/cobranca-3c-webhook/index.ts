@@ -65,10 +65,16 @@ function achatar(obj: unknown, saida: Record<string, unknown> = {}, prof = 0): R
   return saida
 }
 
+// Token do Sprint que chegou sem ser substituido ("{contactfield=firstname}" como
+// VALOR). Guardar isso como nome faria o agente ver a chave crua na tela do 3C.
+const ehTokenCru = (s: string): boolean => /^\{.*\}$/.test(s.trim())
+
 const pegar = (plano: Record<string, unknown>, ...nomes: string[]): string => {
   for (const n of nomes) {
     const v = plano[normKey(n)]
-    if (v !== undefined && v !== null && String(v).trim() !== '') return String(v).trim()
+    if (v === undefined || v === null) continue
+    const s = String(v).trim()
+    if (s !== '' && !ehTokenCru(s)) return s
   }
   return ''
 }
@@ -128,17 +134,28 @@ async function handler(req: Request): Promise<Response> {
 
   const plano = achatar(bruto)
 
+  // ⚠️ Chaves conferidas contra 101 chamadas REAIS do Sprint (crm_webhook_logs,
+  // 17/08/2026). O nome chega por DOIS caminhos: 58 vieram em `Nome Lead` e 43 em
+  // `{contactfield=firstname}` — a chave literal do token, que alguem deixou como
+  // NOME do campo na integracao do Sprint. Os dois juntos cobrem 100%; so com
+  // `Nome Lead` o agente veria "Aluno" em 43% da lista. `Sobrenome Lead` nao existe
+  // no payload real, mas fica no fallback caso volte a ser mapeado la.
   const nome = limparTexto(
-    [pegar(plano, 'Nome Lead', 'nome', 'first_name', 'firstname'),
-     pegar(plano, 'Sobrenome Lead', 'sobrenome', 'last_name', 'lastname')].filter(Boolean).join(' '),
+    [pegar(plano, 'Nome Lead', '{contactfield=firstname}', 'nome', 'first_name', 'firstname'),
+     pegar(plano, 'Sobrenome Lead', '{contactfield=lastname}', 'sobrenome', 'last_name', 'lastname')]
+      .filter(Boolean).join(' '),
   )
   const telefone = pegar(plano, 'Numero', 'telefone', 'whatsapp', 'phone', 'celular')
   const email = pegar(plano, 'email', 'e-mail', 'Email Lead')
   const formacao = limparTexto(pegar(plano, 'Formacao', 'profissao'))
   const oportunidade = limparTexto(pegar(plano, 'Nome Oportunidade', 'oportunidade', 'deal_name', 'titulo'))
+  // No payload real as chaves sao `nome_resposavel(Oportunidade)` e
+  // `sobrenome_resposavel(Oportunidade)` — com o typo "resposavel" (sem o n) que
+  // veio da configuracao do Sprint. Mantidas as grafias corretas no fallback.
   const responsavel = limparTexto(
-    [pegar(plano, 'Responsavel(Nome)', 'responsavel'),
-     pegar(plano, 'Responsavel(Sobrenome)')].filter(Boolean).join(' '),
+    [pegar(plano, 'nome_resposavel(Oportunidade)', 'nome_responsavel(Oportunidade)', 'Responsavel(Nome)', 'responsavel'),
+     pegar(plano, 'sobrenome_resposavel(Oportunidade)', 'sobrenome_responsavel(Oportunidade)', 'Responsavel(Sobrenome)')]
+      .filter(Boolean).join(' '),
   )
   const diasAtraso = extrairDiasAtraso(pegar(plano, 'Dias de Atraso', 'dias_atraso'), oportunidade)
 
