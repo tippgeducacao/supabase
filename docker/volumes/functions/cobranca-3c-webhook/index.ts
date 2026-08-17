@@ -108,10 +108,29 @@ function segredoConfere(recebido: string, esperado: string): boolean {
 
 async function handler(req: Request): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders })
+
+  // Health check. Varios conectores (o SprintHub entre eles, aparentemente) batem
+  // um GET na URL para validar antes de salvar — e um 405 faz o conector marcar a
+  // integracao como invalida e PARAR DE ENVIAR, sem erro visivel do nosso lado.
+  // Responde 200 sem exigir segredo: nao devolve nenhum dado, so prova que existe.
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    return json({ ok: true, servico: 'cobranca-3c-webhook', aceita: 'POST com JSON' })
+  }
   if (req.method !== 'POST') return json({ error: 'Method not allowed' }, 405)
 
   const url = new URL(req.url)
-  const recebido = url.searchParams.get('secret') ?? req.headers.get('x-webhook-secret') ?? ''
+  // Aceita o segredo por onde quer que o conector consiga mandar: query string
+  // (?secret= / ?token= / ?key=), header proprio, ou Authorization: Bearer.
+  // Conector que engole query string ainda consegue autenticar por header.
+  const recebido = (
+    url.searchParams.get('secret') ??
+    url.searchParams.get('token') ??
+    url.searchParams.get('key') ??
+    req.headers.get('x-webhook-secret') ??
+    req.headers.get('x-secret') ??
+    (req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '') ??
+    ''
+  ).trim()
 
   // Segredo da env vence o da config (permite girar sem mexer no banco).
   let esperado = SECRET_ENV
