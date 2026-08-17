@@ -245,17 +245,22 @@ async function diagnostico(base: string, campanha: string, telefone: string) {
   }
 
   const base6 = ['identifier', 'areacode', 'phone', 'nome', 'email', 'formacao'] as const
+  // O 3C CONCATENA areacode + phone: `phone` vai SEM o DDD, senao a linha e
+  // descartada em silencio (provado em 17/08/2026 — ver o comentario na montagem).
+  const semDdd = telefone.substring(2)
   const linha6 = {
-    identifier: 'DIAGNOSTICO - nao ligar', areacode: ddd, phone: telefone,
+    identifier: 'DIAGNOSTICO - nao ligar', areacode: ddd, phone: semDdd,
     nome: 'Diagnostico', email: 'diagnostico@ppgvet.com', formacao: 'Teste',
   }
 
   const variacoes: Array<{ chave: string; header: readonly string[]; linha: Record<string, unknown> }> = [
-    { chave: 'n8n-classico', header: base6, linha: linha6 },
+    // controle: o formato ja provado. Se ESTE falhar, o problema nao e o payload.
+    { chave: 'base6-controle', header: base6, linha: linha6 },
+    // a pergunta aberta: a 7a coluna (dias_atraso) quebra a importacao?
     { chave: 'com-dias', header: HEADER, linha: { ...linha6, dias_atraso: '30' } },
     { chave: 'dias-vazio', header: HEADER, linha: { ...linha6, dias_atraso: '' } },
-    { chave: 'minimo', header: ['identifier', 'areacode', 'phone'], linha: { identifier: 'DIAGNOSTICO - nao ligar', areacode: ddd, phone: telefone } },
-    { chave: 'phone-sem-ddd', header: base6, linha: { ...linha6, phone: telefone.substring(2) } },
+    // regressao: com o DDD colado no phone tem que dar 0 (confirma o diagnostico)
+    { chave: 'phone-com-ddd-regressao', header: base6, linha: { ...linha6, phone: telefone } },
   ]
 
   const resultados: Array<Record<string, unknown>> = []
@@ -477,10 +482,15 @@ async function handler(req: Request): Promise<Response> {
     return json({ ok: true, acao: 'montar', enviados: 0, motivo: 'nenhum inadimplente na janela de recencia' })
   }
 
+  // ⚠️ `phone` vai SEM O DDD — o 3C CONCATENA areacode + phone. Mandando o numero
+  // completo em `phone` ele monta "46" + "46988166051" = 4646988166051, invalido, e
+  // DESCARTA a linha em silencio: responde 200 OK com `imported_lines: 0`.
+  // Provado pelo ?acao=diagnostico em 17/08/2026: mesma linha, mesma lista, mudando
+  // so o `phone` -> 0 importados com DDD, 1 importado sem DDD.
   const mailing = rows.map((r) => ({
     identifier: montarIdentifier(r.nome, r.dias_atraso),
     areacode: r.telefone.substring(0, 2),
-    phone: r.telefone,
+    phone: r.telefone.substring(2),
     nome: limpar(r.nome),
     email: limpar(r.email),
     formacao: limpar(r.formacao),
