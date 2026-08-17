@@ -154,12 +154,34 @@ async function webchatEnviaInformacoes(tu: any, telefone: string, curso: string 
 
 // ── Abertura PROATIVA (estágio validação): oferece o Meet, não pergunta formação ──────
 // Devolve os BALÕES (chunks) da abertura — o widget mostra um a um com "digitando".
+//
+// ⚠️ A instrução MUDA conforme sabemos ou não a pós (2026-08-17): a versão única mandava
+// "diga que viu o interesse na pós (mencione o curso)" mesmo sem curso nenhum, e na home o
+// João abria com "vi aqui que vc se interessou pela nossa pós" — qual pós? Ele não sabia, e
+// a frase fingia saber. Sem curso, a abertura PERGUNTA a área em vez de fingir.
+function instrucaoAbertura(curso: string): string {
+  const base = "[SISTEMA — não é o visitante] O visitante acabou de abrir o chat no site e ainda NÃO escreveu nada. "
+    + "Faça a ABERTURA conforme o SEU roteiro de validação: cumprimente pelo primeiro nome. "
+    + "⛔ NÃO pergunte a formação/graduação agora. ⛔ NÃO diga que a secretaria liberou uma condição "
+    + "especial: ninguém prometeu isso a ele, ele só entrou no site. Envie só a mensagem final, curta e calorosa.";
+  return curso
+    ? base + ` O visitante veio da página da pós **${curso}** — ancore nela pelo nome e conduza `
+      + "OFERECENDO a conversa rápida no Google Meet com um monitor especialista. Termine com uma pergunta convidando a marcar."
+    : base + " ⚠️ Ele veio da HOME e vc NÃO SABE qual pós interessa a ele. É PROIBIDO dizer que viu o interesse dele "
+      + "'na nossa pós' ou em qualquer curso específico — vc não viu. Pergunte, em UMA frase curta, qual área ele quer, "
+      + "citando as que existem: bovinos e leite, aves, suínos, animais de companhia, gestão e agronegócio, saúde e alimentos. "
+      + "NÃO ofereça o Meet ainda: primeiro descubra o assunto.";
+}
 export async function aberturaWebchat(nome: string, curso: string | null, produto: Produto = "pos"): Promise<string[]> {
   const primeiro = (nome || "").trim().split(/\s+/)[0] || "";
   const escola = produto === "escola";
   const fallback = escola
     ? fallbackAberturaEscola(primeiro, limparCurso(curso))
-    : `Oi${primeiro ? ", " + primeiro : ""}! 👋 Vi seu interesse na nossa pós — que tal uma conversa rápida no Google Meet com um monitor especialista pra te mostrar tudo? Topa que eu já procuro um horário?`;
+    // ⚠️ Fallback estático (só entra se a chamada ao modelo falhar). Também não pode fingir
+    // que sabe a pós: sem curso na sessão, ele PERGUNTA a área em vez de afirmar interesse.
+    : limparCurso(curso)
+      ? `Oi${primeiro ? ", " + primeiro : ""}, tudo bem? Vi que vc tá de olho na pós em ${limparCurso(curso)}. Que tal uma conversa rápida no Google Meet com um monitor especialista pra te mostrar tudo? Topa que eu já procuro um horário?`
+      : `Oi${primeiro ? ", " + primeiro : ""}, tudo bem? Me conta rapidinho qual área vc tá querendo, pra eu te falar da pós certa: bovinos e leite, aves, suínos, animais de companhia, gestão e agronegócio, ou saúde e alimentos?`;
   if (!ANTHROPIC_KEY) return dividirAberturaEm2(fallback);
   try {
     // sem tools na abertura (é só a saudação/oferta); usa o prompt real de validação +
@@ -181,7 +203,7 @@ export async function aberturaWebchat(nome: string, curso: string | null, produt
           role: "user",
           content: escola
             ? instrucaoAberturaEscola(limparCurso(curso))
-            : "[SISTEMA — não é o visitante] O visitante acabou de abrir o chat vindo da página da pós de interesse e ainda NÃO escreveu nada. Faça a ABERTURA conforme o SEU roteiro de validação: cumprimente pelo primeiro nome, diga que viu o interesse na pós (mencione o curso) e conduza OFERECENDO a conversa rápida no Google Meet com um monitor especialista. Termine com uma pergunta convidando a marcar. ⛔ NÃO pergunte a formação/graduação agora. Envie só a mensagem final, curta e calorosa.",
+            : instrucaoAbertura(limparCurso(curso)),
         }],
       }),
     });
