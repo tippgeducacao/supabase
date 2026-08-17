@@ -1,13 +1,19 @@
 // Cérebro do João para o WEBCHAT (Fase 2) — REUSA os módulos reais do agente de WhatsApp
-// (crm-agente-sdr) por import, sem duplicar: PARIDADE TOTAL de prompts, router, contexto
-// temporal (com a TABELA DE HORÁRIOS DE ATENDIMENTO) e as 9 tools reais. O que NÃO é
-// reusado é só a I/O de WhatsApp (buffer/lock/debounce/chunks) — aqui a resposta é síncrona
-// e escrita em webchat_mensagens. Não toca no crm-agente-sdr (só importa).
+// (crm-agente-sdr) por import, sem duplicar: router, contexto temporal (com a TABELA DE
+// HORÁRIOS DE ATENDIMENTO) e as 9 tools reais. O que NÃO é reusado é só a I/O de WhatsApp
+// (buffer/lock/debounce/chunks) — aqui a resposta é síncrona e escrita em webchat_mensagens.
+// Não toca no crm-agente-sdr (só importa).
+//
+// ⚠️ O PROMPT NÃO É MAIS COMPARTILHADO (2026-08-17): o roteiro do chat vive em
+// ./prompts-webchat.ts, arquivo próprio deste canal, porque o fluxo diverge do WhatsApp
+// (lá o lead chega com nome e curso do webhook e a conversa abre por template; aqui o
+// visitante pode chegar sem nada e falar primeiro). Personalidade, travas de "nunca diga"
+// e regra da PPG agora existem nos DOIS arquivos — ver o cabeçalho de prompts-webchat.ts.
 //
 // ⚠️ confirmar_agendamento cria reunião REAL (GCal). envia_informacoes manda material pro
 // WhatsApp do lead (ele deu o número). Fluxo/tools = os mesmos do João de WhatsApp.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
-import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO } from "../crm-agente-sdr/prompts.ts";
+import { WEBCHAT_QUALIFICADOR, WEBCHAT_VALIDACAO } from "./prompts-webchat.ts";
 import { montarContextoTemporal, renderPrompt } from "../crm-agente-sdr/contexto.ts";
 import { comPresenteEscola, LINK_ESCOLA_GRATUITA } from "../crm-agente-sdr/escolaGratuita.ts";
 import { carregarTools, chamarAgentePrincipal, chamarRouter } from "../crm-agente-sdr/agente.ts";
@@ -65,7 +71,7 @@ function notaCanal(curso: string | null): string {
 }
 
 function promptDoEstagio(nome: string, curso: string | null, estagio: Estagio, produto: Produto = "pos"): string {
-  const base = estagio === "qualificador" ? AGENTE_QUALIFICADOR : AGENTE_VALIDACAO;
+  const base = estagio === "qualificador" ? WEBCHAT_QUALIFICADOR : WEBCHAT_VALIDACAO;
   const rendered = renderPrompt(base, {
     nome: (nome || "").trim(),
     curso_interesse_original: limparCurso(curso) || "(não informado — descubra sem inventar)",
