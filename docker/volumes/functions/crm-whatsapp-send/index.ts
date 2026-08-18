@@ -3,6 +3,7 @@
 // Diferente do whatsapp-send-message (pedagógico) — usa crm_whatsapp_accounts e crm_whatsapp_messages.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { getWaProvider } from "../_shared/waProviders.ts";
+import { telefoneEnviavel, digitosParaEnvio } from "../_shared/telefone.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -97,10 +98,14 @@ async function invalidarMediaId(admin: any, fileUrl: string, phoneNumberId: stri
   } catch { /* best-effort */ }
 }
 
+/**
+ * Número que vai pra Meta/Uazapi. Delega pra `digitosParaEnvio` (régua compartilhada),
+ * que além de garantir o DDI 55 tira o "0" de tronco de quem digitou "(0xx) …" — são
+ * 167 contatos na base (18/08/2026) que hoje têm número perfeitamente válido e mesmo
+ * assim nunca receberiam nada, porque "5501499668988" não existe em E.164.
+ */
 function formatPhone(raw: string): string | null {
-  const digits = (raw ?? "").replace(/\D/g, "");
-  if (!digits) return null;
-  return digits.startsWith("55") ? digits : `55${digits}`;
+  return digitosParaEnvio(raw);
 }
 
 // Variantes p/ casar a conversa pelo telefone apesar do 9º dígito (Uazapi e Meta
@@ -359,6 +364,27 @@ Deno.serve(async (req) => {
       } else {
         return json({ error: "interactive_tipo deve ser 'button' ou 'list'" }, 400);
       }
+    }
+
+    // GUARDA DE ENVIO (2026-08-18) — o único ponto onde o número impossível é barrado.
+    //
+    // Esta função é o funil de TODO envio ao cliente (broadcast, agendadas-dispatch,
+    // agente SDR, lembretes, webchat-reengajar, sdr-api, templates e os compositores
+    // do CRM), então a régua mora aqui e não em cada chamador. Motivo: número
+    // estruturalmente impossível — o caso da LP que trunca o celular em 13 chars — só
+    // é recusado pela Meta com 131026 DEPOIS que o template já foi consumido. O
+    // intake não descarta mais o número (ele é gravado e sinalizado no Contato 360);
+    // quem impede o prejuízo é este `if`.
+    //
+    // Roda no valor CRU, antes do `formatPhone`, que prefixa "55" em qualquer coisa e
+    // transformaria um número estrangeiro legítimo em falso positivo. `telefoneEnviavel`
+    // só barra o impossível: internacional e fixo passam.
+    if (!telefoneEnviavel(telefone)) {
+      return json({
+        error: "telefone_impossivel",
+        detalhe: `"${telefone}" não é um número que possa existir — nada foi enviado. ` +
+          "Confirme o número com o contato antes de disparar (a Meta cobraria o template mesmo assim).",
+      }, 422);
     }
 
     const to = formatPhone(telefone);

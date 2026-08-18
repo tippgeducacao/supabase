@@ -49,14 +49,16 @@
 //   { ok:true, lead_id, segmento_aplicado, lead_oportunidade_id, oportunidade_id, duplicado_lote }
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
+import { telefoneEnviavel } from "../_shared/telefone.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 /**
  * Tag "[Sistema] Telefone inválido" (`crm_tags`), criada com UUID FIXO pela
- * migration `20260817200000_tag_telefone_invalido.sql` — é o marcador que torna
- * visível o telefone que a guarda de formato descartou. Ver o bloco (10.9).
+ * migration `20260817200000_tag_telefone_invalido.sql` — marca o contato cujo número
+ * é estruturalmente impossível. Desde 2026-08-18 o número É gravado (a tag existe
+ * justamente para sinalizar isso, não para explicar uma ausência). Ver o bloco (10.9).
  */
 const TAG_TELEFONE_INVALIDO = "00000000-0000-4000-8000-00000000ca11";
 
@@ -109,20 +111,6 @@ function canonicalBrPhone(whats55: string): string {
     d = d.slice(0, 2) + "9" + d.slice(2); // insere o 9º dígito (só celular)
   }
   return `55${d}`;
-}
-
-// Telefone BR plausível: 55 + DDD (2 dígitos, nenhum começa com 0) + celular (9 + 8
-// dígitos) OU fixo (8 dígitos começando 2-5). Existe pra pegar o caso da LP da Escola
-// (2026-08): ela prefixa "55" MESMO quando o valor já tem o DDI e trunca o resultado em
-// 13 chars — perde os 2 últimos dígitos e gera um número que PARECE celular válido mas
-// nunca existiu (Meta só devolve 131026 "Message undeliverable" depois de queimar o
-// template). Roda em cima do valor JÁ canonicalizado (9º dígito inserido quando
-// faltava) pra não gerar falso positivo em número antigo sem o 9, e aceita fixo pra não
-// rejeitar contato B2B/decisor que usa WhatsApp Business numa linha fixa. Não valida DDD
-// contra a lista real de 67 códigos (ambicioso demais pra uma guarda de intake) — só
-// descarta o formato estruturalmente impossível.
-function isTelefoneBrPlausivel(canon55: string): boolean {
-  return /^55[1-9][1-9](?:9\d{8}|[2-5]\d{7})$/.test(canon55);
 }
 
 // Lê uma chave de `dados` aceitando CAMINHO ANINHADO com "." (ex.: "dados_completos.email" —
@@ -543,17 +531,15 @@ Deno.serve(async (req) => {
   // (4) extrai campos do lead via mapping
   const nome     = asString(pickByMapping(dados, mapping, "lead.nome"), 200);
   const email    = normalizeEmail(pickByMapping(dados, mapping, "lead.email"));
-  let   whatsapp = normalizeWhatsapp(pickByMapping(dados, mapping, "lead.whatsapp"));
+  const whatsapp = normalizeWhatsapp(pickByMapping(dados, mapping, "lead.whatsapp"));
 
-  // Guarda de formato — descarta ANTES de gravar/disparar (não depois de queimar o
-  // template): número que não bate com o formato de celular BR não vira lead.whatsapp
-  // nem identificador de dedup. O valor bruto segue recuperável no `payload` cru do log
-  // abaixo, então nada se perde — só não contamina o cadastro nem dispara pra Meta.
-  let whatsappBrutoInvalido: string | null = null;
-  if (whatsapp && !isTelefoneBrPlausivel(canonicalBrPhone(whatsapp))) {
-    whatsappBrutoInvalido = whatsapp;
-    whatsapp = null;
-  }
+  // ⚠️ Guarda de formato — MARCA, não descarta (2026-08-18). Até aqui o número
+  // estruturalmente impossível era jogado fora ANTES de gravar. O motivo era certo (a
+  // Meta queima o template e só depois devolve 131026), mas o remédio ficava no lugar
+  // errado: o contato nascia sem telefone nenhum e o SDR nem sabia que a pessoa tinha
+  // digitado alguma coisa. Agora o número é GRAVADO como veio, quem julga o que pode
+  // SAIR é o envio (`crm-whatsapp-send`, régua compartilhada em `_shared/telefone.ts`)
+  // e o contato fica sinalizado — ver `whatsappImpossivel` logo abaixo do `whatsappLead`.
 
   // campos adicionais do lead (gravados em public.leads) + lote (controle de dedup)
   const cursoInteresse = asString(pickByMapping(dados, mapping, "lead.curso_interesse"), 200);
@@ -766,12 +752,10 @@ Deno.serve(async (req) => {
         if (!val) continue;
         if (col === "email") { const e = normalizeEmail(val); if (e) criacaoDefaults.email = e; }
         else if (col === "whatsapp") {
-          // MESMA guarda de formato do identificador: número estruturalmente impossível
-          // não entra em leads.whatsapp por nenhuma das duas portas (senão a Criação
-          // Automática reabriria o furo do 131026 "Message undeliverable" da Meta).
+          // Grava igual ao identificador — inclusive o impossível. O bloqueio de envio
+          // é downstream; aqui só interessa não perder o que a pessoa digitou.
           const w = normalizeWhatsapp(val);
-          if (w && isTelefoneBrPlausivel(canonicalBrPhone(w))) criacaoDefaults.whatsapp = w;
-          else if (w) whatsappBrutoInvalido ??= val;
+          if (w) criacaoDefaults.whatsapp = w;
         }
         else criacaoDefaults[col] = val;
       }
@@ -802,6 +786,12 @@ Deno.serve(async (req) => {
   const emailLead    = email ?? criacaoDefaults.email ?? null;
   const whatsappLead = whatsapp ?? criacaoDefaults.whatsapp ?? null;
 
+  // Número que NÃO pode existir (LP truncou, DDI duplicado, nome no campo telefone).
+  // Vale para as duas portas — identificador e Criação Automática —, por isso mora
+  // aqui, depois do `whatsappLead`. Não impede a gravação: só liga o alarme (tag +
+  // timeline no passo 10.9) e segura o seed do agente no passo (10).
+  const whatsappImpossivel = whatsappLead && !telefoneEnviavel(whatsappLead) ? whatsappLead : null;
+
   // Descarte por "não há NADA pra cadastrar" — substitui o antigo gate de identificador.
   // Não é sobre dedup: é sobre webhook que chegou sem nenhum dado de contato aproveitável
   // (mapeamento vazio / payload que não casa com nada). Sem isso, integração mal
@@ -823,9 +813,9 @@ Deno.serve(async (req) => {
     campoEav.length > 0 || Object.keys(campoFisico).length > 0 || criacaoVeioDoPayload,
   );
   if (!temDadosDeContato) {
-    const motivo = whatsappBrutoInvalido
-      ? `Sem dados de contato: WhatsApp "${whatsappBrutoInvalido}" não é um telefone BR válido e nada mais foi mapeado`
-      : "Sem dados de contato: nenhum campo do Mapeamento de Entrada nem da Criação Automática casou com o payload";
+    // Nota: telefone impossível NÃO cai mais aqui (desde 2026-08-18 ele é gravado e
+    // conta como dado de contato). Este descarte é só pro payload que não casou com nada.
+    const motivo = "Sem dados de contato: nenhum campo do Mapeamento de Entrada nem da Criação Automática casou com o payload";
     await admin.from("crm_webhook_logs").insert({
       integration_id: integration.id, slug, payload, status: "sem_identificador",
       erro: motivo, ip_origem: ipOrigem, ...reqMeta,
@@ -1608,7 +1598,10 @@ Deno.serve(async (req) => {
   // NAO envia mensagem — quem manda o template e a engine de automacao. So dispara quando
   // vamos abrir card (abrirCards — inclui lead IDENTIFICADO com acao) E ha whatsapp.
   let novoLeadDisparado = false;
-  if (abrirCards && whatsappLead && telCanon) {
+  // `!whatsappImpossivel`: número que não pode existir não semeia o agente nem fura o
+  // n8n — o JID seria de um telefone inexistente e o follow-up nasceria condenado.
+  // A guarda de `crm-whatsapp-send` já barraria o envio; aqui evita-se o lixo antes.
+  if (abrirCards && whatsappLead && telCanon && !whatsappImpossivel) {
     // (10a) Seed cliente_ppg_leads_sdr (CONTEXTO do agente). O n8n só escuta eventos de
     // MENSAGEM (webhook apioficial), NÃO o webhook do SprintHub — então o lead é semeado
     // aqui, server-side. Upsert manual por remotejid (não há unique no remotejid): insere
@@ -1703,29 +1696,27 @@ Deno.serve(async (req) => {
     }
   }
 
-  // (10.9) TELEFONE DESCARTADO — deixa de ser invisível ────────────────────────
+  // (10.9) TELEFONE IMPOSSÍVEL — grava, mas acende o alarme ────────────────────
   //
-  // A guarda de formato lá em cima está certa: número estruturalmente impossível
-  // não pode virar `leads.whatsapp` (contamina o cadastro e queima template da
-  // Meta com "Message undeliverable"). O problema era o descarte ser MUDO — o
-  // número bruto ficava só em `crm_webhook_logs.resultado.telefone_invalido`,
-  // onde nenhum SDR olha, e o contato aparecia como se tivesse chegado sem
-  // telefone nenhum.
+  // O número fica em `leads.whatsapp` como chegou (o SDR precisa ver o que a pessoa
+  // digitou para decidir se dá para adivinhar ou se pede por e-mail). O que impede o
+  // estrago é a guarda de ENVIO em `crm-whatsapp-send` — nada sai daqui para a Meta.
   //
-  // Medido em 2026-08-17 (14 dias): 171 descartes, 153 no MESMO padrão `5555` +
-  // DDD + 7 dígitos — a pessoa digita o "55" no campo que já tem +55 selecionado,
-  // a máscara de 11 dígitos da LP come os dois últimos dígitos do celular. O
-  // número que chega aqui é IRRECUPERÁVEL (os dígitos finais nunca saíram do
-  // navegador), então não há o que consertar no servidor: o que dá para fazer é
-  // avisar quem vai atender.
+  // Medido em 2026-08-17 (14 dias): 171 casos, 153 no MESMO padrão `5555` + DDD + 7
+  // dígitos — a pessoa digita o "55" no campo que já tem +55 selecionado e a máscara
+  // de 11 dígitos da LP come os dois últimos dígitos do celular. Os dígitos perdidos
+  // nunca saíram do navegador: é irrecuperável no servidor, a correção de raiz é na
+  // landing page (projeto externo).
   //
-  // Só alarma quem REALMENTE ficou sem telefone: contato duplicado que já tinha
-  // número gravado não vira alerta. Best-effort — nunca derruba o intake.
-  if (whatsappBrutoInvalido && leadId) {
+  // Relê `leads.whatsapp` em vez de confiar em `whatsappImpossivel`: contato
+  // duplicado que já tinha número BOM não pode virar alarme só porque a submissão
+  // nova veio torta (o patch de duplicado não sobrescreve número existente).
+  // Best-effort — nunca derruba o intake.
+  if (whatsappImpossivel && leadId) {
     try {
       const { data: leadAtual } = await admin
         .from("leads").select("whatsapp").eq("id", leadId).maybeSingle();
-      if (!String(leadAtual?.whatsapp ?? "").trim()) {
+      if (!telefoneEnviavel(leadAtual?.whatsapp)) {
         await admin.from("crm_lead_tags").upsert(
           [{ lead_id: leadId, tag_id: TAG_TELEFONE_INVALIDO, origem: "auto" }],
           { onConflict: "lead_id,tag_id", ignoreDuplicates: true },
@@ -1736,9 +1727,9 @@ Deno.serve(async (req) => {
         // ler para decidir se pede o contato de novo.
         await logAtividade(
           leadId, "acao_webhook",
-          "Telefone descartado: não é um número BR válido",
+          "Telefone não pode existir: nenhum disparo vai sair",
           "Telefone inválido",
-          `Chegou "${whatsappBrutoInvalido}" (${slug}) — peça o número por e-mail.`,
+          `Chegou "${whatsappImpossivel}" (${slug}) — gravado como veio; peça o número por e-mail.`,
         );
       }
     } catch (e: any) {
@@ -1757,9 +1748,10 @@ Deno.serve(async (req) => {
       // observabilidade da normalização: null = título não resolvido (candidato a alias)
       curso_canonico: cursoCanonico,
       lead_arquivado_reativado: leadArquivadoReativado || undefined,
-      // Telefone chegou fora do formato plausível BR (guarda em isTelefoneBrPlausivel) —
-      // não foi gravado em leads.whatsapp; o valor bruto fica aqui pra recuperação manual.
-      telefone_invalido: whatsappBrutoInvalido ?? undefined,
+      // Telefone estruturalmente impossível (régua em `_shared/telefone.ts`). Desde
+      // 2026-08-18 ele É gravado em leads.whatsapp — esta chave virou observabilidade
+      // (quantos chegam, de qual LP) e o marcador que a tag/timeline usam.
+      telefone_invalido: whatsappImpossivel ?? undefined,
       // Nenhum identificador resolvido: o contato foi criado SEM passar por dedup (ou a
       // integração não define identificador, ou o valor dele não veio/veio inválido).
       sem_dedup: (!email && !whatsapp) || undefined,

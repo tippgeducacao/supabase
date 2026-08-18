@@ -10,6 +10,7 @@
 // O envio insere em ped_conversas_mensagens; o trigger sac_mirror_from_ped_msg
 // espelha a mensagem de volta no chat do SAC automaticamente.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { telefoneEnviavel } from "../_shared/telefone.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -140,6 +141,16 @@ async function processarUma(
     if (row.tipo_mensagem !== "template" && !janelaAberta) {
       return await falhar(
         "Fora da janela de 24h no horário do envio. Mensagem livre bloqueada — reagende usando um template aprovado pela Meta.",
+      );
+    }
+
+    // Mesma guarda de `crm-whatsapp-send` (régua em `_shared/telefone.ts`): esta função
+    // fala com a Meta direto, sem passar pelo funil, então precisa da própria checagem.
+    // Um lead de indicação/orgânico entra no SAC sem nunca ter mandado mensagem — pode
+    // trazer o número impossível da LP junto e queimar template com 131026.
+    if (!telefoneEnviavel(row.telefone)) {
+      return await falhar(
+        `"${row.telefone}" não é um número que possa existir — nada foi enviado. Confirme o número com o contato.`,
       );
     }
 
