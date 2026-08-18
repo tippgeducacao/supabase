@@ -11,6 +11,9 @@
 //       prioridade); resolve lead.* e campo:<alias> (coluna física ou EAV)
 //   (3.5) MODO MAPEAMENTO: se a integracao tem escuta ativa (crm_webhook_escutas), a chamada
 //       e' SO LOGADA (status='escuta') e NADA e' processado — ver secao "escuta" no CLAUDE.md
+//   (3.6) TRAVA DE REENVIO (idempotencia): payload com `dados_completos.id` (lead id da
+//       Meta) que JA virou lead NESTA integracao e' logado como duplicado e devolvido ok,
+//       SEM processar nada — contra o re-push da planilha pelo n8n. `?force=1` pula.
 //   (4) find-or-create lead (dedup OR email/whatsapp)
 //   (5) ANTI-RAJADA da saudacao por (telefone, curso, lote, INTEGRACAO) via
 //       crm_saudacao_guard: gateia a CRIACAO da captacao/card dentro de uma JANELA
@@ -459,6 +462,66 @@ Deno.serve(async (req) => {
 
   const mapping = (integration.field_mapping ?? {}) as Record<string, string>;
   const config = (integration.config ?? {}) as any; // builder: abas avançadas (opt-in)
+
+  // (3.6) TRAVA DE REENVIO por IDENTIFICADOR EXTERNO (idempotência) — 2026-08-18.
+  // Contexto: o n8n do Formulário INSTANTÂNEO do Meta relê a planilha de 5 em 5 min e
+  // reposta a MESMA linha enquanto a marca `enviado_crm` não gruda nela. Oito linhas presas
+  // geraram 13.223 reprocessos em 7 dias (85% de TODO o tráfego de webhook do sistema),
+  // 3.092 captações e 6.188 atividades para UMA pessoa e 3.086 "recadastros" falsos num
+  // único card. A causa raiz é do lado do n8n (a marcação casava por TELEFONE; passou a
+  // casar pelo `id` da Meta), mas o intake não pode ser cúmplice: se a MESMA submissão
+  // externa já virou lead NESTA integração, respondemos ok — para o remetente conseguir
+  // marcar a linha — e não processamos NADA de novo.
+  // Mesma família do descarte "lead arquivado recente" (passo 8b): desfecho deliberado,
+  // resposta HONRA o config.retorno (é o {"sucesso":"true"} que o IF do n8n valida).
+  // Escopo deliberadamente estreito: só vale quando o payload traz `dados_completos.id` —
+  // o lead id da Meta, único por submissão. Payload sem esse campo => fluxo antigo intacto.
+  // Escape hatch: `?force=1` na URL pula a trava (reprocesso manual depois de arrumar
+  // mapeamento). Uma nova submissão da MESMA pessoa tem id novo e passa normalmente.
+  const idExterno = asString((payload as Record<string, any>)?.dados_completos?.id, 200);
+  if (idExterno && String(queryParams.force ?? "") !== "1") {
+    try {
+      const { data: jaProcessado } = await admin
+        .from("crm_webhook_logs")
+        .select("id, criado_em")
+        .eq("integration_id", integration.id)
+        .eq("payload->dados_completos->>id", idExterno)
+        .in("status", ["ok", "duplicado"])
+        .limit(1)
+        .maybeSingle();
+      if (jaProcessado) {
+        await admin.from("crm_webhook_logs").insert({
+          integration_id: integration.id, slug, payload, status: "duplicado",
+          erro: null, ip_origem: ipOrigem, ...reqMeta,
+          resultado: {
+            reenvio_ignorado: true, processado: false, duplicado: true,
+            id_externo: idExterno,
+            chegada_anterior_em: jaProcessado.criado_em,
+            chegada_anterior_log_id: jaProcessado.id,
+          },
+        });
+        const retornoReenvio = Array.isArray(config?.retorno) ? config.retorno : [];
+        if (retornoReenvio.length > 0) {
+          const ctxReenvio: Record<string, unknown> = {
+            "lead.id": null, "oportunidade.id": null, "lead_oportunidade.id": null,
+            "segmento": null, "duplicado": true, "duplicado_lote": false,
+          };
+          const outReenvio: Record<string, string> = {};
+          for (const r of retornoReenvio) {
+            if (r?.chave) outReenvio[String(r.chave)] = resolveRetornoVal(r?.valor, ctxReenvio);
+          }
+          return json(outReenvio, Number(integration.codigo_status) || 200);
+        }
+        return json(
+          { ok: true, reenvio_ignorado: true, processado: false, duplicado: true, id_externo: idExterno },
+          Number(integration.codigo_status) || 200,
+        );
+      }
+    } catch (e: any) {
+      // Checagem falhou NÃO derruba o intake: segue o fluxo normal de produção.
+      console.error("[crm-lead-webhook] trava de reenvio erro:", e?.message);
+    }
+  }
 
   // Fonte unificada de dados p/ mapeamento/tokens/validação: Corpo + Query + Headers.
   // O Mapeamento de Entrada tem 3 seções (Query/Corpo/Headers); o field_mapping casa a
