@@ -1,7 +1,18 @@
 // dispatch-professor-invite
-// Cron diário: processa convites a professores e envia WhatsApp via Meta Cloud API.
+// Cron de 30 em 30 min (07h–20h30 de Brasília): processa convites a professores e envia
+// WhatsApp via Meta Cloud API. Rodava 1x/dia às 09h — e nessa cadência o marco do LINK DO
+// DIA (1h antes da aula) nunca era alcançado no próprio dia. Ver docs/Pedagógico.md.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { resolverCampoProfessor } from "../_shared/pedProfessorCampos.ts";
+// Régua da fase 2 (30 → 7 → 1 → dia da aula): módulo PURO, coberto por vitest em
+// cadenciaFase2.test.ts. Não reescreva a aritmética aqui dentro.
+import {
+  buildAulaEndIso,
+  buildAulaStartIso,
+  dateOnlyToDate,
+  daysUntilAula,
+  pickNextFase2Marco,
+} from "./cadenciaFase2.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -131,11 +142,6 @@ function formatDatePtBR(date: Date): string {
   return `${dd} de ${mm} ${yy}`;
 }
 
-function dateOnlyToDate(d: string): Date {
-  // d = "YYYY-MM-DD" — interpreta em SP (UTC-3) ao meio-dia para evitar drift
-  return new Date(`${d}T12:00:00-03:00`);
-}
-
 function nowPlus(ms: number): string {
   return new Date(Date.now() + ms).toISOString();
 }
@@ -252,91 +258,6 @@ async function envioJaFeitoRecentemente(
   const ultimo = data?.[0];
   if (!ultimo) return { bloquear: false };
   return { bloquear: true, motivo: `enviado_em_${ultimo.created_at}` };
-}
-
-function buildAulaStartIso(dataYmd: string, horario: string | null): string {
-  // horario esperado "HH:MM-HH:MM" (padronizado pela migration 20260527171000)
-  const inicio = (horario ?? "19:00").split(/[-–]/)[0].trim() || "19:00";
-  return `${dataYmd}T${inicio.length === 5 ? inicio : "19:00"}:00-03:00`;
-}
-
-function buildAulaEndIso(dataYmd: string, horario: string | null): string {
-  // Fim da aula. Se horario for "HH:MM-HH:MM", pega o segundo bloco.
-  // Fallback: 22:00 (padrão das aulas noturnas).
-  const parts = (horario ?? "19:00-22:00").split(/[-–]/);
-  const fim = parts.length >= 2 ? parts[parts.length - 1].trim() : "22:00";
-  const safe = /^\d{2}:\d{2}$/.test(fim) ? fim : "22:00";
-  return `${dataYmd}T${safe}:00-03:00`;
-}
-
-function dateMinusDays(dataYmd: string, days: number): string {
-  const d = dateOnlyToDate(dataYmd);
-  d.setUTCDate(d.getUTCDate() - days);
-  return d.toISOString();
-}
-
-function daysUntilAula(dataYmd: string): number {
-  // dias inteiros (ceil) entre agora e a data da aula em SP
-  const aula = dateOnlyToDate(dataYmd).getTime();
-  const now = Date.now();
-  return Math.ceil((aula - now) / (24 * 3600 * 1000));
-}
-
-type SmartSkipResult = {
-  status:
-    | "fase2_reconfirmacao_30d"
-    | "fase2_reconfirmacao_14d"
-    | "fase2_reconfirmacao_7d"
-    | "fase2_lembrete_1d"
-    | "dia_aula_link_enviado"
-    | "pos_aula_realizada";
-  proxima_acao_em: string;
-  dias: number;
-  marco: string;
-};
-
-function pickNextFase2Marco(aula: { data: string; horario: string | null }): SmartSkipResult {
-  const dias = daysUntilAula(aula.data);
-  if (dias > 30) {
-    return {
-      status: "fase2_reconfirmacao_30d",
-      proxima_acao_em: dateMinusDays(aula.data, 30),
-      dias,
-      marco: "lembrete_30d",
-    };
-  }
-  // Toque de 14 dias REMOVIDO do fluxo (decisão 2026-07-16): régua = 30 → 7 → 1 → dia da aula.
-  if (dias > 7) {
-    return {
-      status: "fase2_reconfirmacao_7d",
-      proxima_acao_em: dateMinusDays(aula.data, 7),
-      dias,
-      marco: "lembrete_7d",
-    };
-  }
-  if (dias > 1) {
-    return {
-      status: "fase2_lembrete_1d",
-      proxima_acao_em: dateMinusDays(aula.data, 1),
-      dias,
-      marco: "lembrete_1d",
-    };
-  }
-  if (dias === 1) {
-    return {
-      status: "fase2_lembrete_1d",
-      proxima_acao_em: nowPlus(60 * 60 * 1000),
-      dias,
-      marco: "lembrete_1d",
-    };
-  }
-  // dias <= 0 → vai direto pro link da aula
-  return {
-    status: "dia_aula_link_enviado",
-    proxima_acao_em: new Date().toISOString(),
-    dias,
-    marco: "dia_aula_link",
-  };
 }
 
 function buildVariableValue(
@@ -855,7 +776,7 @@ Deno.serve(async (req) => {
         // que NÃO mexe em proxima_acao_em ⇒ o convite voltaria em todo run comendo vaga do
         // BATCH_LIMIT, que é ordenado por proxima_acao_em ASC).
         if (convite.status === "fase2_reconfirmacao_14d") {
-          const next = pickNextFase2Marco(aula);
+          const next = pickNextFase2Marco(aula, convite.status);
           // Aula já ocorrida (até 7 dias atrás, o guard acima barra o resto): NÃO reproduzir
           // o `dia_aula_link_enviado` imediato do pickNextFase2Marco — mandaria "segue o link
           // da sua sala" pra aula da semana passada. Encerra a cadência.
@@ -952,26 +873,60 @@ Deno.serve(async (req) => {
           };
           const limite = minDias[convite.status];
           if (diasAgora < limite) {
-            const next = pickNextFase2Marco(aula);
+            // `statusAtual` garante que o próximo marco é um degrau ABAIXO — não existe
+            // mais o caso "próximo igual ao atual" que antes exigia o atalho pro dia da aula.
+            const next = pickNextFase2Marco(aula, convite.status);
             console.log(
               `[dispatch] smart-skip GUARD convite=${convite.id} status=${convite.status} dias_restantes=${diasAgora} < ${limite} → reagenda p/ ${next.status} (${next.marco}) em ${next.proxima_acao_em} sem disparar`,
             );
             await supabase
               .from("ped_convites")
               .update({
-                status: next.status === convite.status ? "dia_aula_link_enviado" : next.status,
-                proxima_acao_em:
-                  next.status === convite.status
-                    ? new Date(
-                        new Date(buildAulaStartIso(aula.data, aula.horario)).getTime() -
-                          60 * 60 * 1000,
-                      ).toISOString()
-                    : next.proxima_acao_em,
+                status: next.status,
+                proxima_acao_em: next.proxima_acao_em,
               })
               .eq("id", convite.id);
             detail.skipped = "smart_skip_marco_passado";
             detail.dias_restantes = diasAgora;
             detail.next_status = next.status;
+            details.push(detail);
+            continue;
+          }
+        }
+
+        // 5.2) GUARD DO LINK DO DIA — o link da sala só serve ANTES de a aula começar.
+        // Enquanto o cron rodou 1x/dia às 09h, esse marco (1h antes da aula, ou seja 18h
+        // para a aula das 19h) NUNCA era alcançado no próprio dia: vencia à noite e só era
+        // visto na rodada da manhã seguinte, mandando "segue o link da sua aula" DEPOIS da
+        // aula. Dos 7 envios reais até 17/08/2026, 3 chegaram com 1 dia de atraso e nenhum
+        // acertou uma aula de 19h. O cron passou a rodar de 30 em 30 min (alcança o marco),
+        // e este guard fica como rede: aula já começada ⇒ pula o link e vai pro pós-aula.
+        if (cadencia === "dia_aula_link") {
+          const inicioMs = new Date(buildAulaStartIso(aula.data, aula.horario)).getTime();
+          if (Date.now() >= inicioMs) {
+            const fimMs = new Date(buildAulaEndIso(aula.data, aula.horario)).getTime();
+            await supabase
+              .from("ped_convites")
+              .update({
+                status: "pos_aula_realizada",
+                proxima_acao_em: new Date(fimMs + 5 * 60 * 1000).toISOString(),
+              })
+              .eq("id", convite.id);
+            await supabase.from("ped_convites_eventos").insert({
+              convite_id: convite.id,
+              aula_id: convite.aula_id,
+              tipo: "link_do_dia_perdido",
+              ator: "system",
+              payload: {
+                motivo: "a aula já havia começado quando o marco venceu",
+                aula_data: aula.data,
+                horario: aula.horario,
+              },
+            });
+            console.log(
+              `[dispatch] link do dia PERDIDO convite=${convite.id} aula=${aula.data} — já começou, pulando pro pós-aula`,
+            );
+            detail.skipped = "link_do_dia_aula_ja_comecou";
             details.push(detail);
             continue;
           }
@@ -1452,26 +1407,13 @@ Deno.serve(async (req) => {
           status === "fase2_reconfirmacao_7d" ||
           status === "fase2_lembrete_1d"
         ) {
-          // Smart skip: escolhe próximo marco viável baseado em dias restantes
-          const next = pickNextFase2Marco(aula);
+          // Próximo degrau da régua, sempre ABAIXO do que acabou de ser enviado.
+          const next = pickNextFase2Marco(aula, status);
           console.log(
             `[dispatch] smart-skip convite=${convite.id} aula=${aula.data} status_atual=${status} dias_restantes=${next.dias} -> proximo=${next.status} (${next.marco}) em ${next.proxima_acao_em}`,
           );
-          // Se o próximo marco é o mesmo do atual (ex: já estamos em 1d e dias===1),
-          // avança pra evitar loop: vai pro link da aula.
-          if (next.status === status) {
-            const startIso = buildAulaStartIso(aula.data, aula.horario);
-            update.status = "dia_aula_link_enviado";
-            update.proxima_acao_em = new Date(
-              new Date(startIso).getTime() - 60 * 60 * 1000,
-            ).toISOString();
-            console.log(
-              `[dispatch] smart-skip convite=${convite.id} próximo igual ao atual, forçando dia_aula_link_enviado`,
-            );
-          } else {
-            update.status = next.status;
-            update.proxima_acao_em = next.proxima_acao_em;
-          }
+          update.status = next.status;
+          update.proxima_acao_em = next.proxima_acao_em;
         } else if (status === "dia_aula_link_enviado") {
           update.status = "pos_aula_realizada";
           // Pós-aula vai 5 minutos depois do FIM da aula (ex: aula 19-22h → 22:05)
