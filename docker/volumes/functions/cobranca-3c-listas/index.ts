@@ -482,15 +482,21 @@ async function handler(req: Request): Promise<Response> {
     return json({ ok: true, acao: 'montar', enviados: 0, motivo: 'nenhum inadimplente na janela de recencia' })
   }
 
-  // ⚠️ `phone` vai SEM O DDD — o 3C CONCATENA areacode + phone. Mandando o numero
-  // completo em `phone` ele monta "46" + "46988166051" = 4646988166051, invalido, e
-  // DESCARTA a linha em silencio: responde 200 OK com `imported_lines: 0`.
-  // Provado pelo ?acao=diagnostico em 17/08/2026: mesma linha, mesma lista, mudando
-  // so o `phone` -> 0 importados com DDD, 1 importado sem DDD.
+  // ⚠️ `phone` vai COM O DDD (numero completo de 11 digitos) — IDENTICO ao
+  // threec-mailing-sync do comercial, que roda em producao ha meses. NAO mexer sem
+  // conferir la primeiro.
+  //
+  // Historico, para ninguem repetir o erro: em 17/08/2026 o ?acao=diagnostico
+  // devolveu `imported_lines: 0` com DDD e `1` sem DDD, e disso se concluiu que o 3C
+  // concatenava areacode + phone. ERRADO. Sem o DDD o 3C ACEITA a linha (por isso o
+  // diagnostico "passou") mas grava um numero de 9 digitos que o discador nao
+  // completa: a lista sobe CHEIA e as ligacoes falham em silencio — pior do que a
+  // lista subir vazia, porque parece que esta tudo certo.
+  // Licao: `imported_lines` prova que a linha foi ACEITA, nao que o numero e VALIDO.
   const mailing = rows.map((r) => ({
     identifier: montarIdentifier(r.nome, r.dias_atraso),
     areacode: r.telefone.substring(0, 2),
-    phone: r.telefone.substring(2),
+    phone: r.telefone,
     nome: limpar(r.nome),
     email: limpar(r.email),
     formacao: limpar(r.formacao),
