@@ -50,6 +50,13 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
+/**
+ * Tag "[Sistema] Telefone inválido" (`crm_tags`), criada com UUID FIXO pela
+ * migration `20260817200000_tag_telefone_invalido.sql` — é o marcador que torna
+ * visível o telefone que a guarda de formato descartou. Ver o bloco (10.9).
+ */
+const TAG_TELEFONE_INVALIDO = "00000000-0000-4000-8000-00000000ca11";
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "content-type, x-webhook-secret, authorization, apikey",
@@ -1630,6 +1637,49 @@ Deno.serve(async (req) => {
       } catch (e: any) {
         console.error("[crm-lead-webhook] novo_lead forward erro:", e?.message);
       }
+    }
+  }
+
+  // (10.9) TELEFONE DESCARTADO — deixa de ser invisível ────────────────────────
+  //
+  // A guarda de formato lá em cima está certa: número estruturalmente impossível
+  // não pode virar `leads.whatsapp` (contamina o cadastro e queima template da
+  // Meta com "Message undeliverable"). O problema era o descarte ser MUDO — o
+  // número bruto ficava só em `crm_webhook_logs.resultado.telefone_invalido`,
+  // onde nenhum SDR olha, e o contato aparecia como se tivesse chegado sem
+  // telefone nenhum.
+  //
+  // Medido em 2026-08-17 (14 dias): 171 descartes, 153 no MESMO padrão `5555` +
+  // DDD + 7 dígitos — a pessoa digita o "55" no campo que já tem +55 selecionado,
+  // a máscara de 11 dígitos da LP come os dois últimos dígitos do celular. O
+  // número que chega aqui é IRRECUPERÁVEL (os dígitos finais nunca saíram do
+  // navegador), então não há o que consertar no servidor: o que dá para fazer é
+  // avisar quem vai atender.
+  //
+  // Só alarma quem REALMENTE ficou sem telefone: contato duplicado que já tinha
+  // número gravado não vira alerta. Best-effort — nunca derruba o intake.
+  if (whatsappBrutoInvalido && leadId) {
+    try {
+      const { data: leadAtual } = await admin
+        .from("leads").select("whatsapp").eq("id", leadId).maybeSingle();
+      if (!String(leadAtual?.whatsapp ?? "").trim()) {
+        await admin.from("crm_lead_tags").upsert(
+          [{ lead_id: leadId, tag_id: TAG_TELEFONE_INVALIDO, origem: "auto" }],
+          { onConflict: "lead_id,tag_id", ignoreDuplicates: true },
+        );
+        // ⚠️ `detalhe` vira o `subtitulo` da timeline, que é renderizado com
+        // `truncate` (uma linha só, em `ContatoVisaoGeral.tsx`). Texto longo some
+        // no "…" — por isso o número cru vem PRIMEIRO, que é o que o SDR precisa
+        // ler para decidir se pede o contato de novo.
+        await logAtividade(
+          leadId, "acao_webhook",
+          "Telefone descartado: não é um número BR válido",
+          "Telefone inválido",
+          `Chegou "${whatsappBrutoInvalido}" (${slug}) — peça o número por e-mail.`,
+        );
+      }
+    } catch (e: any) {
+      console.error("[crm-lead-webhook] marcar telefone inválido erro:", e?.message);
     }
   }
 
