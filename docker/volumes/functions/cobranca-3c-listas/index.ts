@@ -703,21 +703,44 @@ async function handler(req: Request): Promise<Response> {
     return json({ ok: true, acao: 'montar', enviados: 0, motivo: 'nenhum inadimplente na janela de recencia' })
   }
 
-  // ⚠️ `phone` vai COM O DDD (numero completo de 11 digitos) — IDENTICO ao
-  // threec-mailing-sync do comercial, que roda em producao ha meses. NAO mexer sem
-  // conferir la primeiro.
+  // ⚠️ `phone` vai SEM O DDD (os 9 digitos). O DDD vai SO em `areacode` — o 3C
+  // junta os dois. Mandar o numero completo aqui faz o 3C montar DDD+DDD+numero e
+  // RECUSAR a linha.
   //
-  // Historico, para ninguem repetir o erro: em 17/08/2026 o ?acao=diagnostico
-  // devolveu `imported_lines: 0` com DDD e `1` sem DDD, e disso se concluiu que o 3C
-  // concatenava areacode + phone. ERRADO. Sem o DDD o 3C ACEITA a linha (por isso o
-  // diagnostico "passou") mas grava um numero de 9 digitos que o discador nao
-  // completa: a lista sobe CHEIA e as ligacoes falham em silencio — pior do que a
-  // lista subir vazia, porque parece que esta tudo certo.
-  // Licao: `imported_lines` prova que a linha foi ACEITA, nao que o numero e VALIDO.
+  // MEDIDO, nao deduzido (19/08/2026, `?acao=sondar&limite=24` — 24 numeros reais
+  // da fila, cada um inserido SOZINHO em 4 formatos, lendo imported_lines isolado):
+  //
+  //   phone sem DDD  (9 digitos)   24/24  100%   <- este
+  //   phone sem o 9o (10 digitos)  24/24  100%   (dispara numero antigo, nao serve)
+  //   phone COM DDD  (11 digitos)   8/24   33%
+  //   phone com 55   (13 digitos)   6/24   25%
+  //
+  // Nenhum numero foi recusado em TODOS os formatos: nao e blacklist, nao e numero
+  // morto, nao e a carteira. E o payload.
+  //
+  // HISTORICO — este campo ja virou duas vezes, nao vire uma terceira sem sondar:
+  //   17/08  diagnostico apontou sem DDD. CERTO.
+  //   18/08  o time viu numeros de 9 digitos na TELA do 3C, leu como "invalido" e
+  //          pediu para mandar igual ao comercial (com DDD). Trocado no 70d84031c.
+  //          Efeito: a lista do dia caiu de 333 para 89 (73% recusados em silencio),
+  //          e o completamento da campanha ficou em 1,57% — porque os 89 que
+  //          entraram foram gravados com o numero concatenado, indiscavel.
+  //   19/08  a sonda mediu numero a numero e devolveu o resultado acima.
+  //
+  // O que a tela do 3C mostra na coluna `phone` sao os 9 digitos — e assim mesmo,
+  // porque o DDD vive em `areacode`. Numero curto na tela nao e numero invalido.
+  //
+  // Licao que continua valendo: `imported_lines` prova que a linha foi ACEITA, nao
+  // que o numero e DISCAVEL. Aceitacao pela API != numero que completa.
+  //
+  // ⚠️ O threec-mailing-sync (discador do SDR/comercial) manda `phone: r.telefone`,
+  // COM o DDD — o formato que a sonda mediu em 33%. Se a regua do 3C for a mesma na
+  // campanha dele, aquele mailing vem sendo descartado em silencio ha meses. Nao foi
+  // mexido aqui de proposito: e outra campanha em producao e merece a propria sonda.
   const mailing = rows.map((r) => ({
     identifier: montarIdentifier(r.nome, r.dias_atraso),
     areacode: r.telefone.substring(0, 2),
-    phone: r.telefone,
+    phone: r.telefone.substring(2),
     nome: limpar(r.nome),
     email: limpar(r.email),
     formacao: limpar(r.formacao),
