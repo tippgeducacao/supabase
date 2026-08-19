@@ -138,7 +138,7 @@ function dividirAberturaEm2(texto: string): string[] {
 // {{2}} tem que terminar puxando algo que "Consegue confirmar?" complete, senão a última
 // linha fica órfã ("confirmar o quê?").
 // ⚠️ Uma linha só: parâmetro de corpo com quebra de linha faz a Meta recusar o envio.
-function frasePedidoCronograma(curso: string): string {
+export function frasePedidoCronograma(curso: string): string {
   const oQue = /^mba\b/i.test(curso.trim()) ? `do ${curso}` : `da pós em ${curso}`;
   return `Segue o cronograma ${oQue}, que vc pediu no site. Pra eu seguir com o seu atendimento, `
     + "preciso saber se é essa mesmo a pós que te interessa.";

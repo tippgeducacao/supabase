@@ -22,7 +22,7 @@
 // Escrita nas tabelas SÓ por aqui (service role); RLS não tem policy de escrita.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
-import { responderWebchat, aberturaWebchat } from "./agente.ts";
+import { responderWebchat, aberturaWebchat, frasePedidoCronograma } from "./agente.ts";
 import { pushParaSessao } from "../_shared/webchatPush.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -276,6 +276,11 @@ async function responderComoJoao(
       await syncSac(sessaoId, "outbound", "ia", chunk);
     }
 
+    // Pediu o cronograma ⇒ o material foi pro WhatsApp e a conversa pode continuar lá.
+    if (tools.some((t) => t.nome === "envia_informacoes" && !t.mockado)) {
+      await semearHistoricoWhatsApp(sessaoId, sessao, String(sessao.curso ?? ""));
+    }
+
     if (sessao.modo_teste && tools.length) {
       const anteriores = Array.isArray(sessao.teste_tool_chamadas) ? sessao.teste_tool_chamadas : [];
       const em = new Date().toISOString();
@@ -490,6 +495,84 @@ async function acaoEscolherPos(body: Record<string, unknown>) {
     await syncSac(sessaoId, "outbound", "ia", chunk);
   }
   return json({ ok: true });
+}
+
+// ── Continuidade site → WhatsApp (2026-08-19) ───────────────────────────────
+// Quando o cronograma sai por template, a conversa TENDE A CONTINUAR no WhatsApp — e o
+// João de lá lê outro histórico (cliente_ppg_mensagens_sdr, por remotejid). Sem isto ele
+// assume a conversa sem saber de nada e repergunta a graduação que a pessoa já respondeu
+// no site.
+// Copiamos a conversa REAL do site (é a mesma pessoa e o mesmo João, então não há fala
+// inventada) e deixamos a sessão em `agente_qualificador`, que é a persona que agenda —
+// o objetivo é o agendamento sair automático, sem passar por humano.
+async function semearHistoricoWhatsApp(sessaoId: string, sessao: { telefone: string | null; nome: string | null; curso: string | null; modo_teste: boolean }, curso: string): Promise<void> {
+  try {
+    if (sessao.modo_teste) return; // harness nunca escreve no histórico de produção
+    const tel = String(sessao.telefone ?? "").replace(/\D/g, "");
+    if (tel.length < 10) return;
+
+    const { data: atual } = await supabase
+      .from("webchat_sessoes").select("historico_semeado_em").eq("id", sessaoId).maybeSingle();
+    if ((atual as { historico_semeado_em?: string } | null)?.historico_semeado_em) return;
+
+    // remotejid canônico: as variantes cobrem com/sem o 9º dígito. Se o lead já existe do
+    // lado do WhatsApp, reusamos a CHAVE DELE — criar outra duplicaria a mesma pessoa.
+    const { data: vars } = await supabase.rpc("sac_phone_variants", { p: tel });
+    const jids = (Array.isArray(vars) ? vars as string[] : [`55${tel}`])
+      .map((v) => `${v}@s.whatsapp.net`);
+    const { data: leadWa } = await supabase
+      .from("cliente_ppg_leads_sdr")
+      .select("remotejid, agente_atual, curso_interesse_original")
+      .in("remotejid", jids).limit(1).maybeSingle();
+    const lead = leadWa as { remotejid: string; agente_atual: string | null; curso_interesse_original: string | null } | null;
+    const remotejid = lead?.remotejid ?? jids[0];
+
+    if (!lead) {
+      await supabase.from("cliente_ppg_leads_sdr").insert({
+        remotejid,
+        nome: sessao.nome ?? null,
+        curso_interesse_original: curso || null,
+        agente_atual: "agente_qualificador",
+        fonte: "webchat",
+        // ⚠️ followup_ativado e iniciar_atendimento têm DEFAULT TRUE na tabela: criar a
+        // linha sem desligar inscreveria o visitante do site na esteira de 7 toques de
+        // template do WhatsApp, que ninguém pediu. O que tem que ser automático é o
+        // AGENDAMENTO quando ela responder, não perseguição. Ligar isso é decisão à parte.
+        followup_ativado: false,
+        timestamp: new Date().toISOString(),
+      });
+    } else {
+      // Ratchet: quem já está em qualificador não volta pra validação.
+      await supabase.from("cliente_ppg_leads_sdr").update({
+        agente_atual: "agente_qualificador",
+        ...(curso && !lead.curso_interesse_original ? { curso_interesse_original: curso } : {}),
+      }).eq("remotejid", remotejid);
+    }
+
+    const { data: msgs } = await supabase
+      .from("webchat_mensagens").select("direcao, conteudo")
+      .eq("sessao_id", sessaoId).order("id", { ascending: true });
+    const linhas = ((msgs ?? []) as { direcao: string; conteudo: string | null }[])
+      .map((m) => ({
+        role: m.direcao === "inbound" ? "user" : "assistant",
+        content: String(m.conteudo ?? "").trim(),
+      }))
+      .filter((m) => m.content);
+    // O template que sai agora também é fala dele — sem isso ele oferece o cronograma
+    // de novo, achando que ainda não mandou.
+    linhas.push({ role: "assistant", content: frasePedidoCronograma(curso) });
+    if (!linhas.length) return;
+
+    const agora = new Date().toISOString();
+    await supabase.from("cliente_ppg_mensagens_sdr").insert(
+      linhas.map((l) => ({ remotejid, conversation_history: l, timestamp: agora })),
+    );
+    await supabase.from("webchat_sessoes")
+      .update({ historico_semeado_em: agora }).eq("id", sessaoId);
+  } catch (e) {
+    // Best-effort: falhar aqui NÃO pode derrubar a resposta do chat.
+    console.error(`[crm-webchat] semear historico whatsapp: ${(e as Error).message}`);
+  }
 }
 
 async function acaoEnviar(body: Record<string, unknown>, canal: "publico" | "teste" = "publico") {
