@@ -50,6 +50,7 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { telefoneEnviavel } from "../_shared/telefone.ts";
+import { aplicarFiltrosToken, parseTokenWebhook } from "./tokenFiltros.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -236,11 +237,17 @@ function condicaoPassa(c: any, payload: any, email: string | null, whatsapp: str
 }
 
 /** Substitui {webhook=Chave} pelo valor do payload (Criação Automática). Aceita caminho
- *  aninhado com "." (valorDoPayload) — ex.: {webhook=dados_completos.full_name}. */
+ *  aninhado com "." (valorDoPayload) — ex.: {webhook=dados_completos.full_name} — e
+ *  FILTROS depois de "|" (tokenFiltros.ts) — ex.:
+ *  {webhook=dados_completos.full_name|primeiro_nome|capitalizar} = "Maria" a partir de
+ *  "MARIA APARECIDA DA SILVA". É por aqui que a ação "Enviar template WhatsApp" manda só o
+ *  1º nome, já que a variável vem do PAYLOAD e não de um campo do lead. */
 function resolveWebhookVar(template: unknown, payload: any): string {
   return String(template ?? "").replace(/\{webhook=([^}]+)\}/g, (_m, k) => {
-    const v = valorDoPayload(payload, String(k).trim());
-    return v === undefined || v === null ? "" : String(v);
+    const { chave, filtros } = parseTokenWebhook(String(k));
+    const v = valorDoPayload(payload, chave);
+    const bruto = v === undefined || v === null ? "" : String(v);
+    return filtros.length ? aplicarFiltrosToken(bruto, filtros) : bruto;
   });
 }
 
