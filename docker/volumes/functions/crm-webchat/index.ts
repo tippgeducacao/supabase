@@ -398,6 +398,14 @@ async function acaoIniciar(body: Record<string, unknown>, req: Request) {
   // Abertura PROATIVA do João (já puxa conversa com uma pergunta, referenciando o curso
   // da LP) — em vez de um "oi" genérico. Síncrona: quando o iniciar retorna, já está na
   // thread e o 1º poll do widget a exibe. Vem FRACIONADA em balões (o widget espaça).
+  // FLUXO DE BOTÕES (2026-08-19): sem curso na página (home das pós), a conversa NÃO
+  // abre com IA. O visitante escolhe área → pós nos botões do widget, e a fala de
+  // abertura é a mensagem PRONTA de 'escolher_pos' — determinística e sem custo de
+  // modelo. A abertura por IA segue valendo quando a LP informa o curso e na Escola.
+  if (produto === "pos" && !texto(body.curso, 120)) {
+    return json({ ok: true, sessao_id: data.id, escolher_pos: true });
+  }
+
   let chunks: string[] = [`Oi, ${nome.split(" ")[0]}! 👋 Que bom te ver por aqui. Me conta: qual pós ou área você tem em mente?`];
   try {
     chunks = await aberturaWebchat(nome, texto(body.curso, 120) || null, produto);
@@ -439,6 +447,49 @@ async function syncSac(sessaoId: string, direcao: string, origem: string, conteu
   } catch (e) {
     console.error(`[crm-webchat] sac_sync: ${(e as Error).message}`);
   }
+}
+
+// ── escolher_pos: o visitante tocou na pós nos botões ────────────────────────
+// Grava a pós na sessão e escreve a MENSAGEM PRONTA do João. Ela NÃO vem do modelo, mas
+// entra no histórico como fala dele (e no espelho do SAC) por dois motivos: o visitante
+// precisa vê-la ao recarregar a página, e a IA precisa saber o que já foi dito — senão
+// ela cumprimenta de novo e repergunta a graduação.
+// A sessão já vai pra 'qualificador': a graduação está sendo perguntada AGORA, e a etapa
+// de validação existe justamente pro caso oposto (descobrir o interesse primeiro).
+function mensagemProntaDaPos(nome: string, curso: string): string[] {
+  const primeiro = (nome || "").trim().split(/\s+/)[0] || "";
+  // "MBA Gestão da Pecuária Leiteira" não pode virar "a pós em MBA Gestão…" — lê mal.
+  const ehMba = /^mba\b/i.test(curso.trim());
+  const oQue = ehMba ? `o ${curso}` : `a pós em ${curso}`;
+  return [
+    `oi${primeiro ? " " + primeiro : ""}, tudo bem? sou o joão, da ppg educação. bacana, então vc tem interesse em conhecer ${oQue}.`,
+    "posso te encaminhar o cronograma. só me confirma antes: qual é a sua graduação? e vc já é formado?",
+  ];
+}
+
+async function acaoEscolherPos(body: Record<string, unknown>) {
+  const sessaoId = texto(body.sessao_id, 40);
+  const curso = texto(body.curso, 120);
+  if (!UUID_RE.test(sessaoId)) return json({ ok: false, erro: "sessao_invalida" }, 400);
+  if (!curso) return json({ ok: false, erro: "curso_obrigatorio" }, 400);
+
+  const sessao = await carregarSessao(sessaoId);
+  if (!sessao) return json({ ok: false, erro: "sessao_nao_encontrada" }, 404);
+  if (sessao.bloqueada) return json({ ok: false, erro: "sessao_bloqueada" }, 403);
+  // Idempotente: dois toques (ou um recarregar no meio) não duplicam a mensagem.
+  if (sessao.curso) return json({ ok: true, ja_escolhida: true });
+
+  await supabase.from("webchat_sessoes")
+    .update({ curso, estagio: "qualificador" })
+    .eq("id", sessaoId);
+
+  for (const chunk of mensagemProntaDaPos(sessao.nome ?? "", curso)) {
+    await supabase.from("webchat_mensagens").insert({
+      sessao_id: sessaoId, direcao: "outbound", origem: "ia", conteudo: chunk,
+    });
+    await syncSac(sessaoId, "outbound", "ia", chunk);
+  }
+  return json({ ok: true });
 }
 
 async function acaoEnviar(body: Record<string, unknown>, canal: "publico" | "teste" = "publico") {
@@ -794,6 +845,8 @@ Deno.serve(async (req) => {
     switch (acao) {
       case "iniciar":
         return await acaoIniciar(body, req);
+      case "escolher_pos":
+        return await acaoEscolherPos(body);
       case "enviar":
         return await acaoEnviar(body);
       case "audio":
