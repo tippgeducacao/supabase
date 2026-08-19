@@ -18,6 +18,9 @@
 //   POST ?acao=montar&dry=1        -> simula (nao cria lista, nao envia, nao marca)
 //   POST ?acao=faxina&dry=1        -> lista o que MORRERIA, sem apagar nada
 //   POST ?acao=faxina&ids=1,2      -> apaga listas por id (usado no teste do DELETE)
+//   POST ?acao=sondar&limite=12    -> por que 246 de 335 nao entram: testa numero
+//                                     a numero, em 4 formatos, em lista propria
+//                                     de peso 0, e apaga tudo no fim
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0'
 
@@ -366,6 +369,168 @@ async function diagnostico(base: string, campanha: string, telefone: string) {
   }
 }
 
+// -------------------------------------------------------------- sonda ----
+// POR QUE ISTO EXISTE (19/08/2026): a lista do dia sobe com 89 de 335 — 246
+// pessoas, 73% da carteira, NAO CONSEGUEM ENTRAR no discador. Nao e sobra de
+// lista velha (a campanha estava provadamente vazia: `campanha_antes: []`) e nao
+// e tamanho de lote (a perda se espalha: 69/300 e 20/35). O unico padrao e um
+// gradiente por tempo de cobranca — quanto mais dias de atraso, menos importa.
+//
+// Duas coisas explicariam isso, e o `imported_lines` agregado NAO separa:
+//   (a) propriedade do NUMERO  — blacklist do 3C, ou numero morto na operadora
+//   (b) FORMATO do payload     — o 3C querendo o telefone de outro jeito
+//
+// A sonda separa: pega uma amostra ESTRATIFICADA (metade do topo da fila, com
+// mais dias de atraso; metade do fim, com menos) e insere CADA numero SOZINHO,
+// em cada formato candidato, lendo o `imported_lines` de cada insercao isolada.
+//   - so um formato passa                         -> era formato, e sabemos qual
+//   - nenhum formato passa para os mesmos numeros  -> e propriedade do numero
+//   - aceitacao acompanhando dias_atraso           -> confirma o gradiente
+//
+// Cria e APAGA a propria lista, com peso 0 para o discador nao pegar os numeros
+// nos segundos em que eles ficam la. Nao toca na lista do dia.
+const FORMATOS_SONDA: Array<{ chave: string; monta: (tel: string) => { areacode: string; phone: string } }> = [
+  // o que esta em producao hoje: phone COM o DDD (igual ao threec-mailing-sync)
+  { chave: 'atual_11', monta: (t) => ({ areacode: t.slice(0, 2), phone: t }) },
+  // o de 17/08: areacode separado, phone so com os 9 digitos
+  { chave: 'sem_ddd_9', monta: (t) => ({ areacode: t.slice(0, 2), phone: t.slice(2) }) },
+  // com DDI colado — alguns discadores exigem E.164 sem o mais
+  { chave: 'com_55_13', monta: (t) => ({ areacode: t.slice(0, 2), phone: '55' + t }) },
+  // sem o nono digito: numero antigo de 10 digitos, ainda aceito por operadora
+  { chave: 'sem_nono_10', monta: (t) => ({ areacode: t.slice(0, 2), phone: t.slice(0, 2) + t.slice(3) }) },
+]
+
+const HEADER_SONDA = ['identifier', 'areacode', 'phone', 'nome', 'email', 'formacao'] as const
+
+async function sondar(base: string, campanha: string, limite: number) {
+  const apagar = async (listaId: string) => {
+    try {
+      await fetch(alvo(base, `/campaigns/${campanha}/lists/${listaId}`), { method: 'DELETE' })
+    } catch { /* a faxina das 19:00 pega o que sobrar */ }
+  }
+
+  // Peso 0 = o discador nao consome esta lista. Best-effort: se o 3C recusar o
+  // corpo, a exposicao continua sendo os poucos segundos ate o DELETE.
+  const zerarPeso = async (listaId: string) => {
+    try {
+      await fetch(alvo(base, `/campaigns/${campanha}/lists/${listaId}/updateWeight`), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ weight: 0 }),
+      })
+    } catch { /* best-effort */ }
+  }
+
+  const meia = Math.max(1, Math.floor(limite / 2))
+  const campos = 'telefone, nome, email, formacao, dias_atraso, vezes_recebido, primeiro_visto_em'
+  const consulta = (asc: boolean) =>
+    supabase.from('cob_3c_fila').select(campos)
+      .eq('telefone_valido', true).is('removido_em', null)
+      .order('dias_atraso', { ascending: asc }).limit(meia)
+
+  const [topo, fim] = await Promise.all([consulta(false), consulta(true)])
+  if (topo.error || fim.error) throw new Error(topo.error?.message ?? fim.error?.message)
+
+  const vistos = new Set<string>()
+  const amostra: Array<Record<string, unknown>> = []
+  for (const r of [...(topo.data ?? []), ...(fim.data ?? [])]) {
+    const linha = r as Record<string, unknown>
+    const tel = String(linha.telefone ?? '')
+    if (tel.length !== 11 || vistos.has(tel)) continue
+    vistos.add(tel)
+    amostra.push(linha)
+  }
+  if (amostra.length === 0) throw new Error('nenhum telefone valido na fila para sondar')
+
+  const marca = new Date().toISOString().replace(/[^0-9]/g, '').slice(8, 14)
+  const veredito: Record<string, Record<string, unknown>> = {}
+  const listasCriadas: string[] = []
+
+  for (const f of FORMATOS_SONDA) {
+    let listaId: string
+    try {
+      listaId = (await criarListaBruto(base, campanha, `ZZ SONDA ${f.chave} ${marca}`, HEADER_SONDA)).id
+    } catch (err) {
+      veredito[f.chave] = { erro_ao_criar_lista: String(err) }
+      continue
+    }
+    listasCriadas.push(listaId)
+    await zerarPeso(listaId)
+
+    const porNumero: Record<string, number | null> = {}
+    for (const linha of amostra) {
+      const tel = String(linha.telefone)
+      const { areacode, phone } = f.monta(tel)
+      let imp: number | null = null
+      try {
+        const resp = await fetch(alvo(base, `/campaigns/${campanha}/lists/${listaId}/mailing`), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({
+            header: HEADER_SONDA,
+            mailing: [{
+              identifier: 'SONDA - nao ligar',
+              areacode,
+              phone,
+              nome: limpar(String(linha.nome ?? '')) || 'Aluno',
+              email: limpar(String(linha.email ?? '')),
+              formacao: limpar(String(linha.formacao ?? '')),
+            }],
+          }),
+        })
+        const txt = await resp.text()
+        try {
+          const j = JSON.parse(txt)
+          imp = typeof j?.imported_lines === 'number' ? j.imported_lines : null
+        } catch { /* corpo nao-JSON */ }
+      } catch { /* falha de rede: fica null */ }
+      porNumero[tel] = imp
+    }
+
+    veredito[f.chave] = {
+      aceitos: Object.values(porNumero).filter((v) => (v ?? 0) > 0).length,
+      testados: amostra.length,
+      por_numero: porNumero,
+    }
+    await apagar(listaId)
+  }
+
+  // Uma linha por pessoa: da para ver de bate-pronto se o mesmo numero e recusado
+  // em TODOS os formatos (propriedade do numero) ou so em alguns (formato).
+  const porPessoa = amostra.map((linha) => {
+    const tel = String(linha.telefone)
+    const res: Record<string, unknown> = {
+      telefone: tel,
+      dias_atraso: linha.dias_atraso ?? null,
+      vezes_recebido: linha.vezes_recebido ?? null,
+      primeiro_visto_em: linha.primeiro_visto_em ?? null,
+    }
+    for (const f of FORMATOS_SONDA) {
+      const pn = (veredito[f.chave]?.por_numero ?? {}) as Record<string, number | null>
+      res[f.chave] = pn[tel] ?? null
+    }
+    return res
+  })
+
+  const nenhumFormato = porPessoa.filter((r) =>
+    FORMATOS_SONDA.every((f) => !((r[f.chave] as number | null) ?? 0))).length
+
+  return {
+    amostra: amostra.length,
+    por_formato: Object.fromEntries(
+      Object.entries(veredito).map(([k, v]) => [k, { aceitos: v.aceitos ?? null, testados: v.testados ?? null }]),
+    ),
+    recusados_em_TODOS_os_formatos: nenhumFormato,
+    leitura: nenhumFormato === porPessoa.length
+      ? 'NENHUM numero entrou em NENHUM formato: e propriedade do numero (blacklist do 3C ou numero morto), nao o payload.'
+      : nenhumFormato === 0
+        ? 'todo numero entrou em algum formato: o problema E o payload — veja qual formato aceitou mais.'
+        : 'misto: parte dos numeros e recusada em qualquer formato (propriedade do numero) e parte depende do formato.',
+    por_pessoa: porPessoa,
+    listas_de_teste_apagadas: listasCriadas,
+  }
+}
+
 // ------------------------------------------------------------- montar ----
 // Devolve o id E o corpo cru: o diagnostico precisa ver com que header o 3C
 // registrou a lista (se ele nao registrar o header, o mailing e descartado).
@@ -470,6 +635,23 @@ async function handler(req: Request): Promise<Response> {
       return json({ error: 'passe ?telefone=DDD+9+numero (11 digitos). Use um numero SEU: ele entra numa lista real por alguns segundos.' }, 400)
     }
     return json({ ok: true, acao: 'diagnostico', ...(await diagnostico(base, campanha, tel)) })
+  }
+
+  // ------------------------------------------------------------- SONDA ----
+  if (acao === 'sondar') {
+    const limite = Math.min(Math.max(Number(url.searchParams.get('limite') ?? '') || 12, 2), 40)
+    try {
+      const res = await sondar(base, campanha, limite)
+      await supabase.from('cob_3c_execucoes').insert({
+        acao: 'sondar', dry: true, ok: true, enviados: res.amostra, detalhe: res,
+      })
+      return json({ ok: true, acao: 'sondar', ...res })
+    } catch (err) {
+      await supabase.from('cob_3c_execucoes').insert({
+        acao: 'sondar', dry: true, ok: false, erro: String(err),
+      })
+      return json({ error: 'sonda falhou', detail: String(err) }, 502)
+    }
   }
 
   // ------------------------------------------------------------ FAXINA ----
