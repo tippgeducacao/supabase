@@ -30,6 +30,9 @@ const SAMPLES: Record<string, string> = {
   "professor.contato_whatsapp": "(11) 99999-9999",
   "professor.email": "professor@ppgvet.com",
   "professor.forma_pagamento": "PIX",
+  // Sempre "nota fiscal" no envio real (documentoPagamentoTexto) — o sample tem
+  // que dizer o mesmo, senão o revisor da Meta vê o nome do campo cru.
+  "professor.documento_pagamento": "nota fiscal",
   "professor.chave_pix": "professor@ppgvet.com",
   "professor.valor_hora_aula_online": "200,00",
   "professor.valor_hora_aula_presencial": "250,00",

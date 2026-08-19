@@ -14,21 +14,22 @@ function formatValor(v: unknown): string {
 }
 
 /**
- * DOCUMENTO que o professor precisa nos enviar para receber, derivado do campo
- * livre `forma_pagamento` do cadastro (que mistura documento — NF/RECIBO — com
- * MEIO de pagamento — PIX).
+ * DOCUMENTO que o professor precisa nos enviar para receber.
  *
- * Existe porque o template `pos_aula_status_v2_v2` diz "Envie sua {{4}} por aqui":
- * o valor CRU não cabe na frase ("Envie sua PIX") e vem VAZIO em ~85% do cadastro,
- * e parâmetro vazio faz a Meta recusar o template inteiro (erro 131008).
- * Por isso nunca devolve string vazia.
+ * ⚠️ SEMPRE "nota fiscal" (decisão da Janaína/Rafael, 2026-08-19). A cobrança
+ * MANUAL sempre pediu exclusivamente NF; a automática derivava do campo livre
+ * `forma_pagamento` do cadastro e podia dizer "recibo" ou "nota fiscal ou
+ * recibo" — oferecendo uma escolha que não existe e contradizendo a cobrança
+ * manual no mesmo chat. A palavra "recibo" não pode aparecer.
+ *
+ * Continua sendo um CAMPO derivado (e não texto fixo no corpo) porque o template
+ * aprovado `pos_aula_status_v2_v2` diz "Envie sua {{4}} por aqui" e a Meta recusa
+ * o template inteiro quando qualquer {{n}} chega vazio (erro 131008) — é este
+ * campo que garante que {{4}} nunca é vazio, qualquer que seja o cadastro.
+ * Trocar o corpo para embutir "nota fiscal" exigiria template NOVO aprovado.
  */
-export function documentoPagamentoTexto(formaPagamento: unknown): string {
-  const v = String(formaPagamento ?? "").trim().toUpperCase();
-  if (v.includes("NOTA") || v === "NF") return "nota fiscal";
-  if (v.includes("RECIBO")) return "documentação (recibo assinado)";
-  // PIX / "NÃO SE APLICA" / vazio → texto que serve aos dois casos.
-  return "nota fiscal ou recibo";
+export function documentoPagamentoTexto(_formaPagamento?: unknown): string {
+  return "nota fiscal";
 }
 
 /**
