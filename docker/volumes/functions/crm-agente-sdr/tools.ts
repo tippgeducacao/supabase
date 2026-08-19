@@ -1090,14 +1090,19 @@ async function atualizarDadosLead(supabase: any, input: any, ctx: CtxConversa, t
   const sair = (texto: string) => ({ resultado: texto, id: toolUseId });
   const nome = String(input?.nome ?? '').trim();
   const formacao = String(input?.formacao ?? '').trim();
-  if (!nome && !formacao) {
-    return sair('Nada a atualizar: chame esta função só quando o lead informar o nome ou a graduação dele.');
+  // ⚠️ 2026-08-19: o input_schema da tool (no banco) SEMPRE teve tempo_formacao, mas aqui
+  // o campo era descartado — a resposta de "já é formado? quando conclui?" se perdia.
+  // A RPC guarda esse dado desde sempre; era só o handler que não repassava.
+  const tempoFormacao = String(input?.tempo_formacao ?? '').trim();
+  if (!nome && !formacao && !tempoFormacao) {
+    return sair('Nada a atualizar: chame esta função só quando o lead informar o nome, a graduação ou quando conclui a graduação.');
   }
 
   const { data, error } = await supabase.rpc('crm_agente_atualizar_dados_lead', {
     p_remotejid: ctx.remotejid,
     p_nome: nome || null,
     p_formacao: formacao || null,
+    p_tempo_formacao: tempoFormacao || null,
   });
   if (error) {
     console.error(`[crm-agente-sdr] atualizar_dados_lead: ${error.message}`);

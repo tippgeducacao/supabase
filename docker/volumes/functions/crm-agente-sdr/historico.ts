@@ -155,11 +155,26 @@ export async function criarLead(supabase: any, remotejid: string): Promise<void>
   if (error) throw new Error(`criarLead: ${error.message}`);
 }
 
+// Variantes do telefone em formato remotejid (com e sem o 9º dígito, sempre com DDI).
+// ⚠️ 2026-08-19: sem isto, quem chama com o telefone CRU (o webchat manda "46988166051")
+// não atualiza nada, porque a linha vive como "5546988166051@s.whatsapp.net". Foi assim
+// que o curso de interesse escolhido no site nunca chegava ao registro do agente.
+export function jidsDoTelefone(bruto: string): string[] {
+  const dig = String(bruto ?? '').split('@')[0].replace(/\D/g, '');
+  const semDdi = dig.startsWith('55') && dig.length >= 12 ? dig.slice(2) : dig;
+  if (semDdi.length < 10) return [`${dig}@s.whatsapp.net`];
+  const ddd = semDdi.slice(0, 2);
+  const resto = semDdi.slice(2);
+  const com9 = resto.length === 8 ? `9${resto}` : resto;
+  const sem9 = resto.length === 9 && resto.startsWith('9') ? resto.slice(1) : resto;
+  return [...new Set([`55${ddd}${com9}`, `55${ddd}${sem9}`])].map((n) => `${n}@s.whatsapp.net`);
+}
+
 export async function atualizarLead(supabase: any, remotejid: string, patch: Record<string, unknown>): Promise<void> {
   const { error } = await supabase
     .from('cliente_ppg_leads_sdr')
     .update(patch)
-    .eq('remotejid', remotejid);
+    .in('remotejid', jidsDoTelefone(remotejid));
   if (error) throw new Error(`atualizarLead: ${error.message}`);
 }
 
