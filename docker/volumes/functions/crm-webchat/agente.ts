@@ -172,7 +172,7 @@ async function webchatEnviaInformacoes(tu: any, telefone: string, curso: string 
       return { resultado: `Não consegui enviar agora (${d.error || b?.error || r.status}). Diga que vai enviar em seguida e conduza, sem citar o erro.`, id: tu.id };
     }
     const partes: string[] = [];
-    if (d.cronograma_enviado) partes.push("Cronograma ENVIADO no WhatsApp do lead — confirme pra ele com naturalidade.");
+    if (d.cronograma_enviado) partes.push("Cronograma ENVIADO no WHATSAPP do visitante. ⛔ Ele NÃO aparece neste chat: NUNCA diga \"aqui em cima\" nem \"acima\". Confirme dizendo o canal (ex.: \"acabei de mandar no seu whats\").");
     else if (d.cronograma_erro) partes.push(`Cronograma NÃO enviado (${d.cronograma_erro}) — diga que manda em seguida, sem citar erro técnico.`);
     if (d.valor_integral) partes.push(`Valor integral da pós: ${d.valor_integral}.`);
     if (d.valor_matricula) partes.push(`Valor da matrícula (garante a vaga): ${d.valor_matricula}.`);
