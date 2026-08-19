@@ -35,6 +35,17 @@ const SDR_API_KEY = Deno.env.get("AGENTE_SDR_SDRAPI_KEY") ?? "";
 // Linha Web (Uazapi, wa_conexoes.id) por onde o WEBCHAT envia o cronograma — o lead do
 // site não tem janela de 24h no Cloud API. Vazio = cai no comportamento padrão (Cloud).
 const WEBCHAT_WA_CONEXAO_ID = Deno.env.get("WEBCHAT_WA_CONEXAO_ID") ?? "";
+// TEMPLATE OFICIAL DO CRONOGRAMA (2026-08-19). O visitante do site nunca mandou mensagem
+// pro número, então NÃO existe janela de 24h e envio solto é recusado. Template de
+// UTILIDADE com o PDF no cabeçalho é o caminho oficial, e não depende de janela — além de
+// não depender de número Web (Uazapi), que vive caindo ou sendo restringido.
+// Default no código pra funcionar sem mexer no .env da VPS; env sobrescreve se precisar.
+const WEBCHAT_TEMPLATE_CRONOGRAMA = Deno.env.get("WEBCHAT_TEMPLATE_CRONOGRAMA")
+  ?? "confirmacao_de_provas_alunos_pdf_utility_pos_ia";
+// Conta "PPGVET - Pós-graduação IA" (+55 46 99907-1093) — é a WABA onde o template acima
+// está aprovado. Template vive POR WABA: trocar de número exige recriar o template lá.
+const WEBCHAT_WA_ACCOUNT_ID = Deno.env.get("WEBCHAT_WA_ACCOUNT_ID")
+  ?? "d2984495-f70e-4c40-a47b-4b969d735a07";
 const supabase = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "");
 
 const MAX_RODADAS = 6;
@@ -123,7 +134,17 @@ function dividirAberturaEm2(texto: string): string[] {
 // envia_informacoes do WEBCHAT: roteia o cronograma por uma LINHA WEB (Uazapi) via
 // wa_conexao_id — o lead do site não tem janela de 24h no Cloud API. Reusa a MESMA
 // sdr-api/envia-informacoes (resolve curso, cronograma, valores); só troca o canal.
-async function webchatEnviaInformacoes(tu: any, telefone: string, curso: string | null): Promise<Record<string, unknown>> {
+// O corpo do template é "Oi {{1}}. / {{2}} / Consegue confirmar?" — {{1}} é o NOME e o
+// {{2}} tem que terminar puxando algo que "Consegue confirmar?" complete, senão a última
+// linha fica órfã ("confirmar o quê?").
+// ⚠️ Uma linha só: parâmetro de corpo com quebra de linha faz a Meta recusar o envio.
+function frasePedidoCronograma(curso: string): string {
+  const oQue = /^mba\b/i.test(curso.trim()) ? `do ${curso}` : `da pós em ${curso}`;
+  return `Segue o cronograma ${oQue}, que vc pediu no site. Pra eu seguir com o seu atendimento, `
+    + "preciso saber se é essa mesmo a pós que te interessa.";
+}
+
+async function webchatEnviaInformacoes(tu: any, telefone: string, curso: string | null, nome: string): Promise<Record<string, unknown>> {
   const input = tu.input ?? {};
   const conteudo = input.conteudo || "cronograma";
   const pos = String(input.curso_escolhido ?? "").trim() || limparCurso(curso);
@@ -132,7 +153,16 @@ async function webchatEnviaInformacoes(tu: any, telefone: string, curso: string 
     const r = await fetch(`${SDR_API_URL}/envia-informacoes`, {
       method: "POST",
       headers: { Authorization: `Bearer ${SDR_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ whatsapp: telefone, pos, conteudo, wa_conexao_id: WEBCHAT_WA_CONEXAO_ID || null }),
+      body: JSON.stringify({
+        whatsapp: telefone, pos, conteudo,
+        template_name: WEBCHAT_TEMPLATE_CRONOGRAMA,
+        template_lang: "pt_BR",
+        template_params: [(nome || "").trim().split(/\s+/)[0] || "tudo bem", frasePedidoCronograma(pos)],
+        wa_account_id: WEBCHAT_WA_ACCOUNT_ID || null,
+        // Plano B do sdr-api: se o template falhar (não aprovado no número, upload
+        // recusado, número restrito), ele reenvia por esta linha Web em vez de não entregar.
+        wa_conexao_id: WEBCHAT_WA_CONEXAO_ID || null,
+      }),
     });
     const b: any = await r.json().catch(() => ({}));
     const d = b?.data ?? {};
@@ -321,7 +351,7 @@ export async function responderWebchat(
         mockado,
       });
       if (mockado) outputs.push(resultadoToolMockado(tu, limparCurso(curso)));
-      else if (tu.name === "envia_informacoes") outputs.push(await webchatEnviaInformacoes(tu, telefone, curso));
+      else if (tu.name === "envia_informacoes") outputs.push(await webchatEnviaInformacoes(tu, telefone, curso, nome));
       else outputs.push(await executarTool(supabase, tu, ctx));
     }
     messages.push({ role: "user", content: montarToolResults(outputs) });

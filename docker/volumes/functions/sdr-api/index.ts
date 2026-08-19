@@ -416,26 +416,66 @@ async function handleEnviaInformacoes(_sdrId: string, body: any): Promise<Respon
         return json(404, { error: cronogramaErro, code: 'cronograma_nao_cadastrado' })
       }
     } else {
-      const r = await fetch(`${SUPABASE_URL}/functions/v1/crm-whatsapp-send`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${SERVICE_ROLE}` },
-        body: JSON.stringify({
-          telefone,
-          tipo: 'document',
-          anexo_url: info.cronograma.url,
-          filename: info.cronograma.nome_arquivo || undefined,
-          wa_account_id: body?.wa_account_id ?? null,
-          // wa_conexao_id (opcional): força uma LINHA Uazapi/Web (sem janela 24h). Usado
-          // pelo WEBCHAT — o lead do site nunca abriu janela no Cloud API. Quando presente,
-          // o crm-whatsapp-send roteia por enviarViaConexao. WhatsApp não passa → null.
-          wa_conexao_id: body?.wa_conexao_id ?? null,
-          lead_id: body?.lead_id ?? null,
-          oportunidade_id: body?.oportunidade_id ?? null,
-        }),
-      })
-      const sendResp = await r.json().catch(() => ({}))
-      cronogramaEnviado = r.ok && sendResp?.success === true
-      if (!cronogramaEnviado) cronogramaErro = sendResp?.error ?? `crm-whatsapp-send retornou ${r.status}`
+      const base = {
+        telefone,
+        wa_account_id: body?.wa_account_id ?? null,
+        lead_id: body?.lead_id ?? null,
+        oportunidade_id: body?.oportunidade_id ?? null,
+      }
+      // Envio "solto" (document): exige JANELA DE 24h aberta. É o caminho do agente de
+      // WhatsApp, onde o lead sempre respondeu antes.
+      // wa_conexao_id (opcional): força uma LINHA Uazapi/Web, que não tem janela.
+      const comoDocumento = {
+        ...base,
+        tipo: 'document',
+        anexo_url: info.cronograma.url,
+        filename: info.cronograma.nome_arquivo || undefined,
+        wa_conexao_id: body?.wa_conexao_id ?? null,
+      }
+      // TEMPLATE (2026-08-19): quem NÃO tem janela — o visitante do webchat nunca mandou
+      // mensagem pro número — recebe por template de UTILIDADE com o PDF no cabeçalho.
+      // O `header_media_url` faz o crm-whatsapp-send montar o header sozinho e subir o
+      // arquivo por media_id (1 upload por arquivo × número), que é o que evita o 131053.
+      const templateName = String(body?.template_name ?? '').trim()
+      // ⚠️ Parâmetro de corpo com QUEBRA DE LINHA faz a Meta recusar o template. Aqui a
+      // gente achata antes de mandar, além da sanitização que o crm-whatsapp-send faz.
+      const comoTemplate = templateName ? {
+        ...base,
+        tipo: 'template',
+        template_name: templateName,
+        template_lang: String(body?.template_lang ?? 'pt_BR'),
+        template_components: [{
+          type: 'body',
+          parameters: (Array.isArray(body?.template_params) ? body.template_params : [])
+            .map((t: unknown) => ({ type: 'text', text: String(t ?? '').replace(/\s+/g, ' ').trim() })),
+        }],
+        header_media_url: info.cronograma.url,
+      } : null
+
+      const enviar = async (payload: Record<string, unknown>) => {
+        const r = await fetch(`${SUPABASE_URL}/functions/v1/crm-whatsapp-send`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${SERVICE_ROLE}` },
+          body: JSON.stringify(payload),
+        })
+        const resp = await r.json().catch(() => ({}))
+        return {
+          ok: r.ok && resp?.success === true,
+          erro: resp?.error ?? `crm-whatsapp-send retornou ${r.status}`,
+        }
+      }
+
+      let res = await enviar(comoTemplate ?? comoDocumento)
+      // Plano B: template falhou (não aprovado no número, upload recusado, número
+      // restrito) e o chamador ofereceu uma linha Web. Melhor entregar por ela do que
+      // não entregar — o lead pediu o material.
+      if (!res.ok && comoTemplate && body?.wa_conexao_id) {
+        const viaWeb = await enviar(comoDocumento)
+        if (viaWeb.ok) res = viaWeb
+        else res = { ok: false, erro: `template: ${res.erro} | linha web: ${viaWeb.erro}` }
+      }
+      cronogramaEnviado = res.ok
+      if (!cronogramaEnviado) cronogramaErro = res.erro
     }
   }
 
