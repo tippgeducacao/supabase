@@ -430,12 +430,12 @@ async function acaoIniciar(body: Record<string, unknown>, req: Request) {
 async function carregarSessao(sessaoId: string) {
   const { data } = await supabase
     .from("webchat_sessoes")
-    .select("id, bloqueada, nome, telefone, curso, produto, estagio, lead_id, chat_visivel, presenca_em, origem_url, atendimento_humano, modo_teste, teste_execucao_id, teste_cenario, teste_tool_chamadas")
+    .select("id, bloqueada, nome, telefone, curso, pagina, produto, estagio, lead_id, chat_visivel, presenca_em, origem_url, atendimento_humano, modo_teste, teste_execucao_id, teste_cenario, teste_tool_chamadas")
     .eq("id", sessaoId)
     .maybeSingle();
   return data as {
     id: string; bloqueada: boolean; nome: string | null; telefone: string | null;
-    curso: string | null; produto: string | null; estagio: "validacao" | "qualificador" | null;
+    curso: string | null; pagina: string | null; produto: string | null; estagio: "validacao" | "qualificador" | null;
     lead_id: string | null; chat_visivel: boolean | null; presenca_em: string | null;
     origem_url: string | null; atendimento_humano: boolean | null; modo_teste: boolean;
     teste_execucao_id: string | null; teste_cenario: string | null; teste_tool_chamadas: unknown[];
@@ -472,6 +472,81 @@ function mensagemProntaDaPos(nome: string, curso: string): string[] {
   ];
 }
 
+// -- Captacao: manda o lead pro webhook do CRM -------------------------------
+// Quem decide funil, etapa e segmento e a INTEGRACAO (configurada na tela), nao este
+// codigo e muito menos o agente. Aqui a gente so entrega os dados no momento em que os
+// tres campos que importam ficam completos: nome, telefone e curso.
+//
+// O segredo NAO fica no codigo: lemos da propria integracao (service_role), entao
+// rotacionar o secret na tela nao quebra nada aqui.
+//
+// Best-effort: falha aqui NUNCA derruba a conversa. O visitante ja tem lead pelo
+// webchat_lead_upsert; sem o webhook ele fica sem oportunidade, o que e ruim mas e
+// recuperavel -- perder a resposta do chat nao e.
+const WEBCHAT_CAPTACAO_SLUG = Deno.env.get("WEBCHAT_CAPTACAO_SLUG") ?? "pos-3-em-1-webchat";
+
+async function dispararCaptacao(
+  sessao: { nome: string | null; telefone: string | null; origem_url: string | null; pagina: string | null },
+  curso: string,
+): Promise<void> {
+  try {
+    const telefone = String(sessao.telefone ?? "").replace(/\D/g, "");
+    if (!telefone || !curso) return;
+
+    const { data: integ } = await supabase
+      .from("crm_webhook_integrations")
+      .select("slug, secret, ativa")
+      .eq("slug", WEBCHAT_CAPTACAO_SLUG).maybeSingle();
+    const integracao = integ as { slug: string; secret: string | null; ativa: boolean | null } | null;
+    if (!integracao?.secret || integracao.ativa === false) {
+      console.error(`[crm-webchat] captacao: integracao ${WEBCHAT_CAPTACAO_SLUG} inativa ou sem secret`);
+      return;
+    }
+
+    // Resolve o curso no catalogo: o rotulo do botao ("Reproducao... (3 em 1)") nao e o
+    // nome oficial ("POS | ... (3EM1)"). O resolver e o MESMO que o agente usa.
+    let nomeOficial = curso;
+    let segmentoId: string | null = null;
+    try {
+      const { data: resolvido } = await supabase.rpc("fn_sdr_api_resolver_pos_graduacao", { p_valor: curso });
+      const cursoId = (resolvido as { id?: string } | null)?.id ?? null;
+      if (cursoId) {
+        const { data: c } = await supabase.from("cursos").select("nome, segmento_id").eq("id", cursoId).maybeSingle();
+        const linha = c as { nome: string | null; segmento_id: string | null } | null;
+        if (linha?.nome) nomeOficial = linha.nome;
+        segmentoId = linha?.segmento_id ?? null;
+      }
+    } catch (e) {
+      console.error(`[crm-webchat] captacao resolver curso: ${(e as Error).message}`);
+    }
+    // Titulo da oportunidade = nome do catalogo sem o prefixo, como nas integracoes de LP.
+    const titulo = nomeOficial.replace(/^(PÓS|MBA)\s*\|\s*/i, "").trim();
+
+    const url = `${SUPABASE_URL}/functions/v1/crm-lead-webhook`
+      + `?int=${encodeURIComponent(integracao.slug)}&secret=${encodeURIComponent(integracao.secret)}`;
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        nome: sessao.nome ?? "",
+        telefone,
+        curso: titulo,
+        titulo,
+        segmento_id: segmentoId ?? "",
+        fonte: "Webchat",
+        pagina: sessao.pagina ?? "",
+        origem_url: sessao.origem_url ?? "",
+      }),
+    });
+    const resp = await r.json().catch(() => ({}));
+    if (!r.ok || (resp as { ok?: boolean }).ok === false) {
+      console.error(`[crm-webchat] captacao HTTP ${r.status}: ${JSON.stringify(resp).slice(0, 300)}`);
+    }
+  } catch (e) {
+    console.error(`[crm-webchat] captacao: ${(e as Error).message}`);
+  }
+}
+
 async function acaoEscolherPos(body: Record<string, unknown>) {
   const sessaoId = texto(body.sessao_id, 40);
   const curso = texto(body.curso, 120);
@@ -487,6 +562,10 @@ async function acaoEscolherPos(body: Record<string, unknown>) {
   await supabase.from("webchat_sessoes")
     .update({ curso, estagio: "qualificador" })
     .eq("id", sessaoId);
+
+  // Os três campos (nome, telefone, curso) ficaram completos AGORA: é o gatilho da
+  // captação. A guarda de `sessao.curso` acima já garante uma vez só por sessão.
+  await dispararCaptacao(sessao, curso);
 
   for (const chunk of mensagemProntaDaPos(sessao.nome ?? "", curso)) {
     await supabase.from("webchat_mensagens").insert({
