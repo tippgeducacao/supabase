@@ -286,6 +286,9 @@ Deno.serve(async (req) => {
       // É só o PARÂMETRO do envio — NÃO altera o template na Meta, então não há re-aprovação.
       header_media_url,
       header_media_format,
+      // Nome do arquivo do cabeçalho DOCUMENT. Sem ele o WhatsApp mostra "Sem título"
+      // (2026-08-19, cronograma do webchat). Vazio ⇒ derivamos do próprio nome do arquivo.
+      header_media_filename,
       anexo_url,
       filename,
       mime_type,
@@ -559,13 +562,26 @@ Deno.serve(async (req) => {
           // 658 KB com URL sadia (2026-07-30). Com id ela não baixa nada: 1 upload por
           // (arquivo × número). Upload falhou ⇒ `link`, o comportamento antigo.
           const mime = key === "video" ? "video/mp4" : key === "document" ? "application/pdf" : "image/jpeg";
-          const nomeArq = key === "video" ? "header.mp4" : key === "document" ? "header.pdf" : "header.jpg";
+          // Nome do arquivo: o que o chamador mandou, senão o basename da URL (sem query
+          // e com %20 e afins decodificados). É o que o WhatsApp exibe no card do PDF.
+          const nomeDaUrl = (() => {
+            try {
+              const p = decodeURIComponent(new URL(hdrUrl).pathname.split("/").pop() ?? "");
+              return p.trim();
+            } catch { return ""; }
+          })();
+          const extPadrao = key === "video" ? "header.mp4" : key === "document" ? "header.pdf" : "header.jpg";
+          const nomeArq = String(header_media_filename ?? "").trim() || nomeDaUrl || extPadrao;
           headerMediaUrl = hdrUrl;
           headerMediaKey = key;
           headerMediaId = await resolverMediaId(admin, phoneNumberId, accessToken, hdrUrl, mime, nomeArq);
+          // ⚠️ `filename` é SÓ do document: mandar em image/video faz a Meta recusar o
+          // parâmetro. Sem ele no document, o card chega como "Sem título".
+          const midiaHeader: Record<string, unknown> = headerMediaId ? { id: headerMediaId } : { link: hdrUrl };
+          if (key === "document") midiaHeader.filename = nomeArq;
           comps.push({
             type: "header",
-            parameters: [{ type: key, [key]: headerMediaId ? { id: headerMediaId } : { link: hdrUrl } }],
+            parameters: [{ type: key, [key]: midiaHeader }],
           });
         }
       }

@@ -450,6 +450,8 @@ async function handleEnviaInformacoes(_sdrId: string, body: any): Promise<Respon
             .map((t: unknown) => ({ type: 'text', text: String(t ?? '').replace(/\s+/g, ' ').trim() })),
         }],
         header_media_url: info.cronograma.url,
+        // Sem isso o PDF chega como "Sem título" no WhatsApp do lead.
+        header_media_filename: info.cronograma.nome_arquivo || undefined,
       } : null
 
       const enviar = async (payload: Record<string, unknown>) => {
