@@ -1378,8 +1378,24 @@ Deno.serve(async (req) => {
   // criar_oportunidade roda no passo (9b) acima.
   const segIds = (v: unknown): string[] =>
     String(v ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  // Aceita UUID cravado OU token {webhook=Campo} — 2026-08-19. Sem o token, cada curso
+  // exigia uma INTEGRAÇÃO própria só para trocar o segmento, e quem dispara (webchat,
+  // Instagram) teria que carregar um de-para de slugs no código: curso novo viraria
+  // mudança em dois lugares, com deploy. Com o token, uma integração serve todas as pós
+  // e o de-para vive em cursos.segmento_id, que o time edita no cadastro do curso.
+  // ⚠️ Só passa o que for UUID de verdade: token vazio (payload sem o campo) ou lixo
+  // viraria violação de FK e derrubaria a ação inteira — aqui ele é simplesmente
+  // ignorado, e o lead entra sem o segmento em vez de a captação falhar.
+  const UUID_RE_SEG = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const segArr = (v: unknown): string[] =>
-    Array.isArray(v) ? v.map((x) => String(x).trim()).filter(Boolean) : [];
+    Array.isArray(v)
+      ? v
+        .map((x) => {
+          const bruto = String(x ?? "").trim();
+          return bruto.includes("{webhook=") ? resolveWebhookVar(bruto, dados).trim() : bruto;
+        })
+        .filter((id) => UUID_RE_SEG.test(id))
+      : [];
   const acoesExtras = acoesItens;
   const acoesAplicadas: string[] = [];
   // Ligado por uma ação 'enviar_mensagem_whatsapp' com ativar_ia ≠ false → o seed de
