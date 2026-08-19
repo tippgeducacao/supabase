@@ -7,8 +7,9 @@
 // cobranca — desconforto real com cliente que ja esta em dia.
 //
 // O ciclo novo (dois crons):
-//   19:00 BRT  ?acao=faxina  -> apaga TODA lista de cobranca (campanha fica zerada;
-//                               das 19h as 10h30 nao existe fila, de proposito)
+//   19:00 BRT  ?acao=faxina  -> apaga TODAS as listas da campanha, sem olhar nome
+//                               (campanha fica zerada; das 19h as 10h30 nao
+//                               existe fila, de proposito)
 //   10:30 BRT  ?acao=montar  -> cria a lista do dia e sobe so quem AINDA e
 //                               inadimplente (depois de o time revisar o funil)
 //
@@ -165,14 +166,26 @@ async function listarTodasAsListas(base: string, campanha: string): Promise<List
 }
 
 // ------------------------------------------------------------- faxina ----
-async function faxina(base: string, campanha: string, prefixo: string, idsManuais: string[], dry: boolean) {
+async function faxina(base: string, campanha: string, idsManuais: string[], dry: boolean) {
   const todas = await listarTodasAsListas(base, campanha)
 
-  // Regra de seguranca: so morre lista NOSSA (o prefixo configurado) ou id passado
-  // a mao. Lista de terceiro na mesma campanha nunca e tocada por acidente.
+  // Apaga TODAS as listas da campanha, sem olhar o nome (decisao do usuario em
+  // 19/08/2026). A campanha de cobranca e descartavel por natureza: ela nasce as
+  // 10:30 e morre as 19:00 todo dia, entao nao existe lista para preservar nela.
+  //
+  // A regra anterior so matava quem comecasse com o prefixo configurado, para
+  // nunca apagar lista de terceiro. Na pratica isso abriu o buraco: a reciclagem
+  // que o setor faz a mao cria listas chamadas "reciclagem", que nao batiam no
+  // prefixo e SOBREVIVIAM a faxina — em 18/08/2026 duas delas passaram a noite
+  // vivas com ~176 registros e quem tinha quitado continuou sendo discado, que e
+  // exatamente o defeito que motivou a saida do n8n.
+  //
+  // O escopo continua contido: esta function so toca a campanha de
+  // `cob_3c_config.campanha_id`. "Apagar tudo" e tudo DESSA campanha, mais nada.
+  // Consequencia assumida: lista criada a mao aqui tambem morre as 19:00.
   const alvos = idsManuais.length > 0
     ? todas.filter((l) => idsManuais.includes(String(l.id)))
-    : todas.filter((l) => nomeDaLista(l).startsWith(prefixo))
+    : todas
 
   const apagadas: Array<Record<string, unknown>> = []
   const falhas: string[] = []
@@ -193,9 +206,9 @@ async function faxina(base: string, campanha: string, prefixo: string, idsManuai
     alvos: alvos.map(resumoDaLista),
     apagadas,
     falhas,
-    // Preservada com `dial`/`redial` > 0 e lista que CONTINUA discando: em
-    // 18/08/2026 duas listas "reciclagem" sobreviveram a faxina assim, e o log
-    // de entao nao mostrava que elas ainda tinham fila.
+    // So sobra algo aqui quando a chamada veio com `?ids=` (apagar listas
+    // especificas). Na faxina diaria isto e SEMPRE vazio — se vier lista aqui,
+    // alguem passou ids, ou o DELETE falhou e a falha esta em `falhas`.
     preservadas: todas
       .filter((l) => !alvos.some((a) => String(a.id) === String(l.id)))
       .map(resumoDaLista),
@@ -463,7 +476,7 @@ async function handler(req: Request): Promise<Response> {
   if (acao === 'faxina') {
     let res
     try {
-      res = await faxina(base, campanha, prefixo, idsManuais, dry)
+      res = await faxina(base, campanha, idsManuais, dry)
     } catch (err) {
       await supabase.from('cob_3c_execucoes').insert({ acao: 'faxina', dry, ok: false, erro: String(err) })
       return json({ error: 'faxina falhou', detail: String(err) }, 502)
