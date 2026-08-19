@@ -53,11 +53,22 @@ interface FilaRow {
   visto_em: string
 }
 
+// Modelo MailingList do 3C. `dial` e `redial` sao o que AINDA falta discar e
+// rediscar nesta lista: a lista ACABOU quando os dois zeram (e o "Finalizado em"
+// com a barra cheia do painel). Estes campos sempre vieram na resposta do
+// GET /lists — so nunca tinham sido lidos.
 interface Lista3C {
   id: number | string
   name?: string
   nome?: string
   total?: number
+  dial?: number
+  redial?: number
+  dialed?: number
+  dialed_percentage?: number
+  completed?: number
+  answered?: number
+  weight?: number
 }
 
 const json = (body: unknown, status = 200) =>
@@ -94,6 +105,18 @@ function nomeListaDoDia(prefixo: string): string {
 }
 
 const nomeDaLista = (l: Lista3C): string => String(l.name ?? l.nome ?? '')
+
+// O que fica registrado sobre uma lista. `dial`/`redial` respondem "sobrou algo
+// para discar aqui?" — e o que diz se uma lista viva na campanha esta roubando
+// gente da lista do dia.
+const resumoDaLista = (l: Lista3C): Record<string, unknown> => ({
+  id: l.id,
+  nome: nomeDaLista(l),
+  total: l.total ?? null,
+  dial: l.dial ?? null,
+  redial: l.redial ?? null,
+  dialed: l.dialed ?? null,
+})
 
 // O agente le o `identifier` primeiro na tela do 3C.
 function montarIdentifier(nome: string, dias: number | null): string {
@@ -158,7 +181,7 @@ async function faxina(base: string, campanha: string, prefixo: string, idsManuai
     for (const l of alvos) {
       const resp = await fetch(alvo(base, `/campaigns/${campanha}/lists/${l.id}`), { method: 'DELETE' })
       if (resp.ok || resp.status === 204) {
-        apagadas.push({ id: l.id, nome: nomeDaLista(l), total: l.total ?? null })
+        apagadas.push(resumoDaLista(l))
       } else {
         falhas.push(`lista ${l.id}: HTTP ${resp.status} ${(await resp.text()).slice(0, 150)}`)
       }
@@ -167,12 +190,15 @@ async function faxina(base: string, campanha: string, prefixo: string, idsManuai
 
   return {
     listas_na_campanha: todas.length,
-    alvos: alvos.map((l) => ({ id: l.id, nome: nomeDaLista(l), total: l.total ?? null })),
+    alvos: alvos.map(resumoDaLista),
     apagadas,
     falhas,
+    // Preservada com `dial`/`redial` > 0 e lista que CONTINUA discando: em
+    // 18/08/2026 duas listas "reciclagem" sobreviveram a faxina assim, e o log
+    // de entao nao mostrava que elas ainda tinham fila.
     preservadas: todas
       .filter((l) => !alvos.some((a) => String(a.id) === String(l.id)))
-      .map((l) => ({ id: l.id, nome: nomeDaLista(l) })),
+      .map(resumoDaLista),
   }
 }
 
@@ -515,8 +541,13 @@ async function handler(req: Request): Promise<Response> {
   // Idempotente: rodar montar duas vezes no mesmo dia reusa a lista, nao duplica.
   let listaId: string
   let criada = false
+  // Foto da campanha ANTES de montar. Sobra de lista viva (reciclagem, lista
+  // manual, lista de ontem) e a suspeita numero 1 quando a lista do dia nasce
+  // curta — em 18/08/2026 nao deu para provar nada porque isto nao era gravado.
+  let campanhaAntes: Array<Record<string, unknown>> = []
   try {
     const todas = await listarTodasAsListas(base, campanha)
+    campanhaAntes = todas.map(resumoDaLista)
     const existente = todas.find((l) => nomeDaLista(l) === nomeLista)
     if (existente) {
       listaId = String(existente.id)
@@ -527,6 +558,7 @@ async function handler(req: Request): Promise<Response> {
   } catch (err) {
     await supabase.from('cob_3c_execucoes').insert({
       acao: 'montar', dry: false, ok: false, lista_nome: nomeLista, erro: String(err),
+      detalhe: { campanha_antes: campanhaAntes },
     })
     return json({ error: 'falha ao criar/achar a lista do dia', detail: String(err) }, 502)
   }
@@ -535,9 +567,14 @@ async function handler(req: Request): Promise<Response> {
   const aceitos: number[] = []
   let descartados = 0
   const falhas: string[] = []
+  // Resultado de CADA POST. Sem isto uma montagem curta so diz "faltaram N", e
+  // nao da para saber se a perda foi inteira num lote ou espalhada — foi
+  // exatamente o que faltou para explicar os 244 descartados de 18/08/2026.
+  const lotes: Array<Record<string, unknown>> = []
 
   for (let ini = 0; ini < mailing.length; ini += MAX_POR_POST) {
     const fatia = mailing.slice(ini, ini + MAX_POR_POST)
+    const numeroDoLote = ini / MAX_POR_POST
     let resp: Response
     try {
       resp = await fetch(alvo(base, `/campaigns/${campanha}/lists/${listaId}/mailing`), {
@@ -546,20 +583,39 @@ async function handler(req: Request): Promise<Response> {
         body: JSON.stringify({ header: HEADER, mailing: fatia }),
       })
     } catch (err) {
-      falhas.push(`lote ${ini / MAX_POR_POST}: ${String(err)}`)
+      falhas.push(`lote ${numeroDoLote}: ${String(err)}`)
+      lotes.push({ lote: numeroDoLote, enviados: fatia.length, erro: String(err) })
       continue
     }
     const corpo = await resp.text()
     if (resp.status >= 200 && resp.status < 300) {
       // 2xx NAO significa "importou tudo": `imported_lines` traz o numero real.
+      let imp: number | null = null
       try {
         const j = JSON.parse(corpo)
-        const imp = typeof j?.imported_lines === 'number' ? j.imported_lines : fatia.length
-        if (imp < fatia.length) descartados += fatia.length - imp
+        imp = typeof j?.imported_lines === 'number' ? j.imported_lines : null
       } catch { /* corpo nao-JSON */ }
+      // Sem `imported_lines` no corpo o lote conta como aceito inteiro — otimista
+      // de proposito, mas o log marca para nao virar numero de confianca falsa.
+      const impDoLote = imp ?? fatia.length
+      if (impDoLote < fatia.length) descartados += fatia.length - impDoLote
+      lotes.push({
+        lote: numeroDoLote,
+        enviados: fatia.length,
+        importados: impDoLote,
+        descartados: fatia.length - impDoLote,
+        sem_imported_lines: imp === null,
+        status: resp.status,
+      })
       for (let k = ini; k < ini + fatia.length; k++) aceitos.push(k)
     } else {
-      falhas.push(`lote ${ini / MAX_POR_POST}: HTTP ${resp.status} ${corpo.slice(0, 200)}`)
+      falhas.push(`lote ${numeroDoLote}: HTTP ${resp.status} ${corpo.slice(0, 200)}`)
+      lotes.push({
+        lote: numeroDoLote,
+        enviados: fatia.length,
+        status: resp.status,
+        corpo: corpo.slice(0, 200),
+      })
     }
   }
 
@@ -567,6 +623,7 @@ async function handler(req: Request): Promise<Response> {
     await supabase.from('cob_3c_execucoes').insert({
       acao: 'montar', dry: false, ok: false, lista_id: listaId, lista_nome: nomeLista,
       enviados: mailing.length, erro: falhas.slice(0, 3).join(' | '),
+      detalhe: { lotes, campanha_antes: campanhaAntes },
     })
     return json({ error: '3C recusou todos os lotes', detail: falhas.slice(0, 3) }, 422)
   }
@@ -597,7 +654,12 @@ async function handler(req: Request): Promise<Response> {
     importados,
     descartados,
     erro: falhas.length ? falhas.slice(0, 3).join(' | ') : null,
-    detalhe: { lista_criada_agora: criada, marcados: marcados ?? 0 },
+    detalhe: {
+      lista_criada_agora: criada,
+      marcados: marcados ?? 0,
+      lotes,
+      campanha_antes: campanhaAntes,
+    },
   })
 
   return json({
