@@ -16,6 +16,7 @@ import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO } from './prompts.ts';
 import { AGENTE_RECONTATO, montarDossieRecontato } from './prompts-recontato.ts';
 import { AGENTE_CAMPANHA_DIRETA } from './prompts-campanha-direta.ts';
 import { comPresenteEscola, LINK_ESCOLA_GRATUITA } from './escolaGratuita.ts';
+import { comContinuidadeWebchat } from './continuidadeWebchat.ts';
 import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, renderPrompt } from './contexto.ts';
 import { atualizarAgenteComRatchet, atualizarLead, buscarLead, carregarHistorico, criarLead, excluirDadosLead, gravarMensagem, limparParaRouter, sanitizarHistorico } from './historico.ts';
 import { carregarTools, chamarAgentePrincipal, chamarRouter } from './agente.ts';
@@ -374,6 +375,9 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   // já foi renderizado, para valer nas QUATRO personas sem editar o prompts.ts (gerado
   // pela extração do n8n). Régua e link em escolaGratuita.ts.
   promptAgente = comPresenteEscola(promptAgente);
+  // Conversa que veio do CHAT DO SITE: o agente precisa saber que o canal mudou, senão
+  // fala como se ainda estivesse lá ("já te mandei pelo whats", dito NO whats).
+  promptAgente = comContinuidadeWebchat(promptAgente, lead?.veio_do_webchat_em);
   const renovar = lockRenovar(remotejid);
 
   // Tools que pausam a IA por decisão do PRÓPRIO agente (pausa_ia, e o

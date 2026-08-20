@@ -613,6 +613,10 @@ async function semearHistoricoWhatsApp(sessaoId: string, sessao: { telefone: str
         curso_interesse_original: curso || null,
         agente_atual: "agente_qualificador",
         fonte: "webchat",
+        // Marca a MIGRAÇÃO DE CANAL. `fonte` guarda de onde o LEAD veio (e quase sempre
+        // já existe, vindo do sprinthub); isto aqui diz por onde ESTA conversa começou.
+        // É o que liga o bloco de continuidade no prompt do agente de WhatsApp.
+        veio_do_webchat_em: new Date().toISOString(),
         // ⚠️ followup_ativado e iniciar_atendimento têm DEFAULT TRUE na tabela: criar a
         // linha sem desligar inscreveria o visitante do site na esteira de 7 toques de
         // template do WhatsApp, que ninguém pediu. O que tem que ser automático é o
@@ -624,6 +628,7 @@ async function semearHistoricoWhatsApp(sessaoId: string, sessao: { telefone: str
       // Ratchet: quem já está em qualificador não volta pra validação.
       await supabase.from("cliente_ppg_leads_sdr").update({
         agente_atual: "agente_qualificador",
+        veio_do_webchat_em: new Date().toISOString(),
         ...(curso && !lead.curso_interesse_original ? { curso_interesse_original: curso } : {}),
       }).eq("remotejid", remotejid);
     }
