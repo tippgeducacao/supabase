@@ -469,16 +469,6 @@ async function syncSac(sessaoId: string, direcao: string, origem: string, conteu
 // ela cumprimenta de novo e repergunta a graduação.
 // A sessão já vai pra 'qualificador': a graduação está sendo perguntada AGORA, e a etapa
 // de validação existe justamente pro caso oposto (descobrir o interesse primeiro).
-function mensagemProntaDaPos(nome: string, curso: string): string[] {
-  const primeiro = (nome || "").trim().split(/\s+/)[0] || "";
-  // "MBA Gestão da Pecuária Leiteira" não pode virar "a pós em MBA Gestão…" — lê mal.
-  const ehMba = /^mba\b/i.test(curso.trim());
-  const oQue = ehMba ? `o ${curso}` : `a pós em ${curso}`;
-  return [
-    `oi${primeiro ? " " + primeiro : ""}, tudo bem? sou o joão, da ppg educação. bacana, então vc tem interesse em conhecer ${oQue}.`,
-    "posso te encaminhar o cronograma. só me confirma antes: qual é a sua graduação? e vc já é formado?",
-  ];
-}
 
 // -- Captacao: manda o lead pro webhook do CRM -------------------------------
 // Quem decide funil, etapa e segmento e a INTEGRACAO (configurada na tela), nao este
@@ -567,21 +557,25 @@ async function acaoEscolherPos(body: Record<string, unknown>) {
   // Idempotente: dois toques (ou um recarregar no meio) não duplicam a mensagem.
   if (sessao.curso) return json({ ok: true, ja_escolhida: true });
 
+  // NÃO força estágio (2026-08-19): quem decide validação x qualificador é o router, como
+  // em toda conversa. Forçar qualificador pulava a oferta da reunião e jogava o João direto
+  // na coleta — e a reunião é o objetivo, não o cronograma.
   await supabase.from("webchat_sessoes")
-    .update({ curso, estagio: "qualificador" })
+    .update({ curso })
     .eq("id", sessaoId);
 
   // Os três campos (nome, telefone, curso) ficaram completos AGORA: é o gatilho da
   // captação. A guarda de `sessao.curso` acima já garante uma vez só por sessão.
   await dispararCaptacao(sessao, curso);
 
-  for (const chunk of mensagemProntaDaPos(sessao.nome ?? "", curso)) {
-    await supabase.from("webchat_mensagens").insert({
-      sessao_id: sessaoId, direcao: "outbound", origem: "ia", conteudo: chunk,
-    });
-    await syncSac(sessaoId, "outbound", "ia", chunk);
-  }
-  return json({ ok: true });
+  // O toque no botão vira fala DO VISITANTE, não do João. Antes o João abria sozinho
+  // dizendo que ia mandar o cronograma — oferecia material pra quem não pediu nada e
+  // invertia a conversa. Agora o botão diz o que a pessoa quer, e o João responde a isso
+  // pelo roteiro normal (que conduz pra reunião).
+  // Delega pro acaoEnviar: mesma gravação, mesmo espelho no SAC, mesma resposta da IA.
+  const ehMba = /^mba/i.test(curso.trim());
+  const pedido = `Olá, quero falar com um monitor sobre ${ehMba ? "o" : "a pós em"} ${curso}.`;
+  return await acaoEnviar({ sessao_id: sessaoId, conteudo: pedido });
 }
 
 // ── Continuidade site → WhatsApp (2026-08-19) ───────────────────────────────
