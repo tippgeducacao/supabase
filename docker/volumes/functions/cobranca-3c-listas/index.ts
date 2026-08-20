@@ -852,35 +852,53 @@ async function handler(req: Request): Promise<Response> {
     return json({ ok: true, acao: 'montar', enviados: 0, motivo: 'nenhum inadimplente na janela de recencia' })
   }
 
-  // ⚠️ `phone` vai SEM O DDD (os 9 digitos). O DDD vai SO em `areacode` — o 3C
-  // junta os dois. Mandar o numero completo aqui faz o 3C montar DDD+DDD+numero e
-  // RECUSAR a linha.
+  // ⚠️⚠️ `phone` vai COM O DDD, os 11 digitos completos. NAO MEXA sem ler isto
+  // inteiro — este campo ja virou tres vezes e cada virada custou um dia de
+  // operacao.
   //
-  // MEDIDO, nao deduzido (19/08/2026, `?acao=sondar&limite=24` — 24 numeros reais
-  // da fila, cada um inserido SOZINHO em 4 formatos, lendo imported_lines isolado):
+  // O ponto que demorou a ficar claro: os dois formatos falham, por motivos
+  // OPOSTOS, e so um dos fracassos e visivel no `imported_lines`.
   //
-  //   phone sem DDD  (9 digitos)   24/24  100%   <- este
-  //   phone sem o 9o (10 digitos)  24/24  100%   (dispara numero antigo, nao serve)
-  //   phone COM DDD  (11 digitos)   8/24   33%
-  //   phone com 55   (13 digitos)   6/24   25%
+  //   9 digitos   importa 100% e o painel diz que esta tudo bem. Mas o 3C perde o
+  //               DDD e disca 55+numero: em 20/08 a lista de 329 rendeu ligacao
+  //               nenhuma, todas "Falha - Destino indisponivel", telefone exibido
+  //               como (55) 9XXXX-XXXX para a carteira inteira.
+  //   11 digitos  disca CERTO, mas o 3C RECUSA quem ja esteve na campanha antes —
+  //               a base da campanha guarda o numero mesmo depois de a lista ser
+  //               apagada. Por isso a lista sai menor.
   //
-  // Nenhum numero foi recusado em TODOS os formatos: nao e blacklist, nao e numero
-  // morto, nao e a carteira. E o payload.
+  // Medido em 20/08, mesma amostra, mesmo instante — a recusa separa por tempo de
+  // carteira, nao por caracteristica do numero (quem esta ha mais tempo ja foi
+  // discado e ficou preso na base):
   //
-  // HISTORICO — este campo ja virou duas vezes, nao vire uma terceira sem sondar:
-  //   17/08  diagnostico apontou sem DDD. CERTO.
-  //   18/08  o time viu numeros de 9 digitos na TELA do 3C, leu como "invalido" e
-  //          pediu para mandar igual ao comercial (com DDD). Trocado no 70d84031c.
-  //          Efeito: a lista do dia caiu de 333 para 89 (73% recusados em silencio),
-  //          e o completamento da campanha ficou em 1,57% — porque os 89 que
-  //          entraram foram gravados com o numero concatenado, indiscavel.
-  //   19/08  a sonda mediu numero a numero e devolveu o resultado acima.
+  //   54999162692 (90d)   9 dig OK    11 dig RECUSADO
+  //   45999911142 (90d)   9 dig OK    11 dig RECUSADO
+  //   88992776992 (90d)   9 dig OK    11 dig RECUSADO
+  //   49998138421 (30d)   9 dig OK    11 dig OK
+  //   77999268808 (30d)   9 dig OK    11 dig OK
+  //   46999750543 (30d)   9 dig OK    11 dig OK
   //
-  // O que a tela do 3C mostra na coluna `phone` sao os 9 digitos — e assim mesmo,
-  // porque o DDD vive em `areacode`. Numero curto na tela nao e numero invalido.
+  // ESCOLHA DELIBERADA: lista menor com ligacao que COMPLETA vale mais que lista
+  // cheia que nao disca. Comparativo real:
+  //   18/08, 11 digitos,  89 pessoas -> 167 ligacoes, 6 conectadas com operador
+  //   20/08,  9 digitos, 329 pessoas -> 0 conectadas, tudo destino indisponivel
   //
-  // Licao que continua valendo: `imported_lines` prova que a linha foi ACEITA, nao
-  // que o numero e DISCAVEL. Aceitacao pela API != numero que completa.
+  // EM ABERTO: para a lista voltar a sair cheia e preciso limpar a base da
+  // campanha. `?acao=purga` testou 13 corpos/metodos em
+  // `DELETE /campaigns/{id}/mailing/delete` (20/08) e NENHUM liberou o telefone —
+  // varios responderam 204 sem efeito, o resto 422. A API nao expoe isso. Os
+  // caminhos que sobram: capturar o que o painel do 3C faz ao limpar o mailing
+  // (F12 -> Network), ou pedir o endpoint a FluxoTI.
+  //
+  // ⚠️ NAO troque este campo por "a lista esta pequena". Pequena e o sintoma
+  // conhecido; a alternativa e uma lista grande que nao liga para ninguem.
+  // Antes de qualquer mudanca aqui: rode `?acao=sondar`.
+  //
+  // A LICAO QUE CUSTOU A SEMANA: `imported_lines` prova que a linha foi ACEITA,
+  // NAO que o numero e DISCAVEL. Em 19/08 a sonda mediu so aceitacao (9 digitos
+  // 24/24, 11 digitos 8/24) e a conclusao foi trocar o formato — o que produziu no
+  // dia seguinte uma lista cheia que nao completava uma ligacao sequer. Aceitacao
+  // pela API != numero que completa. Meca as DUAS coisas antes de concluir.
   //
   // ⚠️ O threec-mailing-sync (discador do SDR/comercial) manda `phone: r.telefone`,
   // COM o DDD — o formato que a sonda mediu em 33%. Se a regua do 3C for a mesma na
@@ -889,7 +907,7 @@ async function handler(req: Request): Promise<Response> {
   const mailing = rows.map((r) => ({
     identifier: montarIdentifier(r.nome, r.dias_atraso),
     areacode: r.telefone.substring(0, 2),
-    phone: r.telefone.substring(2),
+    phone: r.telefone,
     nome: limpar(r.nome),
     email: limpar(r.email),
     formacao: limpar(r.formacao),
