@@ -711,6 +711,102 @@ async function purga(base: string, campanha: string, telefone: string) {
   }
 }
 
+// ---------------------------------------------------------- recusados ----
+// QUEM sao as pessoas que o 3C nao aceita — nominalmente, nao em contagem.
+//
+// O caminho ate aqui (20/08/2026), com as duas teorias que morreram no meio:
+//   - nao e sobra de lista velha  (montagem com `campanha_antes: []` recusou igual)
+//   - nao e tamanho de lote       (a perda se espalha entre os lotes)
+//   - nao e dedup                 (o modo ciclo da purga inseriu o MESMO telefone
+//                                  duas vezes seguidas e as duas entraram)
+//   - nao e a coluna areacode     (com valor, vazia ou ausente da o mesmo)
+// O que sobra e a unica coisa consistente com tudo: o 3C VALIDA o numero quando
+// consegue — e so consegue quando o DDD esta junto, nos 11 digitos. Com 9 digitos
+// ele nao tem como julgar, aceita todo mundo, e depois disca 55+numero.
+//
+// Se isso esta certo, a lista curta nao e defeito de integracao: e a carteira
+// tendo telefone que nao existe mais. E aí o defeito de verdade e OUTRO — o
+// sistema descartar essa gente em silencio, sem ninguem saber quem ficou de fora.
+//
+// Esta acao insere cada pessoa SOZINHA numa lista descartavel de peso 0 e anota
+// quem o 3C recusou. E lenta de proposito (uma requisicao por pessoa): so assim
+// da para saber o NOME de quem esta fora, e nao so quantos.
+async function recusados(base: string, campanha: string, limite: number | null) {
+  const { data: fila, error } = await supabase.rpc('cob_3c_selecionar', { p_limite: limite ?? 3000 })
+  if (error) throw new Error('falha ao selecionar a fila: ' + error.message)
+  const rows = (fila ?? []) as FilaRow[]
+  if (rows.length === 0) return { veredito: 'fila vazia', total: 0 }
+
+  const header = ['identifier', 'areacode', 'phone', 'nome', 'email', 'formacao'] as const
+  const listaId = (await criarListaBruto(base, campanha, `ZZ RECUSADOS ${Date.now()}`, header)).id
+  try {
+    await fetch(alvo(base, `/campaigns/${campanha}/lists/${listaId}/updateWeight`), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ weight: 0 }),
+    })
+  } catch { /* best-effort */ }
+
+  const testar = async (r: FilaRow): Promise<boolean | null> => {
+    try {
+      const resp = await fetch(alvo(base, `/campaigns/${campanha}/lists/${listaId}/mailing`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({
+          header,
+          mailing: [{
+            identifier: 'CHECAGEM - nao ligar',
+            areacode: r.telefone.slice(0, 2),
+            phone: r.telefone,
+            nome: limpar(r.nome) || 'Aluno',
+            email: limpar(r.email),
+            formacao: limpar(r.formacao),
+          }],
+        }),
+      })
+      const j = JSON.parse(await resp.text())
+      return typeof j?.imported_lines === 'number' ? j.imported_lines > 0 : null
+    } catch {
+      return null
+    }
+  }
+
+  // De 5 em 5: rapido o suficiente para caber no tempo da function, devagar o
+  // suficiente para nao tomar 429 do 3C.
+  const recusadas: Array<Record<string, unknown>> = []
+  let aceitos = 0
+  for (let i = 0; i < rows.length; i += 5) {
+    const fatia = rows.slice(i, i + 5)
+    const res = await Promise.all(fatia.map(testar))
+    res.forEach((ok, k) => {
+      const r = fatia[k]
+      if (ok) aceitos++
+      else {
+        recusadas.push({
+          nome: r.nome, telefone: r.telefone, dias_atraso: r.dias_atraso,
+          email: r.email, indeterminado: ok === null,
+        })
+      }
+    })
+  }
+
+  try { await fetch(alvo(base, `/campaigns/${campanha}/lists/${listaId}`), { method: 'DELETE' }) } catch { /* faxina pega */ }
+
+  const porFaixa: Record<string, { recusados: number }> = {}
+  for (const r of recusadas) {
+    const k = String(r.dias_atraso ?? 'sem faixa')
+    porFaixa[k] = { recusados: (porFaixa[k]?.recusados ?? 0) + 1 }
+  }
+
+  return {
+    total_na_fila: rows.length,
+    aceitos_pelo_3c: aceitos,
+    recusados_pelo_3c: recusadas.length,
+    por_faixa_de_atraso: porFaixa,
+    recusados: recusadas,
+  }
+}
+
 // ------------------------------------------------------------- montar ----
 // Devolve o id E o corpo cru: o diagnostico precisa ver com que header o 3C
 // registrou a lista (se ele nao registrar o header, o mailing e descartado).
@@ -842,6 +938,15 @@ async function handler(req: Request): Promise<Response> {
       return json({ ok: true, acao: 'purga', ...(await purga(base, campanha, tel)) })
     } catch (err) {
       return json({ error: 'purga falhou', detail: String(err) }, 502)
+    }
+  }
+
+  // --------------------------------------------------------- RECUSADOS ----
+  if (acao === 'recusados') {
+    try {
+      return json({ ok: true, acao: 'recusados', ...(await recusados(base, campanha, qLimite)) })
+    } catch (err) {
+      return json({ error: 'checagem falhou', detail: String(err) }, 502)
     }
   }
 
