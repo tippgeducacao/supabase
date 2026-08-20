@@ -606,17 +606,54 @@ async function purga(base: string, campanha: string, telefone: string) {
   }
 
   const baseline = await tentarInserir('baseline')
+
+  // CICLO — o teste que separa "dedup" de "numero recusado por outro motivo".
+  // Feito com um telefone que HOJE ENTRA (baseline=1):
+  //   1a insercao  1  (entrou)
+  //   2a insercao  0  -> dedup existe e e IMEDIATA: entrar ja prende o numero
+  //                1  -> nao ha dedup, e a recusa dos outros tem outra causa
+  //   apos delete  1  -> o corpo do delete FUNCIONA
+  // Sem este teste nao da para saber se o delete nao funciona ou se nao havia
+  // nada para deletar.
   if (baseline !== 0) {
+    const segunda = await tentarInserir('ciclo-2a-insercao')
+    let aposDelete: number | null = null
+    let statusDelete: number | null = null
+    if (segunda === 0) {
+      try {
+        const resp = await fetch(alvo(base, `/campaigns/${campanha}/mailing/delete`), {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({ phone: [telefone] }),
+        })
+        statusDelete = resp.status
+      } catch { /* rede */ }
+      aposDelete = await tentarInserir('ciclo-apos-delete')
+    }
     for (const id of criadas) await apagar(id)
     return {
-      veredito: 'TELEFONE INADEQUADO PARA O TESTE: ele ja entra com 11 digitos '
-        + `(imported_lines=${baseline}). Escolha um numero que a sonda marcou como recusado.`,
-      baseline,
+      veredito: segunda !== 0
+        ? 'NAO HA DEDUP: o mesmo telefone entra duas vezes seguidas. Entao a recusa dos outros numeros NAO e "ja esteve na campanha" — a causa e outra e a purga nao resolve.'
+        : aposDelete && aposDelete > 0
+          ? 'DEDUP CONFIRMADA e o DELETE FUNCIONA: {"phone":[...]} liberou o telefone. E este corpo que a faxina tem que mandar.'
+          : 'DEDUP CONFIRMADA mas o delete NAO libera: entrar prende o numero e nada nesta API solta.',
+      modo: 'ciclo',
+      primeira_insercao: baseline,
+      segunda_insercao: segunda,
+      status_do_delete: statusDelete,
+      insercao_apos_delete: aposDelete,
     }
   }
 
   const candidatos: Array<{ rotulo: string; metodo: string; caminho: string; corpo: unknown }> = [
-    // por telefone — o menos destrutivo, tenta primeiro
+    // O 422 de 20/08 entregou o campo: mandando `phone` como STRING a API responde
+    // "O campo Telefone precisa ser um conjunto" — ou seja, o campo se chama
+    // `phone` (singular) e o valor tem que ser ARRAY. As tentativas anteriores
+    // erraram os dois lados: `phones` no plural (204 e nenhum efeito) e `phone`
+    // como string (422). Estes vem primeiro agora.
+    { rotulo: 'phone_array_11', metodo: 'DELETE', caminho: 'mailing/delete', corpo: { phone: [telefone] } },
+    { rotulo: 'phone_array_9', metodo: 'DELETE', caminho: 'mailing/delete', corpo: { phone: [semDdd] } },
+    { rotulo: 'phone_array_55', metodo: 'DELETE', caminho: 'mailing/delete', corpo: { phone: ['55' + telefone] } },
     { rotulo: 'phones_11', metodo: 'DELETE', caminho: 'mailing/delete', corpo: { phones: [telefone] } },
     { rotulo: 'phones_9', metodo: 'DELETE', caminho: 'mailing/delete', corpo: { phones: [semDdd] } },
     { rotulo: 'numbers_11', metodo: 'DELETE', caminho: 'mailing/delete', corpo: { numbers: [telefone] } },
@@ -649,7 +686,10 @@ async function purga(base: string, campanha: string, telefone: string) {
         ...(c.corpo === null ? {} : { body: JSON.stringify(c.corpo) }),
       })
       status = resp.status
-      corpoResp = (await resp.text()).slice(0, 150)
+      // 1200 e nao 150: o corpo do 422 do 3C traz `errors` com o NOME do campo que
+      // ele esperava — truncar isso foi o que fez a primeira rodada (20/08) voltar
+      // sem saber qual era o campo certo.
+      corpoResp = (await resp.text()).slice(0, 1200)
     } catch (err) {
       corpoResp = String(err).slice(0, 150)
     }
