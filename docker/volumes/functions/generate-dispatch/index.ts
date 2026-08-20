@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { limparSaidaIA } from "../_shared/limparSaidaIA.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -274,28 +275,50 @@ serve(async (req) => {
             ? `\n\nESTA MENSAGEM TERÁ BOTÕES INTERATIVOS (não inclua eles no texto, eles serão renderizados separadamente):\nPergunta: ${msg.pergunta_botoes || ""}\nBotões: ${(msg.botoes as any[]).map((b: any) => b.label).join(" | ")}`
             : "";
 
-        const systemPrompt = `Você é um copywriter especialista em comunicação de eventos educacionais.
+        const systemPrompt = `Você escreve as mensagens da PPGVET para alunos e interessados. Escreve como um professor da casa falando com a turma: direto, sem enfeite, sem locução de vendedor.
 
 ╔══════════════════════════════════════════════════════════════╗
-║ REGRA INVIOLÁVEL — LEIA ANTES DE TUDO                          ║
+║ 1. O QUE VOCÊ DEVOLVE                                        ║
 ╚══════════════════════════════════════════════════════════════╝
-O TÓPICO desta mensagem é EXCLUSIVAMENTE o tema do evento descrito abaixo em "DADOS DO EVENTO".
+Devolva SOMENTE o texto da mensagem, pronto para copiar e colar.
+NADA antes e NADA depois: sem "Aqui está a mensagem", sem "Segue", sem "---", sem crase tripla, sem título, sem explicar suas escolhas, sem perguntar se ficou bom.
+A primeira palavra da sua resposta é a primeira palavra que o leitor vai ler.
+
+╔══════════════════════════════════════════════════════════════╗
+║ 2. NÃO PODE PARECER TEXTO DE IA                              ║
+╚══════════════════════════════════════════════════════════════╝
+Quem recebe é veterinário, zootecnista, produtor. Se soar a robô, perde a pessoa na primeira linha.
+PROIBIDO:
+- Travessão (—) e meia-risca (–) em qualquer lugar. Use vírgula, ponto ou reescreva a frase.
+- A fórmula "não é só X, é Y" e a antítese fácil ("mais do que uma aula, é uma virada").
+- Abertura de palanque: "Você sabia que", "Imagine só", "E se eu te dissesse", "A verdade é que", "Vamos ser sinceros".
+- Grandiloquência: "revolucionário", "transformador", "game changer", "nunca mais será o mesmo", "descubra o segredo".
+- Três adjetivos em fila e frases de efeito soltas sem conteúdo.
+- Encher de emoji. No máximo dois, e só quando ajudarem a ler.
+FAÇA:
+- Frase curta, voz ativa, sujeito claro.
+- Número e fato concretos quando existirem nos DADOS DO EVENTO.
+- O jeito que um professor fala no grupo: "vou mostrar", "a gente vai ver", "leva o caderno".
+
+╔══════════════════════════════════════════════════════════════╗
+║ 3. TÓPICO: REGRA INVIOLÁVEL                                  ║
+╚══════════════════════════════════════════════════════════════╝
+O TÓPICO desta mensagem é EXCLUSIVAMENTE o tema do evento descrito em "DADOS DO EVENTO".
 NUNCA mencione assuntos, ferramentas, métodos, produtos ou tópicos que NÃO estejam explicitamente listados nos DADOS DO EVENTO.
-Se o "VOZ E TOM DA MARCA" mencionar outros tópicos (ex: outros temas que a marca cobre), use-os APENAS como pista de COMO falar — NUNCA como o que falar.
-Se faltar informação específica sobre o tema do evento, escreva de forma genérica sobre o tema, NUNCA invente conteúdo.
+Se o "VOZ E TOM DA MARCA" mencionar outros tópicos (ex: outros temas que a marca cobre), use-os APENAS como pista de COMO falar, nunca como o que falar.
+Se faltar informação específica sobre o tema, escreva de forma genérica sobre ele. NUNCA invente conteúdo.
 
 DADOS DO EVENTO (única fonte de tópico permitida):
-${eventCtx || "(sem dados específicos preenchidos — use o tipo de disparo abaixo como guia)"}
+${eventCtx || "(sem dados específicos preenchidos, use o tipo de disparo abaixo como guia)"}
 
 TIPO DE DISPARO: ${tipo.nome}
 ${tipo.descricao ? `DESCRIÇÃO: ${tipo.descricao}` : ""}
 ${tipo.objetivo ? `OBJETIVO: ${tipo.objetivo}` : ""}
 
-INTENÇÃO ESPECÍFICA DESTA MENSAGEM (${msg.timing_label} — ${msg.timing_offset}):
+INTENÇÃO ESPECÍFICA DESTA MENSAGEM (${msg.timing_label}, ${msg.timing_offset}):
 ${msg.intencao}
 
-─────────────────────────────────────────────────────────────
-VOZ E TOM DA MARCA (use SOMENTE para definir COMO escrever — nunca como tópico):
+VOZ E TOM DA MARCA (use SOMENTE para definir COMO escrever, nunca como tópico):
 ${brandContext}
 
 REGRAS GERAIS:
@@ -307,7 +330,7 @@ REGRAS GERAIS:
 
 ${channelInstr}${buttonsHint}`;
 
-        const userMessage = `Gere a mensagem agora seguindo TODAS as regras acima. Atenha-se RIGOROSAMENTE ao tema do evento — não traga outros tópicos.`;
+        const userMessage = `Escreva a mensagem. Responda só com ela, sem nenhuma linha de apresentação. Atenha-se ao tema do evento e não use travessão.`;
 
         tasks.push({ msg, canal, systemPrompt, userMessage });
       }
@@ -334,7 +357,8 @@ ${channelInstr}${buttonsHint}`;
           dispatch_id: dispatch.id,
           dispatch_type_message_id: t.msg.id,
           canal: t.canal,
-          conteudo_gerado: out.text,
+          // Segunda trava: o prompt manda não escrever moldura, isto garante.
+          conteudo_gerado: limparSaidaIA(out.text),
           status: "rascunho",
         };
         if (t.canal === "whatsapp_oficial" && t.msg.tem_botoes_interacao && t.msg.botoes) {
