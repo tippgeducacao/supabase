@@ -542,6 +542,133 @@ async function sondar(base: string, campanha: string, limite: number) {
   }
 }
 
+// -------------------------------------------------------------- purga ----
+// O NO DO PROBLEMA (20/08/2026). A sonda mostrou que os dois formatos falhavam
+// por motivos OPOSTOS:
+//
+//   phone 11 digitos  disca certo, mas e RECUSADO para quem ja esteve na
+//                     campanha — a base da campanha guarda o numero mesmo depois
+//                     de a lista ser apagada
+//   phone  9 digitos  importa sempre (string diferente, escapa da dedup) mas o 3C
+//                     perde o DDD e disca 55+numero: "Destino indisponivel"
+//
+// Ou seja: o formato certo e o de 11 digitos, e o que falta e conseguir LIMPAR a
+// base da campanha todo dia. `DELETE /campaigns/{id}/mailing/delete` existe e a
+// doc so diz "corpo: 1 campo" — qual campo, ninguem sabe.
+//
+// Esta acao descobre por eliminacao, com um telefone real que HOJE e recusado:
+//   1. confirma o baseline (insere 11 digitos -> tem que dar 0)
+//   2. tenta cada candidato de corpo/metodo
+//   3. depois de cada tentativa, reinsere e le imported_lines
+//   4. o candidato que fizer o numero voltar a entrar E a resposta
+//
+// Os candidatos POR TELEFONE vem primeiro de proposito: se um deles funcionar,
+// da para limpar so quem vai ser reimportado, sem zerar a campanha inteira.
+async function purga(base: string, campanha: string, telefone: string) {
+  const semDdd = telefone.slice(2)
+  const ddd = telefone.slice(0, 2)
+  const header = ['identifier', 'areacode', 'phone', 'nome', 'email', 'formacao'] as const
+
+  const criadas: string[] = []
+  const apagar = async (id: string) => {
+    try { await fetch(alvo(base, `/campaigns/${campanha}/lists/${id}`), { method: 'DELETE' }) } catch { /* faxina pega */ }
+  }
+
+  // Insere o numero COMPLETO (11 digitos) numa lista descartavel e devolve
+  // imported_lines. 1 = a base soltou o telefone. 0 = continua preso.
+  const tentarInserir = async (rotulo: string): Promise<number | null> => {
+    let id: string
+    try {
+      id = (await criarListaBruto(base, campanha, `ZZ PURGA ${rotulo}`, header)).id
+    } catch { return null }
+    criadas.push(id)
+    let imp: number | null = null
+    try {
+      const resp = await fetch(alvo(base, `/campaigns/${campanha}/lists/${id}/mailing`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({
+          header,
+          mailing: [{
+            identifier: 'PURGA - nao ligar', areacode: ddd, phone: telefone,
+            nome: 'Purga', email: 'purga@ppgvet.com', formacao: 'Teste',
+          }],
+        }),
+      })
+      const txt = await resp.text()
+      try {
+        const j = JSON.parse(txt)
+        imp = typeof j?.imported_lines === 'number' ? j.imported_lines : null
+      } catch { /* nao-JSON */ }
+    } catch { /* rede */ }
+    await apagar(id)
+    return imp
+  }
+
+  const baseline = await tentarInserir('baseline')
+  if (baseline !== 0) {
+    for (const id of criadas) await apagar(id)
+    return {
+      veredito: 'TELEFONE INADEQUADO PARA O TESTE: ele ja entra com 11 digitos '
+        + `(imported_lines=${baseline}). Escolha um numero que a sonda marcou como recusado.`,
+      baseline,
+    }
+  }
+
+  const candidatos: Array<{ rotulo: string; metodo: string; caminho: string; corpo: unknown }> = [
+    // por telefone — o menos destrutivo, tenta primeiro
+    { rotulo: 'phones_11', metodo: 'DELETE', caminho: 'mailing/delete', corpo: { phones: [telefone] } },
+    { rotulo: 'phones_9', metodo: 'DELETE', caminho: 'mailing/delete', corpo: { phones: [semDdd] } },
+    { rotulo: 'numbers_11', metodo: 'DELETE', caminho: 'mailing/delete', corpo: { numbers: [telefone] } },
+    { rotulo: 'phone_str', metodo: 'DELETE', caminho: 'mailing/delete', corpo: { phone: telefone } },
+    { rotulo: 'mailing_arr', metodo: 'DELETE', caminho: 'mailing/delete', corpo: { mailing: [telefone] } },
+    { rotulo: 'identifiers', metodo: 'DELETE', caminho: 'mailing/delete', corpo: { identifiers: ['PURGA - nao ligar'] } },
+    // campanha inteira
+    { rotulo: 'all_true', metodo: 'DELETE', caminho: 'mailing/delete', corpo: { all: true } },
+    { rotulo: 'delete_all', metodo: 'DELETE', caminho: 'mailing/delete', corpo: { delete_all: true } },
+    { rotulo: 'status_all', metodo: 'DELETE', caminho: 'mailing/delete', corpo: { status: 'all' } },
+    { rotulo: 'filter_all', metodo: 'DELETE', caminho: 'mailing/delete', corpo: { filter: 'all' } },
+    { rotulo: 'corpo_vazio', metodo: 'DELETE', caminho: 'mailing/delete', corpo: {} },
+    { rotulo: 'post_all', metodo: 'POST', caminho: 'mailing/delete', corpo: { all: true } },
+    // "Delete all mailing list in a campaign" — endpoint diferente, sem corpo
+    { rotulo: 'delete_lists_all', metodo: 'DELETE', caminho: 'lists', corpo: null },
+  ]
+
+  const tentativas: Array<Record<string, unknown>> = []
+  let vencedor: string | null = null
+
+  for (const c of candidatos) {
+    let status: number | null = null
+    let corpoResp = ''
+    try {
+      const resp = await fetch(alvo(base, `/campaigns/${campanha}/${c.caminho}`), {
+        method: c.metodo,
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        ...(c.corpo === null ? {} : { body: JSON.stringify(c.corpo) }),
+      })
+      status = resp.status
+      corpoResp = (await resp.text()).slice(0, 150)
+    } catch (err) {
+      corpoResp = String(err).slice(0, 150)
+    }
+
+    const depois = await tentarInserir(c.rotulo)
+    tentativas.push({ candidato: c.rotulo, metodo: c.metodo, status, resposta: corpoResp, reinsercao: depois })
+    if ((depois ?? 0) > 0) { vencedor = c.rotulo; break }
+  }
+
+  for (const id of criadas) await apagar(id)
+
+  return {
+    veredito: vencedor
+      ? `ACHOU: "${vencedor}" liberou o telefone. E este corpo que a faxina tem que mandar todo dia, e ai o phone pode voltar aos 11 digitos.`
+      : 'NENHUM candidato liberou o telefone. A base da campanha nao se limpa por esta API — o caminho passa a ser capturar o que o painel faz (F12) ou falar com a FluxoTI.',
+    corpo_que_funciona: vencedor,
+    baseline_confirmado: baseline,
+    tentativas,
+  }
+}
+
 // ------------------------------------------------------------- montar ----
 // Devolve o id E o corpo cru: o diagnostico precisa ver com que header o 3C
 // registrou a lista (se ele nao registrar o header, o mailing e descartado).
@@ -662,6 +789,17 @@ async function handler(req: Request): Promise<Response> {
         acao: 'sondar', dry: true, ok: false, erro: String(err),
       })
       return json({ error: 'sonda falhou', detail: String(err) }, 502)
+    }
+  }
+
+  // ------------------------------------------------------------- PURGA ----
+  if (acao === 'purga') {
+    const tel = (url.searchParams.get('telefone') ?? '').replace(/\D/g, '')
+    if (tel.length !== 11) return json({ error: 'passe ?telefone= com 11 digitos, de um numero que a sonda marcou como RECUSADO' }, 400)
+    try {
+      return json({ ok: true, acao: 'purga', ...(await purga(base, campanha, tel)) })
+    } catch (err) {
+      return json({ error: 'purga falhou', detail: String(err) }, 502)
     }
   }
 
