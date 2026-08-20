@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   blocoConfirmacao,
   corrigirCanal,
+  ehDespedidaDeVerdade,
   despedidaDe,
   motivoDoEncerramento,
   temLinkDeMeet,
@@ -61,6 +62,32 @@ describe('despedida por motivo', () => {
 
   it('motivo desconhecido preserva o texto do modelo em vez de chutar', () => {
     expect(despedidaDe({ tool: 'pausa_ia', input: { motivo: 'algo que ninguém previu' } })).toBeNull();
+  });
+});
+
+describe('nem toda pausa é adeus', () => {
+  // Medido no WhatsApp em 20/08: o convite da Escola grudou em 6 de 7 pedidos de ligação.
+  // "beleza já vou te ligar" seguido de "antes de te deixar ir" se contradiz.
+  it('quem pediu ligação NÃO está indo embora', () => {
+    expect(ehDespedidaDeVerdade({ tool: 'pausa_ia', input: { motivo: 'Lead pediu ligação telefônica' } })).toBe(false);
+  });
+
+  it('quem pediu humano NÃO está indo embora', () => {
+    expect(ehDespedidaDeVerdade({ tool: 'pausa_ia', input: { motivo: 'Lead pediu atendimento humano' } })).toBe(false);
+  });
+
+  it('cancelamento NÃO é adeus', () => {
+    expect(ehDespedidaDeVerdade({ tool: 'pausa_ia', input: { motivo: 'Lead pediu cancelamento' } })).toBe(false);
+  });
+
+  it('desinteresse e sem graduação SÃO adeus', () => {
+    expect(ehDespedidaDeVerdade({ tool: 'pausa_ia', input: { motivo: 'Lead demonstrou desinteresse' } })).toBe(true);
+    expect(ehDespedidaDeVerdade({ tool: 'pausa_ia', input: { tipo: 'sem_graduacao' } })).toBe(true);
+  });
+
+  it('motivo desconhecido não conta como adeus', () => {
+    expect(ehDespedidaDeVerdade({ tool: 'pausa_ia', input: { motivo: 'algo novo' } })).toBe(false);
+    expect(ehDespedidaDeVerdade(null)).toBe(false);
   });
 });
 

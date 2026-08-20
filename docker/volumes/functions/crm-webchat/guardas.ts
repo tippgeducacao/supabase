@@ -73,6 +73,22 @@ export function despedidaDe(e: Encerramento | null): string | null {
   return motivo ? DESPEDIDAS[motivo] : null;
 }
 
+// Nem toda pausa é adeus. Em `humano`, `ligacao`, `aluno` e `cancelamento` o atendimento
+// CONTINUA — alguém do time assume. Só nos outros a conversa acabou de verdade.
+//
+// Isso decide quem leva o convite da Escola gratuita, que é despedida e não moeda de
+// troca. Medido no WhatsApp em 20/08: o convite grudou em 6 de 7 pedidos de ligação, e o
+// resultado é autocontraditório — "beleza já vou te ligar" seguido de "antes de te deixar
+// ir, um presente da ppgvet…". Prometeu ligar e se despediu no mesmo fôlego.
+const NAO_SAO_ADEUS = new Set(["humano", "ligacao", "aluno", "cancelamento"]);
+
+/** O atendimento acabou mesmo? (falso quando alguém do time vai assumir) */
+export function ehDespedidaDeVerdade(e: Encerramento | null): boolean {
+  if (!e) return false;
+  const motivo = motivoDoEncerramento(e);
+  return Boolean(motivo) && !NAO_SAO_ADEUS.has(String(motivo));
+}
+
 // ── 2. O material vai pro WhatsApp, não pro chat ───────────────────────────────
 // cron-04: "Consegui te mandar aqui, oh" e "já te mandei ali em cima". O PDF sai por
 // template no WhatsApp e NÃO aparece no chat — o lead procura, não acha, e conclui que

@@ -427,6 +427,17 @@ export async function responderWebchat(
       let chunks = despedida ? [despedida] : await emChunks(textoDe(blocos) || fallback);
       if (!chunks.length) chunks = [fallback];
       if (despedida) console.log(`[crm-webchat] despedida determinística: ${encerramento?.tool}`);
+      // ⚠️ A despedida determinística substitui o texto do modelo — e com ele ia embora o
+      // convite da Escola gratuita, que o instrucaoPosPausa mandava incluir. Era captação
+      // perdida. Ele volta AQUI, e só em encerramento de verdade: quem pediu ligação,
+      // humano ou cancelamento não está indo embora, alguém do time vai assumir.
+      // ⛔ Não vale pro produto 'escola': a pessoa já está dentro da biblioteca.
+      if (despedida && produto !== "escola" && ehDespedidaDeVerdade(encerramento)) {
+        chunks.push(
+          "antes de te deixar ir, um presente: a ppgvet tem uma biblioteca aberta e gratuita, "
+          + `com mais de 30 cursos, artigos, e-books e certificados — aproveita: ${LINK_ESCOLA_GRATUITA}`,
+        );
+      }
       // ESCOLA: link de matrícula só sai se a pessoa pediu (régua em código — ver escola.ts).
       if (produto === "escola") {
         const ultimaDoLead = [...history].reverse().find((m) => m.role === "user")?.text ?? "";
