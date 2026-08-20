@@ -9,7 +9,11 @@
 // A situação do contrato (matriculaConsultar?cpf=&tb_curso_id=) é 1 chamada por contrato e NÃO
 // cabe aqui: fica no backfill, senão estoura o rate limit.
 //
-// Rate limit REAL medido em 20/08/2026: ~15 req/min (a doc promete 30). Daí o gap de 4.2s.
+// Rate limit: 30 req/min POR CHAVE, contados numa janela compartilhada — backfill, cron e
+// chamada manual disputam o mesmo balde ("Máximo: 30 por minuto. Você fez 30 requisições").
+// Por isso o gap default é 2.2s (~27/min) e o cron gasta ~7 chamadas por rodada: sobra folga.
+// Bloco que leve 429 é apenas registrado, não repetido — a janela incremental (-60d/+90d) se
+// sobrepõe entre rodadas, então a rodada seguinte cobre o mesmo período de novo.
 //
 // Modos:
 //   ?modo=incremental (default)  janela de -60d a +90d + fichas dos últimos 30d
@@ -34,7 +38,7 @@ const corsHeaders = {
 
 const SIGA_BASE = (Deno.env.get("SIGA_API_BASE") ?? "https://ppg.sistemasiga.net/sigaAPI").replace(/\/$/, "");
 const SIGA_KEY = Deno.env.get("SIGA_API_KEY") ?? "";
-const GAP_MS = Number(Deno.env.get("SIGA_SYNC_GAP_MS") ?? "4200");
+const GAP_MS = Number(Deno.env.get("SIGA_SYNC_GAP_MS") ?? "2200");
 const BUDGET_MS = Number(Deno.env.get("SIGA_SYNC_BUDGET_MS") ?? "110000");
 
 // ---------------------------------------------------------------- helpers de data e número
