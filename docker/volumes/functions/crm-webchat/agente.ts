@@ -68,6 +68,12 @@ export type WebchatToolChamada = {
   nome: string;
   input: Record<string, unknown>;
   mockado: boolean;
+  /**
+   * O que a tool DEVOLVEU, cortado. Sem isto, o registro mostra que a ferramenta foi
+   * chamada mas não por que falhou — e "chamou 5 vezes e não agendou" continua sem
+   * explicação. Foi o que aconteceu no reteste de 20/08: só dava pra ver a chamada.
+   */
+  resultado?: string;
 };
 type Msg = { role: "user" | "assistant"; content: any };
 // CtxConversa do agente real — no webchat waAccountId/oportunidadeId ficam nulos.
@@ -464,11 +470,16 @@ export async function responderWebchat(
       const input = (tu.input && typeof tu.input === "object" ? tu.input : {}) as Record<string, unknown>;
       if (TOOLS_QUE_PAUSAM.has(nomeTool)) encerramento = { tool: nomeTool, input };
       const mockado = toolDeveSerMockada(modoTeste, nomeTool);
-      chamadas.push({ nome: nomeTool, input, mockado });
+      const registro: WebchatToolChamada = { nome: nomeTool, input, mockado };
+      chamadas.push(registro);
       let saidaTool: Record<string, unknown>;
       if (mockado) saidaTool = resultadoToolMockado(tu, limparCurso(curso));
       else if (nomeTool === "envia_informacoes") saidaTool = await webchatEnviaInformacoes(tu, telefone, curso, nome, sessaoId);
       else saidaTool = await executarTool(supabase, tu, ctx);
+      // Guarda a resposta da tool no MESMO registro (o push foi por referência).
+      registro.resultado = String(
+        saidaTool?.resultado ?? saidaTool?.instrucao ?? JSON.stringify(saidaTool ?? {}),
+      ).slice(0, 500);
       // Reunião criada: guarda o retorno pra garantir o link na saída, aconteça o que
       // acontecer com o texto do modelo (ag-07 marcou reunião e não mandou o link).
       if (nomeTool === "confirmar_agendamento" && !mockado && saidaTool?.agendamento_id) {
