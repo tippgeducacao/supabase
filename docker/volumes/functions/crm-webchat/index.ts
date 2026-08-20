@@ -640,6 +640,17 @@ async function semearHistoricoWhatsApp(sessaoId: string, sessao: { telefone: str
     // O template que sai agora também é fala dele — sem isso ele oferece o cronograma
     // de novo, achando que ainda não mandou.
     linhas.push({ role: "assistant", content: frasePedidoCronograma(curso) });
+    // ⚠️ MARCO DE CANAL. Sem ele o João leva a linguagem do site pro WhatsApp: disse
+    // "mas já te adiantei o cronograma e o valor pelo whats" CONVERSANDO no WhatsApp, com
+    // o PDF logo acima na tela. É o espelho do bug do "aqui em cima" — a mesma frase é
+    // verdadeira num canal e falsa no outro, e ele não tinha como saber onde virou.
+    linhas.push({
+      role: "assistant",
+      content: "[NOTA INTERNA — não repita isto ao lead] As mensagens acima aconteceram no CHAT DO SITE. "
+        + "Daqui em diante a conversa é no WHATSAPP, e o cronograma e o valor JÁ FORAM ENVIADOS e estão "
+        + "nesta mesma conversa, logo acima. Ao citá-los, fale como quem já mandou aqui (\"te mandei aqui em cima\"): "
+        + "⛔ é PROIBIDO dizer que mandou \"pelo whats\" ou \"no seu whatsapp\", porque é exatamente onde vocês estão.",
+    });
     if (!linhas.length) return;
 
     const agora = new Date().toISOString();

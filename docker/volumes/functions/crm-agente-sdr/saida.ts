@@ -94,6 +94,10 @@ export function removerRaciocinioVazado(texto: string): string {
 // lead") é o discriminador central: o João falando COM o lead nunca diz "lead".
 // Mexeu aqui → revalide contra o corpus (query no CLAUDE.md) ANTES de subir.
 const RE_META: RegExp[] = [
+  // NOTA INTERNA injetada no histórico pela continuidade site→WhatsApp (2026-08-19):
+  // marca onde o canal virou, pro João não dizer "te mandei pelo whats" conversando NO
+  // whats. É contexto pra ele, nunca fala pro lead — se vazar, some aqui.
+  /^\s*\[NOTA INTERNA/i,
   // Envoltório de ITÁLICO SIMPLES: *sem resposta necessária*, *aguardando resposta do lead*.
   // ⚠️ `[^*]` nas duas pontas é o que separa do **NEGRITO**, que é legítimo e comum
   // (o chunker isola "**14h, 14h30 ou 15h**" e "**Sanidade Avícola**" em balão próprio).
