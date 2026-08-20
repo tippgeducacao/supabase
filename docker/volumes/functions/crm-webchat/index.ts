@@ -568,14 +568,12 @@ async function acaoEscolherPos(body: Record<string, unknown>) {
   // captação. A guarda de `sessao.curso` acima já garante uma vez só por sessão.
   await dispararCaptacao(sessao, curso);
 
-  // O toque no botão vira fala DO VISITANTE, não do João. Antes o João abria sozinho
-  // dizendo que ia mandar o cronograma — oferecia material pra quem não pediu nada e
-  // invertia a conversa. Agora o botão diz o que a pessoa quer, e o João responde a isso
-  // pelo roteiro normal (que conduz pra reunião).
-  // Delega pro acaoEnviar: mesma gravação, mesmo espelho no SAC, mesma resposta da IA.
-  const ehMba = /^mba\b/i.test(curso.trim());
-  const pedido = `Olá, quero falar com um monitor sobre ${ehMba ? "o" : "a pós em"} ${curso}.`;
-  return await acaoEnviar({ sessao_id: sessaoId, conteudo: pedido });
+  // Esta ação só REGISTRA a escolha e dispara a captação. Quem manda a mensagem é o
+  // WIDGET, pelo caminho normal de envio — o toque no botão vira fala do visitante.
+  // ⚠️ Foi tentado criar a mensagem aqui e não funciona: o widget DESCARTA inbound vindo
+  // do poll ("já foi renderizado otimista no envio"), então a fala nunca aparecia na tela.
+  // Mensagem criada pelo servidor não tem quem a desenhe.
+  return json({ ok: true });
 }
 
 // ── Continuidade site → WhatsApp (2026-08-19) ───────────────────────────────
