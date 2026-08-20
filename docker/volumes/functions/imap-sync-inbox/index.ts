@@ -14,6 +14,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { chaveDaThread, parsearMensagem, resumo } from '../_shared/imap/mime.ts';
 import { abrirSessao, carregarConfig, limparErro, marcarErro, classificarErro } from '../_shared/imap/caixa.ts';
+import { pontoDePartida } from '../_shared/imap/ponteiros.ts';
 import type { SessaoImap } from '../_shared/imap/conexao.ts';
 
 const corsHeaders = {
@@ -367,13 +368,15 @@ async function varrerPasta(
   }
 
   // Caixa que nunca rodou com dois ponteiros: adota o UID mais alto do servidor
-  // como teto e começa o histórico a partir dele, descendo. É isto que faz a
+  // como teto e começa o histórico logo ACIMA dele, descendo. É isto que faz a
   // caixa nascer EM DIA — sem isso, a carga inicial teria de terminar antes de o
-  // primeiro e-mail novo aparecer.
-  if (backfill === null || backfill === undefined) {
-    const maiorNoServidor = Math.max(estado.uidNext - 1, teto, 0);
-    backfill = maiorNoServidor;
-    teto = maiorNoServidor;
+  // primeiro e-mail novo aparecer. A aritmética (e o ±1 que já custou uma
+  // mensagem invisível) vive em `pontoDePartida`, com teste.
+  const partida = pontoDePartida(estado.uidNext, teto, backfill);
+  teto = partida.teto;
+  backfill = partida.backfill;
+  if (partida.adotou) {
+    console.log(`caixa adotada em ${o.pasta}: teto=${teto}, histórico desce de ${backfill}`);
   }
 
   const topo = await sincronizarPasta(admin, caixa, sessao, {
