@@ -2,11 +2,25 @@
 //
 // Aceita as MESMAS ações da versão Gmail, para o despachante do front poder mandar
 // o mesmo payload. O que muda é o que chega ao servidor:
-//   read/unread → UID STORE ±\Seen
-//   archive     → MOVE para a pasta de Arquivo, quando o servidor tem uma
-//   star/link_task → só local (IMAP não tem estrela nem vínculo com tarefa)
+//   read/unread     → UID STORE ±\Seen, em CADA pasta onde a thread tem mensagem
+//   archive         → MOVE para a pasta de Arquivo
+//   trash           → MOVE para a Lixeira
+//   spam            → MOVE para a pasta de Spam
+//   star/link_task/unarchive → só local (não existem no protocolo)
+//
+// A régua de "o que muda no banco" e "para onde vai no servidor" vive em
+// _shared/imap/marcacao.ts, com teste — é onde estavam os erros da 1ª versão.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { abrirSessao, carregarConfig, classificarErro } from '../_shared/imap/caixa.ts';
+import {
+  agruparUidsPorPasta,
+  avisoSemPasta,
+  destinoDaAcao,
+  patchLocalDaAcao,
+  soLocal,
+  type AcaoMarcacao,
+  type PastaImap,
+} from '../_shared/imap/marcacao.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -34,6 +48,7 @@ Deno.serve(async (req) => {
     const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
     const { thread_id, action, task_id } = await req.json();
     if (!thread_id || !action) throw new Error('thread_id e action obrigatórios');
+    const acao = action as AcaoMarcacao;
 
     const { data: thread } = await admin
       .from('email_threads')
@@ -50,49 +65,58 @@ Deno.serve(async (req) => {
     // ── Estado local primeiro ──────────────────────────────────────────────
     // A tela responde a ele. Se o servidor recusar depois, avisamos — mas não
     // deixamos a interface travada esperando a rede para marcar um e-mail como lido.
-    const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
-    if (action === 'read') patch.nao_lido = false;
-    if (action === 'unread') patch.nao_lido = true;
-    if (action === 'archive') patch.arquivado = true;
-    if (action === 'unarchive') patch.arquivado = false;
-    if (action === 'star') patch.favoritado = true;
-    if (action === 'unstar') patch.favoritado = false;
-    if (action === 'trash' || action === 'spam') patch.arquivado = true;
-    if (action === 'link_task') patch.task_id = task_id ?? null;
-
-    await admin.from('email_threads').update(patch).eq('id', thread_id);
+    await admin
+      .from('email_threads')
+      .update(patchLocalDaAcao(acao, { taskId: task_id ?? null }))
+      .eq('id', thread_id);
 
     // Ações que não existem no protocolo IMAP param por aqui, de propósito.
-    if (action === 'link_task' || action === 'star' || action === 'unstar') {
+    if (soLocal(acao)) {
       return responder({ success: true, servidor: 'nao_aplicavel' });
     }
 
     // ── Reflete no servidor ────────────────────────────────────────────────
+    // O UID do IMAP vale DENTRO de uma pasta. A pasta de cada mensagem está na
+    // chave (`imap:<caixa>:<pasta>:<uid>`), e é por ela que os UIDs são separados:
+    // aplicar um UID de Enviados com a INBOX selecionada acertaria outra conversa.
     const { data: mensagens } = await admin
       .from('email_mensagens')
-      .select('imap_uid')
+      .select('gmail_message_id, imap_uid')
       .eq('thread_id', thread_id)
       .not('imap_uid', 'is', null);
-    const uids = (mensagens || []).map((m: any) => Number(m.imap_uid)).filter(Boolean);
 
-    if (!uids.length) {
+    const grupos = agruparUidsPorPasta((mensagens || []) as any[]);
+    if (!grupos.inbox.length && !grupos.sent.length) {
       return responder({ success: true, servidor: 'sem_uid' });
     }
 
     let aviso: string | null = null;
     try {
       const config = await carregarConfig(admin, thread.caixa_id);
+      const pastaDoServidor: Record<PastaImap, string | null> = {
+        inbox: 'INBOX',
+        sent: config.pasta_enviados,
+      };
       const sessao = await abrirSessao(config);
       try {
-        await sessao.cliente.selecionar('INBOX');
-        if (action === 'read' || action === 'unread') {
-          for (const uid of uids) await sessao.cliente.marcarLida(uid, action === 'read');
-        } else if (action === 'archive' || action === 'trash' || action === 'spam') {
-          const destino = action === 'archive' ? config.pasta_arquivo : config.pasta_arquivo;
-          if (destino) {
-            for (const uid of uids) await sessao.cliente.mover(uid, destino);
-          } else {
-            aviso = 'Este servidor não tem pasta de Arquivo — a conversa foi arquivada só aqui no sistema.';
+        if (acao === 'read' || acao === 'unread') {
+          // Lido/não lido vale para a conversa inteira, então passa por cada pasta.
+          for (const chave of ['inbox', 'sent'] as PastaImap[]) {
+            const uids = grupos[chave];
+            const pasta = pastaDoServidor[chave];
+            if (!uids.length || !pasta) continue;
+            await sessao.cliente.selecionar(pasta);
+            for (const uid of uids) await sessao.cliente.marcarLida(uid, acao === 'read');
+          }
+        } else {
+          const destino = destinoDaAcao(acao, config);
+          if (destino && !destino.pasta) {
+            aviso = avisoSemPasta(destino.rotulo);
+          } else if (destino?.pasta && grupos.inbox.length) {
+            // Move só o que está na INBOX: a cópia nos Enviados é o que a pessoa
+            // mandou, e ela não vai para a Lixeira porque alguém excluiu a conversa.
+            await sessao.cliente.selecionar('INBOX');
+            for (const uid of grupos.inbox) await sessao.cliente.mover(uid, destino.pasta);
           }
         }
       } finally {

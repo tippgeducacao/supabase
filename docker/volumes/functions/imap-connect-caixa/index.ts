@@ -9,7 +9,13 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { cifrar, chaveDoAmbiente } from '../_shared/imap/cripto.ts';
 import { abrirImap } from '../_shared/imap/conexao.ts';
-import { acharPastaEspecial, PASTAS_ARQUIVO, PASTAS_ENVIADOS } from '../_shared/imap/client.ts';
+import {
+  acharPastaEspecial,
+  PASTAS_ARQUIVO,
+  PASTAS_ENVIADOS,
+  PASTAS_LIXEIRA,
+  PASTAS_SPAM,
+} from '../_shared/imap/client.ts';
 import { abrirSmtp, classificarErro } from '../_shared/imap/caixa.ts';
 
 const corsHeaders = {
@@ -88,6 +94,11 @@ Deno.serve(async (req) => {
       || acharPastaEspecial(pastas, '\\Sent', PASTAS_ENVIADOS);
     const pastaArquivo = String(body.pasta_arquivo || '').trim()
       || acharPastaEspecial(pastas, '\\Archive', PASTAS_ARQUIVO);
+    // Lixeira e Spam são pastas PRÓPRIAS: sem elas, excluir viraria arquivar.
+    const pastaLixeira = String(body.pasta_lixeira || '').trim()
+      || acharPastaEspecial(pastas, '\\Trash', PASTAS_LIXEIRA);
+    const pastaSpam = String(body.pasta_spam || '').trim()
+      || acharPastaEspecial(pastas, '\\Junk', PASTAS_SPAM);
 
     // ── 2) SMTP: autenticar AGORA, não na primeira resposta ────────────────
     // Senha de SMTP errada só apareceria quando alguém tentasse responder — e aí
@@ -100,6 +111,8 @@ Deno.serve(async (req) => {
       pastas: pastas.map((p) => p.nome),
       pasta_enviados: pastaEnviados,
       pasta_arquivo: pastaArquivo,
+      pasta_lixeira: pastaLixeira,
+      pasta_spam: pastaSpam,
       uid_validity: estado.uidValidity,
       mensagens_na_inbox: estado.total,
       aviso: pastaEnviados
@@ -147,6 +160,21 @@ Deno.serve(async (req) => {
       caixaId = data.id;
     }
 
+    // Reconectando uma caixa que já tinha config: se o servidor renumerou a INBOX,
+    // o ponteiro guardado passou a apontar para OUTRAS mensagens. Gravar o
+    // UIDVALIDITY novo por cima e manter o `ultimo_uid` velho desarmaria justamente
+    // a trava que o sync usa para perceber isso — e o sync nunca mais compararia,
+    // porque os dois números já chegariam iguais.
+    const { data: configAnterior } = await admin
+      .from('email_caixa_imap_config')
+      .select('uid_validity, pasta_enviados')
+      .eq('caixa_id', caixaId)
+      .maybeSingle();
+
+    const renumerou = !!configAnterior
+      && Number(configAnterior.uid_validity ?? 0) !== Number(estado.uidValidity);
+    const mudouEnviados = !!configAnterior && (configAnterior.pasta_enviados ?? null) !== (pastaEnviados ?? null);
+
     const { error: erroConfig } = await admin
       .from('email_caixa_imap_config')
       .upsert({
@@ -157,7 +185,11 @@ Deno.serve(async (req) => {
         senha_cifrada: senhaCifrada,
         pasta_enviados: pastaEnviados,
         pasta_arquivo: pastaArquivo,
+        pasta_lixeira: pastaLixeira,
+        pasta_spam: pastaSpam,
         uid_validity: estado.uidValidity,
+        ...(renumerou ? { ultimo_uid: 0 } : {}),
+        ...(renumerou || mudouEnviados ? { ultimo_uid_enviados: 0, uid_validity_enviados: null } : {}),
         updated_at: new Date().toISOString(),
       }, { onConflict: 'caixa_id' });
     if (erroConfig) throw new Error(erroConfig.message);

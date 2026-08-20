@@ -20,6 +20,8 @@ export interface ConfigImap {
   senha_cifrada: string;
   pasta_enviados: string | null;
   pasta_arquivo: string | null;
+  pasta_lixeira: string | null;
+  pasta_spam: string | null;
   uid_validity: number | null;
   ultimo_uid: number;
   uid_validity_enviados: number | null;

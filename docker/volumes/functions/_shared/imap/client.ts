@@ -372,3 +372,13 @@ export function acharPastaEspecial(
 
 export const PASTAS_ENVIADOS = ["INBOX.Sent", "Sent", "INBOX.Enviados", "Enviados", "Sent Items", "INBOX.Sent Items"];
 export const PASTAS_ARQUIVO = ["INBOX.Archive", "Archive", "INBOX.Arquivo", "Arquivo"];
+// Lixeira e Spam são pastas PRÓPRIAS. Mandar exclusão para o Arquivo deixa o e-mail
+// na caixa enquanto o sistema anuncia que excluiu — ver `destinoDaAcao` em marcacao.ts.
+export const PASTAS_LIXEIRA = [
+  "INBOX.Trash", "Trash", "INBOX.Lixeira", "Lixeira",
+  "Deleted Items", "INBOX.Deleted Items", "Deleted Messages", "INBOX.Deleted Messages",
+];
+export const PASTAS_SPAM = [
+  "INBOX.spam", "spam", "INBOX.Junk", "Junk", "Junk E-mail", "INBOX.Junk E-mail",
+  "Lixo Eletrônico", "INBOX.Lixo Eletrônico",
+];
