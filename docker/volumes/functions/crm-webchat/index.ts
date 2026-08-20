@@ -573,7 +573,7 @@ async function acaoEscolherPos(body: Record<string, unknown>) {
   // invertia a conversa. Agora o botão diz o que a pessoa quer, e o João responde a isso
   // pelo roteiro normal (que conduz pra reunião).
   // Delega pro acaoEnviar: mesma gravação, mesmo espelho no SAC, mesma resposta da IA.
-  const ehMba = /^mba/i.test(curso.trim());
+  const ehMba = /^mba\b/i.test(curso.trim());
   const pedido = `Olá, quero falar com um monitor sobre ${ehMba ? "o" : "a pós em"} ${curso}.`;
   return await acaoEnviar({ sessao_id: sessaoId, conteudo: pedido });
 }
