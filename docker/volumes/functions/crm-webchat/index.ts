@@ -376,6 +376,14 @@ async function acaoIniciar(body: Record<string, unknown>, req: Request) {
       origem_url: texto(body.origem_url, 500) || null,
       ip,
       user_agent: texto(req.headers.get("user-agent"), 300) || null,
+      // CONSENTIMENTO (LGPD art. 8º §2: o ônus de provar é do controlador).
+      // Guardamos o TEXTO que o visitante leu, não um booleano: a redação muda com o
+      // tempo e "aceitou=true" não diz a QUE ele aceitou. Widget antigo não manda nada
+      // e a sessão fica com os campos nulos, que é a leitura honesta de "sem registro".
+      consentimento_texto: texto(body.consentimento_texto, 600) || null,
+      consentimento_versao: texto(body.consentimento_versao, 20) || null,
+      consentimento_em: texto(body.consentimento_texto, 600) ? new Date().toISOString() : null,
+      consentimento_ip: texto(body.consentimento_texto, 600) ? ip : null,
     })
     .select("id")
     .single();
