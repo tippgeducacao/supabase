@@ -389,18 +389,30 @@ async function diagnostico(base: string, campanha: string, telefone: string) {
 //
 // Cria e APAGA a propria lista, com peso 0 para o discador nao pegar os numeros
 // nos segundos em que eles ficam la. Nao toca na lista do dia.
-const FORMATOS_SONDA: Array<{ chave: string; monta: (tel: string) => { areacode: string; phone: string } }> = [
-  // o que esta em producao hoje: phone COM o DDD (igual ao threec-mailing-sync)
-  { chave: 'atual_11', monta: (t) => ({ areacode: t.slice(0, 2), phone: t }) },
-  // o de 17/08: areacode separado, phone so com os 9 digitos
-  { chave: 'sem_ddd_9', monta: (t) => ({ areacode: t.slice(0, 2), phone: t.slice(2) }) },
-  // com DDI colado — alguns discadores exigem E.164 sem o mais
-  { chave: 'com_55_13', monta: (t) => ({ areacode: t.slice(0, 2), phone: '55' + t }) },
-  // sem o nono digito: numero antigo de 10 digitos, ainda aceito por operadora
-  { chave: 'sem_nono_10', monta: (t) => ({ areacode: t.slice(0, 2), phone: t.slice(0, 2) + t.slice(3) }) },
-]
+// 20/08/2026: `phone` com 9 digitos importa 100%, mas o 3C DISCA errado — o painel
+// mostra (55) 9XXXX-XXXX para todo mundo, ou seja, ele perde o DDD e prefixa 55.
+// `areacode` NAO existe na documentacao da API (foi herdado do n8n): a hipotese e
+// que ela seja coluna decorativa e o 3C so leia `phone`. Por isso agora cada
+// formato carrega o PROPRIO header — da para testar sem a coluna.
+const COM_AREACODE = ['identifier', 'areacode', 'phone', 'nome', 'email', 'formacao'] as const
+const SEM_AREACODE = ['identifier', 'phone', 'nome', 'email', 'formacao'] as const
 
-const HEADER_SONDA = ['identifier', 'areacode', 'phone', 'nome', 'email', 'formacao'] as const
+const FORMATOS_SONDA: Array<{
+  chave: string
+  header: readonly string[]
+  monta: (tel: string) => Record<string, string>
+}> = [
+  // producao HOJE: importa 100% e disca errado (vira DDD 55)
+  { chave: 'com_areacode_9', header: COM_AREACODE, monta: (t) => ({ areacode: t.slice(0, 2), phone: t.slice(2) }) },
+  // producao ONTEM: numero completo em phone, com a coluna areacode junto
+  { chave: 'com_areacode_11', header: COM_AREACODE, monta: (t) => ({ areacode: t.slice(0, 2), phone: t }) },
+  // A CANDIDATA: sem a coluna areacode, numero completo em phone
+  { chave: 'sem_areacode_11', header: SEM_AREACODE, monta: (t) => ({ phone: t }) },
+  // controle: a coluna existe mas vem vazia — separa "coluna atrapalha" de "valor atrapalha"
+  { chave: 'areacode_vazio_11', header: COM_AREACODE, monta: (t) => ({ areacode: '', phone: t }) },
+  // E.164 sem o mais, sem a coluna
+  { chave: 'sem_areacode_55_13', header: SEM_AREACODE, monta: (t) => ({ phone: '55' + t }) },
+]
 
 async function sondar(base: string, campanha: string, limite: number) {
   const apagar = async (listaId: string) => {
@@ -449,7 +461,7 @@ async function sondar(base: string, campanha: string, limite: number) {
   for (const f of FORMATOS_SONDA) {
     let listaId: string
     try {
-      listaId = (await criarListaBruto(base, campanha, `ZZ SONDA ${f.chave} ${marca}`, HEADER_SONDA)).id
+      listaId = (await criarListaBruto(base, campanha, `ZZ SONDA ${f.chave} ${marca}`, f.header)).id
     } catch (err) {
       veredito[f.chave] = { erro_ao_criar_lista: String(err) }
       continue
@@ -460,18 +472,17 @@ async function sondar(base: string, campanha: string, limite: number) {
     const porNumero: Record<string, number | null> = {}
     for (const linha of amostra) {
       const tel = String(linha.telefone)
-      const { areacode, phone } = f.monta(tel)
+      const campos_ = f.monta(tel)
       let imp: number | null = null
       try {
         const resp = await fetch(alvo(base, `/campaigns/${campanha}/lists/${listaId}/mailing`), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
           body: JSON.stringify({
-            header: HEADER_SONDA,
+            header: f.header,
             mailing: [{
               identifier: 'SONDA - nao ligar',
-              areacode,
-              phone,
+              ...campos_,
               nome: limpar(String(linha.nome ?? '')) || 'Aluno',
               email: limpar(String(linha.email ?? '')),
               formacao: limpar(String(linha.formacao ?? '')),
