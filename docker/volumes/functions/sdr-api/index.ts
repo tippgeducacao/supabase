@@ -215,6 +215,18 @@ async function resolverLead(body: any): Promise<{ lead_id?: string; criado?: boo
     if (data?.id) return { lead_id: data.id }
   }
 
+  // 2.5) ainda não achou: procura entre os ARQUIVADOS antes de criar duplicata.
+  // Arquivamento é sinal de opt-out/desqualificação e serve pra barrar DISPARO nosso;
+  // não faz sentido barrar um agendamento que a própria pessoa acabou de pedir. Reusar
+  // o cadastro dela preserva o histórico — criar outro só engorda a pilha (um telefone
+  // real da base já tem 30 linhas).
+  if (sub) {
+    const { data } = await supabase
+      .from('leads').select('id')
+      .ilike('whatsapp', `%${sub}%`).order('created_at', { ascending: false }).limit(1).maybeSingle()
+    if (data?.id) return { lead_id: data.id }
+  }
+
   // 3) não achou -> cria. Precisa de nome pra não gerar lead sem identificação.
   if (!nome) {
     return { error: json(422, { error: 'Lead não encontrado e nome não informado para criar', code: 'nome_obrigatorio' }) }

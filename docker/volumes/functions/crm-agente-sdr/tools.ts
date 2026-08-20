@@ -39,6 +39,8 @@ export type CtxConversa = {
   waAccountId: string | null;
   leadId: string | null;
   oportunidadeId: string | null;
+  /** Nome do lead. Usado pra CRIAR o cadastro quando o agendamento não achar nenhum. */
+  nome?: string | null;
   // Canal da conversa. Só o WhatsApp oferece a agenda do DONO do contato (decisão do
   // usuário 2026-08-07: "webchat pode agendar aleatório, foco no WhatsApp, que é o canal
   // maior"). Ausente = whatsapp (o crm-agente-sdr não precisa declarar).
@@ -325,10 +327,18 @@ async function confirmarAgendamento(supabase: any, input: any, ctx: CtxConversa,
     console.log(`[crm-agente-sdr] gate de formação falhou (segue): ${(e as Error).message}`);
   }
   try {
+    // ⚠️ MANDE O lead_id QUANDO EXISTIR. O sdr-api resolve o lead por busca (8 últimos
+    // dígitos, e só entre os NÃO arquivados) e, se não achar, precisa de `nome` pra
+    // criar — senão devolve 422 e o agendamento simplesmente não acontece. Foi o que
+    // pegou em 20/08/2026: o lead do teste estava arquivado, o `nome` não ia no corpo,
+    // e o modelo chamou confirmar_agendamento CINCO vezes até estourar o loop. O
+    // visitante escolheu o horário e a reunião nunca nasceu. Com o lead_id em mãos a
+    // busca nem roda; o `nome` fica como último recurso.
     const post = await sdrApi('agendamentos', {
       method: 'POST',
       body: JSON.stringify({
-        lead: { whatsapp: ctx.telefone },
+        ...(ctx.leadId ? { lead_id: ctx.leadId } : {}),
+        lead: { whatsapp: ctx.telefone, ...(ctx.nome ? { nome: ctx.nome } : {}) },
         pos_graduacao_interesse: input.curso_escolhido,
         vendedor_id: input.vendedor_id,
         data_agendamento: `${input.data_escolhida}T${input.horario_escolhido}:00-03:00`,

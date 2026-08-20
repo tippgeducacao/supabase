@@ -77,7 +77,7 @@ export type WebchatToolChamada = {
 };
 type Msg = { role: "user" | "assistant"; content: any };
 // CtxConversa do agente real — no webchat waAccountId/oportunidadeId ficam nulos.
-type CtxConversa = { remotejid: string; telefone: string; waAccountId: string | null; leadId: string | null; oportunidadeId: string | null };
+type CtxConversa = { remotejid: string; telefone: string; waAccountId: string | null; leadId: string | null; oportunidadeId: string | null; nome?: string | null };
 
 function limparCurso(c: string | null): string {
   if (!c) return "";
@@ -118,8 +118,8 @@ function promptDoEstagio(nome: string, curso: string | null, estagio: Estagio, p
 // consulta_disponibilidade NÃO manda o telefone, então o webchat segue no RODÍZIO
 // entre os vendedores da pós (decisão do usuário 2026-08-07: a régua "quem recebeu o
 // lead recebe a reunião" é só do WhatsApp, o canal maior).
-function ctxDe(telefone: string, leadId: string | null): CtxConversa {
-  return { remotejid: telefone, telefone, waAccountId: null, leadId, oportunidadeId: null, canal: 'webchat' };
+function ctxDe(telefone: string, leadId: string | null, nome: string | null = null): CtxConversa {
+  return { remotejid: telefone, telefone, waAccountId: null, leadId, oportunidadeId: null, nome, canal: 'webchat' };
 }
 
 function textoDe(blocos: any[]): string {
@@ -397,7 +397,7 @@ export async function responderWebchat(
   const agente = estagio === "qualificador" ? "agente_qualificador" : "agente_validacao";
   const promptAgente = promptDoEstagio(nome, curso, estagio, produto);
   const contextoTemporal = montarContextoTemporal();
-  const ctx = ctxDe(telefone, leadId);
+  const ctx = ctxDe(telefone, leadId, nome || null);
 
   let tools: any[] = [];
   try { tools = await carregarTools(supabase, agente); } catch (e) { console.error(`[crm-webchat] carregarTools: ${(e as Error).message}`); }

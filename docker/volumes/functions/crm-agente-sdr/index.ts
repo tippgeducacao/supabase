@@ -237,6 +237,9 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   };
 
   let lead = await buscarLead(supabase, remotejid);
+  // O nome vai no ctx pra servir de último recurso no agendamento (ver o payload em
+  // tools.ts): sem lead ativo e sem nome, o sdr-api devolve 422 e a reunião não nasce.
+  ctx.nome = (lead?.nome as string | null) ?? null;
   if (!lead) {
     await criarLead(supabase, remotejid);
     lead = await buscarLead(supabase, remotejid);
