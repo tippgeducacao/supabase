@@ -52,9 +52,29 @@ async function upsertCalendarIntegrations(
     if (lookupError) throw lookupError;
 
     if (existing?.[0]?.id) {
+      // Linha que uma CAIXA DE E-MAIL usa: NUNCA sobrescrever o token dela aqui.
+      // O grant do Calendar normalmente não tem escopo Gmail — gravá-lo por cima
+      // derrubava envio e sync da caixa em silêncio (o `scopes` continuava
+      // dizendo gmail.send, então nada acusava o problema).
+      // Incidente: bruno@wisenetix.com.br, 19-20/08/2026.
+      const { data: caixaRef } = await admin
+        .from('email_caixas_conectadas')
+        .select('id')
+        .eq('calendar_integration_id', existing[0].id)
+        .eq('ativo', true)
+        .limit(1);
+
+      const patch: Record<string, unknown> = { ...row };
+      if (caixaRef?.[0]?.id) {
+        delete patch.oauth_access_token;
+        delete patch.oauth_refresh_token;
+        delete patch.oauth_token_expires_at;
+        console.warn('[calendar] token preservado (linha usada por caixa de e-mail)', existing[0].id);
+      }
+
       const { error: updateError } = await admin
         .from('calendar_integrations')
-        .update(row)
+        .update(patch)
         .eq('id', existing[0].id);
       if (updateError) throw updateError;
     } else {

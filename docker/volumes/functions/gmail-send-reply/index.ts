@@ -1,6 +1,6 @@
 // gmail-send-reply: responde a uma thread pelo Gmail da caixa
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
-import { ensureToken, base64UrlEncode, validateEmailList, friendlyGmailError, isTokenRevokedError, markCaixaTokenRevoked, encodeHeaderUtf8, encodeDisplayName } from '../_shared/gmail.ts';
+import { ensureToken, base64UrlEncode, validateEmailList, friendlyGmailError, isTokenRevokedError, markCaixaTokenRevoked, isScopeInsufficientError, markCaixaEscopoInsuficiente, encodeHeaderUtf8, encodeDisplayName } from '../_shared/gmail.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -122,7 +122,13 @@ Deno.serve(async (req) => {
       body: JSON.stringify({ raw: rawEncoded, threadId: thread.gmail_thread_id }),
     });
     const sendJson = await sendRes.json();
-    if (!sendRes.ok) throw new Error(`gmail_send_failed: ${JSON.stringify(sendJson)}`);
+    if (!sendRes.ok) {
+      const sendErr = new Error(`gmail_send_failed: ${JSON.stringify(sendJson)}`);
+      // Token sem escopo gmail.send: permanente. Marca a caixa pra aparecer o
+      // banner "Reconectar Gmail" em vez de só falhar o envio atual.
+      if (isScopeInsufficientError(sendErr)) await markCaixaEscopoInsuficiente(admin, thread.caixa.id);
+      throw sendErr;
+    }
 
     // Insere localmente
     await admin.from('email_mensagens').insert({

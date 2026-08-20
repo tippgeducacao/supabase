@@ -84,9 +84,29 @@ async function upsertCalendarIntegrations(
     if (lookupError) throw lookupError;
 
     if (existing?.[0]?.id) {
+      // Linha que uma CAIXA DE E-MAIL usa: NUNCA sobrescrever o token dela aqui.
+      // O grant do Calendar normalmente não tem escopo Gmail — gravá-lo por cima
+      // derrubava envio e sync da caixa em silêncio (o `scopes` continuava
+      // dizendo gmail.send, então nada acusava o problema).
+      // Incidente: bruno@wisenetix.com.br, 19-20/08/2026.
+      const { data: caixaRef } = await admin
+        .from('email_caixas_conectadas')
+        .select('id')
+        .eq('calendar_integration_id', existing[0].id)
+        .eq('ativo', true)
+        .limit(1);
+
+      const patch: Record<string, unknown> = { ...row };
+      if (caixaRef?.[0]?.id) {
+        delete patch.oauth_access_token;
+        delete patch.oauth_refresh_token;
+        delete patch.oauth_token_expires_at;
+        console.warn('[calendar] token preservado (linha usada por caixa de e-mail)', existing[0].id);
+      }
+
       const { error: updateError } = await admin
         .from('calendar_integrations')
-        .update(row)
+        .update(patch)
         .eq('id', existing[0].id);
       if (updateError) throw updateError;
     } else {
@@ -336,6 +356,11 @@ Deno.serve(async (req) => {
         oauth_access_token: access_token,
         oauth_refresh_token: refresh_token ?? baseInteg.oauth_refresh_token,
         oauth_token_expires_at: expiresAt,
+        // Sub-agenda herda o token DESTE grant — então herda também os escopos
+        // dele. Sem isso a coluna ficava com o valor de uma autorização antiga e
+        // mentia sobre o que a linha pode fazer (ex.: dizer gmail.send tendo só
+        // token de Calendar).
+        scopes: grantedScope ?? buildScopes(mode),
         is_primary: false,
         selected: false,
       }));

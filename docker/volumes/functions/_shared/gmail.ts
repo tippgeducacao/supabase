@@ -212,6 +212,21 @@ export function isTransientAuthError(err: unknown): boolean {
   return /oauth_transient/i.test(msg);
 }
 
+/**
+ * Token VÁLIDO, mas sem escopo Gmail (403 ACCESS_TOKEN_SCOPE_INSUFFICIENT).
+ *
+ * Acontece quando a linha de `calendar_integrations` que a caixa aponta recebeu
+ * o token de uma autorização SÓ-CALENDAR: o refresh funciona (nada de
+ * invalid_grant), o Gmail é que recusa. É permanente — só reautorizar com
+ * escopo Gmail resolve. Tratar como "transitório" fazia a caixa parar de
+ * sincronizar/enviar em silêncio, sem banner de reconexão (incidente
+ * bruno@wisenetix.com.br, 19-20/08/2026).
+ */
+export function isScopeInsufficientError(err: unknown): boolean {
+  const msg = (err as Error)?.message || String(err ?? '');
+  return /insufficient authentication scopes|ACCESS_TOKEN_SCOPE_INSUFFICIENT|insufficientPermissions/i.test(msg);
+}
+
 export function friendlyGmailError(err: unknown): string {
   const msg = (err as Error)?.message || String(err);
   if (isTokenRevokedError(err)) {
@@ -219,6 +234,9 @@ export function friendlyGmailError(err: unknown): string {
   }
   if (isTransientAuthError(err)) {
     return 'Erro temporário ao validar a conexão com o Google. Aguarde alguns segundos e tente novamente.';
+  }
+  if (isScopeInsufficientError(err)) {
+    return 'A conexão do Google desta caixa está sem permissão de ENVIO (escopo gmail.send). Clique em "Reconectar Gmail" no topo da caixa de entrada, autorize com a conta da caixa e refaça o envio.';
   }
   // gmail_send_failed: {...}
   const sendMatch = msg.match(/gmail_send_failed:\s*(\{[\s\S]+\})/);
@@ -243,6 +261,20 @@ export async function markCaixaTokenRevoked(admin: any, caixaId: string) {
   try {
     await admin.from('email_caixas_conectadas').update({
       last_sync_error: 'token_revoked',
+      last_sync_at: new Date().toISOString(),
+    }).eq('id', caixaId);
+  } catch (_) {}
+}
+
+/**
+ * Marca a caixa como "conectada, mas sem escopo Gmail". Erro PERMANENTE: o
+ * front mostra o banner de reconexão e o cron para de tentar (cada tentativa
+ * seria um 403 certo).
+ */
+export async function markCaixaEscopoInsuficiente(admin: any, caixaId: string) {
+  try {
+    await admin.from('email_caixas_conectadas').update({
+      last_sync_error: 'scope_insuficiente',
       last_sync_at: new Date().toISOString(),
     }).eq('id', caixaId);
   } catch (_) {}

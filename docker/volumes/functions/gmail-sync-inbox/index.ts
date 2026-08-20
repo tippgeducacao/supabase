@@ -1,6 +1,6 @@
 // gmail-sync-inbox: sincroniza mensagens recentes (inbox + sent), incremental via history
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
-import { ensureToken, parsePayload, parseHeaders, parseAddress, parseAddressList, isTokenRevokedError, markCaixaTokenRevoked, markCaixaTransient } from '../_shared/gmail.ts';
+import { ensureToken, parsePayload, parseHeaders, parseAddress, parseAddressList, isTokenRevokedError, markCaixaTokenRevoked, markCaixaTransient, isScopeInsufficientError, markCaixaEscopoInsuficiente } from '../_shared/gmail.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -64,10 +64,11 @@ async function syncCaixa(admin: any, caixaId: string, forceInitial: boolean) {
   if (cErr || !caixa) throw new Error('caixa não encontrada');
   if (!caixa.ativo) return { skipped: true };
 
-  // Só `token_revoked` bloqueia próximas tentativas (erro permanente — exige
-  // reconectar). `transient` é apenas sinal de saúde, não bloqueia retry.
-  if (caixa.last_sync_error === 'token_revoked' && !forceInitial) {
-    return { skipped: true, reason: 'token_revoked' };
+  // Erros PERMANENTES (exigem reconectar) bloqueiam próximas tentativas:
+  // `token_revoked` (Google derrubou o grant) e `scope_insuficiente` (token
+  // válido, mas sem escopo Gmail). `transient` é só sinal de saúde, não bloqueia.
+  if ((caixa.last_sync_error === 'token_revoked' || caixa.last_sync_error === 'scope_insuficiente') && !forceInitial) {
+    return { skipped: true, reason: caixa.last_sync_error };
   }
 
   let token: string;
@@ -348,6 +349,9 @@ Deno.serve(async (req) => {
         totalInserido += (r as any)?.inserted || 0;
       } catch (e) {
         console.error('sync caixa', id, e);
+        // 403 do Gmail por falta de escopo: permanente. Marca a caixa (banner de
+        // reconexão no front) em vez de repetir o mesmo 403 a cada rodada do cron.
+        if (isScopeInsufficientError(e)) await markCaixaEscopoInsuficiente(admin, id);
         results.push({ caixa_id: id, error: (e as Error).message });
       }
       if (totalInserido >= GLOBAL_MAX) {
