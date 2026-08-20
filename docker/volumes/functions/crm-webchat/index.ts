@@ -263,6 +263,7 @@ async function responderComoJoao(
       sessao.lead_id ?? null,
       sessao.produto === "escola" ? "escola" : "pos",
       sessao.modo_teste === true,
+      sessaoId,
     );
     // ratchet: promoção validação→qualificador é persistida (nunca regride)
     if (estagio === "qualificador" && sessao.estagio !== "qualificador") {
@@ -281,12 +282,22 @@ async function responderComoJoao(
       await semearHistoricoWhatsApp(sessaoId, sessao, String(sessao.curso ?? ""));
     }
 
-    if (sessao.modo_teste && tools.length) {
+    if (tools.length) {
+      // ⚠️ Até 20/08/2026 isto só rodava em modo_teste, e conversa REAL não deixava
+      // rastro nenhum de qual ferramenta o modelo chamou. Sem isso, "ele não mandou o
+      // cronograma" é indistinguível de "ele mandou e o handler recusou" — e a
+      // investigação vira adivinhação no prompt. O agente de WhatsApp já registrava
+      // tudo em crm_agente_sdr_eventos; o chat não registrava nada.
       const anteriores = Array.isArray(sessao.teste_tool_chamadas) ? sessao.teste_tool_chamadas : [];
       const em = new Date().toISOString();
-      await supabase.from("webchat_sessoes").update({
-        teste_tool_chamadas: [...anteriores, ...tools.map((tool) => ({ ...tool, em }))],
-      }).eq("id", sessaoId);
+      try {
+        await supabase.from("webchat_sessoes").update({
+          teste_tool_chamadas: [...anteriores, ...tools.map((tool) => ({ ...tool, em }))],
+        }).eq("id", sessaoId);
+      } catch (e) {
+        // Telemetria nunca derruba atendimento.
+        console.error(`[crm-webchat] registrar tools: ${(e as Error).message}`);
+      }
     }
 
     // NOVA MENSAGEM em SEGUNDO PLANO → push imediato no navegador (com som do sistema).

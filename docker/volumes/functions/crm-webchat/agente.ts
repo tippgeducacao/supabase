@@ -18,7 +18,7 @@ import { montarContextoTemporal, renderPrompt } from "../crm-agente-sdr/contexto
 import { comPresenteEscola, LINK_ESCOLA_GRATUITA } from "../crm-agente-sdr/escolaGratuita.ts";
 import { carregarTools, chamarAgentePrincipal, chamarRouter } from "../crm-agente-sdr/agente.ts";
 import { executarTool, montarToolResults } from "../crm-agente-sdr/tools.ts";
-import { limparParaRouter, sanitizarHistorico } from "../crm-agente-sdr/historico.ts";
+import { buscarLead, limparParaRouter, sanitizarHistorico } from "../crm-agente-sdr/historico.ts";
 // Fracionamento humanizado — o MESMO do João de WhatsApp (saida.ts): humaniza (tira "!"/
 // travessão) e quebra em 2-3 frases via gpt-4o-mini. Aqui só GERA os chunks; o espaçamento
 // temporal ("digitando" entre balões) é feito no widget (client-side), não no servidor.
@@ -26,6 +26,17 @@ import { fracionarResposta, humanizarTexto } from "../crm-agente-sdr/saida.ts";
 // Persona da ESCOLA DE ESPECIALIZAÇÃO (produto='escola') — bloco próprio, ver escola.ts.
 import { fallbackAberturaEscola, filtrarLinkMatricula, instrucaoAberturaEscola, notaCanalEscola } from "./escola.ts";
 import { resultadoToolMockado, toolDeveSerMockada } from "./modoTeste.ts";
+// Guardas determinísticas da saída (despedida por motivo, canal, nome inventado, link
+// do meet). Régua de o que mora lá: vale SEMPRE e violar custa caro — ver guardas.ts.
+import {
+  blocoConfirmacao,
+  corrigirCanal,
+  DESPEDIDA_GENERICA,
+  despedidaDe,
+  type Encerramento,
+  temLinkDeMeet,
+  tirarNomeInventado,
+} from "./guardas.ts";
 
 const ANTHROPIC_KEY = Deno.env.get("AGENTE_SDR_ANTHROPIC_KEY") ?? Deno.env.get("ANTHROPIC_API_KEY") ?? "";
 const MODELO = Deno.env.get("AGENTE_SDR_MODEL") ?? "claude-sonnet-5";
@@ -144,11 +155,66 @@ export function frasePedidoCronograma(curso: string): string {
     + "preciso saber se é essa mesmo a pós que te interessa.";
 }
 
-async function webchatEnviaInformacoes(tu: any, telefone: string, curso: string | null, nome: string): Promise<Record<string, unknown>> {
+async function webchatEnviaInformacoes(
+  tu: any,
+  telefone: string,
+  curso: string | null,
+  nome: string,
+  sessaoId: string | null = null,
+): Promise<Record<string, unknown>> {
   const input = tu.input ?? {};
   const conteudo = input.conteudo || "cronograma";
   const pos = String(input.curso_escolhido ?? "").trim() || limparCurso(curso);
   if (!pos) return { resultado: "Curso não informado — diga que envia em seguida e conduza a conversa.", id: tu.id };
+
+  const mandaCronograma = /cronograma/i.test(String(conteudo));
+
+  // GATE DE FORMAÇÃO (cron-04): cronograma é a TROCA pelo dado. Sem a graduação a
+  // gente nem sabe se a pessoa pode cursar, e mandar antes é entregar material pra
+  // quem talvez não seja elegível. Mesmo formato do gate do confirmar_agendamento:
+  // recusa + instrução do que fazer. Fail-open em erro de leitura — a trava protege
+  // o funil, não pode derrubar atendimento por causa de infra.
+  if (mandaCronograma) {
+    try {
+      const lead = await buscarLead(supabase, telefone);
+      if (lead && !String(lead.formacao_academica ?? "").trim()) {
+        return {
+          resultado: "RECUSADO: a graduação deste lead ainda não foi registrada.",
+          instrucao: "NÃO diga que mandou. Peça a graduação em UMA linha (\"te mando sim. só me "
+            + "confirma antes: qual é a sua graduação? e já concluiu?\"), registre a resposta com "
+            + "atualizar_dados_lead e SÓ ENTÃO chame envia_informacoes de novo. Se ele já disse a "
+            + "graduação nesta conversa, registre-a primeiro e mande na sequência.",
+          id: tu.id,
+        };
+      }
+    } catch (e) {
+      console.log(`[crm-webchat] gate de formação do cronograma falhou (segue): ${(e as Error).message}`);
+    }
+  }
+
+  // IDEMPOTÊNCIA (cron-03): mesmo cronograma saiu duas vezes com 1 minuto de
+  // diferença. O roteiro já proibia reenviar, mas isso não pode depender do modelo
+  // lembrar — o registro do que já foi é por SESSÃO.
+  const chaveCurso = pos.toLowerCase().trim();
+  let jaEnviados: string[] = [];
+  if (mandaCronograma && sessaoId) {
+    try {
+      const { data } = await supabase
+        .from("webchat_sessoes").select("cronogramas_enviados").eq("id", sessaoId).maybeSingle();
+      jaEnviados = ((data as { cronogramas_enviados?: string[] } | null)?.cronogramas_enviados ?? []);
+      if (jaEnviados.includes(chaveCurso)) {
+        console.log(`[crm-webchat] cronograma de "${pos}" já saiu nesta sessão — não reenvia`);
+        return {
+          resultado: `O cronograma de ${pos} JÁ FOI ENVIADO no WhatsApp nesta conversa. NÃO reenvie.`,
+          instrucao: "Diga que o material já está com ele, sem reenviar. Se precisar só do valor, "
+            + "chame de novo com conteudo=\"valor\".",
+          id: tu.id,
+        };
+      }
+    } catch (e) {
+      console.log(`[crm-webchat] leitura de cronogramas_enviados falhou (segue): ${(e as Error).message}`);
+    }
+  }
   try {
     const r = await fetch(`${SDR_API_URL}/envia-informacoes`, {
       method: "POST",
@@ -172,7 +238,19 @@ async function webchatEnviaInformacoes(tu: any, telefone: string, curso: string 
       return { resultado: `Não consegui enviar agora (${d.error || b?.error || r.status}). Diga que vai enviar em seguida e conduza, sem citar o erro.`, id: tu.id };
     }
     const partes: string[] = [];
-    if (d.cronograma_enviado) partes.push("Cronograma ENVIADO no WHATSAPP do visitante. ⛔ Ele NÃO aparece neste chat: NUNCA diga \"aqui em cima\" nem \"acima\". Confirme dizendo o canal (ex.: \"acabei de mandar no seu whats\").");
+    if (d.cronograma_enviado) {
+      partes.push("Cronograma ENVIADO no WHATSAPP do visitante. ⛔ Ele NÃO aparece neste chat: NUNCA diga \"aqui em cima\" nem \"acima\". Confirme dizendo o canal (ex.: \"acabei de mandar no seu whats\").");
+      // Anota que ESTE curso já saiu nesta conversa — é o que impede o reenvio.
+      if (sessaoId) {
+        try {
+          await supabase.from("webchat_sessoes")
+            .update({ cronogramas_enviados: [...jaEnviados, chaveCurso] })
+            .eq("id", sessaoId);
+        } catch (e) {
+          console.log(`[crm-webchat] registrar cronograma enviado falhou (segue): ${(e as Error).message}`);
+        }
+      }
+    }
     else if (d.cronograma_erro) partes.push(`Cronograma NÃO enviado (${d.cronograma_erro}) — diga que manda em seguida, sem citar erro técnico.`);
     if (d.valor_integral) partes.push(`Valor integral da pós: ${d.valor_integral}.`);
     if (d.valor_matricula) partes.push(`Valor da matrícula (garante a vaga): ${d.valor_matricula}.`);
@@ -254,7 +332,11 @@ export async function aberturaWebchat(nome: string, curso: string | null, produt
 // "Pode me contar um pouco mais? 😊" logo depois de "não tenho faculdade, só ensino médio"
 // ou "quero falar com uma pessoa de verdade" — o pior momento possível pra pedir mais.
 // ⚠️ EFÊMERA (vai no contexto temporal, fora do prefixo cacheado; nunca no histórico).
-const TOOLS_QUE_PAUSAM = new Set(["pausa_ia", "temporizador_proxima_turma", "agendar_retorno"]);
+// ⚠️ `agendar_retorno` NÃO entra aqui (saiu em 20/08/2026): ela não pausa a IA de
+// propósito — o lead pode voltar antes do prazo e o João atende. Enquanto esteve na
+// lista, "pode ser na sexta" era respondido com a despedida de quem desistiu (q-06),
+// que é justamente o que o roteiro manda NÃO fazer.
+const TOOLS_QUE_PAUSAM = new Set(["pausa_ia", "temporizador_proxima_turma"]);
 
 function instrucaoPosPausa(produto: Produto): string {
   const presente = produto === "escola"
@@ -271,8 +353,8 @@ function instrucaoPosPausa(produto: Produto): string {
   ].join("\n");
 }
 
-/** Despedida usada quando o modelo devolve vazio DEPOIS de pausar (nunca o fallback genérico). */
-const DESPEDIDA_FALLBACK = "tranquilo, agradeço sua preferência pelo Grupo PPG e fico à disposição se precisar. 🙌";
+// A despedida saiu daqui em 20/08/2026: era UMA frase pra toda tool que encerra, e ela
+// é a de quem DESISTIU. Agora quem escolhe é despedidaDe() em guardas.ts, por motivo.
 
 // ── Turno do João: router (validação×qualificador c/ ratchet) + loop de tools REAIS ──
 export async function responderWebchat(
@@ -284,6 +366,9 @@ export async function responderWebchat(
   leadId: string | null = null,
   produto: Produto = "pos",
   modoTeste = false,
+  // Escopo de CONVERSA pro cronograma: sem ele não dá pra saber que já foi enviado
+  // nesta sessão, e o mesmo PDF sai duas vezes (cron-03).
+  sessaoId: string | null = null,
 ): Promise<{ chunks: string[]; estagio: Estagio; tools: WebchatToolChamada[] }> {
   const chamadas: WebchatToolChamada[] = [];
   const raw: Msg[] = history.map((m) => ({ role: m.role, content: m.text })).filter((m) => m.content);
@@ -312,11 +397,14 @@ export async function responderWebchat(
   try { tools = await carregarTools(supabase, agente); } catch (e) { console.error(`[crm-webchat] carregarTools: ${(e as Error).message}`); }
 
   const messages: Msg[] = [...base];
-  let pausouPorTool = false;
+  // Não basta saber QUE encerrou: a despedida depende do motivo. Guarda a chamada.
+  let encerramento: Encerramento | null = null;
+  // Retorno do confirmar_agendamento desta rodada — é dele que sai o link do meet.
+  let agendou: string | null = null;
   for (let rodada = 0; rodada < MAX_RODADAS; rodada++) {
     const resp = await chamarAgentePrincipal({
       promptAgente,
-      contextoTemporal: pausouPorTool ? `${contextoTemporal}\n\n${instrucaoPosPausa(produto)}` : contextoTemporal,
+      contextoTemporal: encerramento ? `${contextoTemporal}\n\n${instrucaoPosPausa(produto)}` : contextoTemporal,
       messages,
       tools,
     });
@@ -324,15 +412,44 @@ export async function responderWebchat(
     const toolUses = blocos.filter((b) => b.type === "tool_use");
 
     if (!toolUses.length) {
-      const fallback = pausouPorTool ? DESPEDIDA_FALLBACK : "Pode me contar um pouco mais? 😊";
-      let chunks = await emChunks(textoDe(blocos) || fallback);
+      // ENCERRAMENTO COM MOTIVO CONHECIDO: o texto é NOSSO. O modelo decide qual é a
+      // situação (chamando a tool com o tipo/motivo certo); a frase quem escolhe é a
+      // guarda. Foi assim que a despedida de quem desistiu foi parar em lead sem
+      // graduação, em quem já era aluno e em quem pediu humano (q-01/q-04/q-05).
+      const despedida = despedidaDe(encerramento);
+      const fallback = encerramento ? DESPEDIDA_GENERICA : "Pode me contar um pouco mais? 😊";
+      let chunks = despedida ? [despedida] : await emChunks(textoDe(blocos) || fallback);
       if (!chunks.length) chunks = [fallback];
+      if (despedida) console.log(`[crm-webchat] despedida determinística: ${encerramento?.tool}`);
       // ESCOLA: link de matrícula só sai se a pessoa pediu (régua em código — ver escola.ts).
       if (produto === "escola") {
         const ultimaDoLead = [...history].reverse().find((m) => m.role === "user")?.text ?? "";
         const antes = chunks.length;
         chunks = filtrarLinkMatricula(chunks, ultimaDoLead);
         if (chunks.length !== antes) console.log("[crm-webchat] escola: link de matrícula removido (não foi pedido)");
+      }
+      // O material sai por WhatsApp e NÃO aparece no chat: "te mandei aqui em cima"
+      // manda o visitante procurar um PDF que não está aqui (cron-04).
+      chunks = chunks.map((c) => {
+        const r = corrigirCanal(c);
+        if (r.trocou) console.log("[crm-webchat] guarda de canal corrigiu a fala");
+        return r.texto;
+      });
+      // Nome que o visitante nunca disse (q-03: "tranquilo, bruno"). Guarda estreita e
+      // logada — se um dia comer algo legítimo, aparece aqui.
+      chunks = chunks.map((c) => {
+        const r = tirarNomeInventado(c, nome);
+        if (r.removidos.length) console.log(`[crm-webchat] nome inventado removido: ${r.removidos.join(", ")}`);
+        return r.texto;
+      });
+      // Reunião criada e o link não saiu? o dado está no retorno da tool, não pode
+      // depender do modelo copiar (ag-07).
+      if (agendou && !temLinkDeMeet(chunks)) {
+        const bloco = blocoConfirmacao(agendou);
+        if (bloco) {
+          console.log("[crm-webchat] confirmação de reunião anexada (modelo não mandou o link)");
+          chunks.push(bloco);
+        }
       }
       return { chunks, estagio, tools: chamadas };
     }
@@ -343,16 +460,21 @@ export async function responderWebchat(
     messages.push({ role: "assistant", content: blocos });
     const outputs: Record<string, unknown>[] = [];
     for (const tu of toolUses) {
-      if (TOOLS_QUE_PAUSAM.has(tu.name)) pausouPorTool = true;
-      const mockado = toolDeveSerMockada(modoTeste, String(tu.name ?? ""));
-      chamadas.push({
-        nome: String(tu.name ?? ""),
-        input: (tu.input && typeof tu.input === "object" ? tu.input : {}) as Record<string, unknown>,
-        mockado,
-      });
-      if (mockado) outputs.push(resultadoToolMockado(tu, limparCurso(curso)));
-      else if (tu.name === "envia_informacoes") outputs.push(await webchatEnviaInformacoes(tu, telefone, curso, nome));
-      else outputs.push(await executarTool(supabase, tu, ctx));
+      const nomeTool = String(tu.name ?? "");
+      const input = (tu.input && typeof tu.input === "object" ? tu.input : {}) as Record<string, unknown>;
+      if (TOOLS_QUE_PAUSAM.has(nomeTool)) encerramento = { tool: nomeTool, input };
+      const mockado = toolDeveSerMockada(modoTeste, nomeTool);
+      chamadas.push({ nome: nomeTool, input, mockado });
+      let saidaTool: Record<string, unknown>;
+      if (mockado) saidaTool = resultadoToolMockado(tu, limparCurso(curso));
+      else if (nomeTool === "envia_informacoes") saidaTool = await webchatEnviaInformacoes(tu, telefone, curso, nome, sessaoId);
+      else saidaTool = await executarTool(supabase, tu, ctx);
+      // Reunião criada: guarda o retorno pra garantir o link na saída, aconteça o que
+      // acontecer com o texto do modelo (ag-07 marcou reunião e não mandou o link).
+      if (nomeTool === "confirmar_agendamento" && !mockado && saidaTool?.agendamento_id) {
+        agendou = String(saidaTool.resultado ?? "");
+      }
+      outputs.push(saidaTool);
     }
     messages.push({ role: "user", content: montarToolResults(outputs) });
   }
