@@ -630,8 +630,10 @@ async function purga(base: string, campanha: string, telefone: string) {
     { rotulo: 'filter_all', metodo: 'DELETE', caminho: 'mailing/delete', corpo: { filter: 'all' } },
     { rotulo: 'corpo_vazio', metodo: 'DELETE', caminho: 'mailing/delete', corpo: {} },
     { rotulo: 'post_all', metodo: 'POST', caminho: 'mailing/delete', corpo: { all: true } },
-    // "Delete all mailing list in a campaign" — endpoint diferente, sem corpo
-    { rotulo: 'delete_lists_all', metodo: 'DELETE', caminho: 'lists', corpo: null },
+    // NAO reintroduza `DELETE /campaigns/{id}/lists` aqui. Ele foi testado em
+    // 20/08, respondeu 204, NAO liberou o telefone e apagou a lista do dia junto —
+    // a purga e diagnostico, nao pode ter candidato destrutivo. Para apagar
+    // listas existe a faxina, que registra o que apagou.
   ]
 
   const tentativas: Array<Record<string, unknown>> = []
