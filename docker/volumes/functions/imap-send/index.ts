@@ -21,6 +21,23 @@ const ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY')!;
 const responder = (corpo: unknown) =>
   new Response(JSON.stringify(corpo), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 
+/**
+ * Roda depois de a resposta ter ido embora, sem o worker ser morto no meio.
+ *
+ * Medido no HostGator em 2026-08-20: o envio inteiro leva ~5,9s, e **1,8s deles são
+ * só a segunda conexão** (login IMAP + APPEND nos Enviados). Como a mensagem JÁ saiu
+ * pelo SMTP quando essa etapa começa, segurar a tela por ela é cobrar do usuário um
+ * tempo que não muda o resultado do envio.
+ *
+ * Se o runtime não tiver `waitUntil`, cai no comportamento antigo (espera) — melhor
+ * lento do que perder a cópia nos Enviados.
+ */
+function emSegundoPlano(tarefa: Promise<unknown>): Promise<unknown> | void {
+  const rt = (globalThis as { EdgeRuntime?: { waitUntil?: (p: Promise<unknown>) => void } }).EdgeRuntime;
+  if (rt?.waitUntil) { rt.waitUntil(tarefa); return; }
+  return tarefa;
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
 
@@ -126,22 +143,22 @@ Deno.serve(async (req) => {
       await smtp.fechar();
     }
 
-    // ── Enviados do servidor ───────────────────────────────────────────────
-    // Falha aqui NÃO desfaz o envio: a mensagem já saiu. Só registramos, para o
-    // usuário não achar que o envio falhou por causa de um detalhe de arquivamento.
-    let avisoAppend: string | null = null;
+    // ── Enviados do servidor, FORA do caminho da resposta ──────────────────
+    // A mensagem já saiu pelo SMTP; isto é só a cópia nos Enviados do webmail.
+    // Falha aqui não desfaz nada e não precisa segurar a tela (ver `emSegundoPlano`).
     if (config.pasta_enviados) {
-      try {
-        const sessao = await abrirSessao(config);
+      await emSegundoPlano((async () => {
         try {
-          await sessao.cliente.append(config.pasta_enviados, bruto);
-        } finally {
-          await sessao.fechar();
+          const sessao = await abrirSessao(config);
+          try {
+            await sessao.cliente.append(config.pasta_enviados!, bruto);
+          } finally {
+            await sessao.fechar();
+          }
+        } catch (e) {
+          console.error(`[imap-send] APPEND em "${config.pasta_enviados}" falhou: ${(e as Error).message}`);
         }
-      } catch (e) {
-        avisoAppend = `Enviado, mas não consegui gravar em "${config.pasta_enviados}": ${(e as Error).message}`;
-        console.warn(avisoAppend);
-      }
+      })());
     }
 
     // ── Grava local ────────────────────────────────────────────────────────
@@ -200,7 +217,7 @@ Deno.serve(async (req) => {
       enviado_por_user_id: user.id,
     });
 
-    return responder({ success: true, thread_id: threadId, message_id: messageId, aviso: avisoAppend });
+    return responder({ success: true, thread_id: threadId, message_id: messageId });
   } catch (e) {
     const { recado } = classificarErro(e);
     return responder({ success: false, error: recado || (e as Error).message });

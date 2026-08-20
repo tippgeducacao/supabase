@@ -26,6 +26,9 @@ export interface ConfigImap {
   ultimo_uid: number;
   uid_validity_enviados: number | null;
   ultimo_uid_enviados: number;
+  /** Fronteira do histórico, descendo. `null` = ainda não iniciado; `0`/`1` = completo. */
+  uid_backfill: number | null;
+  uid_backfill_enviados: number | null;
 }
 
 /**
@@ -95,21 +98,31 @@ export async function abrirSmtp(
   senha: string,
 ): Promise<{ cliente: ClienteSmtp; fechar: () => Promise<void> }> {
   const d = (globalThis as any).Deno;
+  const alvo = `${config.smtp_host}:${config.smtp_port}`;
   let conn = await abrirSocket({ host: config.smtp_host, port: config.smtp_port, tls: config.smtp_tls });
   let cliente = new ClienteSmtp(conn);
-  await comPrazo(cliente.saudacao(), 20_000, `${config.smtp_host} (saudação)`);
-  await cliente.ehlo("ppgvet");
+  await comPrazo(cliente.saudacao(), 20_000, `${alvo} (saudação)`);
+  await comPrazo(cliente.ehlo("ppgvet"), 20_000, `${alvo} (EHLO)`);
 
   if (config.smtp_tls === "starttls") {
-    await cliente.startTls();
-    conn = await d.startTls(conn, { hostname: config.smtp_host });
+    await comPrazo(cliente.startTls(), 20_000, `${alvo} (STARTTLS)`);
+    // ⚠️ TODO passo tem prazo, e o handshake é o que MAIS precisa. Servidor que
+    // aceita o TCP e não completa o TLS deixa esta promessa pendurada para sempre:
+    // a edge é morta pelo supervisor sem lançar erro nenhum, e a tela fica girando
+    // sem mensagem. Foi exatamente esse o sintoma de "nem enviando está" em
+    // 2026-08-20, com a porta 465 (bloqueada na saída da VPS).
+    conn = await comPrazo(
+      d.startTls(conn, { hostname: config.smtp_host }),
+      20_000,
+      `${alvo} (handshake TLS)`,
+    );
     cliente = new ClienteSmtp(conn);
     // Depois do STARTTLS o EHLO tem que ser REFEITO: as capacidades anunciadas em
     // claro não valem na sessão cifrada (o AUTH normalmente só aparece agora).
-    await cliente.ehlo("ppgvet");
+    await comPrazo(cliente.ehlo("ppgvet"), 20_000, `${alvo} (EHLO cifrado)`);
   }
 
-  await cliente.autenticar(config.usuario, senha);
+  await comPrazo(cliente.autenticar(config.usuario, senha), 20_000, `${alvo} (login)`);
   return {
     cliente,
     fechar: async () => {

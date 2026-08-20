@@ -64,6 +64,12 @@ async function syncCaixa(admin: any, caixaId: string, forceInitial: boolean) {
   if (cErr || !caixa) throw new Error('caixa não encontrada');
   if (!caixa.ativo) return { skipped: true };
 
+  // Caixa IMAP tem motor próprio (imap-sync-inbox). Sem esta guarda o motor do
+  // Gmail tenta refrescar um token que não existe e erra a cada 2 minutos — e uma
+  // caixa CONVERTIDA de gmail para imap ainda carrega o calendar_integration_id
+  // antigo, então nem a ausência de integração serve de filtro.
+  if (caixa.provider === 'imap') return { skipped: true, motivo: 'caixa_imap' };
+
   // Erros PERMANENTES (exigem reconectar) bloqueiam próximas tentativas:
   // `token_revoked` (Google derrubou o grant) e `scope_insuficiente` (token
   // válido, mas sem escopo Gmail). `transient` é só sinal de saúde, não bloqueia.
@@ -331,6 +337,7 @@ Deno.serve(async (req) => {
         .from('email_caixas_conectadas')
         .select('id')
         .eq('ativo', true)
+        .eq('provider', 'gmail')
         .order('last_sync_at', { ascending: false, nullsFirst: false });
       caixaIds = (data || []).map((c: any) => c.id);
     }

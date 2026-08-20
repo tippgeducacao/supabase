@@ -134,6 +134,10 @@ Deno.serve(async (req) => {
           ativo: true,
           nome_exibicao,
           provider: 'imap',
+          // Caixa que ERA Gmail e virou IMAP carrega o vínculo antigo com o Google.
+          // Deixá-lo preenchido faz o `gmail-sync-inbox` continuar varrendo esta
+          // caixa e errar a cada 2 minutos, além de gastar rodada de cron à toa.
+          calendar_integration_id: null,
           departamento_id: body.departamento_id ?? null,
           privado: body.privado === true,
           last_sync_error: null,

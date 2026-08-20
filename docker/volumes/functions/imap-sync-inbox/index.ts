@@ -1,10 +1,19 @@
 // imap-sync-inbox: espelho do gmail-sync-inbox para caixas IMAP.
 //
-// Incremental por UID. Onde o Gmail navega history id, aqui o ponteiro é o maior UID
-// já processado — guardado por PASTA, porque INBOX e Enviados têm numeração própria.
+// Incremental por UID, em DUAS pontas e nesta ordem de prioridade:
+//   1. TOPO      — UID > `ultimo_uid`: o que acabou de chegar. Sempre primeiro.
+//   2. BACKFILL  — UID < `uid_backfill`, descendo: o histórico, com o tempo que sobrar.
+//
+// ⚠️ Um ponteiro só NÃO serve, e o motivo não é performance. Subindo do UID 1 para
+// frente, o e-mail que acabou de chegar é o que tem o MAIOR UID — ou seja, o ÚLTIMO
+// a ser processado. Numa caixa de 1.373 mensagens com o ponteiro em 481, e-mail novo
+// levava ~30 min para aparecer; em caixa grande, dias. Foi exatamente o relato:
+// "o e-mail chegou no meu webmail mas não chegou aqui".
+//
+// Ponteiros são por PASTA, porque INBOX e Enviados têm numeração independente.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { chaveDaThread, parsearMensagem, resumo } from '../_shared/imap/mime.ts';
-import { abrirSessao, carregarConfig, limparErro, marcarErro, classificarErro, type ConfigImap } from '../_shared/imap/caixa.ts';
+import { abrirSessao, carregarConfig, limparErro, marcarErro, classificarErro } from '../_shared/imap/caixa.ts';
 import type { SessaoImap } from '../_shared/imap/conexao.ts';
 
 const corsHeaders = {
@@ -56,48 +65,69 @@ async function guardarAnexos(admin: any, mensagemId: string, caixaId: string, an
   }
 }
 
-/** Sincroniza UMA pasta. Devolve o novo ponteiro e se sobrou backlog. */
+/**
+ * Processa UM trecho de UMA pasta.
+ *
+ * `modo: 'topo'` pega o que chegou DEPOIS de `fronteira` (crescente); `'backfill'`
+ * pega o que existe ANTES dela (decrescente). A pasta já vem selecionada por quem
+ * chama — os dois modos rodam na mesma sessão, e reselecionar custa um round-trip.
+ */
 async function sincronizarPasta(
   admin: any,
   caixa: any,
-  config: ConfigImap,
   sessao: SessaoImap,
   opcoes: {
-    pasta: string;
     apelido: 'inbox' | 'sent';
-    ultimoUid: number;
-    uidValidityGuardado: number | null;
+    modo: 'topo' | 'backfill';
+    fronteira: number;
     limite: number;
   },
-): Promise<{ ultimoUid: number; uidValidity: number; inseridas: number; parcial: boolean }> {
-  const estado = await sessao.cliente.selecionar(opcoes.pasta);
+): Promise<{ fronteira: number; inseridas: number; parcial: boolean }> {
+  const uids = opcoes.modo === 'topo'
+    ? await sessao.cliente.uidsDesde(opcoes.fronteira)
+    : await sessao.cliente.uidsAte(opcoes.fronteira);
 
-  // A trava do IMAP. Se o servidor renumerou, todo UID guardado passou a apontar
-  // para outra mensagem — insistir no ponteiro antigo gravaria conteúdo trocado
-  // em silêncio, que é a pior falha possível aqui.
-  let ultimoUid = opcoes.ultimoUid;
-  if (opcoes.uidValidityGuardado && opcoes.uidValidityGuardado !== estado.uidValidity) {
-    console.warn(`uidvalidity mudou em ${opcoes.pasta} (${opcoes.uidValidityGuardado} -> ${estado.uidValidity}); ressincronizando`);
-    ultimoUid = 0;
-  }
-
-  const uids = await sessao.cliente.uidsDesde(ultimoUid);
   if (!uids.length) {
-    return { ultimoUid, uidValidity: estado.uidValidity, inseridas: 0, parcial: false };
+    // Backfill sem nada abaixo = histórico completo. O 0 é o sinal de "acabou",
+    // e é o que impede a varredura de recomeçar do topo para sempre.
+    return {
+      fronteira: opcoes.modo === 'backfill' ? 0 : opcoes.fronteira,
+      inseridas: 0,
+      parcial: false,
+    };
   }
 
   const aProcessar = uids.slice(0, opcoes.limite);
   const parcial = uids.length > aProcessar.length;
   let inseridas = 0;
-  let maiorProcessado = ultimoUid;
+  // No topo a fronteira SOBE (maior processado); no backfill ela DESCE (menor).
+  let fronteira = opcoes.fronteira;
+  const avancar = (uid: number) => {
+    fronteira = opcoes.modo === 'topo' ? Math.max(fronteira, uid) : Math.min(fronteira, uid);
+  };
 
   for (let i = 0; i < aProcessar.length; i += LOTE_FETCH) {
     if (agora() - INICIO > ORCAMENTO_MS) {
-      return { ultimoUid: maiorProcessado, uidValidity: estado.uidValidity, inseridas, parcial: true };
+      return { fronteira, inseridas, parcial: true };
     }
 
     const lote = aProcessar.slice(i, i + LOTE_FETCH);
-    const mensagens = await sessao.cliente.buscarMensagens(lote);
+
+    // Descarta o que já está gravado ANTES de baixar. O FETCH traz o corpo inteiro
+    // (é o que permite guardar o anexo na hora), então perguntar ao banco primeiro
+    // troca 15 downloads por uma consulta — e é o que faz o backfill atravessar de
+    // graça um trecho que já foi baixado numa rodada anterior.
+    const chavesDoLote = lote.map((uid) => `imap:${caixa.id}:${opcoes.apelido}:${uid}`);
+    const { data: gravadas } = await admin
+      .from('email_mensagens')
+      .select('gmail_message_id')
+      .in('gmail_message_id', chavesDoLote);
+    const jaTem = new Set((gravadas || []).map((m: any) => m.gmail_message_id));
+    const faltando = lote.filter((uid) => !jaTem.has(`imap:${caixa.id}:${opcoes.apelido}:${uid}`));
+    for (const uid of lote) avancar(uid);
+    if (!faltando.length) continue;
+
+    const mensagens = await sessao.cliente.buscarMensagens(faltando);
 
     for (const bruta of mensagens) {
       const chave = `imap:${caixa.id}:${opcoes.apelido}:${bruta.uid}`;
@@ -107,14 +137,14 @@ async function sincronizarPasta(
         .select('id')
         .eq('gmail_message_id', chave)
         .maybeSingle();
-      if (jaExiste) { maiorProcessado = Math.max(maiorProcessado, bruta.uid); continue; }
+      if (jaExiste) { avancar(bruta.uid); continue; }
 
       let msg;
       try {
         msg = await parsearMensagem(bruta.bruto);
       } catch (e) {
         console.error(`falha ao parsear uid ${bruta.uid}`, e);
-        maiorProcessado = Math.max(maiorProcessado, bruta.uid);
+        avancar(bruta.uid);
         continue;
       }
 
@@ -187,7 +217,7 @@ async function sincronizarPasta(
           await admin.from('email_mensagens')
             .update({ gmail_message_id: chave, imap_uid: bruta.uid })
             .eq('id', nossa.id);
-          maiorProcessado = Math.max(maiorProcessado, bruta.uid);
+          avancar(bruta.uid);
           continue;
         }
       }
@@ -222,11 +252,11 @@ async function sincronizarPasta(
       }
 
       inseridas++;
-      maiorProcessado = Math.max(maiorProcessado, bruta.uid);
+      avancar(bruta.uid);
     }
   }
 
-  return { ultimoUid: maiorProcessado, uidValidity: estado.uidValidity, inseridas, parcial };
+  return { fronteira, inseridas, parcial };
 }
 
 let INICIO = agora();
@@ -249,24 +279,43 @@ async function sincronizarCaixa(admin: any, caixaId: string): Promise<Resultado>
   const config = await carregarConfig(admin, caixaId);
   const sessao = await abrirSessao(config);
   try {
-    const inbox = await sincronizarPasta(admin, caixa, config, sessao, {
+    const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    let inseridas = 0;
+    let parcial = false;
+
+    // ── INBOX ────────────────────────────────────────────────────────────────
+    const inbox = await varrerPasta(admin, caixa, sessao, {
       pasta: 'INBOX',
       apelido: 'inbox',
-      ultimoUid: config.ultimo_uid,
+      teto: config.ultimo_uid,
+      backfill: config.uid_backfill,
       uidValidityGuardado: config.uid_validity,
-      limite: MAX_POR_PASTA_POR_RODADA,
+      orcamentoTopo: MAX_POR_PASTA_POR_RODADA,
+      orcamentoBackfill: MAX_POR_PASTA_POR_RODADA,
     });
+    patch.ultimo_uid = inbox.teto;
+    patch.uid_backfill = inbox.backfill;
+    patch.uid_validity = inbox.uidValidity;
+    inseridas += inbox.inseridas;
+    parcial = parcial || inbox.parcial;
 
-    let enviados = { ultimoUid: config.ultimo_uid_enviados, uidValidity: config.uid_validity_enviados ?? 0, inseridas: 0, parcial: false };
+    // ── Enviados ─────────────────────────────────────────────────────────────
     if (config.pasta_enviados && agora() - INICIO < ORCAMENTO_MS) {
       try {
-        enviados = await sincronizarPasta(admin, caixa, config, sessao, {
+        const enviados = await varrerPasta(admin, caixa, sessao, {
           pasta: config.pasta_enviados,
           apelido: 'sent',
-          ultimoUid: config.ultimo_uid_enviados,
+          teto: config.ultimo_uid_enviados,
+          backfill: config.uid_backfill_enviados,
           uidValidityGuardado: config.uid_validity_enviados,
-          limite: Math.floor(MAX_POR_PASTA_POR_RODADA / 2),
+          orcamentoTopo: Math.floor(MAX_POR_PASTA_POR_RODADA / 2),
+          orcamentoBackfill: Math.floor(MAX_POR_PASTA_POR_RODADA / 4),
         });
+        patch.ultimo_uid_enviados = enviados.teto;
+        patch.uid_backfill_enviados = enviados.backfill;
+        patch.uid_validity_enviados = enviados.uidValidity || null;
+        inseridas += enviados.inseridas;
+        parcial = parcial || enviados.parcial;
       } catch (e) {
         // Enviados é secundário: se a pasta sumiu ou mudou de nome, a INBOX não
         // pode deixar de sincronizar por causa disso.
@@ -274,23 +323,78 @@ async function sincronizarCaixa(admin: any, caixaId: string): Promise<Resultado>
       }
     }
 
-    await admin.from('email_caixa_imap_config').update({
-      ultimo_uid: inbox.ultimoUid,
-      uid_validity: inbox.uidValidity,
-      ultimo_uid_enviados: enviados.ultimoUid,
-      uid_validity_enviados: enviados.uidValidity || null,
-      updated_at: new Date().toISOString(),
-    }).eq('caixa_id', caixaId);
-
+    await admin.from('email_caixa_imap_config').update(patch).eq('caixa_id', caixaId);
     await limparErro(admin, caixaId);
-    return {
-      caixa_id: caixaId,
-      inseridas: inbox.inseridas + enviados.inseridas,
-      parcial: inbox.parcial || enviados.parcial,
-    };
+    return { caixa_id: caixaId, inseridas, parcial };
   } finally {
     await sessao.fechar();
   }
+}
+
+/**
+ * Uma pasta inteira: primeiro o TOPO, depois o BACKFILL com o que sobrar.
+ *
+ * ⚠️ A ordem é a regra de negócio, não uma otimização. O topo é o e-mail que a
+ * pessoa está esperando; o histórico pode levar horas sem incomodar ninguém.
+ * Inverter isso é o bug que fez um e-mail recém-chegado não aparecer.
+ */
+async function varrerPasta(
+  admin: any,
+  caixa: any,
+  sessao: SessaoImap,
+  o: {
+    pasta: string;
+    apelido: 'inbox' | 'sent';
+    teto: number;
+    backfill: number | null;
+    uidValidityGuardado: number | null;
+    orcamentoTopo: number;
+    orcamentoBackfill: number;
+  },
+): Promise<{ teto: number; backfill: number; uidValidity: number; inseridas: number; parcial: boolean }> {
+  const estado = await sessao.cliente.selecionar(o.pasta);
+
+  let teto = o.teto;
+  let backfill = o.backfill;
+
+  // A trava do IMAP. Se o servidor renumerou, todo UID guardado passou a apontar
+  // para outra mensagem — insistir no ponteiro antigo gravaria conteúdo trocado
+  // em silêncio, que é a pior falha possível aqui.
+  if (o.uidValidityGuardado && o.uidValidityGuardado !== estado.uidValidity) {
+    console.warn(`uidvalidity mudou em ${o.pasta} (${o.uidValidityGuardado} -> ${estado.uidValidity}); ressincronizando`);
+    teto = 0;
+    backfill = null;
+  }
+
+  // Caixa que nunca rodou com dois ponteiros: adota o UID mais alto do servidor
+  // como teto e começa o histórico a partir dele, descendo. É isto que faz a
+  // caixa nascer EM DIA — sem isso, a carga inicial teria de terminar antes de o
+  // primeiro e-mail novo aparecer.
+  if (backfill === null || backfill === undefined) {
+    const maiorNoServidor = Math.max(estado.uidNext - 1, teto, 0);
+    backfill = maiorNoServidor;
+    teto = maiorNoServidor;
+  }
+
+  const topo = await sincronizarPasta(admin, caixa, sessao, {
+    apelido: o.apelido, modo: 'topo', fronteira: teto, limite: o.orcamentoTopo,
+  });
+
+  let historico = { fronteira: backfill, inseridas: 0, parcial: false };
+  const faltaHistorico = backfill > 1;
+  if (faltaHistorico && agora() - INICIO < ORCAMENTO_MS) {
+    historico = await sincronizarPasta(admin, caixa, sessao, {
+      apelido: o.apelido, modo: 'backfill', fronteira: backfill, limite: o.orcamentoBackfill,
+    });
+  }
+
+  return {
+    teto: topo.fronteira,
+    backfill: historico.fronteira,
+    uidValidity: estado.uidValidity,
+    inseridas: topo.inseridas + historico.inseridas,
+    parcial: topo.parcial || historico.parcial || (historico.fronteira > 1),
+  };
 }
 
 Deno.serve(async (req) => {

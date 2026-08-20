@@ -188,6 +188,41 @@ describe("UID SEARCH — a armadilha do n:*", () => {
   });
 });
 
+describe("UID SEARCH para trás — o histórico", () => {
+  it("pede o intervalo fechado, sem o `*` que traria a mensagem errada", async () => {
+    const s = new ServidorFalso("* OK ready\r\n", ["* SEARCH 3 7 5\r\nP0001 OK SEARCH completed\r\n"]);
+    const c = new ClienteImap(s);
+    await c.saudacao();
+    // Abaixo de 10 = intervalo 1:9. Fechado dos dois lados, então aqui não existe
+    // a armadilha do `n:*` que obriga o corte no cliente.
+    expect(await c.uidsAte(10)).toEqual([7, 5, 3]);
+    expect(s.enviados[0]).toBe("P0001 UID SEARCH UID 1:9\r\n");
+  });
+
+  it("devolve do MAIOR para o menor — o histórico desce do recente para o antigo", async () => {
+    const s = new ServidorFalso("* OK ready\r\n", ["* SEARCH 1 50 20\r\nP0001 OK SEARCH completed\r\n"]);
+    const c = new ClienteImap(s);
+    await c.saudacao();
+    expect(await c.uidsAte(100)).toEqual([50, 20, 1]);
+  });
+
+  it("não fala com o servidor quando já chegou no fundo", async () => {
+    const s = new ServidorFalso("* OK ready\r\n", []);
+    const c = new ClienteImap(s);
+    await c.saudacao();
+    expect(await c.uidsAte(1)).toEqual([]);
+    expect(await c.uidsAte(0)).toEqual([]);
+    expect(s.enviados).toHaveLength(0);
+  });
+
+  it("descarta UID acima do teto, se o servidor mandar", async () => {
+    const s = new ServidorFalso("* OK ready\r\n", ["* SEARCH 5 999\r\nP0001 OK SEARCH completed\r\n"]);
+    const c = new ClienteImap(s);
+    await c.saudacao();
+    expect(await c.uidsAte(10)).toEqual([5]);
+  });
+});
+
 describe("SELECT", () => {
   it("extrai UIDVALIDITY, UIDNEXT e total", async () => {
     const s = new ServidorFalso("* OK ready\r\n", [

@@ -280,6 +280,31 @@ export class ClienteImap {
   }
 
   /**
+   * UIDs ABAIXO de `abaixoDe` (exclusivo), do maior para o menor.
+   *
+   * É o outro sentido do sync: `uidsDesde` traz o que chegou agora, este traz o
+   * histórico. Sem ele o ponteiro único caminhava do UID 1 para frente e o e-mail
+   * que acabou de chegar — que tem o MAIOR UID — era o último a aparecer.
+   *
+   * Aqui não há a armadilha do `*`: o intervalo é fechado dos dois lados.
+   */
+  async uidsAte(abaixoDe: number): Promise<number[]> {
+    const teto = abaixoDe - 1;
+    if (teto < 1) return [];
+    const r = await this.exigirOk(`UID SEARCH UID 1:${teto}`, "UID SEARCH");
+    const linha = r.linhas.find((l) => /^\* SEARCH/i.test(l.texto));
+    if (!linha) return [];
+    return linha.texto
+      .replace(/^\* SEARCH/i, "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map(Number)
+      .filter((uid) => Number.isFinite(uid) && uid >= 1 && uid <= teto)
+      .sort((a, b) => b - a);
+  }
+
+  /**
    * Busca as mensagens inteiras. `BODY.PEEK[]` em vez de `BODY[]` porque `BODY[]`
    * marca \Seen como efeito colateral — sincronizar não pode marcar e-mail como lido.
    */
