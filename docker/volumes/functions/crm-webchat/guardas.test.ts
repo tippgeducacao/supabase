@@ -102,6 +102,24 @@ describe('nome inventado', () => {
     expect(tirarNomeInventado(t, 'marina souza').removidos).toEqual([]);
   });
 
+  // Segundo formato, achado no reteste de 20/08: o nome ABRE a frase.
+  it('tira o nome inventado que abre a frase (reteste cron-03)', () => {
+    const r = tirarNomeInventado('Márcia, sua formação já é atendida, dá pra seguir.', 'Gustavo Teste');
+    expect(r.texto).toBe('sua formação já é atendida, dá pra seguir.');
+    expect(r.removidos).toEqual(['Márcia']);
+  });
+
+  it('mantém o nome do lead abrindo a frase', () => {
+    const t = 'Gustavo, sua formação já é atendida.';
+    expect(tirarNomeInventado(t, 'Gustavo Teste').texto).toBe(t);
+  });
+
+  it('não come interjeição que abre a frase', () => {
+    for (const t of ['Prontinho, segue o link.', 'Show, vamos lá.', 'Bacana, faz sentido.']) {
+      expect(tirarNomeInventado(t, 'Gustavo').texto).toBe(t);
+    }
+  });
+
   it('não come palavra comum depois da saudação', () => {
     const t = 'beleza, então vamos ver os horários de hoje.';
     expect(tirarNomeInventado(t, 'Gustavo').texto).toBe(t);

@@ -98,14 +98,29 @@ export function corrigirCanal(texto: string): { texto: string; trocou: boolean }
 // ⚠️ Guarda ESTREITA de propósito: só mexe no vocativo depois de uma saudação conhecida,
 // e só quando a palavra parece nome (capitalizada ou uma das minúsculas comuns do tom
 // dele). Qualquer coisa mais ampla começaria a comer curso e nome de monitor.
-// A pontuação DEPOIS do nome entra no match de propósito: sem ela, tirar "bruno" de
-// "tranquilo, bruno." deixaria "tranquilo,." na tela.
-const RE_VOCATIVO = /\b(oi|olá|ola|tranquilo|tranquila|beleza|show|fechado|bacana|certo|obrigado|obrigada|valeu)\s*,\s*([A-Za-zÀ-ÿ]{3,20})\s*([.,!?;]|\b)/gi;
+// A pontuação DEPOIS do nome é OBRIGATÓRIA no match, por dois motivos. Primeiro, sem ela
+// tirar "bruno" de "tranquilo, bruno." deixaria "tranquilo,." na tela. Segundo, e mais
+// importante: vocativo de verdade é isolado por pontuação dos dois lados. Sem essa
+// exigência a guarda comia a primeira palavra de qualquer frase — "Bacana, faz sentido"
+// virava "Bacana,sentido", porque "faz" só precisava não estar na lista de exceções.
+const RE_VOCATIVO = /\b(oi|olá|ola|tranquilo|tranquila|beleza|show|fechado|bacana|certo|obrigado|obrigada|valeu)\s*,\s*([A-Za-zÀ-ÿ]{3,20})\s*([.,!?;]|$)/gi;
 
+// O nome ABRINDO a frase, sem saudação antes: "Márcia, sua formação já é atendida"
+// (achado no reteste). Exige inicial maiúscula e a vírgula logo depois — sem as duas
+// condições, comeria o começo de qualquer frase.
+const RE_NOME_ABRINDO = /^\s*([A-ZÀ-Ý][a-zà-ÿ]{2,15})\s*,\s*/;
+
+// Palavra que o João usa muito no começo de frase e que NÃO é nome. A lista é a única
+// coisa entre a guarda e um falso positivo, então ela puxa pro conservador: na dúvida,
+// entra aqui e o texto passa intacto.
 const NAO_SAO_NOME = new Set([
   "então", "entao", "mas", "vc", "você", "voce", "só", "so", "já", "ja", "aqui", "isso",
   "tudo", "bom", "boa", "sim", "não", "nao", "pode", "vamos", "acho", "vou", "dá", "da",
-  "consigo", "top", "legal", "certo", "beleza", "show", "tranquilo", "perfeito", "claro",
+  "consigo", "top", "legal", "certo", "beleza", "show", "tranquilo", "tranquila",
+  "perfeito", "claro", "prontinho", "pronto", "ótimo", "otimo", "bacana", "olha", "opa",
+  "oi", "olá", "ola", "fechou", "fechado", "boas", "valeu", "obrigado", "obrigada",
+  "sobre", "quanto", "antes", "depois", "agora", "hoje", "amanhã", "amanha", "certeza",
+  "importante", "detalhe", "resumindo", "inclusive", "aliás", "alias", "bem", "veja",
 ]);
 
 /**
@@ -120,17 +135,31 @@ export function tirarNomeInventado(
     String(nomeDoLead ?? "").toLowerCase().split(/\s+/).filter((p) => p.length >= 3),
   );
   const removidos: string[] = [];
-  const saida = texto.replace(
+  const suspeito = (palavra: string) => {
+    const p = palavra.toLowerCase();
+    return !NAO_SAO_NOME.has(p) && !permitidos.has(p);
+  };
+
+  let saida = texto.replace(
     RE_VOCATIVO,
     (inteiro, saudacao: string, palavra: string, pontuacao: string) => {
-      const p = palavra.toLowerCase();
-      if (NAO_SAO_NOME.has(p) || permitidos.has(p)) return inteiro;
+      if (!suspeito(palavra)) return inteiro;
       removidos.push(palavra);
       // Fica a saudação com a pontuação que vinha depois do nome ("tranquilo, bruno." →
       // "tranquilo."). Sem pontuação no original, a vírgula segura a frase.
       return `${saudacao}${pontuacao || ","}`;
     },
   );
+
+  // Segundo formato, achado no reteste: o nome ABRE a frase, sem saudação antes
+  // ("Márcia, sua formação já é atendida"). Exige inicial maiúscula e a vírgula logo
+  // depois — sem isso comeria o começo de qualquer frase.
+  saida = saida.replace(RE_NOME_ABRINDO, (inteiro, palavra: string) => {
+    if (!suspeito(palavra)) return inteiro;
+    removidos.push(palavra);
+    return "";
+  });
+
   return { texto: saida, removidos };
 }
 
