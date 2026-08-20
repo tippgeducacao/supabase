@@ -137,14 +137,26 @@ export function sanitizarHistorico(brutas: Msg[]): Msg[] {
 
 // ── Lead (cliente_ppg_leads_sdr) ────────────────────────────────────────────
 
+// Casa por VARIANTES do telefone, igual atualizarLead — e não por igualdade crua.
+// Sem isso, ler e escrever o lead usavam chaves diferentes: o WEBCHAT monta o contexto
+// com `remotejid = telefone` (cru, sem @s.whatsapp.net), então atualizarLead gravava
+// certo e buscarLead voltava null. Efeito: os gates que dependem do lead ficavam
+// fail-open no chat do site — o de formação em confirmar_agendamento (caso Carla,
+// 2026-07-23) criava reunião sem a matriz ter aprovado, e o aviso de formação da
+// consulta_disponibilidade (caso Matheus, 2026-08-08) nunca aparecia.
 export async function buscarLead(supabase: any, remotejid: string): Promise<any | null> {
   const { data, error } = await supabase
     .from('cliente_ppg_leads_sdr')
     .select('*')
-    .eq('remotejid', remotejid)
-    .maybeSingle();
+    .in('remotejid', jidsDoTelefone(remotejid))
+    .limit(2);
+  // .limit(2) + escolha explícita, nunca maybeSingle(): 55 telefones têm as DUAS
+  // variantes como linhas separadas, e maybeSingle() estoura com mais de uma.
   if (error) throw new Error(`buscarLead: ${error.message}`);
-  return data;
+  const linhas = (data ?? []) as any[];
+  if (linhas.length === 0) return null;
+  // Match exato ganha do variante: no WhatsApp a chave que chegou é a que vale.
+  return linhas.find((l) => l.remotejid === remotejid) ?? linhas[0];
 }
 
 export async function criarLead(supabase: any, remotejid: string): Promise<void> {
