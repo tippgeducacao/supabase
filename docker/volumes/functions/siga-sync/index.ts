@@ -12,9 +12,14 @@
 // Rate limit REAL medido em 20/08/2026: ~15 req/min (a doc promete 30). Daí o gap de 4.2s.
 //
 // Modos:
-//   ?modo=incremental (default)  janela de vencimento de -60d a +90d + fichas dos últimos 30d
+//   ?modo=incremental (default)  janela de -60d a +90d + fichas dos últimos 30d
 //   ?modo=janela&ini=YYYY-MM-DD&fim=YYYY-MM-DD   janela arbitrária (backfill manual)
+//   ?tipoData=vencimento|pagamento|cadastro     eixo da janela (default vencimento)
 //   ?fichas=0                    pula a etapa de ficha cadastral
+//
+// Por que tipoData importa: varrendo só por VENCIMENTO, um pagamento feito hoje numa parcela
+// que venceu há 6 meses nunca entraria. Por isso existe um cron diário com tipoData=pagamento
+// cobrindo os últimos 15 dias — pega a quitação atrasada onde quer que ela esteja no tempo.
 //
 // Deploy: git push na main (deploy-edges.yml). NUNCA o "Deploy" do painel Dokploy.
 // Envs: SIGA_API_KEY (obrigatória), SIGA_API_BASE, SIGA_SYNC_GAP_MS, SIGA_SYNC_BUDGET_MS.
@@ -73,6 +78,16 @@ const soDigitos = (v: unknown): string | null => {
   const s = String(v ?? "").replace(/\D/g, "");
   return s || null;
 };
+/**
+ * ~0,9% das cobranças vêm sem nome E sem CPF: o aluno foi apagado no SIGA e a parcela ficou
+ * órfã (13 alunos / 236 parcelas em 20/08/2026). Como as colunas de nome são NOT NULL e o
+ * upsert é em lote, uma dessas linhas derrubava as outras 499 junto. Marca explícita para
+ * ninguém confundir com cadastro de verdade.
+ */
+function nomeOuOrfao(c: any): string {
+  return txt(c.nomeAluno) ?? txt(c.nomeResponsavelFinanceiro) ??
+    `(sem cadastro no SIGA — aluno ${c.tb_aluno_id ?? "?"})`;
+}
 
 // ------------------------------------------------------------------------------ rate limit
 let ultimaChamada = 0;
@@ -121,7 +136,7 @@ function mapTitulo(c: any, agora: string) {
     siga_titulo_id: int(c.id),
     siga_contrato_id: int(c.tb_contrato_id),
     siga_aluno_id: int(c.tb_aluno_id),
-    aluno_nome: txt(c.nomeAluno),
+    aluno_nome: nomeOuOrfao(c),
     cpf_aluno: soDigitos(c.cpfAluno),
     celular_aluno: txt(c.celularAluno),
     email_aluno: txt(c.emailAluno),
@@ -203,6 +218,9 @@ Deno.serve(async (req) => {
   const modo = url.searchParams.get("modo") ?? "incremental";
   const comFichas = url.searchParams.get("fichas") !== "0";
   const disparadoPor = url.searchParams.get("origem") ?? "cron";
+  const tipoData = ["vencimento", "pagamento", "cadastro"].includes(url.searchParams.get("tipoData") ?? "")
+    ? url.searchParams.get("tipoData")!
+    : "vencimento";
 
   if (!SIGA_KEY) {
     return new Response(JSON.stringify({ erro: "SIGA_API_KEY ausente no ambiente" }), {
@@ -233,7 +251,7 @@ Deno.serve(async (req) => {
   }
 
   const { data: logRow } = await supabase.from("siga_sync_log").insert({
-    sync_type: `api:${modo}`, status: "running", triggered_by: disparadoPor, started_at: agora,
+    sync_type: `api:${modo}:${tipoData}`, status: "running", triggered_by: disparadoPor, started_at: agora,
   }).select("id").single();
 
   let recebidas = 0, titulosUp = 0, alunosUp = 0, contratosUp = 0;
@@ -246,7 +264,7 @@ Deno.serve(async (req) => {
     for (const [a, b] of blocos(ini, fim)) {
       if (Date.now() - t0 > BUDGET_MS) { erros.push("orçamento de tempo estourado na etapa de parcelas"); break; }
       const r = await sigaGet(
-        `/cobrancaConsultarPorPeriodo?tipoData=vencimento&dataInicial=${toApiDate(a)}&dataFinal=${toApiDate(b)}`,
+        `/cobrancaConsultarPorPeriodo?tipoData=${tipoData}&dataInicial=${toApiDate(a)}&dataFinal=${toApiDate(b)}`,
       );
       if (!r.json?.sucesso) { erros.push(`${toApiDate(a)}: ${r.json?.erro ?? `HTTP ${r.status}`}`); continue; }
 
@@ -260,7 +278,7 @@ Deno.serve(async (req) => {
           contratos.set(cid, {
             siga_contrato_id: cid,
             siga_aluno_id: aid,
-            aluno_nome: txt(c.nomeAluno),
+            aluno_nome: nomeOuOrfao(c),
             cpf: soDigitos(c.cpfAluno),
             curso_id: int(c.tb_curso_id),
             curso_nome: txt(c.nomeCurso),
@@ -275,7 +293,7 @@ Deno.serve(async (req) => {
         if (aid && !alunos.has(aid)) {
           alunos.set(aid, {
             siga_aluno_id: aid,
-            nome: txt(c.nomeAluno),
+            nome: nomeOuOrfao(c),
             cpf: soDigitos(c.cpfAluno),
             email: txt(c.emailAluno),
             celular: txt(c.celularAluno),
