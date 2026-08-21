@@ -1044,6 +1044,33 @@ async function handler(req: Request): Promise<Response> {
     acao = 'montar' // daqui em diante e a montagem normal, so com outro nome
   }
 
+  // ---------------------------------------------------------------- LER ----
+  // GET cru na API do 3C, so leitura. Existe porque a investigacao da lista curta
+  // precisa olhar cantos da API que nao tem acao propria (qualificacoes e a flag
+  // `should_insert_blacklist`, por exemplo) e o threec-proxy tem allowlist fechada
+  // e exige JWT de usuario.
+  // Trancado no metodo GET de proposito: e ferramenta de diagnostico, nao deve
+  // conseguir alterar nada no 3C nem por engano.
+  if (acao === 'ler') {
+    const caminho = (url.searchParams.get('path') ?? '').split('/').filter(Boolean).join('/')
+    if (!caminho) return json({ error: 'passe ?path=, ex: qualification_lists' }, 400)
+    const CARACTERE_OK = /[A-Za-z0-9_.?=&{}-]/
+    if (![...caminho].every((c) => c === '/' || CARACTERE_OK.test(c))) {
+      return json({ error: 'path invalido' }, 400)
+    }
+    try {
+      const resp = await fetch(alvo(base, `/${caminho}`), { headers: { Accept: 'application/json' } })
+      const txt = await resp.text()
+      try {
+        return json({ ok: resp.ok, status: resp.status, path: caminho, corpo: JSON.parse(txt) })
+      } catch {
+        return json({ ok: resp.ok, status: resp.status, path: caminho, corpo_texto: txt.slice(0, 4000) })
+      }
+    } catch (err) {
+      return json({ error: 'GET falhou', detail: String(err) }, 502)
+    }
+  }
+
   // ------------------------------------------------------------ FAXINA ----
   if (acao === 'faxina') {
     let res
