@@ -1,9 +1,9 @@
 // imap-connect-caixa: cadastra (ou testa) uma caixa IMAP/SMTP genérica.
 //
-// Só admin/diretor — decisão do usuário em 2026-08-20. Diferente do Gmail, onde o
-// Google guarda a senha e o sistema só recebe um token revogável, aqui o sistema
-// passa a guardar a SENHA da caixa; em hospedagem cPanel ela costuma abrir também
-// o painel e o FTP, então a superfície fica restrita a caixas institucionais.
+// Qualquer usuário autenticado pode conectar a própria caixa (decisão do usuário em
+// 2026-08-21). Diferente do Gmail, onde o Google guarda a senha e o sistema só recebe
+// um token revogável, aqui a senha é armazenada cifrada. A autoria continua gravada em
+// `created_by`, e a visibilidade segue a regra de caixa compartilhada/privada.
 //
 // `dry_run: true` só testa e devolve o diagnóstico — é o "Testar conexão" da tela.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
@@ -45,11 +45,6 @@ Deno.serve(async (req) => {
     if (!user) throw new Error('not_authenticated');
 
     const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
-    const { data: roles } = await admin.from('user_roles').select('role').eq('user_id', user.id);
-    const ehGestor = (roles || []).some((r: any) => r.role === 'admin' || r.role === 'diretor');
-    if (!ehGestor) {
-      throw new Error('Só diretor ou admin pode cadastrar uma caixa IMAP.');
-    }
 
     const body = await req.json();
     const email_caixa = String(body.email_caixa || '').trim().toLowerCase();
