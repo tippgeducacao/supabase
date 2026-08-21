@@ -18,6 +18,9 @@
 //   POST ?acao=montar&dry=1        -> simula (nao cria lista, nao envia, nao marca)
 //   POST ?acao=faxina&dry=1        -> lista o que MORRERIA, sem apagar nada
 //   POST ?acao=faxina&ids=1,2      -> apaga listas por id (usado no teste do DELETE)
+//   POST ?acao=repescar            -> se a lista do dia ACABOU (dial+redial = 0),
+//                                     remonta com a fila inteira. Cron de 15 em 15
+//                                     min, 11:00-18:30 BRT. &dry=1 simula
 //   POST ?acao=sondar&limite=12    -> por que 246 de 335 nao entram: testa numero
 //                                     a numero, em 4 formatos, em lista propria
 //                                     de peso 0, e apaga tudo no fim
@@ -46,6 +49,11 @@ const HEADER = ['identifier', 'areacode', 'phone', 'nome', 'email', 'formacao', 
 
 // Teto do 3C por requisicao: "O campo Mailing deve ter no maximo 300 itens".
 const MAX_POR_POST = 300
+
+// Quantas vezes por dia a lista pode ser remontada depois de esgotar. 3 e o que o
+// setor ja fazia a mao (a lista do dia + duas reciclagens). Mais que isso vira
+// ligacao demais para a mesma pessoa no mesmo dia.
+const MAX_REPESCAGENS_POR_DIA = 3
 
 interface FilaRow {
   chave: string
@@ -880,10 +888,12 @@ async function handler(req: Request): Promise<Response> {
   if (!THREEC_TOKEN) return json({ error: '3C_TOKEN_API nao configurado no edge-runtime' }, 500)
 
   const url = new URL(req.url)
-  const acao = (url.searchParams.get('acao') ?? 'montar').toLowerCase()
+  let acao = (url.searchParams.get('acao') ?? 'montar').toLowerCase()
   const dry = url.searchParams.get('dry') === '1'
   const idsManuais = (url.searchParams.get('ids') ?? '').split(',').map((s) => s.trim()).filter(Boolean)
   const qLimite = Number(url.searchParams.get('limite') ?? '') || null
+  // Preenchido so pela repescagem; entra no nome da lista la embaixo.
+  let sufixoRepescagem = ''
 
   const { data: cfg, error: eCfg } = await supabase
     .from('cob_3c_config')
@@ -948,6 +958,80 @@ async function handler(req: Request): Promise<Response> {
     } catch (err) {
       return json({ error: 'checagem falhou', detail: String(err) }, 502)
     }
+  }
+
+  // -------------------------------------------------------- REPESCAGEM ----
+  // A lista do dia seca MUITO antes das 19:00 — em 19/08 os 89 acabaram em menos
+  // de uma hora (`dial: 0, redial: 0`) e o time ficou sem fila. A repescagem
+  // remonta a lista quando isso acontece.
+  //
+  // POR QUE NAO USAR A RECICLAGEM NATIVA DO 3C: ela tem tres travas que a tornam
+  // inviavel como automacao — exige progresso acima de 75%, demora ATE 2H para
+  // processar, e nao tem endpoint na API (so existe no painel, na mao).
+  //
+  // A nossa nao passa por nenhuma das tres: refaz a lista a partir da
+  // `cob_3c_fila`, na hora. E possivel porque nao ha dedup por campanha — o modo
+  // ciclo da purga provou que o mesmo telefone entra duas vezes seguidas.
+  //
+  // REGRA DE NEGOCIO (confirmada com o setor de cobranca em 21/08/2026): eles
+  // marcam TODOS os status na reciclagem manual — Nao atendidas, Abandonadas,
+  // Finalizada, Falha, CP-Pos e CP-Pre. Ou seja: volta TODO MUNDO, sem filtrar por
+  // desfecho. Por isso aqui nao ha filtro por qualificacao: a repescagem e a
+  // montagem do dia de novo, com outro nome de lista.
+  if (acao === 'repescar') {
+    const todasAgora = await listarTodasAsListas(base, campanha)
+    const doDia = todasAgora.filter((l) => nomeDaLista(l).startsWith(prefixo))
+
+    if (doDia.length === 0) {
+      return json({ ok: true, acao: 'repescar', skip: 'nao ha lista de cobranca na campanha — quem cria e a montagem das 10:30' })
+    }
+
+    // "Acabou" = nao sobrou nada para discar NEM para rediscar em nenhuma lista.
+    const pendente = doDia.reduce((acc, l) => acc + (Number(l.dial ?? 0) + Number(l.redial ?? 0)), 0)
+    if (pendente > 0) {
+      return json({
+        ok: true, acao: 'repescar', skip: 'a lista ainda tem fila',
+        pendente, listas: doDia.map(resumoDaLista),
+      })
+    }
+
+    // Janela. Nao repescar cedo demais (a montagem das 10:30 acabou de rodar) nem
+    // tarde demais — lista criada 18:45 morre as 19:00 sem ninguem discar.
+    const agoraBrt = new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' })
+    const d = new Date(agoraBrt)
+    const minutos = d.getHours() * 60 + d.getMinutes()
+    if (minutos < 11 * 60 || minutos >= 18 * 60 + 30) {
+      return json({ ok: true, acao: 'repescar', skip: 'fora da janela (11:00 as 18:30 BRT)', hora_brt: d.toTimeString().slice(0, 5) })
+    }
+
+    // Teto diario: sem isto ele reengata a tarde inteira e a mesma pessoa leva
+    // ligacao atras de ligacao. Contado pelo proprio historico — nao precisa de
+    // coluna nova em cob_3c_config.
+    const inicioDoDia = new Date(d.getFullYear(), d.getMonth(), d.getDate()).toISOString()
+    const { count } = await supabase
+      .from('cob_3c_execucoes')
+      .select('id', { count: 'exact', head: true })
+      .eq('acao', 'montar').eq('dry', false)
+      .ilike('lista_nome', '%repescagem%')
+      .gte('executado_em', inicioDoDia)
+    const feitas = count ?? 0
+    if (feitas >= MAX_REPESCAGENS_POR_DIA) {
+      return json({ ok: true, acao: 'repescar', skip: `teto do dia atingido (${feitas}/${MAX_REPESCAGENS_POR_DIA})` })
+    }
+
+    if (dry) {
+      return json({
+        ok: true, acao: 'repescar', dry: true,
+        faria: `apagaria ${doDia.length} lista(s) esgotada(s) e montaria a repescagem ${feitas + 1}`,
+        listas_esgotadas: doDia.map(resumoDaLista),
+      })
+    }
+
+    // Apaga a esgotada antes de remontar: a campanha nao acumula lista morta, e o
+    // painel nao fica com duas listas do mesmo dia disputando peso.
+    await faxina(base, campanha, [], false)
+    sufixoRepescagem = ` — repescagem ${feitas + 1}`
+    acao = 'montar' // daqui em diante e a montagem normal, so com outro nome
   }
 
   // ------------------------------------------------------------ FAXINA ----
@@ -1061,7 +1145,7 @@ async function handler(req: Request): Promise<Response> {
     dias_atraso: r.dias_atraso ?? '',
   }))
 
-  const nomeLista = nomeListaDoDia(prefixo)
+  const nomeLista = nomeListaDoDia(prefixo) + sufixoRepescagem
 
   if (dry) {
     return json({
