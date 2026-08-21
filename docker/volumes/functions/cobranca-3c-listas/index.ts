@@ -584,6 +584,7 @@ async function purga(base: string, campanha: string, telefone: string) {
 
   // Insere o numero COMPLETO (11 digitos) numa lista descartavel e devolve
   // imported_lines. 1 = a base soltou o telefone. 0 = continua preso.
+  let corpoCruDaRecusa: string | null = null
   const tentarInserir = async (rotulo: string): Promise<number | null> => {
     let id: string
     try {
@@ -608,6 +609,11 @@ async function purga(base: string, campanha: string, telefone: string) {
         const j = JSON.parse(txt)
         imp = typeof j?.imported_lines === 'number' ? j.imported_lines : null
       } catch { /* nao-JSON */ }
+      // O 3C pode estar dizendo POR QUE recusou e ninguem nunca leu: ate aqui so o
+      // `imported_lines` era extraido e o resto do corpo era descartado.
+      if ((imp ?? 0) === 0 && corpoCruDaRecusa === null) {
+        corpoCruDaRecusa = `HTTP ${resp.status} :: ${txt.slice(0, 1500)}`
+      }
     } catch { /* rede */ }
     await apagar(id)
     return imp
@@ -710,6 +716,7 @@ async function purga(base: string, campanha: string, telefone: string) {
   for (const id of criadas) await apagar(id)
 
   return {
+    corpo_cru_da_recusa: corpoCruDaRecusa,
     veredito: vencedor
       ? `ACHOU: "${vencedor}" liberou o telefone. E este corpo que a faxina tem que mandar todo dia, e ai o phone pode voltar aos 11 digitos.`
       : 'NENHUM candidato liberou o telefone. A base da campanha nao se limpa por esta API — o caminho passa a ser capturar o que o painel faz (F12) ou falar com a FluxoTI.',
@@ -986,12 +993,15 @@ async function handler(req: Request): Promise<Response> {
       return json({ ok: true, acao: 'repescar', skip: 'nao ha lista de cobranca na campanha — quem cria e a montagem das 10:30' })
     }
 
-    // "Acabou" = nao sobrou nada para discar NEM para rediscar em nenhuma lista.
-    const pendente = doDia.reduce((acc, l) => acc + (Number(l.dial ?? 0) + Number(l.redial ?? 0)), 0)
+    // "Acabou" = nao sobrou nada para discar NEM para rediscar em NENHUMA lista da
+    // campanha — nao so nas nossas. A faxina apaga tudo antes de remontar, entao
+    // contar so as listas com o prefixo faria a repescagem apagar uma lista
+    // "reciclagem" feita a mao pelo setor com fila viva dentro.
+    const pendente = todasAgora.reduce((acc, l) => acc + (Number(l.dial ?? 0) + Number(l.redial ?? 0)), 0)
     if (pendente > 0) {
       return json({
-        ok: true, acao: 'repescar', skip: 'a lista ainda tem fila',
-        pendente, listas: doDia.map(resumoDaLista),
+        ok: true, acao: 'repescar', skip: 'ainda ha fila na campanha',
+        pendente, listas: todasAgora.map(resumoDaLista),
       })
     }
 
