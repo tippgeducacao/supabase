@@ -825,6 +825,111 @@ async function recusados(base: string, campanha: string, limite: number | null) 
   }
 }
 
+// ------------------------------------------------------------ sandbox ----
+// DESCOBRE, SEM RISCO, se `check_smart_filter` e gravavel — e por qual metodo.
+//
+// O problema: essa flag (e as irmas `check_blacklist` e `check_dnd`) descarta ~73%
+// do mailing no import, nao aparece em nenhuma aba de "Configurar Campanha", e o
+// `PATCH /campaigns/{id}` responde 200 OK IGNORANDO o campo (relido, continua
+// true). Sobrariam `PUT`/`POST`, que tem 22 campos — e um PUT errado na campanha
+// de producao pode zerar rota, qualificacao e horario de quem esta discando agora.
+//
+// Entao o teste acontece numa campanha DESCARTAVEL: cria, mexe, le de volta,
+// apaga. A campanha 282311 nao e tocada em momento nenhum.
+//
+// A descoberta dos campos obrigatorios e feita pelo proprio 3C: um POST com corpo
+// vazio volta 422 com `errors` nomeando o que falta (foi assim que o campo do
+// mailing/delete apareceu). O que ele pedir, copiamos da campanha real.
+async function sandbox(base: string, campanha: string) {
+  const passos: Array<Record<string, unknown>> = []
+  let sandboxId: string | null = null
+
+  const req = async (metodo: string, caminho: string, corpo?: unknown) => {
+    const resp = await fetch(alvo(base, caminho), {
+      method: metodo,
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      ...(corpo === undefined ? {} : { body: JSON.stringify(corpo) }),
+    })
+    const txt = await resp.text()
+    let json_: unknown = null
+    try { json_ = JSON.parse(txt) } catch { /* nao-JSON */ }
+    return { status: resp.status, json: json_ as Record<string, unknown> | null, texto: txt.slice(0, 700) }
+  }
+
+  const lerFlag = async (id: string): Promise<unknown> => {
+    const r = await req('GET', `/campaigns/${id}`)
+    const d = (r.json?.data ?? r.json) as Record<string, unknown> | null
+    return d ? d.check_smart_filter : null
+  }
+
+  try {
+    // 1. a campanha real serve de molde — nada nela e alterado, so lido
+    const realResp = await req('GET', `/campaigns/${campanha}`)
+    const real = (realResp.json?.data ?? {}) as Record<string, unknown>
+
+    // 2. o 3C diz o que e obrigatorio
+    const vazio = await req('POST', '/campaigns', {})
+    const exigidos = Object.keys((vazio.json?.errors ?? {}) as Record<string, unknown>)
+    passos.push({ passo: 'campos_obrigatorios', status: vazio.status, exigidos })
+
+    // 3. monta o corpo copiando da real o que ele pediu
+    const corpo: Record<string, unknown> = {}
+    for (const campo of exigidos) {
+      if (campo in real && real[campo] !== null) corpo[campo] = real[campo]
+    }
+    corpo.name = `ZZ SANDBOX ${Date.now()}`
+    corpo.check_smart_filter = false // <- a pergunta do teste
+
+    const criar = await req('POST', '/campaigns', corpo)
+    const criada = (criar.json?.data ?? null) as Record<string, unknown> | null
+    passos.push({
+      passo: 'criar', status: criar.status,
+      corpo_enviado: Object.keys(corpo),
+      erros: criar.json?.errors ?? null,
+      resposta: criada ? null : criar.texto,
+    })
+    if (!criada?.id) {
+      return { veredito: 'NAO CONSEGUI CRIAR A CAMPANHA DE TESTE — veja errors para saber o que falta.', passos }
+    }
+    sandboxId = String(criada.id)
+
+    // 4. a flag pegou na CRIACAO?
+    const naCriacao = await lerFlag(sandboxId)
+    passos.push({ passo: 'flag_na_criacao', valor: naCriacao, esperado: false })
+
+    // 5. e no PATCH? e no PUT? (tudo no sandbox)
+    const patch = await req('PATCH', `/campaigns/${sandboxId}`, { check_smart_filter: true })
+    const aposPatch = await lerFlag(sandboxId)
+    passos.push({ passo: 'patch', status: patch.status, valor_relido: aposPatch, mudou: aposPatch === true })
+
+    const corpoPut = { ...corpo, name: String(criada.name ?? corpo.name), check_smart_filter: true }
+    const put = await req('PUT', `/campaigns/${sandboxId}`, corpoPut)
+    const aposPut = await lerFlag(sandboxId)
+    passos.push({ passo: 'put', status: put.status, valor_relido: aposPut, mudou: aposPut === true, erros: put.json?.errors ?? null })
+
+    const gravavelNaCriacao = naCriacao === false
+    const gravavelPorPatch = aposPatch === true
+    const gravavelPorPut = aposPut === true
+
+    return {
+      veredito: gravavelPorPut || gravavelPorPatch
+        ? `A FLAG E GRAVAVEL por ${gravavelPorPut ? 'PUT' : 'PATCH'} — da para desligar na campanha real por esse metodo.`
+        : gravavelNaCriacao
+          ? 'A flag so pega na CRIACAO da campanha: nao da para desligar na 282311: seria preciso criar uma campanha nova ja com ela desligada e migrar a operacao.'
+          : 'A FLAG NAO E GRAVAVEL POR API de jeito nenhum — nem criando, nem PATCH, nem PUT. O caminho e a FluxoTI.',
+      gravavel_na_criacao: gravavelNaCriacao,
+      gravavel_por_patch: gravavelPorPatch,
+      gravavel_por_put: gravavelPorPut,
+      passos,
+    }
+  } finally {
+    // O sandbox NUNCA fica para tras, nem se algo acima explodir.
+    if (sandboxId) {
+      try { await fetch(alvo(base, `/campaigns/${sandboxId}`), { method: 'DELETE' }) } catch { /* nada a fazer */ }
+    }
+  }
+}
+
 // ------------------------------------------------------------- montar ----
 // Devolve o id E o corpo cru: o diagnostico precisa ver com que header o 3C
 // registrou a lista (se ele nao registrar o header, o mailing e descartado).
@@ -1147,6 +1252,15 @@ async function handler(req: Request): Promise<Response> {
         ? Object.fromEntries(FLAGS_PERMITIDAS.map((f) => [f, depois[f] ?? null]))
         : null,
     })
+  }
+
+  // ------------------------------------------------------------- SANDBOX ----
+  if (acao === 'sandbox') {
+    try {
+      return json({ ok: true, acao: 'sandbox', ...(await sandbox(base, campanha)) })
+    } catch (err) {
+      return json({ error: 'sandbox falhou', detail: String(err) }, 502)
+    }
   }
 
   // ------------------------------------------------------------ FAXINA ----
