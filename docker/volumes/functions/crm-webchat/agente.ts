@@ -60,11 +60,11 @@ const WEBCHAT_TEMPLATE_CRONOGRAMA = Deno.env.get("WEBCHAT_TEMPLATE_CRONOGRAMA")
   ?? "confirmacao_de_provas_alunos_pdf_utility_pos_ia";
 // Conta "PPGVET - Pós-graduação IA" (+55 46 99907-1093) — é a WABA onde o template acima
 // está aprovado. Template vive POR WABA: trocar de número exige recriar o template lá.
-const WEBCHAT_WA_ACCOUNT_ID = Deno.env.get("WEBCHAT_WA_ACCOUNT_ID")
+export const WEBCHAT_WA_ACCOUNT_ID = Deno.env.get("WEBCHAT_WA_ACCOUNT_ID")
   ?? "d2984495-f70e-4c40-a47b-4b969d735a07";
 // TEMPLATE DA PONTE PRO WHATSAPP (fase 4). Mesma WABA do cronograma acima — template vive
 // POR WABA, então trocar de número exige recriá-lo lá.
-const WEBCHAT_TEMPLATE_CONTINUIDADE = Deno.env.get("WEBCHAT_TEMPLATE_CONTINUIDADE")
+export const WEBCHAT_TEMPLATE_CONTINUIDADE = Deno.env.get("WEBCHAT_TEMPLATE_CONTINUIDADE")
   ?? "webchat_continuar_conversa_utility";
 const supabase = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "");
 

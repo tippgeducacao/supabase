@@ -23,6 +23,10 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { responderWebchat, aberturaWebchat, frasePedidoCronograma } from "./agente.ts";
+// A ponte pro WhatsApp tem DUAS origens (a tool do João e o botão do atendente) e uma
+// idempotência só. O template e a conta vêm do agente pra não divergirem entre as duas.
+import { WEBCHAT_TEMPLATE_CONTINUIDADE, WEBCHAT_WA_ACCOUNT_ID } from "./agente.ts";
+import { fraseConviteWhatsapp } from "./frases.ts";
 import { pushParaSessao } from "../_shared/webchatPush.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -974,6 +978,80 @@ async function acaoPushStatus(body: Record<string, unknown>) {
   return json({ ok: true, ativo: (count ?? 0) > 0 });
 }
 
+/**
+ * Usuário LOGADO (qualquer um do time), não só diretor.
+ * ⚠️ Diferente de `usuarioGestao`: o botão de levar a conversa pro WhatsApp é do
+ * ATENDENTE. Exigir permissão de admin ali entregaria um botão que só o diretor
+ * conseguiria usar — e quem está no card é quem precisa dele.
+ */
+async function usuarioLogado(req: Request): Promise<string | null> {
+  const token = (req.headers.get("authorization") ?? "").match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
+  if (!token) return null;
+  const { data, error } = await supabase.auth.getUser(token);
+  if (error || !data.user?.id) return null;
+  return data.user.id;
+}
+
+/**
+ * BOTÃO MANUAL da ponte pro WhatsApp (fase 4).
+ *
+ * Mesmo efeito da tool `levar_para_whatsapp`, com o gatilho no atendente em vez de no
+ * João: às vezes quem percebe que a conversa morreu no site é a pessoa olhando o card.
+ *
+ * ⚠️ A idempotência é a MESMA (`levado_para_whatsapp_em`), de propósito: se o João já
+ * mandou, o botão não manda de novo — senão o lead recebe dois templates pelo mesmo
+ * motivo, um de cada origem, e cada template é cobrado.
+ */
+async function acaoLevarParaWhatsapp(body: Record<string, unknown>, req: Request) {
+  if (!(await usuarioLogado(req))) return json({ ok: false, erro: "acesso_negado" }, 403);
+  const sessaoId = texto(body.sessao_id, 40);
+  if (!UUID_RE.test(sessaoId)) return json({ ok: false, erro: "sessao_invalida" }, 400);
+
+  const { data: s, error } = await supabase
+    .from("webchat_sessoes")
+    .select("id, nome, telefone, curso, levado_para_whatsapp_em")
+    .eq("id", sessaoId)
+    .maybeSingle();
+  if (error || !s) return json({ ok: false, erro: "sessao_nao_encontrada" }, 404);
+  if (!String(s.telefone ?? "").trim()) return json({ ok: false, erro: "sem_telefone" }, 400);
+  if (s.levado_para_whatsapp_em) {
+    return json({ ok: true, ja_enviado: true, em: s.levado_para_whatsapp_em });
+  }
+
+  const primeiro = String(s.nome ?? "").trim().split(/\s+/)[0] || "tudo bem";
+  const r = await fetch(`${SUPABASE_URL}/functions/v1/crm-whatsapp-send`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      telefone: s.telefone,
+      tipo: "template",
+      template_name: WEBCHAT_TEMPLATE_CONTINUIDADE,
+      template_lang: "pt_BR",
+      template_components: [{
+        type: "body",
+        parameters: [
+          { type: "text", text: primeiro },
+          { type: "text", text: fraseConviteWhatsapp(s.curso) },
+        ],
+      }],
+      wa_account_id: WEBCHAT_WA_ACCOUNT_ID || null,
+      origem: "humano",
+    }),
+  });
+  const b: any = await r.json().catch(() => ({}));
+  if (r.status < 200 || r.status >= 300) {
+    console.error(`[crm-webchat] levar_para_whatsapp manual: ${b?.error ?? r.status}`);
+    return json({ ok: false, erro: b?.error ?? "falha_no_envio" }, 400);
+  }
+  await supabase.from("webchat_sessoes")
+    .update({ levado_para_whatsapp_em: new Date().toISOString() })
+    .eq("id", sessaoId);
+  return json({ ok: true, ja_enviado: false });
+}
+
 async function acaoPoll(body: Record<string, unknown>) {
   const sessaoId = texto(body.sessao_id, 40);
   if (!UUID_RE.test(sessaoId)) return json({ ok: false, erro: "sessao_invalida" }, 400);
@@ -1048,6 +1126,8 @@ Deno.serve(async (req) => {
         return await acaoTesteEnviar(body, req);
       case "teste_responder":
         return await acaoTesteResponder(body, req);
+      case "levar_para_whatsapp":
+        return await acaoLevarParaWhatsapp(body, req);
       case "poll":
         return await acaoPoll(body);
       case "push_vapid":
