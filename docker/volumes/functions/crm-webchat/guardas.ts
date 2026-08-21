@@ -9,6 +9,32 @@
 /** Sinal de que uma tool de encerramento rodou nesta rodada. */
 export type Encerramento = { tool: string; input: Record<string, unknown> };
 
+// ── 0. O nome, repetido a cada turno ───────────────────────────────────────────
+// Caso Flávia (21/08/2026): o João a chamou de "vitória" e ela respondeu "e não me chamo
+// vitória". Varrendo profiles, leads, contatos e os retornos das tools, "Vitória" não
+// existe em lugar nenhum — não veio de dado trocado, foi preenchimento de lacuna.
+//
+// O que a conversa mostra: nas 14 mensagens anteriores ele NUNCA usou o nome dela. O nome
+// vivia só no topo do prompt de sistema, renderizado uma vez. Numa conversa longa, a hora
+// de escrever "saudação, NOME," chega com o nome a dezenas de turnos de distância — e o
+// modelo completa pelo FORMATO, não pela memória.
+//
+// Por isso o nome volta a cada turno, no fim do contexto, onde a recência ajuda.
+
+/** Lembrete do nome, apensado ao contexto temporal (que é reinjetado toda rodada). */
+export function notaDoNome(nome: string | null | undefined): string {
+  const limpo = String(nome ?? "").trim();
+  if (!limpo) {
+    return "\n\n**⛔ VOCÊ NÃO SABE O NOME DESTA PESSOA.**\n"
+      + "Não escreva nome nenhum — nem chute, nem 'amigo', nem 'colega'. Fale sem vocativo.";
+  }
+  const primeiro = limpo.split(/\s+/)[0];
+  return `\n\n**A PESSOA COM QUEM VOCÊ ESTÁ FALANDO SE CHAMA: ${primeiro}**\n`
+    + `É o ÚNICO nome que existe nesta conversa. Se for usar nome, use "${primeiro}" — mais nenhum.\n`
+    + "⛔ Na dúvida, NÃO use nome: falar sem nome é neutro, falar o nome errado é o erro mais "
+    + "visível que existe. A pessoa sabe o próprio nome e percebe na hora.";
+}
+
 // ── 1. Despedida por MOTIVO ────────────────────────────────────────────────────
 // Rodada de 20/08: a despedida de quem DESISTIU saiu para o lead sem graduação (q-01),
 // pra quem já era aluno (q-04), pra quem pediu atendimento humano (q-05) e pra quem só

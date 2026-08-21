@@ -34,6 +34,7 @@ import {
   DESPEDIDA_GENERICA,
   despedidaDe,
   type Encerramento,
+  notaDoNome,
   temLinkDeMeet,
   tirarNomeInventado,
 } from "./guardas.ts";
@@ -396,7 +397,10 @@ export async function responderWebchat(
   }
   const agente = estagio === "qualificador" ? "agente_qualificador" : "agente_validacao";
   const promptAgente = promptDoEstagio(nome, curso, estagio, produto);
-  const contextoTemporal = montarContextoTemporal();
+  // O nome vai JUNTO do contexto temporal porque este bloco é reinjetado a cada turno, no
+  // fim do contexto. No topo do prompt ele fica a dezenas de mensagens de distância, e foi
+  // assim que a Flávia virou "vitória" numa conversa de 28 mensagens (21/08/2026).
+  const contextoTemporal = montarContextoTemporal() + notaDoNome(nome);
   const ctx = ctxDe(telefone, leadId, nome || null);
 
   let tools: any[] = [];

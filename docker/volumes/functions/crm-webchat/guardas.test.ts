@@ -5,6 +5,7 @@ import {
   ehDespedidaDeVerdade,
   despedidaDe,
   motivoDoEncerramento,
+  notaDoNome,
   temLinkDeMeet,
   tirarNomeInventado,
 } from './guardas';
@@ -188,5 +189,28 @@ describe('bloco de confirmação da reunião', () => {
   it('detecta quando o modelo já mandou o link sozinho', () => {
     expect(temLinkDeMeet(['pronto', 'link: https://meet.google.com/abc-defg-hij'])).toBe(true);
     expect(temLinkDeMeet(['tá tudo certo com sua reunião marcada pra hoje às 14h30'])).toBe(false);
+  });
+});
+
+describe('o nome repetido a cada turno', () => {
+  // O nome vivia só no topo do prompt. Numa conversa de 28 mensagens ele fica a dezenas de
+  // turnos de distância, e o modelo completa o vocativo pelo FORMATO — foi assim que a
+  // Flávia virou "vitória" (21/08/2026).
+  it('manda usar só o primeiro nome do lead', () => {
+    const n = notaDoNome('Flávia Radaelli Corá');
+    expect(n).toContain('SE CHAMA: Flávia');
+    expect(n).not.toContain('Radaelli');
+    expect(n).toContain('Na dúvida, NÃO use nome');
+  });
+
+  it('sem nome, proíbe chutar em vez de ficar em silêncio', () => {
+    const n = notaDoNome('');
+    expect(n).toContain('NÃO SABE O NOME');
+    expect(n).toContain('nem chute');
+  });
+
+  it('trata nulo como ausência de nome', () => {
+    expect(notaDoNome(null)).toContain('NÃO SABE O NOME');
+    expect(notaDoNome(undefined)).toContain('NÃO SABE O NOME');
   });
 });
