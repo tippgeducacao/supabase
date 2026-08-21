@@ -880,6 +880,14 @@ async function sandbox(base: string, campanha: string) {
     corpo.name = `ZZ SANDBOX ${Date.now()}`
     corpo.check_smart_filter = false // <- a pergunta do teste
 
+    // O 3C pede `qualification_list` na criacao, mas devolve esse id ANINHADO no
+    // GET, dentro de `dialer_settings.qualification_list_id`. Nome de entrada
+    // diferente do nome de saida — copiar campo a campo nao acha sozinho.
+    if (exigidos.includes('qualification_list') && corpo.qualification_list === undefined) {
+      const ds = (real.dialer_settings ?? {}) as Record<string, unknown>
+      if (ds.qualification_list_id != null) corpo.qualification_list = ds.qualification_list_id
+    }
+
     const criar = await req('POST', '/campaigns', corpo)
     const criada = (criar.json?.data ?? null) as Record<string, unknown> | null
     passos.push({
