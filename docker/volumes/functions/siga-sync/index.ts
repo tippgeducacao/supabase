@@ -177,6 +177,29 @@ function mapTitulo(c: any, agora: string) {
   };
 }
 
+function mapTurma(t: any, agora: string) {
+  return {
+    siga_turma_id: int(t.id),
+    curso_id: int(t.id_curso),
+    nome: txt(t.nome) ?? `(turma ${t.id})`,
+    data_inicio: brToIso(t.data_inicio),
+    data_fim: brToIso(t.data_fim),
+    dias_semana: txt(t.dias_semana),
+    horario_inicio: txt(t.horario_inicio),
+    horario_final: txt(t.horario_final),
+    turno: txt(t.turno),
+    tipo: txt(t.tipo),
+    instituicao_id: int(t.tb_instituicao_id),
+    sala_id: int(t.tb_sala_id),
+    responsavel: txt(t.responsavel),
+    arquivada: String(t.arquivada ?? "0") === "1",
+    bloquear_matricula: String(t.bloquearMatricula ?? "0") === "1",
+    raw: t,
+    synced_at: agora,
+    updated_at: agora,
+  };
+}
+
 function mapFicha(f: any, agora: string) {
   return {
     cpf: soDigitos(f.cpf),
@@ -258,7 +281,7 @@ Deno.serve(async (req) => {
     sync_type: `api:${modo}:${tipoData}`, status: "running", triggered_by: disparadoPor, started_at: agora,
   }).select("id").single();
 
-  let recebidas = 0, titulosUp = 0, alunosUp = 0, contratosUp = 0;
+  let recebidas = 0, titulosUp = 0, alunosUp = 0, contratosUp = 0, turmasUp = 0;
   const erros: string[] = [];
   const contratos = new Map<number, any>();
   const alunos = new Map<number, any>();
@@ -335,6 +358,24 @@ Deno.serve(async (req) => {
       else contratosUp += contratosArr.slice(i, i + 500).length;
     }
 
+    // ---- ETAPA 2b: catálogo de turmas ---------------------------------------------------
+    // 1 requisição só, sem filtro. Traz turma de TODAS as instituições (turmaListar não sofre
+    // o gate), inclusive as que não têm parcela nenhuma — que é o que a v_turmas_plataformas,
+    // por derivar de movimento financeiro, não consegue ver.
+    if (Date.now() - t0 < BUDGET_MS) {
+      const rt = await sigaGet("/turmaListar");
+      if (rt.json?.sucesso) {
+        const turmas = (rt.json.dados ?? []).map((t: any) => mapTurma(t, agora))
+          .filter((t: any) => t.siga_turma_id);
+        const { error } = await supabase.from("siga_turmas")
+          .upsert(turmas, { onConflict: "siga_turma_id" });
+        if (error) erros.push(`turmas: ${error.message}`);
+        else turmasUp = turmas.length;
+      } else {
+        erros.push(`turmaListar: ${rt.json?.erro ?? `HTTP ${rt.status}`}`);
+      }
+    }
+
     // ---- ETAPA 3: ficha cadastral dos cadastros recentes -------------------------------
     // Casa por CPF: matriculaweb não devolve tb_aluno_id, então o vínculo é pelo documento.
     if (comFichas && Date.now() - t0 < BUDGET_MS) {
@@ -369,7 +410,7 @@ Deno.serve(async (req) => {
     return new Response(JSON.stringify({
       ok: true, modo,
       janela: { ini: toApiDate(ini), fim: toApiDate(fim) },
-      recebidas, titulos: titulosUp, alunos: alunosUp, contratos: contratosUp,
+      recebidas, titulos: titulosUp, alunos: alunosUp, contratos: contratosUp, turmas: turmasUp,
       erros: erros.slice(0, 10), duracao_ms: Date.now() - t0,
     }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
   } catch (e) {
