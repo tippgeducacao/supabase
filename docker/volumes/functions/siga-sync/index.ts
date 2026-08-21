@@ -281,6 +281,69 @@ Deno.serve(async (req) => {
     sync_type: `api:${modo}:${tipoData}`, status: "running", triggered_by: disparadoPor, started_at: agora,
   }).select("id").single();
 
+  // ---- modo=situacao: rodízio de contratos --------------------------------------------
+  // matriculaConsultar é 1 requisição POR CONTRATO, então não cabe nas rodadas normais.
+  // Aqui a gente pega os N contratos com a conferência mais velha (NULL primeiro) e atualiza.
+  // Como a situação muda sozinha com o tempo, o rodízio nunca "termina": depois de cobrir
+  // todo mundo ele volta pro começo, mantendo o dado fresco em vez de congelado.
+  if (modo === "situacao") {
+    const limite = Math.min(Number(url.searchParams.get("limite") ?? "20"), 40);
+    const { data: alvos } = await supabase
+      .from("siga_contratos")
+      .select("siga_contrato_id, cpf, curso_id")
+      .not("cpf", "is", null)
+      .not("curso_id", "is", null)
+      .order("situacao_synced_at", { ascending: true, nullsFirst: true })
+      .limit(limite);
+
+    let conferidos = 0, atualizados = 0;
+    const problemas: string[] = [];
+    for (const alvo of (alvos ?? [])) {
+      if (Date.now() - t0 > BUDGET_MS) { problemas.push("orçamento de tempo estourado"); break; }
+      const r = await sigaGet(`/matriculaConsultar?cpf=${alvo.cpf}&tb_curso_id=${alvo.curso_id}`);
+      conferidos++;
+      // Carimba o alvo mesmo se a consulta não achou nada, senão ele volta pra fila eternamente.
+      await supabase.from("siga_contratos")
+        .update({ situacao_synced_at: agora })
+        .eq("siga_contrato_id", alvo.siga_contrato_id);
+
+      if (!r.json?.sucesso) { problemas.push(`${alvo.cpf}: ${r.json?.erro ?? `HTTP ${r.status}`}`); continue; }
+
+      for (const m of (r.json.dados ?? [])) {
+        const { error } = await supabase.from("siga_contratos").update({
+          situacao_contrato: txt(m.situacao),
+          // o SIGA devolve situacaoAluno ora em caixa alta ora baixa (RESCINDIDO/rescindido)
+          situacao_aluno: txt(m.situacaoAluno)?.toLowerCase() ?? null,
+          numero_contrato: txt(m.numeroContrato),
+          ano_contrato: txt(m.anoContrato),
+          vigencia_inicial: brToIso(m.inicioContrato),
+          vigencia_final: brToIso(m.fimContrato),
+          dia_vencimento: txt(m.diaVencimento),
+          valor_total_curso: num(m.valorTotalCurso),
+          qtd_parcelas_curso: txt(m.qtdParcelasCurso),
+          forma_pagamento: txt(m.formaPagamento),
+          situacao_synced_at: agora,
+          api_synced_at: agora,
+        }).eq("siga_contrato_id", int(m.id)!);
+        if (error) problemas.push(`contrato ${m.id}: ${error.message}`);
+        else atualizados++;
+      }
+    }
+
+    await supabase.from("siga_sync_log").update({
+      status: problemas.length ? "partial" : "ok",
+      rows_received: conferidos,
+      contratos_upserted: atualizados,
+      finished_at: new Date().toISOString(),
+      error_message: problemas.length ? problemas.slice(0, 5).join(" | ") : null,
+    }).eq("id", logRow?.id);
+
+    return new Response(JSON.stringify({
+      ok: true, modo, conferidos, atualizados,
+      erros: problemas.slice(0, 5), duracao_ms: Date.now() - t0,
+    }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+  }
+
   let recebidas = 0, titulosUp = 0, alunosUp = 0, contratosUp = 0, turmasUp = 0;
   const erros: string[] = [];
   const contratos = new Map<number, any>();
