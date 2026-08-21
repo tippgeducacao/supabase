@@ -906,18 +906,32 @@ async function sandbox(base: string, campanha: string) {
     passos.push({ passo: 'flag_na_criacao', valor: naCriacao, esperado: false })
 
     // 5. e no PATCH? e no PUT? (tudo no sandbox)
-    const patch = await req('PATCH', `/campaigns/${sandboxId}`, { check_smart_filter: true })
+    //
+    // ⚠️ A flag e IGNORADA na criacao: a campanha nasce com `true` mesmo pedindo
+    // `false`. Entao o alvo do teste e `false` — pedir `true` daria "mudou" sem
+    // nada ter mudado, que foi o erro da 1a versao deste teste (21/08/2026) e por
+    // pouco nao virou um veredito errado.
+    const patch = await req('PATCH', `/campaigns/${sandboxId}`, { check_smart_filter: false })
     const aposPatch = await lerFlag(sandboxId)
-    passos.push({ passo: 'patch', status: patch.status, valor_relido: aposPatch, mudou: aposPatch === true })
+    passos.push({ passo: 'patch_para_false', status: patch.status, valor_relido: aposPatch, mudou: aposPatch === false })
 
-    const corpoPut = { ...corpo, name: String(criada.name ?? corpo.name), check_smart_filter: true }
+    // O PUT exige mais tres campos que o POST nao pedia — descobertos pelo 422 da
+    // rodada anterior. Ficam explicitos aqui.
+    const corpoPut: Record<string, unknown> = {
+      ...corpo,
+      name: String(criada.name ?? corpo.name),
+      check_smart_filter: false,
+      is_predictive: real.is_predictive ?? false,
+      update_mailing_data: real.update_mailing_data ?? false,
+      limit_call_per_agent: real.limit_call_per_agent ?? 0,
+    }
     const put = await req('PUT', `/campaigns/${sandboxId}`, corpoPut)
     const aposPut = await lerFlag(sandboxId)
-    passos.push({ passo: 'put', status: put.status, valor_relido: aposPut, mudou: aposPut === true, erros: put.json?.errors ?? null })
+    passos.push({ passo: 'put_para_false', status: put.status, valor_relido: aposPut, mudou: aposPut === false, erros: put.json?.errors ?? null })
 
     const gravavelNaCriacao = naCriacao === false
-    const gravavelPorPatch = aposPatch === true
-    const gravavelPorPut = aposPut === true
+    const gravavelPorPatch = aposPatch === false
+    const gravavelPorPut = aposPut === false
 
     return {
       veredito: gravavelPorPut || gravavelPorPatch
