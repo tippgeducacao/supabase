@@ -17,7 +17,7 @@ import { AGENTE_RECONTATO, montarDossieRecontato } from './prompts-recontato.ts'
 import { AGENTE_CAMPANHA_DIRETA } from './prompts-campanha-direta.ts';
 import { comPresenteEscola, LINK_ESCOLA_GRATUITA } from './escolaGratuita.ts';
 import { comContinuidadeWebchat } from './continuidadeWebchat.ts';
-import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, renderPrompt } from './contexto.ts';
+import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoNome, renderPrompt } from './contexto.ts';
 import { atualizarAgenteComRatchet, atualizarLead, buscarLead, carregarHistorico, criarLead, excluirDadosLead, gravarMensagem, limparParaRouter, sanitizarHistorico } from './historico.ts';
 import { carregarTools, chamarAgentePrincipal, chamarRouter } from './agente.ts';
 import { type CtxConversa, executarTool, montarToolResults } from './tools.ts';
@@ -271,7 +271,8 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     curso_interesse_original: lead?.curso_interesse_original ?? '',
     pergunta_formacao: montarPerguntaFormacao(formacaoNormalizada),
   };
-  const contextoTemporal = montarContextoTemporal();
+  // O nome volta AQUI, a cada turno, e não só no cabeçalho do prompt (ver notaDoNome).
+  const contextoTemporal = montarContextoTemporal() + notaDoNome(vars.nome);
 
   // Persona: LEAD em modo_recontato manda (independe do número — espelha o gate de
   // entrada); senão vale a persona do número (relay/buffer). 'recontato' = no-show:
