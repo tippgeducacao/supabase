@@ -15,7 +15,8 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3';
 import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO } from './prompts.ts';
 import { AGENTE_RECONTATO, montarDossieRecontato } from './prompts-recontato.ts';
 import { AGENTE_CAMPANHA_DIRETA } from './prompts-campanha-direta.ts';
-import { comPresenteEscola, LINK_ESCOLA_GRATUITA } from './escolaGratuita.ts';
+import { comBlocoDaEscola, comPresenteNaDespedida, LINK_ESCOLA_GRATUITA } from './escolaGratuita.ts';
+import type { Encerramento } from './encerramento.ts';
 import { comContinuidadeWebchat } from './continuidadeWebchat.ts';
 import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoNome, renderPrompt } from './contexto.ts';
 import { atualizarAgenteComRatchet, atualizarLead, buscarLead, carregarHistorico, criarLead, excluirDadosLead, gravarMensagem, limparParaRouter, sanitizarHistorico } from './historico.ts';
@@ -378,7 +379,20 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   // biblioteca gratuita junto da despedida. Apensado AQUI, no ponto único onde o prompt
   // já foi renderizado, para valer nas QUATRO personas sem editar o prompts.ts (gerado
   // pela extração do n8n). Régua e link em escolaGratuita.ts.
-  promptAgente = comPresenteEscola(promptAgente);
+  // ...MENOS pra quem já está dentro da Escola: aí o bloco vira o aviso de que ela já tem
+  // acesso. A RPC casa por telefone canônico (o 9º dígito diverge à vontade entre
+  // `leads.whatsapp` e o remotejid) e custa ~6ms, varrendo as linhas DA TAG e não `leads`.
+  // Falha de rede aqui NÃO pode calar o agente: no erro, assume "não está na Escola" e o
+  // convite volta ao comportamento antigo, que é o lado seguro dessa moeda.
+  let estaNaEscola = false;
+  try {
+    const { data, error } = await supabase.rpc('crm_esta_na_escola', { p_remotejid: remotejid });
+    if (error) throw new Error(error.message);
+    estaNaEscola = data === true;
+  } catch (e) {
+    tel.registrar('erro', { onde: 'crm_esta_na_escola' }, undefined, String((e as Error)?.message ?? e));
+  }
+  promptAgente = comBlocoDaEscola(promptAgente, estaNaEscola);
   // Conversa que veio do CHAT DO SITE: o agente precisa saber que o canal mudou, senão
   // fala como se ainda estivesse lá ("já te mandei pelo whats", dito NO whats).
   promptAgente = comContinuidadeWebchat(promptAgente, lead?.veio_do_webchat_em);
@@ -403,6 +417,10 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   let pausouPorTool = false;
   let encerrouPorTool = false;
   let retornoPorFormatura = false;
+  // Guardado como OBJETO (tool + input), não como boolean: quem decide o presente da Escola
+  // precisa saber o MOTIVO — "pediu ligação" e "desistiu" encerram a rodada do mesmo jeito
+  // e merecem tratamento oposto. Ver mereceOPresente() em escolaGratuita.ts.
+  let encerramento: Encerramento | null = null;
 
   // Quando a tool de pausa vem SEM texto junto, o loop dá mais uma volta pro modelo
   // escrever a despedida — e é EXATAMENTE nessa volta que ele, sem nada a dizer,
@@ -414,15 +432,24 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   // ⚠️ A despedida-exemplo daqui carrega o PRESENTE DA ESCOLA (2026-08-05): na telemetria,
   // a esmagadora maioria das pausas vem SEM texto junto, então é NESTA volta que a última
   // mensagem ao lead nasce — sem o convite aqui, o presente simplesmente não sairia.
+  // ⚠️ A despedida-exemplo daqui MUDA conforme a pessoa já tenha ou não acesso à Escola:
+  // pedir "despeça-se COM o presente" a quem já está dentro é instruir o erro na origem, e
+  // aí nenhuma guarda de saída resolve — ela só apagaria o que o modelo acabou de escrever.
   const INSTRUCAO_POS_PAUSA = '[SISTEMA — você acabou de encerrar/pausar este atendimento. '
     + 'NÃO relate isso e NÃO descreva o estado do atendimento.]\n'
-    + 'Se você ainda NÃO se despediu nesta conversa, escreva SÓ a despedida curta ao lead, JÁ COM o '
-    + 'presente da Escola (a conversa acabou sem reunião), por exemplo: '
-    + '"tranquilo, agradeço sua preferência pelo Grupo PPG e fico à disposição se precisar no futuro. '
-    + 'antes de te deixar ir: a ppgvet tem uma biblioteca de conteúdo aberta e totalmente gratuita, '
-    + 'com mais de 30 cursos, artigos, e-books, aulas abertas de pós e certificados. '
-    + 'é um presente da ppgvet educação pra vc, aproveita: ' + LINK_ESCOLA_GRATUITA + '"\n'
-    + 'Se você JÁ mandou o convite da Escola nesta conversa, não repita — mande só a despedida.\n'
+    + (estaNaEscola
+      ? 'Se você ainda NÃO se despediu nesta conversa, escreva SÓ a despedida curta ao lead, '
+        + 'por exemplo: "tranquilo, agradeço sua preferência pelo Grupo PPG e fico à disposição '
+        + 'se precisar no futuro."\n'
+        + '⛔ Esta pessoa JÁ tem acesso à Escola de Especialização — NÃO ofereça a biblioteca '
+        + 'gratuita e NÃO mande o link.\n'
+      : 'Se você ainda NÃO se despediu nesta conversa, escreva SÓ a despedida curta ao lead, JÁ COM o '
+        + 'presente da Escola (a conversa acabou sem reunião), por exemplo: '
+        + '"tranquilo, agradeço sua preferência pelo Grupo PPG e fico à disposição se precisar no futuro. '
+        + 'antes de te deixar ir: a ppgvet tem uma biblioteca de conteúdo aberta e totalmente gratuita, '
+        + 'com mais de 30 cursos, artigos, e-books, aulas abertas de pós e certificados. '
+        + 'é um presente da ppgvet educação pra vc, aproveita: ' + LINK_ESCOLA_GRATUITA + '"\n'
+        + 'Se você JÁ mandou o convite da Escola nesta conversa, não repita — mande só a despedida.\n')
     + 'Se a despedida já foi enviada, responda com texto vazio.\n'
     + 'NUNCA escreva frases como "sem nova mensagem do lead", "*sem resposta necessária*", '
     + '"atendimento pausado" ou "nenhuma ação necessária": elas são enviadas ao WhatsApp do lead.';
@@ -575,6 +602,8 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
         retornoPorFormatura = toolUses.some(
           (tu: any) => tu.name === 'agendar_retorno' && tu.input?.tipo === 'formatura',
         );
+        const tuFim = toolUses.find((tu: any) => TOOLS_QUE_ENCERRAM.has(tu.name));
+        if (tuFim) encerramento = { tool: tuFim.name, input: (tuFim.input ?? {}) as Record<string, unknown> };
         // O prompt manda a despedida vir NA MESMA resposta da tool que encerra;
         // sem este envio ela era descartada pelo `continue` e a rodada acabava
         // muda pro lead (casos Claudia 2026-07-06 e Matheus 2026-08-08).
@@ -593,8 +622,10 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
           continue;
         }
         if (iaTexto) {
+          const comPresente = comPresenteNaDespedida(iaTexto, encerramento, conversaTexto(messages), estaNaEscola);
+          if (comPresente.anexou) tel.registrar('presente_escola_anexado', { onde: 'despedida_com_tool' });
           await enviarResposta(
-            ctx, iaTexto, renovar, tel,
+            ctx, comPresente.texto, renovar, tel,
             pausouPorTool ? undefined : () => iaPausada(remotejid),
           );
           tel.registrar('rodada_fim', { voltas_llm: rodada + 1, respondeu: true }, Date.now() - inicioRodada);
@@ -666,7 +697,11 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
         tel.registrar('envio_abortado_pausa', { onde: 'antes_envio', motivo: 'IA pausada durante a geração' });
       } else {
         await suspenderEsteirasSeRetencao(texto);
-        await enviarResposta(ctx, texto, renovar, tel, pausouPorTool ? undefined : () => iaPausada(remotejid));
+        // É AQUI que a maioria das despedidas nasce: a esmagadora maioria das pausas vem
+        // sem texto junto, então o loop dá mais uma volta só pra escrever o adeus.
+        const comPresente = comPresenteNaDespedida(texto, encerramento, conversaTexto(messages), estaNaEscola);
+        if (comPresente.anexou) tel.registrar('presente_escola_anexado', { onde: 'despedida_pos_pausa' });
+        await enviarResposta(ctx, comPresente.texto, renovar, tel, pausouPorTool ? undefined : () => iaPausada(remotejid));
       }
     }
     tel.registrar('rodada_fim', { voltas_llm: rodada + 1, respondeu: Boolean(texto) }, Date.now() - inicioRodada);

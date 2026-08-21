@@ -6,34 +6,14 @@
 //
 // Tudo aqui é só do WEBCHAT: não passa pelo saida.ts, que é compartilhado com o WhatsApp.
 
-/** Sinal de que uma tool de encerramento rodou nesta rodada. */
-export type Encerramento = { tool: string; input: Record<string, unknown> };
-
-// ── 0. O nome, repetido a cada turno ───────────────────────────────────────────
-// Caso Flávia (21/08/2026): o João a chamou de "vitória" e ela respondeu "e não me chamo
-// vitória". Varrendo profiles, leads, contatos e os retornos das tools, "Vitória" não
-// existe em lugar nenhum — não veio de dado trocado, foi preenchimento de lacuna.
-//
-// O que a conversa mostra: nas 14 mensagens anteriores ele NUNCA usou o nome dela. O nome
-// vivia só no topo do prompt de sistema, renderizado uma vez. Numa conversa longa, a hora
-// de escrever "saudação, NOME," chega com o nome a dezenas de turnos de distância — e o
-// modelo completa pelo FORMATO, não pela memória.
-//
-// Por isso o nome volta a cada turno, no fim do contexto, onde a recência ajuda.
-
-/** Lembrete do nome, apensado ao contexto temporal (que é reinjetado toda rodada). */
-export function notaDoNome(nome: string | null | undefined): string {
-  const limpo = String(nome ?? "").trim();
-  if (!limpo) {
-    return "\n\n**⛔ VOCÊ NÃO SABE O NOME DESTA PESSOA.**\n"
-      + "Não escreva nome nenhum — nem chute, nem 'amigo', nem 'colega'. Fale sem vocativo.";
-  }
-  const primeiro = limpo.split(/\s+/)[0];
-  return `\n\n**A PESSOA COM QUEM VOCÊ ESTÁ FALANDO SE CHAMA: ${primeiro}**\n`
-    + `É o ÚNICO nome que existe nesta conversa. Se for usar nome, use "${primeiro}" — mais nenhum.\n`
-    + "⛔ Na dúvida, NÃO use nome: falar sem nome é neutro, falar o nome errado é o erro mais "
-    + "visível que existe. A pessoa sabe o próprio nome e percebe na hora.";
-}
+// Encerramento e nome são COMPARTILHADOS com o agente de WhatsApp — moram em
+// ../crm-agente-sdr/ (mesmo padrão do escolaGratuita.ts, que este agente já importa de lá).
+// Reexportados aqui pra que o resto do webchat continue enxergando um lugar só.
+export type { Encerramento } from '../crm-agente-sdr/encerramento.ts';
+export { ehDespedidaDeVerdade, motivoDoEncerramento } from '../crm-agente-sdr/encerramento.ts';
+export { notaDoNome } from '../crm-agente-sdr/nomeDoLead.ts';
+import type { Encerramento, MotivoEncerramento } from '../crm-agente-sdr/encerramento.ts';
+import { motivoDoEncerramento } from '../crm-agente-sdr/encerramento.ts';
 
 // ── 1. Despedida por MOTIVO ────────────────────────────────────────────────────
 // Rodada de 20/08: a despedida de quem DESISTIU saiu para o lead sem graduação (q-01),
@@ -42,7 +22,7 @@ export function notaDoNome(nome: string | null | undefined): string {
 // MODELO escolheu o texto errado tendo o certo no roteiro; no último saiu o texto fixo do
 // código. Por isso o texto passou a ser NOSSO, sempre: o modelo decide qual é a situação
 // (chamando a tool com o tipo/motivo certo), a frase quem escolhe é esta função.
-const DESPEDIDAS: Record<string, string> = {
+const DESPEDIDAS: Record<MotivoEncerramento, string> = {
   sem_graduacao:
     "nossas pós seguem o modelo lato sensu, que pede graduação completa pra matrícula. "
     + "fica à vontade pra nos procurar quando concluir, vai ser um prazer marcar essa conversa.",
@@ -64,55 +44,11 @@ const DESPEDIDAS: Record<string, string> = {
 /** Usada quando o modelo não escreveu nada e o motivo não foi reconhecido. */
 export const DESPEDIDA_GENERICA = DESPEDIDAS.desinteresse;
 
-/**
- * Classifica o encerramento pelo que a tool recebeu. O `tipo` manda; o `motivo` é texto
- * livre do modelo e só serve de desempate — nunca o contrário (é a mesma régua do
- * arquivamento no tools.ts: o discriminador é o ENUM, não a redação).
- *
- * ⚠️ Motivo que não bate com nada devolve **null** de propósito, e aí o texto do modelo
- * é preservado. `pausa_ia` é chamada pra coisas que não são despedida — cancelamento e
- * remarcação, por exemplo — e chutar "desinteresse" no desconhecido trocaria uma frase
- * certa por uma errada. Sobrescrever só onde a gente tem certeza.
- */
-export function motivoDoEncerramento(e: Encerramento): keyof typeof DESPEDIDAS | null {
-  if (e.tool === "temporizador_proxima_turma") return "proxima_turma";
-  if (e.tool !== "pausa_ia") return null;
-
-  const tipo = String(e.input?.tipo ?? "").toLowerCase();
-  if (tipo === "sem_graduacao") return "sem_graduacao";
-  if (tipo === "nao_perturbe") return "desinteresse";
-
-  const motivo = String(e.input?.motivo ?? "").toLowerCase();
-  if (/human[oa]|atendente|pessoa de verdade/.test(motivo)) return "humano";
-  if (/liga(ç|c)(ã|a)o|telefon/.test(motivo)) return "ligacao";
-  if (/alun[oa]|matriculad/.test(motivo)) return "aluno";
-  if (/cancel|remarc|desmarc/.test(motivo)) return "cancelamento";
-  if (/incompat|forma(ç|c)(ã|a)o/.test(motivo)) return "incompativel";
-  if (/desinteress|sem interesse|n(ã|a)o quer|parar de/.test(motivo)) return "desinteresse";
-  return null;
-}
-
 /** A despedida canônica do motivo, ou null quando não é caso de encerramento. */
 export function despedidaDe(e: Encerramento | null): string | null {
   if (!e) return null;
   const motivo = motivoDoEncerramento(e);
   return motivo ? DESPEDIDAS[motivo] : null;
-}
-
-// Nem toda pausa é adeus. Em `humano`, `ligacao`, `aluno` e `cancelamento` o atendimento
-// CONTINUA — alguém do time assume. Só nos outros a conversa acabou de verdade.
-//
-// Isso decide quem leva o convite da Escola gratuita, que é despedida e não moeda de
-// troca. Medido no WhatsApp em 20/08: o convite grudou em 6 de 7 pedidos de ligação, e o
-// resultado é autocontraditório — "beleza já vou te ligar" seguido de "antes de te deixar
-// ir, um presente da ppgvet…". Prometeu ligar e se despediu no mesmo fôlego.
-const NAO_SAO_ADEUS = new Set(["humano", "ligacao", "aluno", "cancelamento"]);
-
-/** O atendimento acabou mesmo? (falso quando alguém do time vai assumir) */
-export function ehDespedidaDeVerdade(e: Encerramento | null): boolean {
-  if (!e) return false;
-  const motivo = motivoDoEncerramento(e);
-  return Boolean(motivo) && !NAO_SAO_ADEUS.has(String(motivo));
 }
 
 // ── 2. O material vai pro WhatsApp, não pro chat ───────────────────────────────

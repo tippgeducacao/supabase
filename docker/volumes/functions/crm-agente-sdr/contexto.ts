@@ -8,6 +8,8 @@
 // ainda cursa a graduação (elegibilidadeFormatura.ts) — pelo mesmo motivo do calendário
 // dos próximos dias: o modelo erra conta de calendário, então recebe a data pronta.
 import { blocoElegibilidadeFormatura } from './elegibilidadeFormatura.ts';
+// Reexportado por conveniência: quem monta contexto quer o lembrete de nome junto.
+export { notaDoNome } from './nomeDoLead.ts';
 
 export function extrairPrimeiroNome(nomeCompleto: string | null | undefined): string {
   if (!nomeCompleto) return '';
@@ -334,26 +336,3 @@ export function renderPrompt(prompt: string, vars: Record<string, string>): stri
   return prompt.replace(/\{\{\s*\$json\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g, (m, chave) => vars[chave] ?? m);
 }
 
-// Gêmea de crm-webchat/guardas.ts → notaDoNome. Mexeu aqui, mexeu lá: são funções
-// duplicadas de propósito (cada edge function é um bundle próprio, não dá pra importar
-// da pasta vizinha sem quebrar o deploy).
-//
-// Por que o nome volta A CADA TURNO em vez de ficar só no topo do prompt: em 21/08/2026
-// o João chamou a Flávia de "vitória". "Vitória" não existe em profiles, leads,
-// sac_contatos, cliente_ppg_leads_sdr, nos retornos das tools nem nas 28 mensagens — e
-// nas 14 mensagens anteriores ele NUNCA tinha usado o nome dela. Não foi dado trocado,
-// foi preenchimento de lacuna: na hora de escrever "saudação, NOME," o nome certo estava
-// a dezenas de turnos de distância e o modelo completou pelo FORMATO. Aqui o contexto vai
-// depois do breakpoint de cache, no fim — onde a recência ajuda.
-export function notaDoNome(nome: string | null | undefined): string {
-  const limpo = String(nome ?? '').trim();
-  if (!limpo) {
-    return '\n\n**⛔ VOCÊ NÃO SABE O NOME DESTA PESSOA.**\n'
-      + 'Não escreva nome nenhum — nem chute, nem "amigo", nem "colega". Fale sem vocativo.';
-  }
-  const primeiro = limpo.split(/\s+/)[0];
-  return `\n\n**A PESSOA COM QUEM VOCÊ ESTÁ FALANDO SE CHAMA: ${primeiro}**\n`
-    + `É o ÚNICO nome que existe nesta conversa. Se for usar nome, use "${primeiro}" — mais nenhum.\n`
-    + '⛔ Na dúvida, NÃO use nome: falar sem nome é neutro, falar o nome errado é o erro mais '
-    + 'visível que existe. A pessoa sabe o próprio nome e percebe na hora.';
-}
