@@ -1103,8 +1103,16 @@ Deno.serve(async (req) => {
   }
 
   const acao = texto(body.acao, 40);
-  const acaoTeste = acao.startsWith("teste_");
-  if (!acaoTeste && origemBloqueada(req)) {
+  /*
+    A allowlist de origem existe pra impedir que QUALQUER site embede o widget e gaste o
+    nosso agente. Ações que exigem USUÁRIO LOGADO da PPGVET são outro modelo de ameaça — o
+    token já é a barreira — e vêm do app (app.ppgeducacao.site), que não é uma LP e não
+    está na lista. Sem esta isenção o botão "Chamar no WhatsApp" levaria 403 silencioso,
+    exatamente como uma LP em domínio novo (incidente já conhecido).
+    ⚠️ Só entra aqui ação que confere sessão do usuário logo na primeira linha.
+  */
+  const acaoDeUsuarioLogado = acao.startsWith("teste_") || acao === "levar_para_whatsapp";
+  if (!acaoDeUsuarioLogado && origemBloqueada(req)) {
     return json({ ok: false, erro: "origem_nao_permitida" }, 403);
   }
 
