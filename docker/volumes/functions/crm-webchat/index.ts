@@ -1052,6 +1052,92 @@ async function acaoLevarParaWhatsapp(body: Record<string, unknown>, req: Request
   return json({ ok: true, ja_enviado: false });
 }
 
+/**
+ * ÁUDIO DO ATENDENTE no chat do site (fase 4).
+ *
+ * O caminho de ida já existia: o lead grava, o widget toca, o Whisper transcreve. Faltava a
+ * volta — o atendente só podia escrever. Num chat onde a pessoa acabou de mandar um áudio,
+ * responder por texto é uma assimetria que ela percebe.
+ *
+ * ⚠️ Espelha `acaoAudio` (a do lead) de propósito, invertendo só a direção: mesmo bucket,
+ * mesma pasta, mesmo formato de `anexos` — o widget já sabe tocar isso, porque
+ * `addBolhaMsg` lê o anexo pela direção, não pelo remetente.
+ *
+ * ⚠️ TRANSCREVE o áudio do atendente também. Não é pro lead (ele ouve), é para os DOIS
+ * lugares onde a conversa continua sendo lida: o espelho no SAC, que mostraria só "[áudio]",
+ * e o próprio João, se a conversa for devolvida pra ele — sem a transcrição ele retomaria
+ * sem saber o que o humano prometeu.
+ *
+ * ⚠️ Assume a conversa, igual ao envio de texto (`sac_v2_webchat_enviar`): quem responde
+ * passa a ser o atendente até alguém devolver ao João. Mandar áudio e continuar com a IA
+ * respondendo por cima seria a pior combinação possível.
+ */
+async function acaoAtendenteAudio(body: Record<string, unknown>, req: Request) {
+  if (!(await usuarioLogado(req))) return json({ ok: false, erro: "acesso_negado" }, 403);
+  const sessaoId = texto(body.sessao_id, 40);
+  if (!UUID_RE.test(sessaoId)) return json({ ok: false, erro: "sessao_invalida" }, 400);
+  const b64 = typeof body.audio_base64 === "string" ? body.audio_base64 : "";
+  if (!b64) return json({ ok: false, erro: "audio_vazio" }, 400);
+  const mime = texto(body.mime, 60) || "audio/webm";
+
+  const sessao = await carregarSessao(sessaoId);
+  if (!sessao) return json({ ok: false, erro: "sessao_nao_encontrada" }, 404);
+  if (sessao.bloqueada) return json({ ok: false, erro: "sessao_bloqueada" }, 403);
+
+  let bytes: Uint8Array;
+  try {
+    bytes = b64ToBytes(b64);
+  } catch {
+    return json({ ok: false, erro: "audio_invalido" }, 400);
+  }
+  if (!bytes.length) return json({ ok: false, erro: "audio_vazio" }, 400);
+
+  // ⚠️ Sem URL não há o que tocar: aqui o upload é BLOQUEANTE, ao contrário do lado do lead,
+  // onde a transcrição ainda salva a mensagem. Um balão de áudio sem áudio é pior que um erro.
+  let url: string | null = null;
+  try {
+    const ext = extDoMime(mime);
+    const path = `webchat/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}.${ext}`;
+    const { error: stErr } = await supabase.storage
+      .from("whatsapp-anexos")
+      .upload(path, bytes, { contentType: mime, upsert: false });
+    if (stErr) throw new Error(stErr.message);
+    url = toPublicUrl(supabase.storage.from("whatsapp-anexos").getPublicUrl(path).data.publicUrl);
+  } catch (e) {
+    console.error(`[crm-webchat] atendente_audio storage: ${(e as Error).message}`);
+    return json({ ok: false, erro: "falha_no_upload" }, 500);
+  }
+
+  const transcricao = await transcreverWhisper(bytes, mime);
+  const conteudo = transcricao || "[áudio]";
+  const anexos = [{ tipo: "audio", mime_type: mime, url, url_storage: url }];
+
+  const { data: msg, error } = await supabase
+    .from("webchat_mensagens")
+    .insert({
+      sessao_id: sessaoId,
+      direcao: "outbound",
+      origem: "humano",
+      conteudo,
+      anexos,
+      transcricao: transcricao || null,
+    })
+    .select("id")
+    .single();
+  if (error) {
+    console.error(`[crm-webchat] atendente_audio insert: ${error.message}`);
+    return json({ ok: false, erro: "erro_interno" }, 500);
+  }
+
+  await syncSac(sessaoId, "outbound", "humano", conteudo, anexos);
+  await supabase
+    .from("webchat_sessoes")
+    .update({ atendimento_humano: true, ultima_atividade: new Date().toISOString() })
+    .eq("id", sessaoId);
+
+  return json({ ok: true, mensagem_id: msg.id, transcricao });
+}
+
 async function acaoPoll(body: Record<string, unknown>) {
   const sessaoId = texto(body.sessao_id, 40);
   if (!UUID_RE.test(sessaoId)) return json({ ok: false, erro: "sessao_invalida" }, 400);
@@ -1095,7 +1181,11 @@ Deno.serve(async (req) => {
     // do cap de texto — as demais ficam no limite pequeno (anti-DoS).
     if (cru.length > MAX_BODY_AUDIO) return json({ ok: false, erro: "payload_grande" }, 413);
     body = JSON.parse(cru);
-    if (body.acao !== "audio" && cru.length > MAX_BODY_BYTES) {
+    // ⚠️ As DUAS ações de áudio (a do lead e a do atendente) passam do cap de texto: 16 KB
+    // não cabe nem um segundo de gravação em base64, e o 413 sairia antes de qualquer
+    // guard, virando "não consigo mandar áudio" sem explicação.
+    const acaoComAudio = body.acao === "audio" || body.acao === "atendente_audio";
+    if (!acaoComAudio && cru.length > MAX_BODY_BYTES) {
       return json({ ok: false, erro: "payload_grande" }, 413);
     }
   } catch {
@@ -1111,7 +1201,8 @@ Deno.serve(async (req) => {
     exatamente como uma LP em domínio novo (incidente já conhecido).
     ⚠️ Só entra aqui ação que confere sessão do usuário logo na primeira linha.
   */
-  const acaoDeUsuarioLogado = acao.startsWith("teste_") || acao === "levar_para_whatsapp";
+  const acaoDeUsuarioLogado = acao.startsWith("teste_")
+    || acao === "levar_para_whatsapp" || acao === "atendente_audio";
   if (!acaoDeUsuarioLogado && origemBloqueada(req)) {
     return json({ ok: false, erro: "origem_nao_permitida" }, 403);
   }
@@ -1134,6 +1225,8 @@ Deno.serve(async (req) => {
         return await acaoTesteEnviar(body, req);
       case "teste_responder":
         return await acaoTesteResponder(body, req);
+      case "atendente_audio":
+        return await acaoAtendenteAudio(body, req);
       case "levar_para_whatsapp":
         return await acaoLevarParaWhatsapp(body, req);
       case "poll":
