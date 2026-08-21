@@ -38,6 +38,11 @@ export function resultadoToolMockado(
       return { resultado: "Interesse na próxima turma registrado com sucesso.", id };
     case "atualizar_dados_lead":
       return { resultado: "Dados do lead atualizados com sucesso.", id };
+    case "levar_para_whatsapp":
+      // Mock explícito, e não o `default`: no harness a diferença entre "ação bloqueada"
+      // e "mensagem enviada" muda o que o modelo escreve depois — e é justamente a fala
+      // seguinte que a rubrica avalia.
+      return { resultado: "Mensagem enviada no WhatsApp do visitante. Confirme dizendo o canal e avise que é só responder por lá.", id };
     case "consulta_disponibilidade_ppg":
       return { resultado: "Consulta recebida. Use a disponibilidade informada anteriormente e não invente horários.", id };
     default:

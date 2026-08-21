@@ -18,6 +18,10 @@ import { montarContextoTemporal, renderPrompt } from "../crm-agente-sdr/contexto
 import { comPresenteEscola, LINK_ESCOLA_GRATUITA } from "../crm-agente-sdr/escolaGratuita.ts";
 import { carregarTools, chamarAgentePrincipal, chamarRouter } from "../crm-agente-sdr/agente.ts";
 import { executarTool, montarToolResults } from "../crm-agente-sdr/tools.ts";
+// Frases que viram PARÂMETRO de template ficam num módulo puro pra poderem ser testadas:
+// elas saem no WhatsApp de um lead, com a marca da PPGVET.
+import { fraseConviteWhatsapp, frasePedidoCronograma, limparCurso } from "./frases.ts";
+export { frasePedidoCronograma };
 import { buscarLead, limparParaRouter, sanitizarHistorico } from "../crm-agente-sdr/historico.ts";
 // Fracionamento humanizado — o MESMO do João de WhatsApp (saida.ts): humaniza (tira "!"/
 // travessão) e quebra em 2-3 frases via gpt-4o-mini. Aqui só GERA os chunks; o espaçamento
@@ -58,6 +62,10 @@ const WEBCHAT_TEMPLATE_CRONOGRAMA = Deno.env.get("WEBCHAT_TEMPLATE_CRONOGRAMA")
 // está aprovado. Template vive POR WABA: trocar de número exige recriar o template lá.
 const WEBCHAT_WA_ACCOUNT_ID = Deno.env.get("WEBCHAT_WA_ACCOUNT_ID")
   ?? "d2984495-f70e-4c40-a47b-4b969d735a07";
+// TEMPLATE DA PONTE PRO WHATSAPP (fase 4). Mesma WABA do cronograma acima — template vive
+// POR WABA, então trocar de número exige recriá-lo lá.
+const WEBCHAT_TEMPLATE_CONTINUIDADE = Deno.env.get("WEBCHAT_TEMPLATE_CONTINUIDADE")
+  ?? "webchat_continuar_conversa_utility";
 const supabase = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "");
 
 const MAX_RODADAS = 6;
@@ -80,10 +88,6 @@ type Msg = { role: "user" | "assistant"; content: any };
 // CtxConversa do agente real — no webchat waAccountId/oportunidadeId ficam nulos.
 type CtxConversa = { remotejid: string; telefone: string; waAccountId: string | null; leadId: string | null; oportunidadeId: string | null; nome?: string | null };
 
-function limparCurso(c: string | null): string {
-  if (!c) return "";
-  return c.replace(/^p[oó]s\s*\|\s*/i, "").replace(/^mba\s*\|\s*/i, "MBA ").replace(/^curso\s*\|\s*/i, "").trim();
-}
 
 // Nota do CANAL apensada ao prompt real (o João de WhatsApp não sabe que aqui é chat de site).
 function notaCanal(curso: string | null): string {
@@ -156,12 +160,6 @@ function dividirAberturaEm2(texto: string): string[] {
 // {{2}} tem que terminar puxando algo que "Consegue confirmar?" complete, senão a última
 // linha fica órfã ("confirmar o quê?").
 // ⚠️ Uma linha só: parâmetro de corpo com quebra de linha faz a Meta recusar o envio.
-export function frasePedidoCronograma(curso: string): string {
-  const oQue = /^mba\b/i.test(curso.trim()) ? `do ${curso}` : `da pós em ${curso}`;
-  return `Segue o cronograma ${oQue}, que vc pediu no site. Pra eu seguir com o seu atendimento, `
-    + "preciso saber se é essa mesmo a pós que te interessa.";
-}
-
 async function webchatEnviaInformacoes(
   tu: any,
   telefone: string,
@@ -264,6 +262,126 @@ async function webchatEnviaInformacoes(
     return { resultado: partes.join(" ") || "Feito.", id: tu.id };
   } catch (e) {
     return { resultado: `Erro técnico ao enviar (${(e as Error).message}). Diga que envia em seguida e conduza.`, id: tu.id };
+  }
+}
+
+// ── FASE 4: a ponte pro WhatsApp ────────────────────────────────────────────
+// O visitante pede pra continuar no WhatsApp ("me chama lá", "prefiro por whats"). Antes
+// disto o João só podia dizer "então te chamo lá" e não acontecia nada — quem tinha que
+// agir era um humano, e ninguém sabia que precisava.
+//
+// ⚠️ NÃO existe janela de 24h aqui: o visitante nunca escreveu pro número. Mensagem solta é
+// recusada pela Meta, então o caminho é TEMPLATE de utilidade — o mesmo motivo pelo qual o
+// cronograma sai por template. A resposta dele ao template é que abre a janela.
+//
+// ⚠️ A tool é registrada em CÓDIGO, não em `lista_tools_claude`: aquela tabela é
+// compartilhada com o João de WhatsApp (mesmas linhas por `agente`), e lá "levar pro
+// WhatsApp" não faz sentido nenhum — a pessoa já está no WhatsApp.
+export const TOOL_LEVAR_WHATSAPP = {
+  name: "levar_para_whatsapp",
+  description:
+    "Continua a conversa no WhatsApp do visitante. Use APENAS quando ELE pedir pra falar por "
+    + "lá (\"me chama no whats\", \"prefiro por whatsapp\", \"me manda mensagem\") ou disser que "
+    + "precisa sair do site agora. Dispara uma mensagem oficial no WhatsApp dele; a resposta "
+    + "dele lá continua o mesmo atendimento. NÃO use por conta própria pra 'garantir contato', "
+    + "e NÃO use se ele só pediu material (para material use envia_informacoes).",
+  input_schema: {
+    type: "object",
+    properties: {
+      motivo: {
+        type: "string",
+        description: "O que o visitante disse que motivou a mudança de canal, com as palavras dele.",
+      },
+    },
+    required: ["motivo"],
+  },
+} as const;
+
+/**
+ * Segunda variável do template — frase montada AQUI, não pelo modelo.
+ * ⚠️ Uma linha só: parâmetro de corpo com quebra de linha faz a Meta recusar o envio.
+ */
+async function webchatLevarParaWhatsapp(
+  tu: any,
+  telefone: string,
+  curso: string | null,
+  nome: string,
+  sessaoId: string | null,
+): Promise<Record<string, unknown>> {
+  if (!telefone) {
+    return {
+      resultado: "RECUSADO: não há WhatsApp cadastrado nesta conversa.",
+      instrucao: "Peça o número em UMA linha antes de tentar de novo.",
+      id: tu.id,
+    };
+  }
+
+  // IDEMPOTÊNCIA — a mesma régua do cronograma (cron-03). Pedir duas vezes não pode virar
+  // dois templates: além de parecer spam, cada template é cobrado.
+  if (sessaoId) {
+    try {
+      const { data } = await supabase
+        .from("webchat_sessoes").select("levado_para_whatsapp_em").eq("id", sessaoId).maybeSingle();
+      if ((data as { levado_para_whatsapp_em?: string | null } | null)?.levado_para_whatsapp_em) {
+        return {
+          resultado: "A mensagem no WhatsApp JÁ FOI enviada nesta conversa. NÃO reenvie.",
+          instrucao: "Diga que já mandou e que é só responder por lá — sem reenviar.",
+          id: tu.id,
+        };
+      }
+    } catch (e) {
+      // Fail-open: a trava protege o funil, não pode derrubar atendimento por causa de infra.
+      console.log(`[crm-webchat] leitura de levado_para_whatsapp_em falhou (segue): ${(e as Error).message}`);
+    }
+  }
+
+  const primeiro = (nome || "").trim().split(/\s+/)[0] || "tudo bem";
+  try {
+    const r = await fetch(`${SUPABASE_URL}/functions/v1/crm-whatsapp-send`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        telefone,
+        tipo: "template",
+        template_name: WEBCHAT_TEMPLATE_CONTINUIDADE,
+        template_lang: "pt_BR",
+        template_components: [{
+          type: "body",
+          parameters: [
+            { type: "text", text: primeiro },
+            { type: "text", text: fraseConviteWhatsapp(curso) },
+          ],
+        }],
+        wa_account_id: WEBCHAT_WA_ACCOUNT_ID || null,
+      }),
+    });
+    const b: any = await r.json().catch(() => ({}));
+    if (r.status < 200 || r.status >= 300) {
+      return {
+        resultado: `Não consegui mandar agora (${b?.error || r.status}). Diga que manda em seguida e siga a conversa, sem citar o erro.`,
+        id: tu.id,
+      };
+    }
+    if (sessaoId) {
+      try {
+        await supabase.from("webchat_sessoes")
+          .update({ levado_para_whatsapp_em: new Date().toISOString() })
+          .eq("id", sessaoId);
+      } catch (e) {
+        console.log(`[crm-webchat] registrar levado_para_whatsapp falhou (segue): ${(e as Error).message}`);
+      }
+    }
+    return {
+      resultado: "Mensagem ENVIADA no WhatsApp do visitante. ⛔ Ela NÃO aparece neste chat: "
+        + "confirme dizendo o canal (ex.: \"acabei de te mandar no seu whats\") e avise que é "
+        + "só responder por lá que você continua de onde pararam.",
+      id: tu.id,
+    };
+  } catch (e) {
+    return { resultado: `Erro técnico ao enviar (${(e as Error).message}). Diga que manda em seguida e conduza.`, id: tu.id };
   }
 }
 
@@ -405,6 +523,9 @@ export async function responderWebchat(
 
   let tools: any[] = [];
   try { tools = await carregarTools(supabase, agente); } catch (e) { console.error(`[crm-webchat] carregarTools: ${(e as Error).message}`); }
+  // A ponte pro WhatsApp é EXCLUSIVA do chat do site: `lista_tools_claude` é compartilhada
+  // com o João de WhatsApp, e lá esta tool não faria sentido (a pessoa já está no WhatsApp).
+  tools = [...tools, TOOL_LEVAR_WHATSAPP];
 
   const messages: Msg[] = [...base];
   // Não basta saber QUE encerrou: a despedida depende do motivo. Guarda a chamada.
@@ -490,6 +611,7 @@ export async function responderWebchat(
       let saidaTool: Record<string, unknown>;
       if (mockado) saidaTool = resultadoToolMockado(tu, limparCurso(curso));
       else if (nomeTool === "envia_informacoes") saidaTool = await webchatEnviaInformacoes(tu, telefone, curso, nome, sessaoId);
+      else if (nomeTool === "levar_para_whatsapp") saidaTool = await webchatLevarParaWhatsapp(tu, telefone, curso, nome, sessaoId);
       else saidaTool = await executarTool(supabase, tu, ctx);
       // Guarda a resposta da tool no MESMO registro (o push foi por referência).
       registro.resultado = String(
