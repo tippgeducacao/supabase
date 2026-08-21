@@ -18,6 +18,9 @@
 //   POST ?acao=montar&dry=1        -> simula (nao cria lista, nao envia, nao marca)
 //   POST ?acao=faxina&dry=1        -> lista o que MORRERIA, sem apagar nada
 //   POST ?acao=faxina&ids=1,2      -> apaga listas por id (usado no teste do DELETE)
+//   POST ?acao=flag&nome=check_smart_filter&valor=false
+//                                  -> liga/desliga um filtro de entrada da campanha
+//                                     (so as 3 check_*; &dry=1 so mostra os valores)
 //   POST ?acao=repescar            -> se a lista do dia ACABOU (dial+redial = 0),
 //                                     remonta com a fila inteira. Cron de 15 em 15
 //                                     min, 11:00-18:30 BRT. &dry=1 simula
@@ -1069,6 +1072,81 @@ async function handler(req: Request): Promise<Response> {
     } catch (err) {
       return json({ error: 'GET falhou', detail: String(err) }, 502)
     }
+  }
+
+  // ---------------------------------------------------------------- FLAG ----
+  // Liga/desliga um dos filtros de entrada da campanha.
+  //
+  // POR QUE EXISTE: sao esses filtros que descartam ~73% do mailing no import, em
+  // silencio (200 OK com imported_lines menor). E eles NAO aparecem em lugar
+  // nenhum de "Configurar Campanha" — as quatro abas foram varridas em 21/08/2026.
+  // So existem no modelo da API. `PATCH /campaigns/{id}` e atualizacao PARCIAL,
+  // entao mexer numa flag nao mexe no resto da campanha.
+  //
+  // TRAVA: so estas tres chaves, so booleano. Esta function nao vira ferramenta
+  // de editar campanha — se um dia precisar mexer em outra coisa, faca no painel,
+  // onde fica registrado quem mudou.
+  //
+  // ⚠️ `check_dnd` (Nao Me Perturbe) e registro LEGAL de telemarketing. Desligar e
+  // decisao da diretoria, nao do TI. Esta aqui porque a API aceita, nao porque e
+  // recomendado.
+  if (acao === 'flag') {
+    const FLAGS_PERMITIDAS = ['check_smart_filter', 'check_blacklist', 'check_dnd']
+    const nome = (url.searchParams.get('nome') ?? '').trim()
+    const valorTxt = (url.searchParams.get('valor') ?? '').trim().toLowerCase()
+
+    if (!FLAGS_PERMITIDAS.includes(nome)) {
+      return json({ error: `nome deve ser uma de: ${FLAGS_PERMITIDAS.join(', ')}` }, 400)
+    }
+    if (valorTxt !== 'true' && valorTxt !== 'false') {
+      return json({ error: 'valor deve ser true ou false' }, 400)
+    }
+    const valor = valorTxt === 'true'
+
+    const lerCampanha = async (): Promise<Record<string, unknown> | null> => {
+      const r = await fetch(alvo(base, `/campaigns/${campanha}`), { headers: { Accept: 'application/json' } })
+      if (!r.ok) return null
+      const j = await r.json()
+      return (j?.data ?? j) as Record<string, unknown>
+    }
+
+    const antes = await lerCampanha()
+    if (!antes) return json({ error: 'nao consegui ler a campanha antes de mexer' }, 502)
+
+    if (dry) {
+      return json({
+        ok: true, acao: 'flag', dry: true, nome,
+        valor_atual: antes[nome] ?? null, valor_novo: valor,
+        todas_as_flags: Object.fromEntries(FLAGS_PERMITIDAS.map((f) => [f, antes[f] ?? null])),
+      })
+    }
+
+    const resp = await fetch(alvo(base, `/campaigns/${campanha}`), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ [nome]: valor }),
+    })
+    const corpo = (await resp.text()).slice(0, 600)
+
+    // Le de novo: a resposta do PATCH pode dizer OK sem ter aplicado. So o valor
+    // relido prova que mudou — mesma licao do `imported_lines`.
+    const depois = await lerCampanha()
+    const aplicou = depois ? depois[nome] === valor : null
+
+    return json({
+      ok: aplicou === true,
+      acao: 'flag',
+      nome,
+      valor_antes: antes[nome] ?? null,
+      valor_pedido: valor,
+      valor_relido: depois ? (depois[nome] ?? null) : null,
+      aplicou,
+      status_do_patch: resp.status,
+      corpo_do_patch: corpo,
+      todas_as_flags_agora: depois
+        ? Object.fromEntries(FLAGS_PERMITIDAS.map((f) => [f, depois[f] ?? null]))
+        : null,
+    })
   }
 
   // ------------------------------------------------------------ FAXINA ----
