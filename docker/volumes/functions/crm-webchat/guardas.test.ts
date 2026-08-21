@@ -136,6 +136,19 @@ describe('nome inventado', () => {
     expect(r.removidos).toEqual(['Márcia']);
   });
 
+  // Caso REAL de 21/08/2026: a lead se chamava Flávia, o João escreveu "vitória, então
+  // segue assim:" e ela respondeu "e não me chamo vitória". A guarda anterior exigia
+  // inicial maiúscula — e o João escreve tudo em caixa baixa por regra de persona, então
+  // ela pedia justamente o que ele nunca produz.
+  it('pega o nome inventado em MINÚSCULA abrindo a frase (caso Flávia)', () => {
+    const r = tirarNomeInventado(
+      'vitória, então segue assim: como a pós é lato sensu, a matrícula pede a graduação.',
+      'Flávia',
+    );
+    expect(r.removidos).toEqual(['vitória']);
+    expect(r.texto).toMatch(/^então segue assim/);
+  });
+
   it('mantém o nome do lead abrindo a frase', () => {
     const t = 'Gustavo, sua formação já é atendida.';
     expect(tirarNomeInventado(t, 'Gustavo Teste').texto).toBe(t);

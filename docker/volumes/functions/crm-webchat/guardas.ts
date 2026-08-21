@@ -121,10 +121,16 @@ export function corrigirCanal(texto: string): { texto: string; trocou: boolean }
 // virava "Bacana,sentido", porque "faz" só precisava não estar na lista de exceções.
 const RE_VOCATIVO = /\b(oi|olá|ola|tranquilo|tranquila|beleza|show|fechado|bacana|certo|obrigado|obrigada|valeu)\s*,\s*([A-Za-zÀ-ÿ]{3,20})\s*([.,!?;]|$)/gi;
 
-// O nome ABRINDO a frase, sem saudação antes: "Márcia, sua formação já é atendida"
-// (achado no reteste). Exige inicial maiúscula e a vírgula logo depois — sem as duas
-// condições, comeria o começo de qualquer frase.
-const RE_NOME_ABRINDO = /^\s*([A-ZÀ-Ý][a-zà-ÿ]{2,15})\s*,\s*/;
+// O nome ABRINDO a frase, sem saudação antes: "Márcia, sua formação já é atendida".
+//
+// ⚠️ Aceita MINÚSCULA também (21/08/2026). A versão anterior exigia inicial maiúscula e
+// deixou passar "vitória, então segue assim:" numa conversa real — a lead respondeu "e não
+// me chamo vitória". O João escreve tudo em caixa baixa por regra de persona, então exigir
+// maiúscula era pedir justamente o que ele nunca produz.
+//
+// O que segura o falso positivo não é a caixa, é a vírgula colada + a lista de exceções:
+// "beleza,", "então,", "certo," e companhia estão todas em NAO_SAO_NOME.
+const RE_NOME_ABRINDO = /^\s*([a-zà-ÿA-ZÀ-Ý][a-zà-ÿ]{2,15})\s*,\s*/;
 
 // Palavra que o João usa muito no começo de frase e que NÃO é nome. A lista é a única
 // coisa entre a guarda e um falso positivo, então ela puxa pro conservador: na dúvida,
