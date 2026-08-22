@@ -16,6 +16,7 @@ import { chaveDaThread, parsearMensagem, resumo } from '../_shared/imap/mime.ts'
 import { abrirSessao, carregarConfig, limparErro, marcarErro, classificarErro } from '../_shared/imap/caixa.ts';
 import { pontoDePartida } from '../_shared/imap/ponteiros.ts';
 import type { SessaoImap } from '../_shared/imap/conexao.ts';
+import { diferencaDeSinalizador, emLotes } from '../_shared/emailReconciliacao.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -260,6 +261,80 @@ async function sincronizarPasta(
   return { fronteira, inseridas, parcial };
 }
 
+const LOTE_UPDATE = 200;
+
+/**
+ * Reconcilia o "não lido" da INBOX contra o servidor, que é a fonte da verdade.
+ *
+ * ⚠️ Espelha o `reconciliarNaoLidos` do motor do Gmail e existe pelo mesmo motivo:
+ * o sync só sabia LIGAR o `nao_lido` (`if (!ehSaida && naoLido) patch.nao_lido = true`),
+ * nunca desligar. Quem lia no webmail deixava a conversa marcada como não lida aqui
+ * pra sempre — a caixa tecnologia.inovacao tinha 1.273 de 1.393 assim.
+ *
+ * Exige a INBOX já SELECIONADA por quem chama (UID é por pasta — ler UID com a
+ * pasta errada selecionada opera na mensagem errada, em silêncio).
+ */
+async function reconciliarNaoLidosImap(admin: any, caixa: any, sessao: SessaoImap) {
+  const uidsNaoLidos = await sessao.cliente.uidsNaoLidos();
+
+  // UID -> a chave com que a mensagem foi gravada. A pasta faz parte da chave
+  // justamente porque o UID sozinho não diz de onde veio.
+  const chaves = uidsNaoLidos.map((uid) => `imap:${caixa.id}:inbox:${uid}`);
+
+  // ⚠️ Este conjunto é a lista do que CONTINUA não lido. Se uma das consultas
+  // falhasse e ele saísse incompleto, tudo que ficou de fora seria marcado como
+  // LIDO — sumiria da frente da pessoa o e-mail que ela ainda não viu. Por isso
+  // erro aqui ABORTA a reconciliação (o catch de quem chama só registra e segue),
+  // em vez de virar um conjunto menor que passa por legítimo.
+  const deveriaEstarNaoLida = new Set<string>();
+  for (const lote of emLotes(chaves, LOTE_UPDATE)) {
+    const { data, error } = await admin
+      .from('email_mensagens')
+      .select('thread_id, is_outgoing')
+      .in('gmail_message_id', lote);
+    if (error) throw new Error(`traducao_uid_thread_falhou: ${error.message}`);
+    // Mensagem de saída não conta como "não lida" — é a mesma regra do sync.
+    for (const m of data || []) if (!m.is_outgoing) deveriaEstarNaoLida.add(m.thread_id);
+  }
+
+  const marcadas: { id: string }[] = [];
+  for (let de = 0; ; de += 1000) {
+    const { data, error } = await admin
+      .from('email_threads')
+      .select('id')
+      .eq('caixa_id', caixa.id)
+      .eq('pasta', 'inbox')
+      .eq('nao_lido', true)
+      .range(de, de + 999);
+    if (error) throw new Error(`leitura_das_marcadas_falhou: ${error.message}`);
+    if (!data?.length) break;
+    marcadas.push(...data);
+    if (data.length < 1000) break;
+  }
+
+  // Mesma régua do motor do Gmail. Aqui a "chave do servidor" é o próprio id da
+  // thread: o IMAP não tem id de conversa, quem agrupa é o nosso `chaveDaThread`,
+  // então a tradução UID -> thread já foi feita na consulta acima.
+  const { desmarcar, marcar } = diferencaDeSinalizador(
+    marcadas.map((t) => ({ id: t.id, chave: t.id })),
+    deveriaEstarNaoLida,
+  );
+
+  const quando = new Date().toISOString();
+  for (const lote of emLotes(desmarcar, LOTE_UPDATE)) {
+    await admin.from('email_threads')
+      .update({ nao_lido: false, updated_at: quando })
+      .in('id', lote);
+  }
+  for (const lote of emLotes(marcar, LOTE_UPDATE)) {
+    await admin.from('email_threads')
+      .update({ nao_lido: true, updated_at: quando })
+      .eq('pasta', 'inbox')
+      .in('id', lote);
+  }
+  return { lidas: desmarcar.length, nao_lidas: marcar.length };
+}
+
 let INICIO = agora();
 
 async function sincronizarCaixa(admin: any, caixaId: string): Promise<Resultado> {
@@ -299,6 +374,18 @@ async function sincronizarCaixa(admin: any, caixaId: string): Promise<Resultado>
     patch.uid_validity = inbox.uidValidity;
     inseridas += inbox.inseridas;
     parcial = parcial || inbox.parcial;
+
+    // Aqui e não depois: a INBOX ainda está selecionada (a pasta de Enviados só é
+    // aberta abaixo), e UID vale por pasta. Fora do orçamento, fica pra próxima
+    // rodada — reconciliar é convergente, atrasar dois minutos não custa nada.
+    if (agora() - INICIO < ORCAMENTO_MS) {
+      try {
+        await reconciliarNaoLidosImap(admin, caixa, sessao);
+      } catch (e) {
+        // Não pode derrubar o sync: mensagem nova é mais importante que contador.
+        console.warn('falha ao reconciliar não lidos', e);
+      }
+    }
 
     // ── Enviados ─────────────────────────────────────────────────────────────
     if (config.pasta_enviados && agora() - INICIO < ORCAMENTO_MS) {

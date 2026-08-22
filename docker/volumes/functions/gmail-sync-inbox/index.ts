@@ -1,6 +1,22 @@
 // gmail-sync-inbox: sincroniza mensagens recentes (inbox + sent), incremental via history
+//
+// Sincroniza em DOIS sentidos. Mensagem nova desce pelo history; ESTADO (lida,
+// favoritada, arquivada) desce por RECONCILIAÇÃO: o Gmail é perguntado quem está
+// não lido/favoritado e o banco é alinhado com a resposta.
+//
+// ⚠️ Antes disso o sync era de mão ÚNICA: ler no sistema limpava o UNREAD lá, mas
+// ler no Gmail nunca voltava pra cá e o contador travava pra sempre. Em agosto/2026
+// havia caixa com 3.749 de 3.817 conversas marcadas como não lidas por isso.
+//
+// Reconciliar por CONSULTA, e não pelos eventos `labelAdded`/`labelRemoved` do
+// history, é decisão consciente: o history entrega evento por MENSAGEM, então um
+// "marcar tudo como lido" no Gmail viraria centenas de updates linha a linha dentro
+// do orçamento de ~60s da edge. A consulta devolve o conjunto pronto, do tamanho do
+// que está realmente não lido — e ainda cobre o que é mais velho que a janela de
+// ~30 dias do history, que evento nenhum alcança.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { ensureToken, parsePayload, parseHeaders, parseAddress, parseAddressList, isTokenRevokedError, markCaixaTokenRevoked, markCaixaTransient, isScopeInsufficientError, markCaixaEscopoInsuficiente } from '../_shared/gmail.ts';
+import { diferencaDeArquivadas, diferencaDeSinalizador, emLotes } from '../_shared/emailReconciliacao.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -55,7 +71,168 @@ async function gmailListAll(
   return ids;
 }
 
-async function syncCaixa(admin: any, caixaId: string, forceInitial: boolean) {
+/**
+ * IDs de THREAD de uma query do Gmail, com o aviso de a lista ter vindo inteira.
+ *
+ * ⚠️ O `completo` não é enfeite: a reconciliação usa a lista como "tudo que está
+ * neste estado". Se a paginação for cortada no meio, o que ficou de fora seria
+ * desmarcado em MASSA — sumiria da frente da pessoa o e-mail que ela ainda não
+ * leu. Lista truncada ⇒ não reconcilia nada.
+ */
+async function gmailThreadIdsDaQuery(
+  query: string,
+  token: string,
+  maxTotal = 5000,
+  pageSize = 500,
+): Promise<{ threadIds: Set<string>; completo: boolean }> {
+  const threadIds = new Set<string>();
+  let pageToken: string | undefined = undefined;
+  let vistos = 0;
+  do {
+    const params = new URLSearchParams({ q: query, maxResults: String(pageSize) });
+    if (pageToken) params.set('pageToken', pageToken);
+    const res = await gmail(`/messages?${params.toString()}`, token);
+    const msgs: { id: string; threadId: string }[] = res.messages || [];
+    for (const m of msgs) if (m.threadId) threadIds.add(m.threadId);
+    vistos += msgs.length;
+    pageToken = res.nextPageToken;
+    if (vistos >= maxTotal) return { threadIds, completo: !pageToken };
+  } while (pageToken);
+  return { threadIds, completo: true };
+}
+
+const LOTE_UPDATE = 200;
+
+/**
+ * Lê uma consulta inteira em páginas — PostgREST corta em 1.000 por padrão.
+ *
+ * Estoura no erro em vez de devolver o que deu: um `select` que falhou no meio
+ * viraria "o banco não tem nada marcado", e quem chama trataria isso como estado
+ * legítimo. Erro aqui derruba o sync DESTA caixa e cai no catch do laço, que já
+ * registra e segue para a próxima.
+ */
+async function lerTudo(montarQuery: (de: number, ate: number) => any) {
+  const linhas: any[] = [];
+  for (let de = 0; ; de += 1000) {
+    const { data, error } = await montarQuery(de, de + 999);
+    if (error) throw new Error(`leitura_paginada_falhou: ${error.message}`);
+    if (!data?.length) break;
+    linhas.push(...data);
+    if (data.length < 1000) break;
+  }
+  return linhas;
+}
+
+/**
+ * Alinha uma coluna booleana da thread com o conjunto que o Gmail devolveu.
+ *
+ * A comparação é feita pelo CONJUNTO VERDADEIRO dos dois lados (o que está não
+ * lido / favoritado) — e ele é pequeno, então o custo acompanha o tamanho do que
+ * está pendente, não o tamanho da caixa. Converge sozinho: a primeira rodada
+ * paga o passivo, as seguintes comparam dois punhados.
+ */
+async function alinharSinalizador(
+  admin: any,
+  caixaId: string,
+  coluna: 'nao_lido' | 'favoritado',
+  verdadeirasNoGmail: Set<string>,
+  soInbox: boolean,
+) {
+  const marcadas = await lerTudo((de, ate) => {
+    let q = admin.from('email_threads')
+      .select('id, gmail_thread_id')
+      .eq('caixa_id', caixaId)
+      .eq(coluna, true);
+    if (soInbox) q = q.eq('pasta', 'inbox');
+    return q.range(de, ate);
+  });
+
+  const { desmarcar, marcar } = diferencaDeSinalizador(
+    marcadas.map((t) => ({ id: t.id, chave: t.gmail_thread_id })),
+    verdadeirasNoGmail,
+  );
+
+  const quando = new Date().toISOString();
+  for (const lote of emLotes(desmarcar, LOTE_UPDATE)) {
+    await admin.from('email_threads')
+      .update({ [coluna]: false, updated_at: quando })
+      .in('id', lote);
+  }
+  for (const lote of emLotes(marcar, LOTE_UPDATE)) {
+    // Escopado à caixa: `gmail_thread_id` não é único entre caixas — a mesma
+    // conversa aparece nas duas quando duas caixas nossas estão na thread.
+    let q = admin.from('email_threads')
+      .update({ [coluna]: true, updated_at: quando })
+      .eq('caixa_id', caixaId)
+      .in('gmail_thread_id', lote);
+    // Conversa que o sistema mandou pra lixeira/spam também foi pra lá no Gmail:
+    // não deve voltar a acender por aqui.
+    if (soInbox) q = q.eq('pasta', 'inbox');
+    await q;
+  }
+  return { desmarcadas: desmarcar.length, marcadas: marcar.length };
+}
+
+/**
+ * Alinha `arquivado` com a caixa de entrada do Gmail.
+ *
+ * Separada das outras porque é a CARA: o conjunto verdadeiro aqui é "não está na
+ * inbox", que é o complemento — obriga a listar a inbox INTEIRA do Gmail e a ler
+ * todas as threads da caixa. Por isso só roda no sync manual/inicial, não nas
+ * rodadas de 2 em 2 minutos. `arquivado` não decide o que a lista mostra (isso é
+ * a coluna `pasta`); ele alimenta o contador por caixa e o alerta de "precisa de
+ * resposta", que aguentam ficar um pouco atrás.
+ */
+async function alinharArquivadas(admin: any, caixaId: string, token: string) {
+  const { threadIds: naInboxDoGmail, completo } = await gmailThreadIdsDaQuery('in:inbox', token, 20000);
+  if (!completo) return { alinhado: false, motivo: 'lista_truncada' };
+
+  const todas = await lerTudo((de, ate) =>
+    admin.from('email_threads')
+      .select('id, gmail_thread_id, arquivado')
+      .eq('caixa_id', caixaId)
+      .range(de, ate));
+
+  const { paraArquivar, paraDesarquivar } = diferencaDeArquivadas(
+    todas.map((t) => ({ id: t.id, chave: t.gmail_thread_id, arquivado: t.arquivado })),
+    naInboxDoGmail,
+  );
+
+  const quando = new Date().toISOString();
+  for (const [alvo, ids] of [[true, paraArquivar], [false, paraDesarquivar]] as [boolean, string[]][]) {
+    for (const lote of emLotes(ids, LOTE_UPDATE)) {
+      await admin.from('email_threads')
+        .update({ arquivado: alvo, updated_at: quando })
+        .in('id', lote);
+    }
+  }
+  return { alinhado: true, arquivadas: paraArquivar.length, desarquivadas: paraDesarquivar.length };
+}
+
+/** O Gmail é a fonte da verdade do estado; aqui o banco é trazido pra ele. */
+async function reconciliarEstado(
+  admin: any,
+  caixaId: string,
+  token: string,
+  incluirArquivadas: boolean,
+) {
+  const resultado: Record<string, unknown> = {};
+
+  const naoLidas = await gmailThreadIdsDaQuery('in:inbox is:unread', token);
+  resultado.nao_lidas = naoLidas.completo
+    ? await alinharSinalizador(admin, caixaId, 'nao_lido', naoLidas.threadIds, true)
+    : 'lista_truncada';
+
+  const favoritas = await gmailThreadIdsDaQuery('is:starred', token);
+  resultado.favoritas = favoritas.completo
+    ? await alinharSinalizador(admin, caixaId, 'favoritado', favoritas.threadIds, false)
+    : 'lista_truncada';
+
+  if (incluirArquivadas) resultado.arquivadas = await alinharArquivadas(admin, caixaId, token);
+  return resultado;
+}
+
+async function syncCaixa(admin: any, caixaId: string, forceInitial: boolean, sozinha: boolean) {
   const { data: caixa, error: cErr } = await admin
     .from('email_caixas_conectadas')
     .select('*, integ:calendar_integrations(*)')
@@ -315,7 +492,28 @@ async function syncCaixa(admin: any, caixaId: string, forceInitial: boolean) {
     last_sync_error: null,
   }).eq('id', caixa.id);
 
-  return { inserted, history_id: newHistoryId };
+  // Reconcilia DEPOIS de gravar o progresso, e sem poder derrubar a rodada:
+  // mensagem nova vale mais que contador. Se a reconciliação estourar (ou o
+  // worker morrer no meio dela), o history_id já avançou e a próxima rodada
+  // tenta de novo — em vez de reprocessar o sync inteiro por causa do contador.
+  //
+  // Também não roda durante o backlog (o `return` acima): a caixa ainda vai mudar
+  // muito nesta e nas próximas rodadas, seria orçamento gasto à toa.
+  //
+  // A varredura cara (arquivadas) fica pro sync de UMA caixa só — o botão de
+  // atualizar da tela e a carga inicial. Aí não há teto global e alguém está
+  // esperando por ela; no cron de 2 em 2 minutos sairia caro em todas as caixas
+  // de uma vez, e não é ela que decide o que a lista mostra.
+  let estado: unknown;
+  try {
+    const varreduraCompleta = forceInitial || sozinha || !caixa.history_id;
+    estado = await reconciliarEstado(admin, caixa.id, token, varreduraCompleta);
+  } catch (e) {
+    console.warn('falha ao reconciliar estado', caixa.id, e);
+    estado = { erro: (e as Error).message };
+  }
+
+  return { inserted, history_id: newHistoryId, estado };
 }
 
 Deno.serve(async (req) => {
@@ -351,7 +549,7 @@ Deno.serve(async (req) => {
     const results: any[] = [];
     for (const id of caixaIds) {
       try {
-        const r = await syncCaixa(admin, id, !!initial);
+        const r = await syncCaixa(admin, id, !!initial, !!caixa_id);
         results.push({ caixa_id: id, ...r });
         totalInserido += (r as any)?.inserted || 0;
       } catch (e) {

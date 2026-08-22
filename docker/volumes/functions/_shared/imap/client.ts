@@ -305,6 +305,27 @@ export class ClienteImap {
   }
 
   /**
+   * UIDs SEM a flag \\Seen na pasta selecionada — o "não lido" do servidor.
+   *
+   * É a fonte da verdade pra reconciliação: quem lê no webmail some daqui, e é
+   * assim que a leitura feita fora do sistema volta pra cá. Não tem a armadilha
+   * do `*` do `uidsDesde` — `UNSEEN` é um critério, não um intervalo.
+   */
+  async uidsNaoLidos(): Promise<number[]> {
+    const r = await this.exigirOk("UID SEARCH UNSEEN", "UID SEARCH UNSEEN");
+    const linha = r.linhas.find((l) => /^\* SEARCH/i.test(l.texto));
+    if (!linha) return [];
+    return linha.texto
+      .replace(/^\* SEARCH/i, "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map(Number)
+      .filter((uid) => Number.isFinite(uid) && uid >= 1)
+      .sort((a, b) => a - b);
+  }
+
+  /**
    * Busca as mensagens inteiras. `BODY.PEEK[]` em vez de `BODY[]` porque `BODY[]`
    * marca \Seen como efeito colateral — sincronizar não pode marcar e-mail como lido.
    */

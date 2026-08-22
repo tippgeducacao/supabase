@@ -223,6 +223,35 @@ describe("UID SEARCH para trás — o histórico", () => {
   });
 });
 
+describe("UID SEARCH UNSEEN — o não lido do servidor", () => {
+  it("pergunta pelas não lidas sem intervalo de UID", async () => {
+    // `UNSEEN` é critério, não intervalo: não tem a armadilha do `n:*`, e é por
+    // isso que o filtro aqui é só sanidade (uid >= 1), não corte de fronteira.
+    const s = new ServidorFalso("* OK ready\r\n", ["* SEARCH 4 2 9\r\nP0001 OK SEARCH completed\r\n"]);
+    const c = new ClienteImap(s);
+    await c.saudacao();
+    expect(await c.uidsNaoLidos()).toEqual([2, 4, 9]);
+    expect(s.enviados[0]).toBe("P0001 UID SEARCH UNSEEN\r\n");
+  });
+
+  it("caixa inteira lida devolve lista vazia — e é isso que zera o contador", async () => {
+    const s = new ServidorFalso("* OK ready\r\n", ["* SEARCH\r\nP0001 OK SEARCH completed\r\n"]);
+    const c = new ClienteImap(s);
+    await c.saudacao();
+    expect(await c.uidsNaoLidos()).toEqual([]);
+  });
+
+  it("servidor que não manda linha SEARCH nenhuma não vira lista vazia por acidente", async () => {
+    // Só o OK final. Sem a linha `* SEARCH`, devolver [] é o certo — e a
+    // reconciliação em cima disso marcaria a caixa toda como lida, então este
+    // caminho precisa ser o mesmo do "de fato não há não lidas".
+    const s = new ServidorFalso("* OK ready\r\n", ["P0001 OK SEARCH completed\r\n"]);
+    const c = new ClienteImap(s);
+    await c.saudacao();
+    expect(await c.uidsNaoLidos()).toEqual([]);
+  });
+});
+
 describe("SELECT", () => {
   it("extrai UIDVALIDITY, UIDNEXT e total", async () => {
     const s = new ServidorFalso("* OK ready\r\n", [
