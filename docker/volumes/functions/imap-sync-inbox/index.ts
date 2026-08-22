@@ -16,7 +16,7 @@ import { chaveDaThread, parsearMensagem, resumo } from '../_shared/imap/mime.ts'
 import { abrirSessao, carregarConfig, limparErro, marcarErro, classificarErro } from '../_shared/imap/caixa.ts';
 import { pontoDePartida } from '../_shared/imap/ponteiros.ts';
 import type { SessaoImap } from '../_shared/imap/conexao.ts';
-import { diferencaDeSinalizador, emLotes } from '../_shared/emailReconciliacao.ts';
+import { diferencaDeSinalizador, emLotes, LOTE_FILTRO_IN } from '../_shared/emailReconciliacao.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -261,8 +261,6 @@ async function sincronizarPasta(
   return { fronteira, inseridas, parcial };
 }
 
-const LOTE_UPDATE = 200;
-
 /**
  * Reconcilia o "não lido" da INBOX contra o servidor, que é a fonte da verdade.
  *
@@ -287,7 +285,7 @@ async function reconciliarNaoLidosImap(admin: any, caixa: any, sessao: SessaoIma
   // erro aqui ABORTA a reconciliação (o catch de quem chama só registra e segue),
   // em vez de virar um conjunto menor que passa por legítimo.
   const deveriaEstarNaoLida = new Set<string>();
-  for (const lote of emLotes(chaves, LOTE_UPDATE)) {
+  for (const lote of emLotes(chaves, LOTE_FILTRO_IN)) {
     const { data, error } = await admin
       .from('email_mensagens')
       .select('thread_id, is_outgoing')
@@ -321,12 +319,12 @@ async function reconciliarNaoLidosImap(admin: any, caixa: any, sessao: SessaoIma
   );
 
   const quando = new Date().toISOString();
-  for (const lote of emLotes(desmarcar, LOTE_UPDATE)) {
+  for (const lote of emLotes(desmarcar, LOTE_FILTRO_IN)) {
     await admin.from('email_threads')
       .update({ nao_lido: false, updated_at: quando })
       .in('id', lote);
   }
-  for (const lote of emLotes(marcar, LOTE_UPDATE)) {
+  for (const lote of emLotes(marcar, LOTE_FILTRO_IN)) {
     await admin.from('email_threads')
       .update({ nao_lido: true, updated_at: quando })
       .eq('pasta', 'inbox')

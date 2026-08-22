@@ -89,6 +89,25 @@ export function diferencaDeArquivadas(
   return { paraArquivar, paraDesarquivar };
 }
 
+/**
+ * Tamanho do lote de um filtro `IN` do PostgREST.
+ *
+ * ⚠️ **O limite real é o tamanho da URL, não a quantidade de itens.** O filtro vai
+ * na query string de um GET/PATCH, e o Kong/nginx corta em ~8 KB. Com 200 itens
+ * isso estoura: 200 UUIDs ≈ 7.800 B (já no fio, antes de somar o resto da URL) e
+ * 200 chaves IMAP (`imap:<uuid>:inbox:<uid>`, com `:` virando `%3A`) ≈ 12.600 B.
+ *
+ * Aconteceu de verdade em 2026-08-22, na primeira rodada depois do deploy: a
+ * reconciliação do IMAP morria em `URI too long` a cada 2 minutos, e no Gmail as
+ * caixas com MUITA coisa a corrigir (as que mais precisavam) eram justamente as
+ * que falhavam — as pequenas passavam porque o lote parcial cabia na URL.
+ *
+ * 50 deixa a maior das listas em ~3,2 KB, com folga para o resto da URL. O custo
+ * é round-trip a mais numa passada que converge: só a primeira rodada de cada
+ * caixa tem lista grande.
+ */
+export const LOTE_FILTRO_IN = 50;
+
 /** Fatia uma lista em lotes — PostgREST não aceita um `IN` de tamanho ilimitado. */
 export function emLotes<T>(itens: T[], tamanho: number): T[][] {
   const lotes: T[][] = [];

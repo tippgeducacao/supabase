@@ -16,7 +16,7 @@
 // ~30 dias do history, que evento nenhum alcança.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { ensureToken, parsePayload, parseHeaders, parseAddress, parseAddressList, isTokenRevokedError, markCaixaTokenRevoked, markCaixaTransient, isScopeInsufficientError, markCaixaEscopoInsuficiente } from '../_shared/gmail.ts';
-import { diferencaDeArquivadas, diferencaDeSinalizador, emLotes } from '../_shared/emailReconciliacao.ts';
+import { diferencaDeArquivadas, diferencaDeSinalizador, emLotes, LOTE_FILTRO_IN } from '../_shared/emailReconciliacao.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -101,7 +101,6 @@ async function gmailThreadIdsDaQuery(
   return { threadIds, completo: true };
 }
 
-const LOTE_UPDATE = 200;
 
 /**
  * Lê uma consulta inteira em páginas — PostgREST corta em 1.000 por padrão.
@@ -153,12 +152,12 @@ async function alinharSinalizador(
   );
 
   const quando = new Date().toISOString();
-  for (const lote of emLotes(desmarcar, LOTE_UPDATE)) {
+  for (const lote of emLotes(desmarcar, LOTE_FILTRO_IN)) {
     await admin.from('email_threads')
       .update({ [coluna]: false, updated_at: quando })
       .in('id', lote);
   }
-  for (const lote of emLotes(marcar, LOTE_UPDATE)) {
+  for (const lote of emLotes(marcar, LOTE_FILTRO_IN)) {
     // Escopado à caixa: `gmail_thread_id` não é único entre caixas — a mesma
     // conversa aparece nas duas quando duas caixas nossas estão na thread.
     let q = admin.from('email_threads')
@@ -200,7 +199,7 @@ async function alinharArquivadas(admin: any, caixaId: string, token: string) {
 
   const quando = new Date().toISOString();
   for (const [alvo, ids] of [[true, paraArquivar], [false, paraDesarquivar]] as [boolean, string[]][]) {
-    for (const lote of emLotes(ids, LOTE_UPDATE)) {
+    for (const lote of emLotes(ids, LOTE_FILTRO_IN)) {
       await admin.from('email_threads')
         .update({ arquivado: alvo, updated_at: quando })
         .in('id', lote);
