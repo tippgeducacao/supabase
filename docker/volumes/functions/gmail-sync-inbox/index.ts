@@ -78,25 +78,31 @@ async function gmailListAll(
  * neste estado". Se a paginação for cortada no meio, o que ficou de fora seria
  * desmarcado em MASSA — sumiria da frente da pessoa o e-mail que ela ainda não
  * leu. Lista truncada ⇒ não reconcilia nada.
+ *
+ * ⚠️ **Usa `/threads`, não `/messages`, e a diferença não é performance — é a
+ * UNIDADE do teto.** `/messages` devolve uma linha por MENSAGEM, então o teto
+ * contava mensagens enquanto a comparação é por CONVERSA. Na caixa do rafael
+ * (3.751 conversas não lidas, mais de 5.000 mensagens dentro delas) o teto de
+ * 5.000 estourava e a caixa era pulada por `lista_truncada` — justamente a que
+ * mais precisava. Com `/threads` o teto está na mesma moeda do que se compara, e
+ * ainda cabe mais conversa por página.
  */
 async function gmailThreadIdsDaQuery(
   query: string,
   token: string,
-  maxTotal = 5000,
+  maxTotal = 20000,
   pageSize = 500,
 ): Promise<{ threadIds: Set<string>; completo: boolean }> {
   const threadIds = new Set<string>();
   let pageToken: string | undefined = undefined;
-  let vistos = 0;
   do {
     const params = new URLSearchParams({ q: query, maxResults: String(pageSize) });
     if (pageToken) params.set('pageToken', pageToken);
-    const res = await gmail(`/messages?${params.toString()}`, token);
-    const msgs: { id: string; threadId: string }[] = res.messages || [];
-    for (const m of msgs) if (m.threadId) threadIds.add(m.threadId);
-    vistos += msgs.length;
+    const res = await gmail(`/threads?${params.toString()}`, token);
+    const threads: { id: string }[] = res.threads || [];
+    for (const t of threads) if (t.id) threadIds.add(t.id);
     pageToken = res.nextPageToken;
-    if (vistos >= maxTotal) return { threadIds, completo: !pageToken };
+    if (threadIds.size >= maxTotal) return { threadIds, completo: !pageToken };
   } while (pageToken);
   return { threadIds, completo: true };
 }
@@ -183,7 +189,7 @@ async function alinharSinalizador(
  * resposta", que aguentam ficar um pouco atrás.
  */
 async function alinharArquivadas(admin: any, caixaId: string, token: string) {
-  const { threadIds: naInboxDoGmail, completo } = await gmailThreadIdsDaQuery('in:inbox', token, 20000);
+  const { threadIds: naInboxDoGmail, completo } = await gmailThreadIdsDaQuery('in:inbox', token);
   if (!completo) return { alinhado: false, motivo: 'lista_truncada' };
 
   const todas = await lerTudo((de, ate) =>
@@ -507,6 +513,10 @@ async function syncCaixa(admin: any, caixaId: string, forceInitial: boolean, soz
   try {
     const varreduraCompleta = forceInitial || sozinha || !caixa.history_id;
     estado = await reconciliarEstado(admin, caixa.id, token, varreduraCompleta);
+    // O cron DESCARTA a resposta da function, então sem este log a única forma de
+    // saber que uma caixa foi pulada por `lista_truncada` era invocar na mão. Foi
+    // o que custou uma rodada de investigação em 2026-08-22.
+    console.log('reconciliação', caixa.email_caixa, JSON.stringify(estado));
   } catch (e) {
     console.warn('falha ao reconciliar estado', caixa.id, e);
     estado = { erro: (e as Error).message };
