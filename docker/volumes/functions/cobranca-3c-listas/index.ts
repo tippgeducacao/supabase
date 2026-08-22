@@ -36,7 +36,18 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 }
 
-const THREEC_BASE_ENV = Deno.env.get('THREEC_BASE_URL') ?? 'https://3c.fluxoti.com/api/v1'
+// ⚠️ HOST NOVO desde 22/08/2026: a FluxoTI virou **3C Plus** e aposentou o domínio.
+// `fluxoti.com` não resolve mais (sem DNS) e `3c.fluxoti.com`, embora ainda responda
+// pelo Cloudflare, devolve o MESMO 404 de nginx em todo path — raiz, /login, /api,
+// /health. Não é token nem rede: não há nada servido ali.
+// Medido com o token real, de dentro da VPS:
+//     3c.fluxoti.com/api/v1/agents/status  -> 404
+//     app.3c.plus/api/v1/agents/status     -> 200 OK
+// O token continua o mesmo; só o endereço mudou. Parou tudo entre 21h46 e 21h48 BRT
+// de 21/08/2026 — Dash Ligação, TV, mailing quente (0 lead no discador) e as listas
+// de cobrança, todos de uma vez, porque as quatro functions caem neste default
+// (THREEC_BASE_URL não está definida na VPS).
+const THREEC_BASE_ENV = Deno.env.get('THREEC_BASE_URL') ?? 'https://app.3c.plus/api/v1'
 const THREEC_TOKEN =
   Deno.env.get('3C_TOKEN_API') ??
   Deno.env.get('THREEC_API_TOKEN') ??
