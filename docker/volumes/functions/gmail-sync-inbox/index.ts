@@ -16,7 +16,7 @@
 // ~30 dias do history, que evento nenhum alcança.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { ensureToken, parsePayload, parseHeaders, parseAddress, parseAddressList, isTokenRevokedError, markCaixaTokenRevoked, markCaixaTransient, isScopeInsufficientError, markCaixaEscopoInsuficiente } from '../_shared/gmail.ts';
-import { diferencaDeArquivadas, diferencaDeSinalizador, emLotes, LOTE_FILTRO_IN } from '../_shared/emailReconciliacao.ts';
+import { diferencaPorLinha, emLotes, LOTE_FILTRO_IN } from '../_shared/emailReconciliacao.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -128,112 +128,94 @@ async function lerTudo(montarQuery: (de: number, ate: number) => any) {
   return linhas;
 }
 
+/** Uma thread nossa, do ponto de vista da reconciliação. */
+interface ThreadLocal {
+  id: string;
+  gmail_thread_id: string;
+  pasta: string;
+  nao_lido: boolean;
+  favoritado: boolean;
+  arquivado: boolean;
+}
+
 /**
- * Alinha uma coluna booleana da thread com o conjunto que o Gmail devolveu.
+ * Grava numa coluna booleana só as threads que precisam mudar.
  *
- * A comparação é feita pelo CONJUNTO VERDADEIRO dos dois lados (o que está não
- * lido / favoritado) — e ele é pequeno, então o custo acompanha o tamanho do que
- * está pendente, não o tamanho da caixa. Converge sozinho: a primeira rodada
- * paga o passivo, as seguintes comparam dois punhados.
+ * Sempre por `id`: a lista já saiu de linhas nossas, então não há por que
+ * procurar de novo por `gmail_thread_id` (que, aliás, não é único entre caixas).
  */
-async function alinharSinalizador(
-  admin: any,
-  caixaId: string,
-  coluna: 'nao_lido' | 'favoritado',
-  verdadeirasNoGmail: Set<string>,
-  soInbox: boolean,
-) {
-  const marcadas = await lerTudo((de, ate) => {
-    let q = admin.from('email_threads')
-      .select('id, gmail_thread_id')
-      .eq('caixa_id', caixaId)
-      .eq(coluna, true);
-    if (soInbox) q = q.eq('pasta', 'inbox');
-    return q.range(de, ate);
-  });
-
-  const { desmarcar, marcar } = diferencaDeSinalizador(
-    marcadas.map((t) => ({ id: t.id, chave: t.gmail_thread_id })),
-    verdadeirasNoGmail,
-  );
-
+async function gravarColuna(admin: any, coluna: string, ids: string[], valor: boolean) {
   const quando = new Date().toISOString();
-  for (const lote of emLotes(desmarcar, LOTE_FILTRO_IN)) {
+  for (const lote of emLotes(ids, LOTE_FILTRO_IN)) {
     await admin.from('email_threads')
-      .update({ [coluna]: false, updated_at: quando })
+      .update({ [coluna]: valor, updated_at: quando })
       .in('id', lote);
   }
-  for (const lote of emLotes(marcar, LOTE_FILTRO_IN)) {
-    // Escopado à caixa: `gmail_thread_id` não é único entre caixas — a mesma
-    // conversa aparece nas duas quando duas caixas nossas estão na thread.
-    let q = admin.from('email_threads')
-      .update({ [coluna]: true, updated_at: quando })
-      .eq('caixa_id', caixaId)
-      .in('gmail_thread_id', lote);
-    // Conversa que o sistema mandou pra lixeira/spam também foi pra lá no Gmail:
-    // não deve voltar a acender por aqui.
-    if (soInbox) q = q.eq('pasta', 'inbox');
-    await q;
-  }
-  return { desmarcadas: desmarcar.length, marcadas: marcar.length };
+}
+
+/** Aplica os dois sentidos e devolve o que mudou, para o log. */
+async function alinhar(admin: any, coluna: string, linhas: { id: string; atual: boolean; desejado: boolean }[]) {
+  const { ligar, desligar } = diferencaPorLinha(linhas);
+  await gravarColuna(admin, coluna, ligar, true);
+  await gravarColuna(admin, coluna, desligar, false);
+  return { ligadas: ligar.length, desligadas: desligar.length };
 }
 
 /**
- * Alinha `arquivado` com a caixa de entrada do Gmail.
+ * O Gmail é a fonte da verdade do estado; aqui o banco é trazido pra ele.
  *
- * Separada das outras porque é a CARA: o conjunto verdadeiro aqui é "não está na
- * inbox", que é o complemento — obriga a listar a inbox INTEIRA do Gmail e a ler
- * todas as threads da caixa. Por isso só roda no sync manual/inicial, não nas
- * rodadas de 2 em 2 minutos. `arquivado` não decide o que a lista mostra (isso é
- * a coluna `pasta`); ele alimenta o contador por caixa e o alerta de "precisa de
- * resposta", que aguentam ficar um pouco atrás.
+ * Lê as threads da caixa UMA vez e usa a mesma leitura para os três alinhamentos
+ * — o custo fica previsível (~12 páginas para as 11,6 mil threads de todas as
+ * caixas juntas) e, em regime, não sobra escrita nenhuma.
  */
-async function alinharArquivadas(admin: any, caixaId: string, token: string) {
-  const { threadIds: naInboxDoGmail, completo } = await gmailThreadIdsDaQuery('in:inbox', token);
-  if (!completo) return { alinhado: false, motivo: 'lista_truncada' };
-
-  const todas = await lerTudo((de, ate) =>
-    admin.from('email_threads')
-      .select('id, gmail_thread_id, arquivado')
-      .eq('caixa_id', caixaId)
-      .range(de, ate));
-
-  const { paraArquivar, paraDesarquivar } = diferencaDeArquivadas(
-    todas.map((t) => ({ id: t.id, chave: t.gmail_thread_id, arquivado: t.arquivado })),
-    naInboxDoGmail,
-  );
-
-  const quando = new Date().toISOString();
-  for (const [alvo, ids] of [[true, paraArquivar], [false, paraDesarquivar]] as [boolean, string[]][]) {
-    for (const lote of emLotes(ids, LOTE_FILTRO_IN)) {
-      await admin.from('email_threads')
-        .update({ arquivado: alvo, updated_at: quando })
-        .in('id', lote);
-    }
-  }
-  return { alinhado: true, arquivadas: paraArquivar.length, desarquivadas: paraDesarquivar.length };
-}
-
-/** O Gmail é a fonte da verdade do estado; aqui o banco é trazido pra ele. */
 async function reconciliarEstado(
   admin: any,
   caixaId: string,
   token: string,
   incluirArquivadas: boolean,
 ) {
-  const resultado: Record<string, unknown> = {};
-
   const naoLidas = await gmailThreadIdsDaQuery('in:inbox is:unread', token);
-  resultado.nao_lidas = naoLidas.completo
-    ? await alinharSinalizador(admin, caixaId, 'nao_lido', naoLidas.threadIds, true)
-    : 'lista_truncada';
-
   const favoritas = await gmailThreadIdsDaQuery('is:starred', token);
-  resultado.favoritas = favoritas.completo
-    ? await alinharSinalizador(admin, caixaId, 'favoritado', favoritas.threadIds, false)
-    : 'lista_truncada';
+  const naInbox = incluirArquivadas
+    ? await gmailThreadIdsDaQuery('in:inbox', token)
+    : null;
 
-  if (incluirArquivadas) resultado.arquivadas = await alinharArquivadas(admin, caixaId, token);
+  const resultado: Record<string, unknown> = {};
+  if (!naoLidas.completo) resultado.nao_lidas = 'lista_truncada';
+  if (!favoritas.completo) resultado.favoritas = 'lista_truncada';
+  if (naInbox && !naInbox.completo) resultado.arquivadas = 'lista_truncada';
+  // Nada aproveitável nesta rodada: não vale ler o banco inteiro à toa.
+  if (!naoLidas.completo && !favoritas.completo && !(naInbox?.completo)) return resultado;
+
+  const nossas: ThreadLocal[] = await lerTudo((de, ate) =>
+    admin.from('email_threads')
+      .select('id, gmail_thread_id, pasta, nao_lido, favoritado, arquivado')
+      .eq('caixa_id', caixaId)
+      .range(de, ate));
+
+  if (naoLidas.completo) {
+    // Só a caixa de entrada: conversa que o sistema mandou pra lixeira/spam também
+    // foi pra lá no Gmail, e não deve voltar a acender por aqui.
+    resultado.nao_lidas = await alinhar(admin, 'nao_lido', nossas
+      .filter((t) => t.pasta === 'inbox')
+      .map((t) => ({ id: t.id, atual: t.nao_lido, desejado: naoLidas.threadIds.has(t.gmail_thread_id) })));
+  }
+
+  if (favoritas.completo) {
+    resultado.favoritas = await alinhar(admin, 'favoritado', nossas
+      .map((t) => ({ id: t.id, atual: t.favoritado, desejado: favoritas.threadIds.has(t.gmail_thread_id) })));
+  }
+
+  if (naInbox?.completo) {
+    // `arquivado` é o COMPLEMENTO de "está na inbox" — por isso depende de listar a
+    // inbox inteira, e por isso esta parte só roda no sync de uma caixa só. Note que
+    // `pasta` fica de fora de propósito: é ela que a lista da tela filtra, e thread
+    // só de saída nasce com arquivado=true e pasta='inbox' (é o "Enviada" que aparece
+    // na caixa de entrada). Recalcular `pasta` daqui sumiria com esses e-mails.
+    resultado.arquivadas = await alinhar(admin, 'arquivado', nossas
+      .map((t) => ({ id: t.id, atual: t.arquivado, desejado: !naInbox.threadIds.has(t.gmail_thread_id) })));
+  }
+
   return resultado;
 }
 

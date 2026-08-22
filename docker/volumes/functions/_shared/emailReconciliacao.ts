@@ -10,83 +10,50 @@
  *     e-mail que ela ainda não viu. Um lugar só, com teste em cima.
  */
 
-/** Uma linha de `email_threads` do ponto de vista da reconciliação. */
-export interface LinhaThread {
+/** Uma linha nossa confrontada com o que o servidor diz dela. */
+export interface LinhaConfrontada {
   /** Chave primária da thread no nosso banco — é por ela que o UPDATE vai. */
   id: string;
-  /** Como o servidor chama esta conversa (`gmail_thread_id`, ou o próprio id no IMAP). */
-  chave: string;
+  /** Como a coluna está no banco agora. */
+  atual: boolean;
+  /** Como o servidor diz que deveria estar. */
+  desejado: boolean;
 }
 
-export interface DiferencaSinalizador {
-  /** Está marcado no banco e o servidor não confirma ⇒ desligar. */
-  desmarcar: string[];
-  /** O servidor confirma e o banco não tem ⇒ ligar. */
-  marcar: string[];
-}
-
-/**
- * Diferença entre o que o banco acha e o que o servidor diz, para uma coluna
- * booleana (`nao_lido`, `favoritado`).
- *
- * `marcadasNoBanco` deve conter APENAS as linhas com a coluna já em `true` — é o
- * que mantém o custo proporcional ao que está pendente, e não ao tamanho da caixa.
- *
- * ⚠️ `desmarcar` sai em IDs do banco e `marcar` sai em CHAVES do servidor, e a
- * assimetria é proposital: o que precisa ser ligado o banco ainda não localizou
- * (é justamente o que não está na lista lida), então só a chave do servidor
- * existe para procurá-lo.
- */
-export function diferencaDeSinalizador(
-  marcadasNoBanco: LinhaThread[],
-  verdadeirasNoServidor: Set<string> | Iterable<string>,
-): DiferencaSinalizador {
-  const verdadeiras = verdadeirasNoServidor instanceof Set
-    ? verdadeirasNoServidor
-    : new Set(verdadeirasNoServidor);
-  const jaMarcadas = new Set((marcadasNoBanco ?? []).map((t) => t.chave));
-
-  return {
-    desmarcar: (marcadasNoBanco ?? [])
-      .filter((t) => !verdadeiras.has(t.chave))
-      .map((t) => t.id),
-    marcar: [...verdadeiras].filter((chave) => !jaMarcadas.has(chave)),
-  };
-}
-
-export interface LinhaArquivavel extends LinhaThread {
-  arquivado: boolean;
-}
-
-export interface DiferencaArquivadas {
-  paraArquivar: string[];
-  paraDesarquivar: string[];
+export interface Diferenca {
+  /** Está `false` no banco e o servidor diz `true`. */
+  ligar: string[];
+  /** Está `true` no banco e o servidor diz `false`. */
+  desligar: string[];
 }
 
 /**
- * Diferença de `arquivado` contra a caixa de entrada do servidor.
+ * O que precisa mudar, e só isso.
  *
- * Aqui o conjunto verdadeiro é o COMPLEMENTO ("não está na inbox"), então não dá
- * para comparar só o lado marcado como nas outras colunas — é preciso a lista
- * inteira das threads da caixa. É por isso que esta varredura é a cara, e por isso
- * que ela não roda a cada rodada do cron.
+ * ⚠️ **A comparação parte das NOSSAS linhas, não do conjunto do servidor — e essa
+ * direção é a correção de um desperdício real (2026-08-22).** A primeira versão
+ * partia da lista do servidor e mandava um UPDATE por chave que não estivesse
+ * marcada aqui. Só que o Gmail tem muito mais conversa do que a gente já
+ * sincronizou: na caixa `programappgvet` ele devolvia **6.808** não lidas contra
+ * **2.774** threads nossas, então sobravam ~4.000 chaves que não existem no banco
+ * — 137 PATCH inúteis a cada 2 minutos, batendo no pool do PostgREST (o gargalo
+ * conhecido desta VPS) para casar zero linha.
+ *
+ * Partindo das nossas linhas, o trabalho é limitado ao que existe aqui, e o que o
+ * servidor tem a mais é simplesmente ignorado — que é o certo: não dá para marcar
+ * uma conversa que ainda não foi baixada.
+ *
+ * Linha que já está no estado desejado NÃO entra: UPDATE à toa acorda o realtime
+ * e faz a Inbox recarregar sem motivo.
  */
-export function diferencaDeArquivadas(
-  todasAsThreads: LinhaArquivavel[],
-  naInboxDoServidor: Set<string> | Iterable<string>,
-): DiferencaArquivadas {
-  const naInbox = naInboxDoServidor instanceof Set
-    ? naInboxDoServidor
-    : new Set(naInboxDoServidor);
-  const paraArquivar: string[] = [];
-  const paraDesarquivar: string[] = [];
-
-  for (const t of todasAsThreads ?? []) {
-    const arquivadaNoServidor = !naInbox.has(t.chave);
-    if (arquivadaNoServidor === t.arquivado) continue;
-    (arquivadaNoServidor ? paraArquivar : paraDesarquivar).push(t.id);
+export function diferencaPorLinha(linhas: LinhaConfrontada[]): Diferenca {
+  const ligar: string[] = [];
+  const desligar: string[] = [];
+  for (const linha of linhas ?? []) {
+    if (linha.atual === linha.desejado) continue;
+    (linha.desejado ? ligar : desligar).push(linha.id);
   }
-  return { paraArquivar, paraDesarquivar };
+  return { ligar, desligar };
 }
 
 /**

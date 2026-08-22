@@ -16,7 +16,7 @@ import { chaveDaThread, parsearMensagem, resumo } from '../_shared/imap/mime.ts'
 import { abrirSessao, carregarConfig, limparErro, marcarErro, classificarErro } from '../_shared/imap/caixa.ts';
 import { pontoDePartida } from '../_shared/imap/ponteiros.ts';
 import type { SessaoImap } from '../_shared/imap/conexao.ts';
-import { diferencaDeSinalizador, emLotes, LOTE_FILTRO_IN } from '../_shared/emailReconciliacao.ts';
+import { diferencaPorLinha, emLotes, LOTE_FILTRO_IN } from '../_shared/emailReconciliacao.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -295,42 +295,39 @@ async function reconciliarNaoLidosImap(admin: any, caixa: any, sessao: SessaoIma
     for (const m of data || []) if (!m.is_outgoing) deveriaEstarNaoLida.add(m.thread_id);
   }
 
-  const marcadas: { id: string }[] = [];
+  // Todas as conversas da caixa de entrada, não só as já marcadas: a comparação
+  // parte das NOSSAS linhas (mesma régua do motor do Gmail), o que resolve os dois
+  // sentidos numa passada só e nunca tenta escrever em linha que não existe.
+  const nossas: { id: string; nao_lido: boolean }[] = [];
   for (let de = 0; ; de += 1000) {
     const { data, error } = await admin
       .from('email_threads')
-      .select('id')
+      .select('id, nao_lido')
       .eq('caixa_id', caixa.id)
       .eq('pasta', 'inbox')
-      .eq('nao_lido', true)
       .range(de, de + 999);
-    if (error) throw new Error(`leitura_das_marcadas_falhou: ${error.message}`);
+    if (error) throw new Error(`leitura_das_threads_falhou: ${error.message}`);
     if (!data?.length) break;
-    marcadas.push(...data);
+    nossas.push(...data);
     if (data.length < 1000) break;
   }
 
-  // Mesma régua do motor do Gmail. Aqui a "chave do servidor" é o próprio id da
-  // thread: o IMAP não tem id de conversa, quem agrupa é o nosso `chaveDaThread`,
-  // então a tradução UID -> thread já foi feita na consulta acima.
-  const { desmarcar, marcar } = diferencaDeSinalizador(
-    marcadas.map((t) => ({ id: t.id, chave: t.id })),
-    deveriaEstarNaoLida,
+  // O IMAP não tem id de conversa — quem agrupa é o nosso `chaveDaThread` —, então
+  // a tradução UID -> thread já foi feita na consulta acima e o confronto aqui é
+  // direto pelo id da linha.
+  const { ligar, desligar } = diferencaPorLinha(
+    nossas.map((t) => ({ id: t.id, atual: t.nao_lido, desejado: deveriaEstarNaoLida.has(t.id) })),
   );
 
   const quando = new Date().toISOString();
-  for (const lote of emLotes(desmarcar, LOTE_FILTRO_IN)) {
-    await admin.from('email_threads')
-      .update({ nao_lido: false, updated_at: quando })
-      .in('id', lote);
+  for (const [valor, ids] of [[true, ligar], [false, desligar]] as [boolean, string[]][]) {
+    for (const lote of emLotes(ids, LOTE_FILTRO_IN)) {
+      await admin.from('email_threads')
+        .update({ nao_lido: valor, updated_at: quando })
+        .in('id', lote);
+    }
   }
-  for (const lote of emLotes(marcar, LOTE_FILTRO_IN)) {
-    await admin.from('email_threads')
-      .update({ nao_lido: true, updated_at: quando })
-      .eq('pasta', 'inbox')
-      .in('id', lote);
-  }
-  return { lidas: desmarcar.length, nao_lidas: marcar.length };
+  return { nao_lidas: ligar.length, lidas: desligar.length };
 }
 
 let INICIO = agora();
@@ -378,7 +375,9 @@ async function sincronizarCaixa(admin: any, caixaId: string): Promise<Resultado>
     // rodada — reconciliar é convergente, atrasar dois minutos não custa nada.
     if (agora() - INICIO < ORCAMENTO_MS) {
       try {
-        await reconciliarNaoLidosImap(admin, caixa, sessao);
+        const r = await reconciliarNaoLidosImap(admin, caixa, sessao);
+        // O cron descarta a resposta da function; sem log não há como saber o efeito.
+        console.log('reconciliação', caixa.email_caixa, JSON.stringify(r));
       } catch (e) {
         // Não pode derrubar o sync: mensagem nova é mais importante que contador.
         console.warn('falha ao reconciliar não lidos', e);
