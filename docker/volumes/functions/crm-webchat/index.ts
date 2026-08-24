@@ -35,6 +35,10 @@ const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE);
 
 const MAX_SESSOES_POR_IP_HORA = 20;
+// Teto por TELEFONE (não só IP): fecha o alvejamento de uma vítima via IPs rotativos —
+// cada sessão dela com ≥1 inbound vira um cutucão de WhatsApp (cron webchat-reengajar).
+// Uso legítimo cria ~1/dia (o widget reusa a sessão no localStorage); 5 é folgado.
+const MAX_SESSOES_POR_TELEFONE_DIA = Number(Deno.env.get("WEBCHAT_MAX_SESSOES_TELEFONE_DIA") ?? 5);
 const MAX_MSGS_POR_SESSAO_MIN = 15;
 const MAX_CONTEUDO = 2000;
 const MAX_BODY_BYTES = 16_384;
@@ -190,6 +194,32 @@ function extDoMime(mime: string): string {
   if (m.includes("wav")) return "wav";
   if (m.includes("webm")) return "webm";
   return "webm";
+}
+
+// Detecta o tipo de áudio pelos BYTES MÁGICOS (assinatura), ignorando o MIME que o cliente
+// alega. O upload de áudio é anônimo e vai pra um bucket PÚBLICO — sem isto, um atacante
+// mandava base64 de HTML/SVG com mime "audio/webm" e ganhava uma URL de conteúdo arbitrário
+// hospedada no domínio da PPG (phishing com cara de origem confiável). Aqui só passa o que
+// realmente tem cara de áudio; o tipo devolvido é o DETECTADO, nunca o do cliente.
+// Retorna o mime canônico, ou null quando não reconhece um container de áudio.
+function detectarMimeAudio(b: Uint8Array): string | null {
+  if (b.length < 12) return null;
+  const u32 = (i: number) => (b[i] << 24) | (b[i + 1] << 16) | (b[i + 2] << 8) | b[i + 3];
+  const ascii = (i: number, n: number) => String.fromCharCode(...b.slice(i, i + n));
+  // OGG (Opus/Vorbis) — "OggS"
+  if (ascii(0, 4) === "OggS") return "audio/ogg";
+  // WebM / Matroska (EBML) — 1A 45 DF A3
+  if (u32(0) === 0x1a45dfa3) return "audio/webm";
+  // WAV — "RIFF"...."WAVE"
+  if (ascii(0, 4) === "RIFF" && ascii(8, 4) === "WAVE") return "audio/wav";
+  // MP4 / M4A — "ftyp" no offset 4 (box size ocupa 0..4)
+  if (ascii(4, 4) === "ftyp") return "audio/mp4";
+  // AMR — "#!AMR"
+  if (ascii(0, 5) === "#!AMR") return "audio/amr";
+  // MP3 — "ID3" (tag) ou frame sync 0xFFEx (MPEG audio / ADTS-AAC)
+  if (ascii(0, 3) === "ID3") return "audio/mpeg";
+  if (b[0] === 0xff && (b[1] & 0xe0) === 0xe0) return "audio/mpeg";
+  return null;
 }
 
 // Transcreve via OpenAI Whisper (mesmo endpoint/modelo do crm-transcrever-audio). Best-effort:
@@ -403,6 +433,23 @@ async function acaoIniciar(body: Record<string, unknown>, req: Request) {
   if ((totalHora ?? 0) >= MAX_SESSOES_HORA_GLOBAL) {
     console.error(`[crm-webchat] DISJUNTOR sessões/hora atingido (${totalHora})`);
     return json({ ok: false, erro: "ocupado" }, 429);
+  }
+
+  // Anti-abuso por NÚMERO: limita quantas sessões um mesmo telefone canônico abre por dia,
+  // pra que rotação de IP não permita alvejar a vítima repetidamente (cada sessão com
+  // inbound = 1 possível cutucão de WhatsApp pra ela). Fail-open: erro no throttle não
+  // derruba chat legítimo, e o atacante não tem como forçar o erro (é um count simples);
+  // o limite por IP + disjuntor global seguem valendo por baixo.
+  try {
+    const { data: ctTel } = await supabase.rpc("webchat_sessoes_por_telefone", {
+      p_telefone: telefone,
+      p_horas: 24,
+    });
+    if ((ctTel ?? 0) >= MAX_SESSOES_POR_TELEFONE_DIA) {
+      return json({ ok: false, erro: "limite_sessoes" }, 429);
+    }
+  } catch (e) {
+    console.error(`[crm-webchat] throttle telefone: ${(e as Error).message}`);
   }
 
   // Produto da sessão: 'escola' (chat DENTRO da Escola de Especialização, persona própria)
@@ -868,8 +915,6 @@ async function acaoAudio(body: Record<string, unknown>, req: Request) {
   if (!UUID_RE.test(sessaoId)) return json({ ok: false, erro: "sessao_invalida" }, 400);
   const b64 = typeof body.audio_base64 === "string" ? body.audio_base64 : "";
   if (!b64) return json({ ok: false, erro: "audio_vazio" }, 400);
-  const mime = texto(body.mime, 60) || "audio/webm";
-
   const sessao = await carregarSessao(sessaoId);
   if (!sessao) return json({ ok: false, erro: "sessao_nao_encontrada" }, 404);
   if (sessao.bloqueada) return json({ ok: false, erro: "sessao_bloqueada" }, 403);
@@ -894,12 +939,16 @@ async function acaoAudio(body: Record<string, unknown>, req: Request) {
   }
   if (!bytes.length) return json({ ok: false, erro: "audio_vazio" }, 400);
 
+  // Valida pelos BYTES, não pelo mime do cliente: bucket público + upload anônimo.
+  const mimeReal = detectarMimeAudio(bytes);
+  if (!mimeReal) return json({ ok: false, erro: "audio_invalido" }, 400);
+
   // sobe pro Storage (mesmo bucket público do WhatsApp; pasta webchat/)
   let url: string | null = null;
   try {
-    const ext = extDoMime(mime);
+    const ext = extDoMime(mimeReal);
     const path = `webchat/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}.${ext}`;
-    const { error: stErr } = await supabase.storage.from("whatsapp-anexos").upload(path, bytes, { contentType: mime, upsert: false });
+    const { error: stErr } = await supabase.storage.from("whatsapp-anexos").upload(path, bytes, { contentType: mimeReal, upsert: false });
     if (stErr) console.error(`[crm-webchat] storage upload: ${stErr.message}`);
     else url = toPublicUrl(supabase.storage.from("whatsapp-anexos").getPublicUrl(path).data.publicUrl);
   } catch (e) {
@@ -907,9 +956,9 @@ async function acaoAudio(body: Record<string, unknown>, req: Request) {
   }
 
   // transcreve (Whisper); vazio → "[áudio]" (a conversa segue mesmo sem transcrição)
-  const transcricao = await transcreverWhisper(bytes, mime);
+  const transcricao = await transcreverWhisper(bytes, mimeReal);
   const conteudo = transcricao || "[áudio]";
-  const anexos = url ? [{ tipo: "audio", mime_type: mime, url, url_storage: url }] : [];
+  const anexos = url ? [{ tipo: "audio", mime_type: mimeReal, url, url_storage: url }] : [];
 
   const { data: msg, error } = await supabase
     .from("webchat_mensagens")
@@ -1107,8 +1156,6 @@ async function acaoAtendenteAudio(body: Record<string, unknown>, req: Request) {
   if (!UUID_RE.test(sessaoId)) return json({ ok: false, erro: "sessao_invalida" }, 400);
   const b64 = typeof body.audio_base64 === "string" ? body.audio_base64 : "";
   if (!b64) return json({ ok: false, erro: "audio_vazio" }, 400);
-  const mime = texto(body.mime, 60) || "audio/webm";
-
   const sessao = await carregarSessao(sessaoId);
   if (!sessao) return json({ ok: false, erro: "sessao_nao_encontrada" }, 404);
   if (sessao.bloqueada) return json({ ok: false, erro: "sessao_bloqueada" }, 403);
@@ -1121,15 +1168,19 @@ async function acaoAtendenteAudio(body: Record<string, unknown>, req: Request) {
   }
   if (!bytes.length) return json({ ok: false, erro: "audio_vazio" }, 400);
 
+  // Mesma validação por bytes do lado do lead: nada entra no bucket público sem ser áudio.
+  const mimeReal = detectarMimeAudio(bytes);
+  if (!mimeReal) return json({ ok: false, erro: "audio_invalido" }, 400);
+
   // ⚠️ Sem URL não há o que tocar: aqui o upload é BLOQUEANTE, ao contrário do lado do lead,
   // onde a transcrição ainda salva a mensagem. Um balão de áudio sem áudio é pior que um erro.
   let url: string | null = null;
   try {
-    const ext = extDoMime(mime);
+    const ext = extDoMime(mimeReal);
     const path = `webchat/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}.${ext}`;
     const { error: stErr } = await supabase.storage
       .from("whatsapp-anexos")
-      .upload(path, bytes, { contentType: mime, upsert: false });
+      .upload(path, bytes, { contentType: mimeReal, upsert: false });
     if (stErr) throw new Error(stErr.message);
     url = toPublicUrl(supabase.storage.from("whatsapp-anexos").getPublicUrl(path).data.publicUrl);
   } catch (e) {
@@ -1137,9 +1188,9 @@ async function acaoAtendenteAudio(body: Record<string, unknown>, req: Request) {
     return json({ ok: false, erro: "falha_no_upload" }, 500);
   }
 
-  const transcricao = await transcreverWhisper(bytes, mime);
+  const transcricao = await transcreverWhisper(bytes, mimeReal);
   const conteudo = transcricao || "[áudio]";
-  const anexos = [{ tipo: "audio", mime_type: mime, url, url_storage: url }];
+  const anexos = [{ tipo: "audio", mime_type: mimeReal, url, url_storage: url }];
 
   const { data: msg, error } = await supabase
     .from("webchat_mensagens")
