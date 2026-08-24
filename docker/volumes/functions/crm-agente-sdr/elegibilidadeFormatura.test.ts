@@ -238,3 +238,55 @@ describe('decidirPrazoEstudante', () => {
     expect(instrucaoPerguntarConclusao('sem_data')).not.toMatch(/NÃO deduza/);
   });
 });
+
+describe('posição no curso E data de conclusão na mesma resposta', () => {
+  /*
+    Caso real de 22/08/2026, achado na telemetria do chat do site. A lead respondeu
+    "10 período, finalizo em novembro". O modelo mandou `conclusao_graduacao: "11/2026"` —
+    CERTO — mas a guarda lia só o texto cru, via "10 período" e devolvia
+    PRECISA_DATA_CONCLUSAO, descartando a data. Ela respondeu quatro vezes, escreveu
+    "Já respondi", e a conversa só destravou quando o modelo repetiu a data noutro formato.
+  */
+  const agora = brt('2026-08-22T11:44:00');
+
+  it('lê a data quando o lead diz a posição E quando conclui', () => {
+    const r = lerConclusao('10 período, finalizo em novembro', agora);
+    expect(r.tipo).toBe('data');
+    if (r.tipo === 'data') expect(r.data.toISOString().slice(0, 7)).toBe('2026-11');
+  });
+
+  it('a tool PASSA a rodar nesse caso, em vez de pedir a data de novo', () => {
+    const d = decidirPrazoEstudante({
+      contexto_qualificacao: 'estudante_apto',
+      conclusao_graduacao: '11/2026',
+      conclusao_graduacao_bruta: '10 período, finalizo em novembro',
+    }, agora);
+    expect(d.acao).toBe('segue');
+  });
+
+  it('outras formas de dizer a mesma coisa', () => {
+    for (const txt of ['5o periodo, termino em dezembro', 'to no 8 semestre e concluo em julho',
+                       'ultimo periodo, me formo em novembro']) {
+      expect(lerConclusao(txt, agora).tipo).toBe('data');
+    }
+  });
+
+  // ⚠️ A guarda original existe por um motivo real (caso Edinara: o modelo transformou
+  // "2 semestre" numa data plausível por conta própria). Ela CONTINUA valendo.
+  it('posição SOZINHA continua exigindo a data', () => {
+    for (const txt of ['2 semestre', 'tô no 5º período', 'primeiro ano', 'última fase']) {
+      expect(lerConclusao(txt, agora).tipo).toBe('posicao_no_curso');
+    }
+    expect(decidirPrazoEstudante({
+      contexto_qualificacao: 'estudante_apto',
+      conclusao_graduacao: '12/2026',
+      conclusao_graduacao_bruta: '2 semestre',
+    }, agora).acao).toBe('pergunta_data');
+  });
+
+  // O mês precisa estar ligado a um verbo de CONCLUSÃO — mês solto ao lado da posição pode
+  // ser o começo do curso, e aí deduzir seria o mesmo erro de antes.
+  it('mês que não é de conclusão não vale como data', () => {
+    expect(lerConclusao('tô no 3º período, comecei em janeiro', agora).tipo).toBe('posicao_no_curso');
+  });
+});

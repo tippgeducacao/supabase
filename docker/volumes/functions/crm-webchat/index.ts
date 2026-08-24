@@ -332,8 +332,37 @@ async function responderComoJoao(
       }
     }
   } catch (e) {
-    console.error(`[crm-webchat] cerebro: ${(e as Error).message}`);
-    const fb = "Tive uma instabilidade aqui, mas já já te respondo. 🙏";
+    const erro = (e as Error)?.message ?? String(e);
+    console.error(`[crm-webchat] cerebro: ${erro}`);
+    /*
+      ⚠️ GUARDA A FALHA NA SESSÃO. O log da edge dura 24h: quatro conversas caíram aqui em
+      22/08 e, dois dias depois, não havia onde olhar pra saber por quê — só o balão genérico
+      na tela do lead. O agente de WhatsApp tem `crm_agente_sdr_eventos` justamente pra isso;
+      o chat não tinha equivalente. Best-effort: registrar não pode derrubar o fallback.
+    */
+    try {
+      const { data: s } = await supabase
+        .from("webchat_sessoes").select("falhas").eq("id", sessaoId).maybeSingle();
+      const falhas = Array.isArray((s as { falhas?: unknown } | null)?.falhas)
+        ? (s as { falhas: unknown[] }).falhas
+        : [];
+      const { count } = await supabase
+        .from("webchat_mensagens")
+        .select("id", { count: "exact", head: true })
+        .eq("sessao_id", sessaoId);
+      falhas.push({ em: new Date().toISOString(), erro: erro.slice(0, 500), msgs: count ?? null });
+      await supabase.from("webchat_sessoes")
+        .update({ falhas: falhas.slice(-20) }).eq("id", sessaoId);
+    } catch (e2) {
+      console.error(`[crm-webchat] registrar falha: ${(e2 as Error).message}`);
+    }
+    /*
+      ⚠️ O texto NÃO promete mais "já já te respondo". Nada tenta de novo depois daqui — a
+      resposta só volta se o próprio visitante escrever. Prometer retorno que não vem é pior
+      que assumir a falha: ele fica esperando em vez de repetir a pergunta.
+    */
+    const fb = "Desculpa, tive um problema aqui e não consegui responder. "
+      + "Pode mandar de novo? 🙏";
     await supabase.from("webchat_mensagens").insert({
       sessao_id: sessaoId, direcao: "outbound", origem: "sistema", conteudo: fb,
     });

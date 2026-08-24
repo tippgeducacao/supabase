@@ -162,6 +162,28 @@ export function lerConclusao(bruto: unknown, agora: Date = new Date()): LeituraC
     return { tipo: 'data', data: fimDoMes(d.getUTCFullYear(), d.getUTCMonth() + 1), via: 'duracao' };
   }
 
+  /*
+    2b. POSIÇÃO **E** CONCLUSÃO na mesma resposta: "10 período, finalizo em novembro".
+
+    Precisa vir ANTES da regra de posição. Sem isto o "10 período" curto-circuitava tudo e a
+    data que o lead deu na MESMA frase era jogada fora: o João perguntava o mês/ano de novo,
+    e de novo. Caso real de 22/08 — a lead respondeu quatro vezes, escreveu "Já respondi", e
+    a conversa só destravou quando o modelo repetiu a data noutro formato.
+
+    ⚠️ Exige um VERBO DE CONCLUSÃO perto do mês. Mês solto ao lado da posição pode ser outra
+    coisa ("tô no 3º período, comecei em janeiro"), e aí a regra de posição continua valendo —
+    que é o que protege do caso Edinara.
+  */
+  const conclusaoComMes = t.match(new RegExp(
+    `\\b(?:finaliz|termin|conclu|form|colo|colar)[a-z]*\\b[^.;]{0,30}?`
+    + `\\b(${MESES_PT.map((m) => m.slice(0, 3)).join('|')})[a-z]*\\b`,
+  ));
+  if (conclusaoComMes) {
+    const mes = MESES_PT.findIndex((m) => m.startsWith(conclusaoComMes[1])) + 1;
+    const ano = mes < br.getUTCMonth() + 1 ? anoAtual + 1 : anoAtual;
+    return { tipo: 'data', data: fimDoMes(ano, mes), via: 'conclusao com mes' };
+  }
+
   // 3. Posição no curso — o caso Edinara.
   if (new RegExp(`\\b(?:\\d{1,2}|${ORDINAL_PT})[a-z]*\\s*[ºoª°]?\\s*(?:semestre|periodo|ano|fase|etapa)s?\\b`).test(t)) {
     return { tipo: 'posicao_no_curso', via: 'numero de semestre/periodo' };
