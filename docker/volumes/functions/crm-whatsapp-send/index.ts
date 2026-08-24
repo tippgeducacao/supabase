@@ -687,12 +687,22 @@ Deno.serve(async (req) => {
         audio: audioObj,
       };
     } else if (tipo === "sticker") {
-      // Figurinha: webp estático (512x512, <100KB) ou animado (<500KB) por URL pública.
+      // Figurinha: webp estático (512x512, <100KB) ou animado (<500KB).
+      // Por media_id, MESMO motivo do document/image/vídeo: por `link` a Meta baixa o
+      // arquivo do nosso storage a CADA envio e o 131053 ("Downloading media from
+      // weblink failed") é INTERMITENTE — e cresce com o tamanho. Medido em 2026-08-24
+      // sobre o histórico real: figurinha ≤ 100 KB teve 1.512 envios e ZERO 131053;
+      // acima de 100 KB, 91 falhas em 403 envios (a de 709 KB falhou 29 de 34 vezes).
+      // O MESMO arquivo ora ia, ora não — é o download da Meta expirando, não a arte.
+      // Foi o último tipo de mídia que ainda ia por link; agora nenhum vai.
+      mediaIdUsado = await resolverMediaId(
+        admin, phoneNumberId, accessToken, docUrl, "image/webp", docFilename || "sticker.webp",
+      );
       waPayload = {
         messaging_product: "whatsapp",
         to,
         type: "sticker",
-        sticker: { link: docUrl },
+        sticker: mediaIdUsado ? { id: mediaIdUsado } : { link: docUrl },
       };
     } else if (tipo === "reaction") {
       // Reação a uma mensagem existente: emoji em `conteudo`, alvo em reaction_message_id.
