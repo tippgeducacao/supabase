@@ -11,6 +11,7 @@ import {
   buildAulaStartIso,
   dateOnlyToDate,
   daysUntilAula,
+  marcoLinkDoDia,
   pickNextFase2Marco,
 } from "./cadenciaFase2.ts";
 
@@ -46,6 +47,7 @@ const STATUSES_DISPATCHABLE = [
   "fase2_reconfirmacao_14d",
   "fase2_reconfirmacao_7d",
   "fase2_lembrete_1d",
+  "dia_aula_manha_enviado",
   "dia_aula_link_enviado",
   "pos_aula_realizada",
 ] as const;
@@ -60,6 +62,10 @@ const STATUS_TO_CADENCIA: Record<string, string> = {
   // lista, o convite continua sendo LIDO pelo cron e é remigrado pro marco vivo.
   fase2_reconfirmacao_7d: "lembrete_7d",
   fase2_lembrete_1d: "lembrete_1d",
+  // Aviso da manhã do dia da aula (10:00) — traz aula, horário, link e o pedido do
+  // material. Não substitui o link de 1h antes: os dois saem no mesmo dia, e o guard
+  // anti-repetição não os confunde porque ele é por NOME DE TEMPLATE, não por convite.
+  dia_aula_manha_enviado: "dia_aula_manha",
   dia_aula_link_enviado: "dia_aula_link",
   pos_aula_realizada: "pos_aula_status",
 };
@@ -293,9 +299,19 @@ function buildVariableValue(
       // template inteiro (131008) — o lembrete de 30d ficou repetindo dias seguidos
       // por causa de UMA aula sem horário. "a combinar" entrega a mensagem.
       return String(ctx.aula?.horario ?? "").trim() || "a combinar";
-    case "link_sala_aula":
-      // Link da sala (cadastro do CURSO em /pedagogico-v2/cursos), com override por aula
-      return String(ctx.aula?.link_sala_override || ctx.pos?.link_sala_meet || "");
+    case "link_sala_aula": {
+      // Link da sala (cadastro do CURSO em /pedagogico-v2/cursos), com override por aula.
+      //
+      // O cadastro guarda a sala sem esquema ("meet.google.com/xxx-yyyy-zzz" é o formato
+      // real das 4 pós ativas). Quando este campo vai para o BOTÃO do template a Meta
+      // recebe só o slug e monta a URL, mas quando ele vai no CORPO — caso do aviso da
+      // manhã — o que chega ao professor é texto puro, e nem todo cliente de WhatsApp
+      // transforma "meet.google.com/..." em link clicável. O `https://` resolve, e é
+      // inofensivo para quem já cadastrou a URL completa.
+      const bruto = String(ctx.aula?.link_sala_override || ctx.pos?.link_sala_meet || "").trim();
+      if (!bruto) return "";
+      return /^https?:\/\//i.test(bruto) ? bruto : `https://${bruto}`;
+    }
     default:
       return "";
   }
@@ -894,6 +910,41 @@ Deno.serve(async (req) => {
           }
         }
 
+        // 5.15) GUARD DO AVISO DA MANHÃ — ele é o toque das 10h; perdeu a manhã, perdeu.
+        // Se o marco só for alcançado quando o link de 1h antes JÁ está de pé (convite
+        // confirmado no fim da tarde, motor parado, backlog), mandar "hoje temos aula,
+        // separe o material" às 18h05 e o link às 18h06 é ruído em cima do professor. Vai
+        // direto para o degrau do link, que carrega a informação essencial.
+        if (cadencia === "dia_aula_manha") {
+          const marcoLinkMs = new Date(marcoLinkDoDia(aula)).getTime();
+          if (Date.now() >= marcoLinkMs) {
+            await supabase
+              .from("ped_convites")
+              .update({
+                status: "dia_aula_link_enviado",
+                proxima_acao_em: new Date(marcoLinkMs).toISOString(),
+              })
+              .eq("id", convite.id);
+            await supabase.from("ped_convites_eventos").insert({
+              convite_id: convite.id,
+              aula_id: convite.aula_id,
+              tipo: "aviso_manha_perdido",
+              ator: "system",
+              payload: {
+                motivo: "o marco das 10h só venceu depois da hora do link",
+                aula_data: aula.data,
+                horario: aula.horario,
+              },
+            });
+            console.log(
+              `[dispatch] aviso da manhã PERDIDO convite=${convite.id} aula=${aula.data} — já passou da hora do link, pulando`,
+            );
+            detail.skipped = "aviso_manha_tarde_demais";
+            details.push(detail);
+            continue;
+          }
+        }
+
         // 5.2) GUARD DO LINK DO DIA — o link da sala só serve ANTES de a aula começar.
         // Enquanto o cron rodou 1x/dia às 09h, esse marco (1h antes da aula, ou seja 18h
         // para a aula das 19h) NUNCA era alcançado no próprio dia: vencia à noite e só era
@@ -950,6 +1001,30 @@ Deno.serve(async (req) => {
             ator: "system",
             payload: { cadencia, status: convite.status },
           });
+
+          // ⚠️ Sem template, o `continue` abaixo NÃO mexe no estado — o convite fica no
+          // degrau com o marco vencido e o cron o re-seleciona a cada 30 min para sempre.
+          // Num degrau TERMINAL isso é só ruído; no degrau da MANHÃ seria fatal, porque o
+          // convite nunca chegaria ao link do dia e o professor entraria na aula sem sala.
+          // Enquanto o `aula_hoje_manha_v1` não estiver aprovado na Meta, o aviso das 10h
+          // simplesmente não acontece e a régua volta a ser a de antes: link 1h antes.
+          if (cadencia === "dia_aula_manha") {
+            await supabase
+              .from("ped_convites")
+              .update({
+                status: "dia_aula_link_enviado",
+                proxima_acao_em: marcoLinkDoDia(aula),
+              })
+              .eq("id", convite.id);
+            console.log(
+              `[dispatch] aviso da manhã sem template aprovado convite=${convite.id} → segue direto pro link`,
+            );
+            detail.skipped = "template_indisponivel_promovido_ao_link";
+            detail.cadencia = cadencia;
+            details.push(detail);
+            continue;
+          }
+
           detail.skipped = "template_indisponivel";
           detail.cadencia = cadencia;
           details.push(detail);
@@ -1405,7 +1480,8 @@ Deno.serve(async (req) => {
           status === "fase2_reconfirmacao_30d" ||
           status === "fase2_reconfirmacao_14d" ||
           status === "fase2_reconfirmacao_7d" ||
-          status === "fase2_lembrete_1d"
+          status === "fase2_lembrete_1d" ||
+          status === "dia_aula_manha_enviado"
         ) {
           // Próximo degrau da régua, sempre ABAIXO do que acabou de ser enviado.
           const next = pickNextFase2Marco(aula, status);

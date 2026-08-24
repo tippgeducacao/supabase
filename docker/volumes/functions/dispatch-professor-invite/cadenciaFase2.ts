@@ -99,12 +99,20 @@ export const ESCADA_FASE2 = [
 
 // Em que degrau da escada cada status ESTÁ. O 14d aposentado ocupa o degrau do 30d:
 // quem parou nele já gastou a reconfirmação longa, e o próximo passo é o de 7d.
+//
+// O degrau 3 não vive em ESCADA_FASE2 porque não é medido em DIAS e sim em HORA do
+// próprio dia da aula (10:00) — o loop de degraus não sabe compará-lo. Ele existe aqui
+// para a regra "o próximo é sempre estritamente abaixo do atual" continuar valendo:
+// quem já recebeu o toque da manhã não pode voltar pra ele.
 export const DEGRAU_FASE2: Record<string, number> = {
   fase2_reconfirmacao_30d: 0,
   fase2_reconfirmacao_14d: 0,
   fase2_reconfirmacao_7d: 1,
   fase2_lembrete_1d: 2,
+  dia_aula_manha_enviado: 3,
 };
+
+const DEGRAU_MANHA = 3;
 
 export type SmartSkipResult = {
   status:
@@ -112,6 +120,7 @@ export type SmartSkipResult = {
     | "fase2_reconfirmacao_14d"
     | "fase2_reconfirmacao_7d"
     | "fase2_lembrete_1d"
+    | "dia_aula_manha_enviado"
     | "dia_aula_link_enviado"
     | "pos_aula_realizada";
   proxima_acao_em: string;
@@ -141,6 +150,42 @@ export function marcoLinkDoDia(aula: { data: string; horario: string | null }): 
   return new Date(inicio - 60 * 60 * 1000).toISOString();
 }
 
+/** Hora do toque da manhã no dia da aula (decisão do Rafael, 24/08/2026). */
+export const HORA_TOQUE_MANHA = "10:00";
+
+/**
+ * Antes desta hora de início, a aula NÃO recebe o toque da manhã.
+ *
+ * O toque das 10h existe para dar ao professor um aviso com folga — tempo de se organizar
+ * e de mandar o material antes da aula. Numa aula que começa 08:00 (prático) ele chegaria
+ * com a aula já em andamento, e numa que começa 11:00 chegaria colado no link de 1h antes,
+ * dois toques quase juntos. O corte às 12:00 garante pelo menos 2h de folga real; abaixo
+ * dele o professor recebe só o link, 1h antes, como sempre foi.
+ */
+const INICIO_MINIMO_PARA_TOQUE_MANHA = "12:00";
+
+/** A aula começa tarde o bastante para o toque das 10h fazer sentido? */
+export function aulaTemToqueDeManha(aula: { data: string; horario: string | null }): boolean {
+  const inicio = new Date(buildAulaStartIso(aula.data, aula.horario)).getTime();
+  const corte = new Date(`${aula.data}T${INICIO_MINIMO_PARA_TOQUE_MANHA}:00-03:00`).getTime();
+  return Number.isFinite(inicio) && inicio >= corte;
+}
+
+/**
+ * Quando o aviso da manhã deve sair: **10:00 do dia da aula**, hora fixa.
+ *
+ * Fixa, e não relativa ao início: o valor dele é chegar cedo, quando o professor ainda tem
+ * o dia inteiro pela frente para separar os slides. Uma hora relativa (ex. 9h antes)
+ * espalharia o aviso por horários estranhos conforme o horário de cada aula.
+ *
+ * ⚠️ 10:00 está DENTRO da janela do cron (07h–20h30 SP). Mudar esta hora para fora da
+ * janela faz o marco nunca vencer — foi exatamente assim que o link do dia ficou mudo até
+ * 17/08/2026. Ver `docs/Pedagógico.md`.
+ */
+export function marcoManhaDoDia(aula: { data: string; horario: string | null }): string {
+  return new Date(`${aula.data}T${HORA_TOQUE_MANHA}:00-03:00`).toISOString();
+}
+
 /**
  * Próximo marco da fase 2 para esta aula.
  *
@@ -158,6 +203,7 @@ export function pickNextFase2Marco(
   aula: { data: string; horario: string | null },
   statusAtual?: string | null,
   hojeYmd: string = hojeSpYmd(),
+  agora: Date = new Date(),
 ): SmartSkipResult {
   const dias = daysUntilAula(aula.data, hojeYmd);
   const degrauAtual = statusAtual ? DEGRAU_FASE2[statusAtual] : undefined;
@@ -173,6 +219,21 @@ export function pickNextFase2Marco(
         proxima_acao_em: dateMinusDays(aula.data, deg.dias),
         dias,
         marco: deg.marco,
+      };
+    }
+  }
+
+  // Acabaram os lembretes contados em dias. Antes do link, o aviso da manhã do dia da
+  // aula — só se ainda estiver no FUTURO. Sem essa checagem, um convite confirmado às 14h
+  // do próprio dia receberia às 14h um "bom dia, hoje tem aula" com marco vencido às 10h.
+  if (degrauAtual === undefined || degrauAtual < DEGRAU_MANHA) {
+    const manha = marcoManhaDoDia(aula);
+    if (aulaTemToqueDeManha(aula) && new Date(manha).getTime() > agora.getTime()) {
+      return {
+        status: "dia_aula_manha_enviado",
+        proxima_acao_em: manha,
+        dias,
+        marco: "dia_aula_manha",
       };
     }
   }
