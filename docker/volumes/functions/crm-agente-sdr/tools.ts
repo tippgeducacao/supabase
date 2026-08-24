@@ -1158,6 +1158,28 @@ export async function executarTool(
   } catch (e) {
     // Erro vira tool_result legível — o agente contorna na conversa em vez de travar.
     console.error(`[crm-agente-sdr] tool ${name} falhou:`, e);
+    /*
+      ⚠️ "Conduza normalmente" é FAIL-OPEN, e para a checagem de elegibilidade isso é o pior
+      default possível: a matriz cai (ela usa MODELO_MATRIZ, um modelo PRÓPRIO, que já ficou
+      apontando pra um id morto uma vez) e o modelo segue como se o lead fosse apto —
+      oferecendo horário e marcando reunião para quem talvez nem possa cursar. É o mesmo
+      buraco que `decidirPrazoEstudante` fecha quando falta a data; falha técnica não pode
+      reabri-lo por outra porta.
+      Aqui a falha é FECHADA: sem checagem, é proibido tratar como apto.
+    */
+    if (name === 'verificar_compatibilidade_curso') {
+      return {
+        id,
+        output: 'FALHA_TECNICA',
+        compativel: null,
+        pode_cursar: null,
+        mensagem_para_lead: null,
+        resultado: `A checagem de compatibilidade NÃO rodou (falha técnica: ${(e as Error).message}).`,
+        instrucao: 'É PROIBIDO tratar o lead como apto, dizer que a formação dele atende ou '
+          + 'oferecer horário agora. Sem citar erro técnico, diga que vai confirmar a '
+          + 'compatibilidade e siga a conversa; tente esta função de novo na próxima rodada.',
+      };
+    }
     return { resultado: `Erro ao executar ${name}: ${(e as Error).message}. Conduza a conversa normalmente sem citar o erro.`, id };
   }
 }
