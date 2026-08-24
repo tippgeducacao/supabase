@@ -7,10 +7,29 @@ Deno.serve(async (req) => {
   }
 
   try {
+    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+      serviceKey
     );
+
+    // Gate de autorização — roda com service_role, sem verify_jwt, e faz INSERT em massa
+    // em fin_alunos. Sem isto qualquer um na internet com a anon key (pública) inseria
+    // linhas arbitrárias. Não tem chamador no front hoje; exige usuário logado OU a
+    // própria service_role. (Apagar a pasta não removeria a function da VPS — o deploy
+    // usa docker cp, que não apaga; por isso o gate, que protege via git push.)
+    const authToken = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
+    let autorizado = !!authToken && authToken === serviceKey;
+    if (!autorizado && authToken) {
+      const { data: u } = await supabase.auth.getUser(authToken);
+      autorizado = !!u?.user?.id;
+    }
+    if (!autorizado) {
+      return new Response(
+        JSON.stringify({ error: "não autorizado" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
 
     const { alunos } = await req.json();
 

@@ -44,6 +44,25 @@ serve(async (req) => {
     
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
+    // Gate de autorização — esta function roda com service_role e tem verify_jwt=false.
+    // Sem isto qualquer um com a anon key (pública, vive no bundle do front) disparava o
+    // recálculo e gravava em comissionamentos_semanais. Todos os chamadores são
+    // supabase.functions.invoke do front (JWT do usuário logado) — não há cron. Exige um
+    // usuário logado de verdade OU a própria service_role (server-to-server). Padrão
+    // espelhado de crm-transcrever-audio.
+    const authToken = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
+    let autorizado = !!authToken && authToken === supabaseServiceKey;
+    if (!autorizado && authToken) {
+      const { data: u } = await supabase.auth.getUser(authToken);
+      autorizado = !!u?.user?.id;
+    }
+    if (!autorizado) {
+      return new Response(JSON.stringify({ error: "não autorizado" }), {
+        status: 401,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     const body: RequestBody = await req.json();
     console.log('📊 Recalculando comissionamentos:', body);
 
