@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { encode as base64Encode, decode as base64Decode } from "https://deno.land/std@0.168.0/encoding/base64.ts";
+import { limparSaidaIA, tirarTravessao } from "../_shared/limparSaidaIA.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -220,32 +221,36 @@ serve(async (req) => {
 
     // 3. Build system prompt
     const tomFinal = tom_de_voz || bp?.tom_de_voz || "Direto e Forte";
+    // O travessão não vem só do modelo: os `brand_profiles` usam "—" no próprio
+    // tom_descricao, nas frases de exemplo e nas regras de estilo. Injetar isso no prompt
+    // é ENSINAR o cacoete que a regra 5 proíbe — então o exemplo entra já sem travessão.
+    const semTravessao = (v: any) => (v === null || v === undefined ? "" : tirarTravessao(String(v)));
     const systemPrompt = `Você é um copywriter especialista em redes sociais com foco em conteúdo TÉCNICO e APLICÁVEL. Gere uma legenda para Instagram seguindo RIGOROSAMENTE estas diretrizes:
 
 ${bp?.brand_name || bp?.account_name ? `MARCA/CONTA: ${bp.brand_name || bp.account_name}${bp?.instagram_handle ? ` (@${String(bp.instagram_handle).replace(/^@/, "")})` : ""}` : ""}
 TOM DE VOZ: ${tomFinal}
-${bp?.tom_descricao ? `DESCRIÇÃO DO TOM: ${bp.tom_descricao}` : ""}
+${bp?.tom_descricao ? `DESCRIÇÃO DO TOM: ${semTravessao(bp.tom_descricao)}` : ""}
 
-${bp?.vocabulario_chave ? `VOCABULÁRIO E PALAVRAS-CHAVE: ${bp.vocabulario_chave}` : ""}
-${bp?.metaforas_estrategicas ? `METÁFORAS ESTRATÉGICAS: ${bp.metaforas_estrategicas}` : ""}
+${bp?.vocabulario_chave ? `VOCABULÁRIO E PALAVRAS-CHAVE: ${semTravessao(bp.vocabulario_chave)}` : ""}
+${bp?.metaforas_estrategicas ? `METÁFORAS ESTRATÉGICAS: ${semTravessao(bp.metaforas_estrategicas)}` : ""}
 
-${bp?.estrutura_visual ? `ESTRUTURA VISUAL:\n${bp.estrutura_visual}` : ""}
+${bp?.estrutura_visual ? `ESTRUTURA VISUAL:\n${semTravessao(bp.estrutura_visual)}` : ""}
 
-${bp?.alertas_nao_usar ? `ALERTAS - NÃO UTILIZAR DE FORMA ALGUMA:\n${bp.alertas_nao_usar}` : ""}
+${bp?.alertas_nao_usar ? `ALERTAS - NÃO UTILIZAR DE FORMA ALGUMA:\n${semTravessao(bp.alertas_nao_usar)}` : ""}
 
-${bp?.frases_exemplo ? `EXEMPLOS DE FRASES QUE REPRESENTAM O TOM:\n${bp.frases_exemplo}` : ""}
+${bp?.frases_exemplo ? `EXEMPLOS DE FRASES QUE REPRESENTAM O TOM:\n${semTravessao(bp.frases_exemplo)}` : ""}
 
 === PÚBLICO-ALVO (escreva FALANDO DIRETAMENTE para esta pessoa) ===
-${bp?.publico_alvo ? `QUEM É: ${bp.publico_alvo}` : ""}
-${bp?.persona_perfil_demografico ? `PERFIL DEMOGRÁFICO: ${bp.persona_perfil_demografico}` : ""}
-${bp?.segmento ? `SEGMENTO/NICHO: ${bp.segmento}` : ""}
-${bp ? `- Dores: ${bp.persona_dores || ""}
-- Objeções: ${bp.persona_objecoes || ""}
-- Desejos: ${bp.persona_desejos || ""}` : ""}
+${bp?.publico_alvo ? `QUEM É: ${semTravessao(bp.publico_alvo)}` : ""}
+${bp?.persona_perfil_demografico ? `PERFIL DEMOGRÁFICO: ${semTravessao(bp.persona_perfil_demografico)}` : ""}
+${bp?.segmento ? `SEGMENTO/NICHO: ${semTravessao(bp.segmento)}` : ""}
+${bp ? `- Dores: ${semTravessao(bp.persona_dores)}
+- Objeções: ${semTravessao(bp.persona_objecoes)}
+- Desejos: ${semTravessao(bp.persona_desejos)}` : ""}
 
-${bp?.termos_obrigatorios ? `TERMOS OBRIGATÓRIOS (use com naturalidade quando couber): ${bp.termos_obrigatorios}` : ""}
-${bp?.termos_proibidos ? `TERMOS PROIBIDOS (NUNCA use): ${bp.termos_proibidos}` : ""}
-${bp?.regras_estilo ? `REGRAS DE ESTILO:\n${bp.regras_estilo}` : ""}
+${bp?.termos_obrigatorios ? `TERMOS OBRIGATÓRIOS (use com naturalidade quando couber): ${semTravessao(bp.termos_obrigatorios)}` : ""}
+${bp?.termos_proibidos ? `TERMOS PROIBIDOS (NUNCA use): ${semTravessao(bp.termos_proibidos)}` : ""}
+${bp?.regras_estilo ? `REGRAS DE ESTILO:\n${semTravessao(bp.regras_estilo)}` : ""}
 
 === REGRAS OBRIGATÓRIAS DA LEGENDA ===
 
@@ -257,11 +262,14 @@ ${bp?.regras_estilo ? `REGRAS DE ESTILO:\n${bp.regras_estilo}` : ""}
 
 4. **CONEXÃO COM O PÚBLICO**: Crie identificação com quem lê. Use linguagem que mostra que você entende a realidade do público. Fale DE IGUAL PARA IGUAL.
 
-5. **PROIBIDO**:
+5. **SEM TRAVESSÃO**: NUNCA escreva travessão (— ou –) na legenda. É a marca registrada de texto de IA e o leitor percebe na hora. No lugar dele use ponto final, vírgula ou dois-pontos, refazendo a frase se precisar. Em item de lista, abra com emoji ou hífen simples (-); em intervalo de horário ou período, use hífen simples ("19h-20h").
+
+6. **PROIBIDO**:
+   - NÃO use travessão (— ou –) em hipótese alguma, nem para separar ideia, nem para abrir item de lista
    - NÃO use tom de coach (frases motivacionais vazias, "acredite em você", "mindset", etc.)
    - NÃO use tom consultivo/corporativo distante ("nossa empresa oferece", "entre em contato para saber mais")
    - NÃO use clichês genéricos ou frases que poderiam servir para qualquer nicho
-   - NÃO seja vago — toda frase deve agregar valor real
+   - NÃO seja vago: toda frase deve agregar valor real
 
 Gere APENAS a legenda, sem explicações adicionais. A legenda deve estar pronta para ser usada diretamente no Instagram.`;
 
@@ -349,7 +357,9 @@ Gere APENAS a legenda, sem explicações adicionais. A legenda deve estar pronta
           }),
         }, "Gemini");
         const gj = await gemRes.json();
-        const caption = (gj?.candidates?.[0]?.content?.parts || []).map((p: any) => p.text || "").join("").trim();
+        // Mesma trava determinística do disparo (`generate-dispatch`): instruir o modelo
+        // resolve quase sempre, e "quase" não serve para texto que vai colado no Instagram.
+        const caption = limparSaidaIA((gj?.candidates?.[0]?.content?.parts || []).map((p: any) => p.text || "").join(""));
         if (genVId) {
           await supabase.from("ai_generations").update({
             caption_generated: caption,
@@ -443,7 +453,7 @@ Gere APENAS a legenda, sem explicações adicionais. A legenda deve estar pronta
       }, "Claude API error");
 
       const result = await claudeRes.json();
-      const caption = result?.content?.[0]?.text || "";
+      const caption = limparSaidaIA(result?.content?.[0]?.text || "");
       const elapsedSec = Math.round((Date.now() - startTime) / 1000);
 
       const inputTokens = result?.usage?.input_tokens || 500;

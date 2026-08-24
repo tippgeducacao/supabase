@@ -1,8 +1,8 @@
 // ============================================================================
 // limparSaidaIA — tira da resposta do modelo tudo que não é a mensagem.
 // ----------------------------------------------------------------------------
-// O texto gerado vai para uma pessoa copiar e colar num grupo de WhatsApp ou
-// num e-mail. Chegava assim:
+// O texto gerado vai para uma pessoa copiar e colar num grupo de WhatsApp, num
+// e-mail ou na legenda de um post de Instagram. Chegava assim:
 //
 //     Aqui está a mensagem gerada seguindo todas as regras:
 //     ---
@@ -33,7 +33,7 @@ const ABERTURA_AO_OPERADOR =
   /^\s*(aqui est[áa]|segue(m)?\b|abaixo\b|vou gerar|gerando|com base n|conforme solicitado|prontinho)/i;
 
 const FALA_DA_PROPRIA_MENSAGEM =
-  /\b(mensagem|texto|copy|conte[úu]do|vers[ãa]o|sugest[ãa]o|regras|solicitado|pedido)\b/i;
+  /\b(mensagem|texto|copy|legenda|conte[úu]do|vers[ãa]o|sugest[ãa]o|regras|solicitado|pedido)\b/i;
 
 const EH_INTERJEICAO = /^\s*(claro|perfeito|entendi|certo|beleza|show)\s*[!,.:]/i;
 

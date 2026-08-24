@@ -108,3 +108,41 @@ describe('tirarTravessao', () => {
     expect(tirarTravessao('pós-graduação em suinocultura')).toBe('pós-graduação em suinocultura');
   });
 });
+
+describe('limparSaidaIA — legenda de post (Instagram)', () => {
+  it('tira o preâmbulo e desfaz os travessões da legenda gerada', () => {
+    const bruto = `Aqui está a legenda:
+
+Veterinário bom na técnica e travado no negócio não chega longe.
+
+◆ Felipe Titto — fundador do Tittanium, referência em empreendedorismo
+◆ Rafael Costa — PPGVET
+
+Dias 18, 19 e 20 de setembro — Ribeirão Preto.
+
+Comenta aqui embaixo se você vai.
+
+#gestaoveterinaria #negocios #ppgvet #imersao #clinicaveterinaria`;
+    expect(limparSaidaIA(bruto)).toBe(
+      `Veterinário bom na técnica e travado no negócio não chega longe.
+
+◆ Felipe Titto, fundador do Tittanium, referência em empreendedorismo
+◆ Rafael Costa, PPGVET
+
+Dias 18, 19 e 20 de setembro, Ribeirão Preto.
+
+Comenta aqui embaixo se você vai.
+
+#gestaoveterinaria #negocios #ppgvet #imersao #clinicaveterinaria`,
+    );
+  });
+
+  it('NÃO come as hashtags do fim nem o CTA em pergunta', () => {
+    const msg = `Protocolo errado, vaca vazia.
+
+Você já perdeu prenhez por causa disso?
+
+#reproducao #bovinos #ppgvet #manejo #pecuaria`;
+    expect(limparSaidaIA(msg)).toBe(msg);
+  });
+});
