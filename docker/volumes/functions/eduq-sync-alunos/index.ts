@@ -14,14 +14,16 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
+// Campos de texto vindos do XLSX podem chegar como NUMBER (celular/CPF sem formatacao na
+// celula) - z.string() seco derrubava o lote inteiro (incidente 25/08/2026, docs/Modulo-Eduq.md 5.6).
 const RawAlunoEduq = z.object({
   'Id aluno':      z.number().int(),
   'Id pessoa':     z.number().int().nullable().optional(),
   'Aluno(a)':      z.string().min(1),
-  'E-mail':        z.string().nullable().optional(),
-  'CPF':           z.string().nullable().optional(),
-  'Celular':       z.string().nullable().optional(),
-  'Endereço':      z.string().nullable().optional(),
+  'E-mail':        z.union([z.string(), z.number()]).nullable().optional(),
+  'CPF':           z.union([z.string(), z.number()]).nullable().optional(),
+  'Celular':       z.union([z.string(), z.number()]).nullable().optional(),
+  'Endereço':      z.union([z.string(), z.number()]).nullable().optional(),
   'Situação':      z.string().min(1),
   'Dt Inicio':     z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
   'Turma Montada': z.string().min(1),
