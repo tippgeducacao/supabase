@@ -18,6 +18,21 @@ function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 }
 
+/**
+ * Nome do system user dono do token (GET /me). Só pra dica de erro — best-effort,
+ * nunca derruba a resposta. O token NÃO sai daqui.
+ */
+async function nomeDoSystemUser(token: string): Promise<string | null> {
+  try {
+    const r = await fetch(`${META_GRAPH}/me?fields=id,name`, { headers: { Authorization: `Bearer ${token}` } });
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j?.id) return null;
+    return `"${j.name ?? "?"}" (id ${j.id})`;
+  } catch {
+    return null;
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return json({ error: "use POST" }, 405);
@@ -46,7 +61,7 @@ Deno.serve(async (req) => {
     return json({ error: `conta WhatsApp incompleta: ${waErr?.message ?? "sem phone_number_id/token"}` }, 500);
   }
 
-  // Registra na Meta.
+  // Registra na Meta. Só phone_number_id + token — o waba_id da conta NÃO entra aqui.
   const r = await fetch(`${META_GRAPH}/${wa.phone_number_id}/register`, {
     method: "POST",
     headers: { Authorization: `Bearer ${wa.access_token}`, "Content-Type": "application/json" },
@@ -55,15 +70,30 @@ Deno.serve(async (req) => {
   const resp = await r.json().catch(() => ({}));
   if (!r.ok || (resp as any)?.error) {
     const e = (resp as any)?.error;
+    const metaMsg = String(e?.message ?? "");
+    // (#100) "Need either permission on WhatsApp Business Account or owner business" NÃO é
+    // PIN: é o system user dono do token sem atribuição no ativo WABA do número (Business
+    // Manager → Usuários do sistema → Adicionar ativos → Contas do WhatsApp). Mesma causa
+    // raiz do (#100) ao excluir template. Caso real: Administrativo PPG, 2026-08-25.
+    const semPermissaoWaba = e?.code === 100 && /permission on .*whatsapp business account/i.test(metaMsg);
+    let hint: string | undefined;
+    if (semPermissaoWaba) {
+      const su = await nomeDoSystemUser(wa.access_token);
+      hint =
+        `Não é PIN: o system user dono do token desta conta${su ? ` — ${su} —` : ""} não está atribuído à ` +
+        `WABA deste número. No Business Manager: Configurações do negócio → Usuários → Usuários do sistema → ` +
+        `esse usuário → Adicionar ativos → Contas do WhatsApp → marque a WABA com controle total. ` +
+        `Depois clique Registrar de novo e, em seguida, Conectar webhook.`;
+    } else if (e?.code === 100 || e?.code === 133005) {
+      hint = "Pode ser PIN antigo (2FA) — desative a Verificação em duas etapas do número no WhatsApp Manager e tente outro PIN.";
+    } else if (e?.code === 133010) {
+      hint = "Número ainda não verificado — verifique (OTP) antes de registrar.";
+    }
     return json({
       error: e?.error_user_msg || e?.message || `Meta ${r.status}`,
       meta_code: e?.code ?? null,
       meta_subcode: e?.error_subcode ?? null,
-      hint: e?.code === 100 || e?.code === 133005
-        ? "Pode ser PIN antigo (2FA) — desative a Verificação em duas etapas do número no WhatsApp Manager e tente outro PIN."
-        : e?.code === 133010
-          ? "Número ainda não verificado — verifique (OTP) antes de registrar."
-          : undefined,
+      hint,
       // 422 (nunca 502/504): o Cloudflare engole 502/504 da origem sem headers CORS.
     }, 422);
   }
