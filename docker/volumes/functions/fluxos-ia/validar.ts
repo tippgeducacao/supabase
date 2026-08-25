@@ -51,6 +51,10 @@ export type Analise = z.infer<typeof zAnalise>;
 export const zDesenho = z.object({
   mermaid: z.string().min(1),
   resumo: z.string().default(''),
+  // Pedido como obrigatório na ferramenta, tolerado como ausente aqui: um título que
+  // não veio não pode fazer o desenho inteiro ser descartado — o front tem um plano B
+  // (`tituloDoPrompt`) e o desenho é o que a pessoa pediu.
+  titulo: z.string().max(120).default(''),
 });
 
 /**

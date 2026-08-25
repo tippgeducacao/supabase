@@ -197,8 +197,17 @@ export const FERRAMENTA_DESENHAR = {
           'integrações com [["texto"]], passos manuais com [/"texto"/]. Ramos rotulados.',
       },
       resumo: { type: 'string', description: 'Uma frase sobre o que foi desenhado.' },
+      // O nome do PROJETO na barra lateral do Excalidraw. Sai daqui e não do texto do
+      // usuário porque a descrição costuma ser um parágrafo, e parágrafo não cabe numa
+      // lista lateral nem serve para buscar por título depois.
+      titulo: {
+        type: 'string',
+        description:
+          'Nome curto do processo, no máximo 6 palavras, em Português do Brasil, sem ponto final. ' +
+          'Ex.: "Jornada do lead até a matrícula".',
+      },
     },
-    required: ['mermaid', 'resumo'],
+    required: ['mermaid', 'resumo', 'titulo'],
   },
 } as const;
 

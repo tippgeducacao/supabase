@@ -255,7 +255,7 @@ async function gerarPorDescricao(chave: string, corpo: Record<string, unknown>):
   if (!mermaidParecePlausivel(mermaid)) {
     return json({ error: 'A IA devolveu um diagrama inválido. Tente descrever de outro jeito.' }, 422);
   }
-  return json({ mermaid, resumo: parse.data.resumo });
+  return json({ mermaid, resumo: parse.data.resumo, titulo: parse.data.titulo });
 }
 
 async function analisar(
