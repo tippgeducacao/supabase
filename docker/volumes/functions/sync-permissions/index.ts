@@ -21,7 +21,10 @@ const corsHeaders = {
 type PermissionDef = {
   key: string;
   label: string;
-  section: string;
+  /** Categoria da tela no painel do diretor (nome novo de `section`). */
+  category?: string;
+  /** Compat com bundles anteriores a 24/08/2026, que mandavam `section`. */
+  section?: string;
   description?: string | null;
 };
 
@@ -67,8 +70,24 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    const body = (await req.json().catch(() => ({}))) as { permissions?: PermissionDef[] };
+    const body = (await req.json().catch(() => ({}))) as {
+      permissions?: PermissionDef[];
+      permitirAposentar?: boolean;
+    };
     const incoming = Array.isArray(body.permissions) ? body.permissions : [];
+
+    // 🛡️ APOSENTAR SÓ QUANDO PEDIDO EXPLICITAMENTE (25/08/2026).
+    //
+    // Incidente real do mesmo dia: um bundle DESATUALIZADO chamou o sync e
+    // desativou 8 telas que tinham acabado de ser catalogadas. Ninguém perdeu
+    // acesso (a tabela `permissions` é registro, não gate), mas com a limpeza
+    // automática já no ar o próximo caso apagaria CONCESSÕES de telas vivas.
+    //
+    // A trava de tamanho (60%) não pega isso: um catálogo velho tem quase o
+    // mesmo tamanho do novo. O que distingue não é o tamanho — é a INTENÇÃO.
+    // Por isso: acrescentar e renomear seguem automáticos (são seguros e
+    // idempotentes); APOSENTAR virou ação deliberada, do botão do painel.
+    const permitirAposentar = body.permitirAposentar === true;
 
     if (incoming.length === 0) {
       return new Response(JSON.stringify({ error: 'permissions array required' }), {
@@ -91,7 +110,7 @@ Deno.serve(async (req: Request) => {
     const upsertPayload = incoming.map((p) => ({
       key: p.key,
       label: p.label,
-      section: p.section,
+      section: p.category ?? p.section ?? 'Outros',
       description: p.description ?? null,
       is_active: true,
     }));
@@ -100,12 +119,53 @@ Deno.serve(async (req: Request) => {
       .upsert(upsertPayload, { onConflict: 'key' });
     if (upErr) throw upErr;
 
-    // 2) Desativar removidas
+    // 2) Desativar removidas + LIMPAR as concessões que sobrariam órfãs.
+    //
+    // Até 24/08/2026 o sync só virava a flag `is_active`, e as concessões da
+    // tela aposentada ficavam para trás em departamentos/cargos/overrides —
+    // foi assim que 65 concessões mortas se acumularam. Agora a aposentadoria
+    // se limpa sozinha, no mesmo passo.
     const toDeactivate = (existingRows ?? [])
       .filter((r) => !incomingKeys.has(r.key) && r.is_active)
       .map((r) => r.key);
-    if (toDeactivate.length > 0) {
-      await supabase.from('permissions').update({ is_active: false }).in('key', toDeactivate);
+
+    // 🛡️ TRAVA ANTI-DEPLOY-QUEBRADO. Um bundle truncado (build parcial, catálogo
+    // pela metade) mandaria poucas chaves e faria o sync "aposentar" o resto —
+    // e aí a limpeza automática apagaria concessões de telas VIVAS. Se o
+    // catálogo recebido for drasticamente menor que o que já existe ativo, o
+    // sync ainda atualiza rótulos (inofensivo) mas se recusa a aposentar nada.
+    const ativasNoBanco = (existingRows ?? []).filter((r) => r.is_active).length;
+    const encolhimentoSuspeito =
+      ativasNoBanco > 0 && incoming.length < Math.floor(ativasNoBanco * 0.6);
+
+    let limpeza: unknown = null;
+    if (!permitirAposentar) {
+      if (toDeactivate.length > 0) {
+        console.log(
+          `sync-permissions: ${toDeactivate.length} tela(s) ausentes do catalogo recebido, ` +
+          `mas aposentadoria NAO foi pedida — mantidas ativas: ${toDeactivate.join(', ')}`
+        );
+      }
+    } else if (encolhimentoSuspeito) {
+      console.warn(
+        `sync-permissions: catalogo recebido tem ${incoming.length} telas contra ${ativasNoBanco} ` +
+        `ativas no banco. Encolhimento suspeito — NAO vou aposentar nem limpar nada.`
+      );
+    } else if (toDeactivate.length > 0) {
+      const { error: deacErr } = await supabase
+        .from('permissions')
+        .update({ is_active: false })
+        .in('key', toDeactivate);
+      if (deacErr) throw deacErr;
+
+      // Snapshot + remoção nas 3 camadas. Mesma RPC que o botão manual do
+      // painel usa, para os dois caminhos nunca divergirem.
+      const { data: res, error: limpErr } = await supabase.rpc('limpar_concessoes_orfas', {
+        p_chaves: toDeactivate,
+        p_motivo: 'sync-permissions: telas aposentadas no deploy',
+      });
+      if (limpErr) console.warn('limpeza automatica falhou:', limpErr.message);
+      else limpeza = res;
     }
 
     // 3) Para keys NOVAS (não existiam antes), criar default-deny global +
@@ -138,8 +198,15 @@ Deno.serve(async (req: Request) => {
       JSON.stringify({
         ok: true,
         upserted: incoming.length,
-        deactivated: toDeactivate.length,
+        deactivated: (!permitirAposentar || encolhimentoSuspeito) ? 0 : toDeactivate.length,
         newKeys: newKeys.length,
+        limpeza,
+        ...(!permitirAposentar && toDeactivate.length > 0
+          ? { aviso: `${toDeactivate.length} tela(s) ausentes do catalogo foram MANTIDAS ativas (aposentadoria nao pedida)` }
+          : {}),
+        ...(permitirAposentar && encolhimentoSuspeito
+          ? { aviso: `catalogo suspeito (${incoming.length} telas vs ${ativasNoBanco} ativas) — aposentadoria bloqueada` }
+          : {}),
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
