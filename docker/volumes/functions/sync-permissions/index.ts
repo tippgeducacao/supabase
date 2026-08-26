@@ -2,13 +2,13 @@
 // Recebe a lista PERMISSIONS do bundle do frontend e sincroniza com o catálogo.
 // - Upsert por `key` (atualiza label/section/description, reativa se necessário).
 // - Marca como is_active=false qualquer registro cuja key não veio na lista.
-// - Para cada permissão NOVA criada agora, insere em role_permissions com
-//   granted=true APENAS para o cargo 'diretor' (default deny para os demais).
-//   Isso garante que telas novas nunca vazam por descuido.
+// - Tela NOVA nasce trancada POR CONSTRUÇÃO: quem decide acesso é o motor
+//   (`src/lib/permissoes/motor.ts`), que só libera o que está na configuração de
+//   alguém — e chave nova não está em lugar nenhum. Não precisa gravar nada.
 //
-// Para preservar permissões EXISTENTES (Fase 2 fará backfill a partir de
-// permissoes_cargo + departamentos.acessos_por_tipo), esta função só cria
-// entradas default-deny para keys que NÃO existiam antes.
+// ⚠️ Aposentar tela (desativar + limpar concessões) só acontece quando o corpo
+// manda `permitirAposentar: true` — ou seja, pelo botão do painel. O boot NUNCA
+// pede, porque um bundle desatualizado já desativou 8 telas por engano.
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 
@@ -27,8 +27,6 @@ type PermissionDef = {
   section?: string;
   description?: string | null;
 };
-
-const ROLES = ['vendedor', 'sdr', 'admin', 'coordenador', 'supervisor', 'secretaria', 'diretor', 'comum'];
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
@@ -168,31 +166,20 @@ Deno.serve(async (req: Request) => {
       else limpeza = res;
     }
 
-    // 3) Para keys NOVAS (não existiam antes), criar default-deny global +
-    //    granted=true para diretor
+    // 3) Telas NOVAS nascem trancadas — e isso NÃO precisa de escrita nenhuma.
+    //
+    // Aqui havia um seed em `role_permissions` (uma linha por cargo, granted só
+    // para diretor). Aquela tabela foi DROPADA em 26/08/2026: era a "camada
+    // nova" de um plano que parou no meio — 350 linhas, backfill feito, última
+    // escrita em 31/07 e ZERO leituras no app. Snapshot em
+    // `zz_role_permissions_20260826`.
+    //
+    // O "default deny" continua valendo, e por construção: quem decide acesso é
+    // o motor (`src/lib/permissoes/motor.ts`), que só libera uma tela se ela
+    // estiver na configuração de alguém. Chave nova não está em lugar nenhum,
+    // logo ninguém a enxerga — sem precisar gravar 8 linhas por tela para dizer
+    // "não".
     const newKeys = incoming.filter((p) => !existingMap.has(p.key)).map((p) => p.key);
-    if (newKeys.length > 0) {
-      const seedRows: Array<Record<string, unknown>> = [];
-      for (const key of newKeys) {
-        for (const role of ROLES) {
-          seedRows.push({
-            department_id: null,
-            role,
-            permission_key: key,
-            granted: role === 'diretor',
-            granted_at: role === 'diretor' ? new Date().toISOString() : null,
-          });
-        }
-      }
-      // upsert para evitar conflito com índice único parcial (department_id IS NULL)
-      const { error: seedErr } = await supabase
-        .from('role_permissions')
-        .upsert(seedRows, { onConflict: 'role,permission_key', ignoreDuplicates: true });
-      if (seedErr) {
-        // Conflito esperado em algumas linhas; logar e continuar
-        console.warn('seed warn:', seedErr.message);
-      }
-    }
 
     return new Response(
       JSON.stringify({
