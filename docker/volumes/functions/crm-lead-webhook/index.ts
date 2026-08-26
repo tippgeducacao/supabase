@@ -850,13 +850,15 @@ Deno.serve(async (req) => {
   let leadId: string | null = null;
   let duplicado = false;
   let leadArquivadoReativado = false;
-  // Arquivamento HUMANO recente (<14d): o "recadastro" NÃO reativa nem dispara nada —
-  // o SprintHub re-empurra base existente como lead novo (94% duplicados no lote 18,
-  // 2026-07-03, caso Ana Limeira: arquivada 09:32, template às 14:32) e isso atropelava
-  // a decisão do SDR. Arquivado antigo (>=14d ou sem data) segue reativando (recadastro
-  // legítimo de lead que voltou).
-  let leadPermaneceArquivado = false;
-  const CARENCIA_ARQUIVADO_MS = 14 * 24 * 3600_000;
+  // Recadastro de lead ARQUIVADO reativa SEMPRE (comportamento original de 2026-06-24).
+  // Houve aqui uma carência de 14d (f4a40f7bc1, 2026-07-03, caso Ana Limeira: o SprintHub
+  // re-empurrava base existente como lead novo e o template saía por cima de um
+  // arquivamento humano feito horas antes). REMOVIDA em 2026-08-26: ela valia para TODO
+  // webhook e, quando entrou integração não-comercial, engoliu uma candidatura do
+  // Processo Seletivo (funil 📝 RH E CONTRATAÇÃO, que não dispara nada) — a inscrição
+  // sumiu sem card. Trade-off assumido: ~46 leads/quinzena arquivados por SDR voltam a
+  // reviver e a receber template no próximo re-push. Se for preciso reintroduzir, faça
+  // com opt-out POR INTEGRAÇÃO, nunca global.
   try {
     let existing: any = null;
 
@@ -887,19 +889,12 @@ Deno.serve(async (req) => {
     if (existing) {
       duplicado = true;
       leadId = existing.id;
-      // Lead estava arquivado → recadastro = reativar, SALVO arquivamento recente (<14d):
-      // aí a decisão de arquivar (humana) prevalece — mantém arquivado e o fluxo abaixo
-      // vira no-op (sem card, sem template, sem IA).
+      // Lead estava arquivado → recadastro = reativar (sem carência; ver nota acima).
       if (existing.arquivado === true) {
-        const arquivadoEmMs = existing.arquivado_em ? Date.parse(existing.arquivado_em) : NaN;
-        if (Number.isFinite(arquivadoEmMs) && Date.now() - arquivadoEmMs < CARENCIA_ARQUIVADO_MS) {
-          leadPermaneceArquivado = true;
-        } else {
-          leadArquivadoReativado = true;
-          await admin.from("leads")
-            .update({ arquivado: false, arquivado_em: null, arquivado_por: null })
-            .eq("id", existing.id);
-        }
+        leadArquivadoReativado = true;
+        await admin.from("leads")
+          .update({ arquivado: false, arquivado_em: null, arquivado_por: null })
+          .eq("id", existing.id);
       }
       // Preenche campos vazios sem sobrescrever os existentes. Inclui os defaults da
       // Criação Automática (espelha o "atualiza e cria" do SprintHub — fill-if-empty
@@ -990,41 +985,6 @@ Deno.serve(async (req) => {
         console.error("[crm-lead-webhook] eav campo erro:", err?.message);
       }
     }
-  }
-
-  // (5.7) Lead ARQUIVADO há menos de 14 dias → recadastro INERTE: dados já atualizados
-  // (fill-if-empty acima), mas NADA dispara (sem card, sem template, sem seed de IA, sem
-  // forward). A decisão humana de arquivar prevalece sobre o re-push do SprintHub.
-  if (leadPermaneceArquivado) {
-    await logAtividade(
-      leadId, "acao_webhook", "Recadastro recebido com lead ARQUIVADO",
-      `${integration.nome ?? slug} — arquivado há menos de 14 dias: mantido arquivado, sem envios`,
-    );
-    await admin.from("crm_webhook_logs").insert({
-      integration_id: integration.id, slug, payload, ...reqMeta,
-      resultado: { lead_id: leadId, duplicado: true, lead_arquivado_recente: true, acoes_aplicadas: [] },
-      status: "duplicado",
-      ip_origem: ipOrigem,
-    });
-    // ⚠️ A resposta HONRA o config.retorno mesmo neste descarte: manter arquivado é um
-    // desfecho DELIBERADO da integração, não um erro. O shape antigo ({ok, discarded})
-    // não trazia o {"sucesso":"true"} que o IF do n8n valida antes de marcar a linha da
-    // planilha como enviada → a MESMA linha re-entrava a cada 5 min por até 14 dias
-    // (loop medido em 2026-08-11: ~100 logs/dia por lead arquivado, inflando o
-    // "Por chegada" da Gestão de Leads).
-    const retornoArq = Array.isArray(config?.retorno) ? config.retorno : [];
-    if (retornoArq.length > 0) {
-      const ctxArq: Record<string, unknown> = {
-        "lead.id": leadId, "oportunidade.id": null, "lead_oportunidade.id": null,
-        "segmento": null, "duplicado": true, "duplicado_lote": false,
-      };
-      const outArq: Record<string, string> = {};
-      for (const r of retornoArq) {
-        if (r?.chave) outArq[String(r.chave)] = resolveRetornoVal(r?.valor, ctxArq);
-      }
-      return json(outArq, Number(integration.codigo_status) || 200);
-    }
-    return json({ ok: true, discarded: true, reason: "lead_arquivado_recente", lead_id: leadId }, 200);
   }
 
   // (6) extras p/ lead_oportunidades
