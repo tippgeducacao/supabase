@@ -1,7 +1,8 @@
 // crm-whatsapp-webhook
 // Recebe eventos do Meta WhatsApp Cloud API para o CRM Comercial.
 // Processa: mensagens inbound, status de entrega, leitura.
-// Cada conta CRM tem seu próprio webhook_verify_token.
+// Verificação (GET): aceita o verify token GLOBAL (crm_whatsapp_config) — o que se cola em
+// App/BM novo — e, por compat, o token por conta (crm_whatsapp_accounts).
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 
 const corsHeaders = {
@@ -275,7 +276,22 @@ Deno.serve(async (req) => {
       return json({ error: "Parâmetros de verificação inválidos" }, 400);
     }
 
-    // Busca todas as contas CRM ativas e verifica se algum token bate
+    // 1) Token GLOBAL (crm_whatsapp_config) — é o que a tela manda colar em App/BM novo.
+    //    Na Meta o verify token é do APP, não do número: o wizard pede o webhook ANTES de
+    //    existir o access_token permanente, ou seja, antes de dar pra cadastrar a conta
+    //    aqui. Sem um token que já exista, App novo = 403 garantido.
+    const { data: cfg } = await admin
+      .from("crm_whatsapp_config")
+      .select("webhook_verify_token")
+      .maybeSingle();
+
+    if (cfg?.webhook_verify_token && cfg.webhook_verify_token === token) {
+      console.log("[crm-whatsapp-webhook] Webhook verificado pelo token global");
+      return new Response(challenge, { status: 200 });
+    }
+
+    // 2) Compat: tokens POR CONTA, gerados no INSERT da conta antes de existir o global.
+    //    Os apps já configurados na Meta seguem valendo sem reconfigurar nada.
     const { data: accounts } = await admin
       .from("crm_whatsapp_accounts")
       .select("id, webhook_verify_token")
@@ -287,7 +303,7 @@ Deno.serve(async (req) => {
       return json({ error: "Token de verificação inválido" }, 403);
     }
 
-    console.log("[crm-whatsapp-webhook] Webhook verificado para conta:", matched.id);
+    console.log("[crm-whatsapp-webhook] Webhook verificado pelo token da conta:", matched.id);
     return new Response(challenge, { status: 200 });
   }
 
