@@ -36,6 +36,15 @@ const META_APP_SECRETS = (Deno.env.get("CRM_META_APP_SECRET") ?? "")
 // público (api.ppgeducacao.site) por hairpin NAT — só o pg_net da reconciliação
 // (no container do banco) chega lá. Com a URL pública, TODO inbound caía na
 // reconciliação de ~5min. O kong interno é o mesmo caminho usado p/ crm-whatsapp-send.
+// Idade máxima (segundos) de um inbound para ele DISPARAR rodada do agente.
+// A Meta reentrega webhook que falhou, com backoff crescente: depois de uma janela de
+// rejeição (App Secret errado, edge fora do ar, deploy) a fila drena horas depois — e sem
+// esta régua CADA mensagem antiga vira uma rodada NOVA, floodando o lead com respostas fora
+// de contexto. Caso 2026-08-27 (BM 03): 7 mensagens de teste voltaram entre 13min e 1h45
+// depois, cada uma gerando 2 balões, com o lead sem ter escrito nada naquele momento.
+// Default 15min: entrega normal da Meta é de segundos, então a folga é enorme.
+const RELAY_IDADE_MAX_S = Number(Deno.env.get("CRM_RELAY_IDADE_MAX_S") ?? "900") || 900;
+
 const RELAY_BASE = (Deno.env.get("SUPABASE_URL") ?? "").replace(/\/$/, "");
 const N8N_INBOUND_URL = ((Deno.env.get("CRM_N8N_INBOUND_URL") ?? "") !== "" && RELAY_BASE)
   ? `${RELAY_BASE}/functions/v1/crm-agente-sdr`
@@ -651,7 +660,45 @@ Deno.serve(async (req) => {
             );
             // Relay pro agente de IA — SÓ se este número está marcado com agente_ia_ativo.
             // (at-most-once garantido pelo índice único em wa_message_id no insert acima.)
-            if (accountIaAtivo) {
+            // Idade REAL da mensagem (relógio da Meta), não o created_at: numa
+            // reentrega o created_at é "agora" e a mensagem parece nova.
+            // Sem timestamp confiável trata como nova — fail-open, nunca engolir lead.
+            const tsMeta = Number(msg?.timestamp);
+            const idadeS = Number.isFinite(tsMeta) && tsMeta > 0
+              ? Math.floor(Date.now() / 1000) - tsMeta
+              : 0;
+            const redelivery = idadeS > RELAY_IDADE_MAX_S;
+
+            if (accountIaAtivo && redelivery) {
+              console.warn(
+                `[crm-whatsapp-webhook] inbound de ${from} tem ${Math.round(idadeS / 60)}min ` +
+                `(limite ${Math.round(RELAY_IDADE_MAX_S / 60)}min) — redelivery da Meta, ` +
+                `rodada do agente PULADA. A msg está gravada: aparece no SAC e entra no ` +
+                `histórico da próxima rodada (wamid=${msgId})`,
+              );
+              // Marca como já tratada para a reconciliação não ressuscitar em 4min: ela
+              // filtra por created_at (= agora, acabamos de gravar) e não enxerga a idade
+              // real, então sem isto o cron desfaria esta guarda.
+              if (msgId) {
+                const { error: marcaErr } = await admin
+                  .from("crm_agente_sdr_reconciliados")
+                  .upsert(
+                    {
+                      wa_message_id: msgId,
+                      remotejid: `${canonicalBrDigits(phoneDigits)}@s.whatsapp.net`,
+                      conteudo: (`[redelivery ${Math.round(idadeS / 60)}min — rodada pulada] ` +
+                        `${conteudoComQuote ?? ""}`).slice(0, 500),
+                    },
+                    { onConflict: "wa_message_id", ignoreDuplicates: true },
+                  );
+                if (marcaErr) {
+                  console.error(
+                    "[crm-whatsapp-webhook] falha ao marcar redelivery em reconciliados " +
+                    `(cron pode reinjetar): ${marcaErr.message}`,
+                  );
+                }
+              }
+            } else if (accountIaAtivo) {
               await relayToN8n({
                 remotejid: `${canonicalBrDigits(phoneDigits)}@s.whatsapp.net`,
                 id: msgId,
