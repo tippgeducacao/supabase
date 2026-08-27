@@ -10,9 +10,11 @@
  * reenviar corrige e nunca duplica. Por isso é seguro repetir uma entrega em
  * dúvida — o risco é o oposto: deixar de entregar.
  *
- * Variáveis necessárias:
- *   BIBLIOTECA_INGEST_URL     — ex.: https://materiaispedagogico.lovable.app/api/public/ingestao-material
- *   BIBLIOTECA_INGEST_SECRET  — o mesmo segredo configurado na biblioteca
+ * Endereço e segredo vêm da tabela `ped_biblioteca_config` (lida só por
+ * service_role), NÃO de variável de ambiente: o env das edge functions vive no
+ * Dokploy e já houve incidente de ele reverter variáveis num redeploy — a
+ * esteira pararia calada. As variáveis BIBLIOTECA_INGEST_URL/SECRET continuam
+ * funcionando como reserva, para dar para trocar sem mexer no banco.
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3'
 import { corsHeaders } from '../_shared/cors.ts'
@@ -38,11 +40,17 @@ interface Envio {
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
 
-  const url = Deno.env.get('BIBLIOTECA_INGEST_URL')
-  const secret = Deno.env.get('BIBLIOTECA_INGEST_SECRET')
+  const { data: config } = await supabase
+    .from('ped_biblioteca_config')
+    .select('ingest_url,ingest_secret')
+    .maybeSingle()
+
+  const url = config?.ingest_url ?? Deno.env.get('BIBLIOTECA_INGEST_URL')
+  const secret = config?.ingest_secret ?? Deno.env.get('BIBLIOTECA_INGEST_SECRET')
   if (!url || !secret) {
+    // Sai antes de tocar na fila: nada é perdido nem marcado como erro.
     return new Response(
-      JSON.stringify({ erro: 'BIBLIOTECA_INGEST_URL/SECRET não configurados' }),
+      JSON.stringify({ erro: 'ingestão da biblioteca não configurada (ped_biblioteca_config)' }),
       { status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
   }
