@@ -25,7 +25,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { responderWebchat, aberturaWebchat, frasePedidoCronograma } from "./agente.ts";
 // A ponte pro WhatsApp tem DUAS origens (a tool do João e o botão do atendente) e uma
 // idempotência só. O template e a conta vêm do agente pra não divergirem entre as duas.
-import { WEBCHAT_TEMPLATE_CONTINUIDADE, WEBCHAT_WA_ACCOUNT_ID } from "./agente.ts";
+import { WEBCHAT_TEMPLATE_CONTINUIDADE, WEBCHAT_WA_ACCOUNT_ID, WHATSAPP_REENVIO_COOLDOWN_MIN } from "./agente.ts";
 import { fraseConviteWhatsapp } from "./frases.ts";
 import { pushParaSessao } from "../_shared/webchatPush.ts";
 
@@ -1076,9 +1076,11 @@ async function usuarioLogado(req: Request): Promise<string | null> {
  * Mesmo efeito da tool `levar_para_whatsapp`, com o gatilho no atendente em vez de no
  * João: às vezes quem percebe que a conversa morreu no site é a pessoa olhando o card.
  *
- * ⚠️ A idempotência é a MESMA (`levado_para_whatsapp_em`), de propósito: se o João já
- * mandou, o botão não manda de novo — senão o lead recebe dois templates pelo mesmo
- * motivo, um de cada origem, e cada template é cobrado.
+ * ⚠️ A janela anti-duplicata é a MESMA do João (`levado_para_whatsapp_em` +
+ * WHATSAPP_REENVIO_COOLDOWN_MIN), de propósito: o botão não repete um envio que acabou de
+ * sair, senão o lead recebe dois templates pelo mesmo motivo, um de cada origem, e cada
+ * template é cobrado. Passada a janela o botão manda de novo normalmente — a ponte pode ser
+ * usada mais de uma vez no mesmo lead.
  */
 async function acaoLevarParaWhatsapp(body: Record<string, unknown>, req: Request) {
   if (!(await usuarioLogado(req))) return json({ ok: false, erro: "acesso_negado" }, 403);
@@ -1092,8 +1094,12 @@ async function acaoLevarParaWhatsapp(body: Record<string, unknown>, req: Request
     .maybeSingle();
   if (error || !s) return json({ ok: false, erro: "sessao_nao_encontrada" }, 404);
   if (!String(s.telefone ?? "").trim()) return json({ ok: false, erro: "sem_telefone" }, 400);
-  if (s.levado_para_whatsapp_em) {
-    return json({ ok: true, ja_enviado: true, em: s.levado_para_whatsapp_em });
+  const levadoEm = s.levado_para_whatsapp_em as string | null;
+  if (
+    levadoEm && WHATSAPP_REENVIO_COOLDOWN_MIN > 0 &&
+    Date.now() - new Date(levadoEm).getTime() < WHATSAPP_REENVIO_COOLDOWN_MIN * 60_000
+  ) {
+    return json({ ok: true, ja_enviado: true, em: levadoEm });
   }
 
   const primeiro = String(s.nome ?? "").trim().split(/\s+/)[0] || "tudo bem";

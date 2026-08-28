@@ -73,6 +73,16 @@ export const WEBCHAT_WA_ACCOUNT_ID = Deno.env.get("WEBCHAT_WA_ACCOUNT_ID")
 // POR WABA, então trocar de número exige recriá-lo lá.
 export const WEBCHAT_TEMPLATE_CONTINUIDADE = Deno.env.get("WEBCHAT_TEMPLATE_CONTINUIDADE")
   ?? "webchat_continuar_conversa_utility";
+// Janela ANTI-DUPLICATA da ponte pro WhatsApp — NÃO é limite por lead (2026-08-28).
+// A sessão do site vive dias (o chat persiste no navegador) e o visitante pode pedir para
+// seguir no WhatsApp mais de uma vez ao longo dela; nesses casos o template TEM que sair de
+// novo. O que não pode é o MESMO pedido virar dois envios — o modelo chamando a tool duas
+// vezes na mesma rodada, ou o atendente clicando o botão do SAC logo depois do João. Até
+// 2026-08-28 isso era um bloqueio permanente por sessão, o que deixava o lead sem a
+// mensagem para sempre depois do primeiro envio. Zero desliga a janela.
+export const WHATSAPP_REENVIO_COOLDOWN_MIN = Number(
+  Deno.env.get("WEBCHAT_REENVIO_WHATSAPP_COOLDOWN_MIN") ?? "10",
+);
 const supabase = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "");
 
 const MAX_RODADAS = 6;
@@ -323,16 +333,18 @@ async function webchatLevarParaWhatsapp(
     };
   }
 
-  // IDEMPOTÊNCIA — a mesma régua do cronograma (cron-03). Pedir duas vezes não pode virar
-  // dois templates: além de parecer spam, cada template é cobrado.
-  if (sessaoId) {
+  // ANTI-DUPLICATA por JANELA (ver WHATSAPP_REENVIO_COOLDOWN_MIN). Reenviar mais tarde na
+  // mesma sessão é legítimo e liberado; o que a janela impede é o mesmo pedido sair duas
+  // vezes seguidas — cada template é cobrado e dois iguais em sequência parecem spam.
+  if (sessaoId && WHATSAPP_REENVIO_COOLDOWN_MIN > 0) {
     try {
       const { data } = await supabase
         .from("webchat_sessoes").select("levado_para_whatsapp_em").eq("id", sessaoId).maybeSingle();
-      if ((data as { levado_para_whatsapp_em?: string | null } | null)?.levado_para_whatsapp_em) {
+      const em = (data as { levado_para_whatsapp_em?: string | null } | null)?.levado_para_whatsapp_em;
+      if (em && Date.now() - new Date(em).getTime() < WHATSAPP_REENVIO_COOLDOWN_MIN * 60_000) {
         return {
-          resultado: "A mensagem no WhatsApp JÁ FOI enviada nesta conversa. NÃO reenvie.",
-          instrucao: "Diga que já mandou e que é só responder por lá — sem reenviar.",
+          resultado: `A mensagem no WhatsApp acabou de sair nesta conversa (menos de ${WHATSAPP_REENVIO_COOLDOWN_MIN} min). NÃO reenvie agora.`,
+          instrucao: "Diga que acabou de mandar e que é só responder por lá — sem reenviar.",
           id: tu.id,
         };
       }
