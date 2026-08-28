@@ -49,6 +49,13 @@ const RELAY_BASE = (Deno.env.get("SUPABASE_URL") ?? "").replace(/\/$/, "");
 const N8N_INBOUND_URL = ((Deno.env.get("CRM_N8N_INBOUND_URL") ?? "") !== "" && RELAY_BASE)
   ? `${RELAY_BASE}/functions/v1/crm-agente-sdr`
   : "";
+// Agente de RH e Contratação: número próprio, agente próprio. O inbound do número
+// Administrativo PPG NÃO pode cair no João — o candidato receberia o qualificador
+// comercial tentando vender pós-graduação. Este é o ÚNICO ponto onde os dois se
+// encostam, e é um desvio por número, não uma mistura de código.
+const AGENTE_RH_WA_ACCOUNT_ID = Deno.env.get("AGENTE_RH_WA_ACCOUNT_ID")
+  ?? "31d9a4ff-9606-4018-a2fb-ffb0155e099b";
+const AGENTE_RH_URL = RELAY_BASE ? `${RELAY_BASE}/functions/v1/crm-agente-rh` : "";
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -249,19 +256,22 @@ function canonicalBrDigits(raw: string): string {
 // Repassa a mensagem inbound normalizada pro n8n (buffer + roteador do agente SDR).
 // Awaited com timeout; em qualquer erro só loga — nunca derruba o webhook (Meta espera 200).
 async function relayToN8n(payload: Record<string, unknown>): Promise<void> {
-  if (!N8N_INBOUND_URL) return;
+  // Desvio por número: RH vai pro agente de RH, todo o resto segue pro João.
+  const ehRh = payload?.wa_account_id === AGENTE_RH_WA_ACCOUNT_ID;
+  const destino = ehRh ? AGENTE_RH_URL : N8N_INBOUND_URL;
+  if (!destino) return;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 10000);
   try {
-    const res = await fetch(N8N_INBOUND_URL, {
+    const res = await fetch(destino, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
       signal: ctrl.signal,
     });
-    if (!res.ok) console.log(`[crm-whatsapp-webhook] relay n8n respondeu ${res.status}`);
+    if (!res.ok) console.log(`[crm-whatsapp-webhook] relay ${ehRh ? "RH" : "n8n"} respondeu ${res.status}`);
   } catch (e) {
-    console.log("[crm-whatsapp-webhook] relay n8n falhou:", e instanceof Error ? e.message : String(e));
+    console.log(`[crm-whatsapp-webhook] relay ${ehRh ? "RH" : "n8n"} falhou:`, e instanceof Error ? e.message : String(e));
   } finally {
     clearTimeout(timer);
   }

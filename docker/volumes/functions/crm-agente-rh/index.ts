@@ -1,0 +1,350 @@
+// crm-agente-rh — o agente de RH e Contratação da PPG.
+//
+// Recebe o relay do crm-whatsapp-webhook (mesmo payload que o João recebe), conversa com o
+// candidato pelo número Administrativo PPG, coleta seis informações e grava nos campos do
+// card. Quem move o card na esteira é a rh_funil_tick(); este aqui só conversa.
+//
+// SEPARADO DO JOÃO DE PROPÓSITO (decisão do Rafael, 2026-08-28): não importa uma linha de
+// crm-agente-sdr, tem prompt, telemetria e trava próprios. Mexer aqui nunca pode arriscar o
+// agente que fala com lead de venda o dia inteiro.
+//
+// OS QUATRO GATES, nesta ordem — o primeiro que falhar encerra e deixa rastro:
+//   1. NÚMERO  — só o Administrativo PPG.
+//   2. ORIGEM  — só quem entrou pela página de vagas (tem o campo da área preenchido).
+//   3. ETAPA   — só as etapas da esteira e a Triagem. Entrevista em diante é humano.
+//   4. JANELA  — só respondendo a quem escreveu. O agente NUNCA inicia conversa.
+//
+// Responde 200 na hora e processa em background: o relay do gateway desiste em 10s.
+
+// deno-lint-ignore-file no-explicit-any
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3';
+import { PROMPT_RH } from './prompt.ts';
+
+declare const EdgeRuntime: { waitUntil?: (p: Promise<unknown>) => void } | undefined;
+
+const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
+const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+const ANTHROPIC_KEY = Deno.env.get('AGENTE_RH_ANTHROPIC_KEY') ?? Deno.env.get('ANTHROPIC_API_KEY') ?? '';
+const SEND_URL = `${SUPABASE_URL}/functions/v1/crm-whatsapp-send`;
+
+// ⚠️ Sonnet 5 recusa temperature≠default e budget_tokens (400). Nada de sampling aqui.
+const MODELO = Deno.env.get('AGENTE_RH_MODEL') ?? 'claude-sonnet-5';
+
+const CONTA_RH = Deno.env.get('AGENTE_RH_WA_ACCOUNT_ID') ?? '31d9a4ff-9606-4018-a2fb-ffb0155e099b';
+const FUNIL_RH = '27ab7e60-7cbc-432a-b852-52597bf277b4';
+const ETAPAS_PERMITIDAS = [
+  'Inscrição Recebida', 'Contato 02', 'Contato 03', 'Contato 04',
+  'Contato 05', 'Contato 06', 'Contato 07', 'Triagem Candidato',
+];
+
+const BUFFER_MS = 6000;        // quem manda 3 balões seguidos recebe UMA resposta
+const LOCK_TTL_SEGUNDOS = 90;
+const JANELA_HORAS = 24;
+const MAX_HISTORICO = 40;
+
+const supabase = createClient(SUPABASE_URL, SERVICE_ROLE);
+const json = (d: unknown, s = 200) =>
+  new Response(JSON.stringify(d), { status: s, headers: { 'Content-Type': 'application/json' } });
+
+const so8 = (t: string) => (t ?? '').replace(/\D/g, '').slice(-8);
+const dormir = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function evento(tipo: string, dados: Record<string, unknown> = {}) {
+  try {
+    await supabase.from('rh_agente_eventos').insert({
+      telefone: (dados.telefone as string) ?? null,
+      lead_id: (dados.lead_id as string) ?? null,
+      oportunidade_id: (dados.oportunidade_id as string) ?? null,
+      tipo,
+      detalhe: dados,
+    });
+  } catch (e) {
+    console.error('[crm-agente-rh] telemetria falhou:', e instanceof Error ? e.message : String(e));
+  }
+}
+
+// ── Raciocínio nunca chega ao candidato ────────────────────────────────────
+// Lição do agente do João: às vezes o modelo SIMULA o raciocínio dentro do bloco de
+// texto, embrulhado em <thinking>. Instrução no prompt não resolve sempre; esta régua
+// determinística resolve. Fica no funil por onde todo balão passa.
+const TAGS = '(?:antml:)?(?:thinking|thought|thoughts|scratchpad|reasoning|reflection)';
+export function limparResposta(texto: string): string {
+  let t = texto ?? '';
+  t = t.replace(new RegExp(`<${TAGS}[^>]*>[\\s\\S]*?</${TAGS}>`, 'gi'), '');
+  t = t.replace(new RegExp(`</?${TAGS}[^>]*>`, 'gi'), '');
+  return t.trim();
+}
+
+// ── Anthropic com retry ────────────────────────────────────────────────────
+async function chamarClaude(body: Record<string, unknown>): Promise<any> {
+  let ultimo = '';
+  for (let i = 1; i <= 4; i++) {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': ANTHROPIC_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+    if (res.ok) return await res.json();
+    ultimo = `HTTP ${res.status}: ${(await res.text()).slice(0, 400)}`;
+    if (res.status >= 400 && res.status < 500 && res.status !== 429) break;
+    if (i < 4) await dormir(2500);
+  }
+  throw new Error(`Anthropic: ${ultimo}`);
+}
+
+// A tool existe para o modelo ENTREGAR dado estruturado, não para decidir nada. Todos os
+// campos são opcionais: ele grava o que já conseguiu, quando conseguiu, sem esperar o fim.
+const TOOL_DADOS = {
+  name: 'salvar_dados_candidato',
+  description:
+    'Grava no cadastro do candidato o que você já apurou nesta conversa. Chame sempre que ' +
+    'descobrir uma informação nova, mesmo que ainda falte o resto. Nunca invente: só preencha ' +
+    'o que a pessoa disse de verdade.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      cidade: { type: 'string', description: 'Cidade onde a pessoa mora hoje.' },
+      conhece_alguem: { type: 'string', description: 'Quem ela conhece que trabalha ou trabalhou na PPG. "não" se não conhece.' },
+      formacao: { type: 'string', description: 'A formação dela, nas palavras dela.' },
+      habilidades: { type: 'string', description: 'As 3 principais habilidades, separadas por vírgula.' },
+      defeitos: { type: 'string', description: 'Os 3 principais defeitos, separados por vírgula.' },
+      mudanca: { type: 'string', description: 'Só quando mora fora de Ampére: se teria disponibilidade de mudança.' },
+    },
+    additionalProperties: false,
+  },
+} as const;
+
+const CAMPO_POR_CHAVE: Record<string, string> = {
+  cidade: '_rh_cidade',
+  conhece_alguem: '_rh_conhece_alguem',
+  formacao: '_rh_formacao',
+  habilidades: '_rh_habilidades',
+  defeitos: '_rh_defeitos',
+  mudanca: '_rh_mudanca',
+};
+
+async function gravarDados(leadId: string, dados: Record<string, string>): Promise<string[]> {
+  const gravados: string[] = [];
+  for (const [chave, alias] of Object.entries(CAMPO_POR_CHAVE)) {
+    const valor = (dados?.[chave] ?? '').toString().trim();
+    if (!valor) continue;
+    const { data: campo } = await supabase
+      .from('crm_campos').select('id').eq('alias', alias).maybeSingle();
+    if (!campo?.id) continue;
+
+    const { data: existente } = await supabase
+      .from('crm_campo_valores').select('id')
+      .eq('lead_id', leadId).eq('campo_id', campo.id).maybeSingle();
+
+    if (existente?.id) {
+      await supabase.from('crm_campo_valores')
+        .update({ value_text: valor, updated_at: new Date().toISOString() }).eq('id', existente.id);
+    } else {
+      await supabase.from('crm_campo_valores')
+        .insert({ lead_id: leadId, campo_id: campo.id, value_text: valor });
+    }
+    gravados.push(alias);
+  }
+  return gravados;
+}
+
+async function enviar(telefone: string, texto: string, leadId: string | null, opId: string | null) {
+  const res = await fetch(SEND_URL, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${SERVICE_ROLE}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      telefone, tipo: 'text', conteudo: texto,
+      wa_account_id: CONTA_RH, lead_id: leadId, oportunidade_id: opId,
+    }),
+  });
+  if (!res.ok) throw new Error(`crm-whatsapp-send HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
+}
+
+async function processar(payload: any) {
+  const telefone: string = payload?.telefone ?? '';
+  const msgId: string = payload?.id ?? '';
+  const fone8 = so8(telefone);
+  if (!fone8) return;
+
+  // GATE 1 já passou no handler (número). Idempotência antes de qualquer coisa cara.
+  const { error: errDup } = await supabase
+    .from('rh_agente_processadas').insert({ wa_message_id: msgId, telefone });
+  if (errDup) { await evento('pulado:duplicada', { telefone, msgId }); return; }
+
+  await evento('recebido', { telefone, msgId, conteudo: String(payload?.conteudo ?? '').slice(0, 200) });
+
+  const { data: pegou } = await supabase.rpc('rh_agente_lock_claim', {
+    p_telefone: fone8, p_ttl_segundos: LOCK_TTL_SEGUNDOS,
+  });
+  if (!pegou) { await evento('pulado:lock', { telefone }); return; }
+
+  try {
+    // Buffer: dá tempo de a pessoa terminar de escrever antes de responder.
+    await dormir(BUFFER_MS);
+
+    // ── Lead, card e etapa, em três consultas simples ────────────────────
+    // Sem embed do PostgREST de propósito: join por nome de relacionamento quebra calado
+    // se a FK for renomeada, e aqui "quebrar calado" significa o candidato sem resposta.
+    const { data: leads } = await supabase
+      .from('leads').select('id, nome, whatsapp')
+      .ilike('whatsapp', `%${fone8}`).limit(10);
+    const lead = (leads ?? []).find((l: any) => so8(l.whatsapp ?? '') === fone8);
+    if (!lead) { await evento('pulado:sem_lead', { telefone }); return; }
+    const leadId = lead.id as string;
+
+    const { data: card } = await supabase
+      .from('crm_oportunidades')
+      .select('id, titulo, etapa_id')
+      .eq('funil_id', FUNIL_RH).eq('lead_id', leadId)
+      .eq('status', 'aberta').eq('arquivada', false)
+      .order('criada_em', { ascending: false })
+      .limit(1).maybeSingle();
+    if (!card) { await evento('pulado:sem_card', { telefone, lead_id: leadId }); return; }
+
+    const { data: etapaRow } = await supabase
+      .from('crm_funis_etapas').select('nome').eq('id', card.etapa_id).maybeSingle();
+    const etapa = etapaRow?.nome ?? '';
+
+    // GATE 3 — etapa.
+    if (!ETAPAS_PERMITIDAS.includes(etapa)) {
+      await evento('pulado:etapa', { telefone, lead_id: leadId, oportunidade_id: card.id, etapa });
+      return;
+    }
+
+    // GATE 2 — origem: só quem veio da página de vagas tem o campo da área.
+    const { data: campoArea } = await supabase
+      .from('crm_campos').select('id').eq('alias', '_contratacao_em_qual_area').maybeSingle();
+    // Sem o campo cadastrado não dá para afirmar a origem de ninguém. Falha FECHADO:
+    // é melhor o agente calar do que conversar com quem não é candidato. (E `.eq` com
+    // string vazia estouraria na hora, por uuid inválido.)
+    if (!campoArea?.id) {
+      await evento('pulado:sem_campo_area', { telefone, lead_id: leadId, oportunidade_id: card.id });
+      return;
+    }
+    const { data: temArea } = await supabase
+      .from('crm_campo_valores').select('id')
+      .eq('lead_id', leadId).eq('campo_id', campoArea.id).maybeSingle();
+    if (!temArea) {
+      await evento('pulado:origem', { telefone, lead_id: leadId, oportunidade_id: card.id });
+      return;
+    }
+
+    // ── Histórico da conversa NESTE número ───────────────────────────────
+    // ⚠️ O filtro por TELEFONE é obrigatório aqui. Sem ele, o agente enxerga a conversa de
+    // todos os candidatos daquele número e responde com o contexto da pessoa errada.
+    // O ilike casa os últimos 8 dígitos, que é a régua de telefone do resto do sistema
+    // (imune ao 9º dígito, ao DDI e à formatação).
+    const { data: msgs } = await supabase
+      .from('crm_whatsapp_messages')
+      .select('direcao, conteudo, created_at, telefone')
+      .eq('wa_account_id', CONTA_RH)
+      .ilike('telefone', `%${fone8}`)
+      .order('created_at', { ascending: false })
+      .limit(120);
+
+    const conversa = (msgs ?? [])
+      .filter((m: any) => (m.conteudo ?? '').trim() && so8(m.telefone) === fone8)
+      .reverse()
+      .slice(-MAX_HISTORICO);
+
+    // GATE 4 — janela: só respondemos quem escreveu nas últimas 24h.
+    const ultimoInbound = [...conversa].reverse().find((m: any) => m.direcao === 'inbound');
+    const idadeH = ultimoInbound
+      ? (Date.now() - new Date(ultimoInbound.created_at).getTime()) / 3_600_000
+      : Infinity;
+    if (idadeH > JANELA_HORAS) {
+      await evento('pulado:janela', { telefone, lead_id: leadId, oportunidade_id: card.id, idadeH });
+      return;
+    }
+
+    const messages = conversa.map((m: any) => ({
+      role: m.direcao === 'inbound' ? 'user' : 'assistant',
+      content: String(m.conteudo).slice(0, 4000),
+    }));
+    if (!messages.length || messages[messages.length - 1].role !== 'user') {
+      messages.push({ role: 'user', content: String(payload?.conteudo ?? '').slice(0, 4000) });
+    }
+
+    // ── Claude ───────────────────────────────────────────────────────────
+    const contexto =
+      `\n\nCONTEXTO DESTE CANDIDATO (não repita de volta para ele, use para conversar):\n` +
+      `- Nome no cadastro: ${lead.nome ?? 'não informado'}\n` +
+      `- Área que ele escolheu na página: ${card.titulo ?? 'não informada'}\n` +
+      `- Etapa atual: ${etapa}`;
+
+    let resposta = '';
+    let dadosGravados: string[] = [];
+    let rodada = 0;
+    const historico: any[] = [...messages];
+
+    while (rodada < 4) {
+      rodada++;
+      const r = await chamarClaude({
+        model: MODELO,
+        max_tokens: 1024,
+        thinking: { type: 'disabled' },
+        system: [{ type: 'text', text: PROMPT_RH + contexto, cache_control: { type: 'ephemeral' } }],
+        messages: historico,
+        tools: [TOOL_DADOS],
+      });
+
+      const blocos = r?.content ?? [];
+      const texto = blocos.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n').trim();
+      const usos = blocos.filter((b: any) => b.type === 'tool_use');
+
+      if (usos.length) {
+        historico.push({ role: 'assistant', content: blocos });
+        const results: any[] = [];
+        for (const u of usos) {
+          const gravou = await gravarDados(leadId, u.input ?? {});
+          dadosGravados = [...dadosGravados, ...gravou];
+          results.push({ type: 'tool_result', tool_use_id: u.id, content: `ok, gravei: ${gravou.join(', ') || 'nada novo'}` });
+        }
+        historico.push({ role: 'user', content: results });
+        if (texto) resposta = texto;
+        continue;
+      }
+      resposta = texto;
+      break;
+    }
+
+    resposta = limparResposta(resposta);
+    if (!resposta) {
+      await evento('erro', { telefone, lead_id: leadId, oportunidade_id: card.id, motivo: 'resposta vazia' });
+      return;
+    }
+
+    await enviar(telefone, resposta, leadId, card.id);
+    await evento('respondido', {
+      telefone, lead_id: leadId, oportunidade_id: card.id, etapa,
+      campos: dadosGravados, rodadas: rodada, tamanho: resposta.length,
+    });
+  } catch (e) {
+    await evento('erro', { telefone, motivo: e instanceof Error ? e.message : String(e) });
+    console.error('[crm-agente-rh]', e);
+  } finally {
+    await supabase.rpc('rh_agente_lock_liberar', { p_telefone: fone8 });
+  }
+}
+
+Deno.serve(async (req) => {
+  if (req.method === 'OPTIONS') return new Response('ok', { status: 200 });
+  if (req.method !== 'POST') return json({ erro: 'use POST' }, 405);
+
+  let payload: any = {};
+  try { payload = await req.json(); } catch { return json({ erro: 'json inválido' }, 400); }
+
+  // GATE 1 — número. Silencioso: mensagem de outro número não é problema, é rotina.
+  if (payload?.wa_account_id !== CONTA_RH) return json({ ok: true, pulado: 'numero' });
+  if (payload?.direcao !== 'inbound' || payload?.from_me === true) return json({ ok: true, pulado: 'nao_inbound' });
+  if (!ANTHROPIC_KEY) { await evento('erro', { motivo: 'sem ANTHROPIC key' }); return json({ ok: true, pulado: 'sem_chave' }); }
+
+  const tarefa = processar(payload);
+  if (typeof EdgeRuntime !== 'undefined' && EdgeRuntime?.waitUntil) EdgeRuntime.waitUntil(tarefa);
+  else await tarefa;
+  return json({ ok: true });
+});
