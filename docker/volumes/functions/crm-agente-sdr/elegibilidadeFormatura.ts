@@ -1,19 +1,27 @@
 // FONTE ÚNICA da janela de elegibilidade do ESTUDANTE que ainda cursa a graduação.
 //
-// Régua (decisão do usuário 2026-08-06): elegível quem conclui a graduação
+// Régua (decisão do usuário 2026-08-06, ampliada em 2026-08-28): elegível quem conclui a
+// graduação
 //   • nos próximos 3 meses, **OU**
-//   • até 31/12 do ano corrente
-// — o que for MAIOR. Ou seja, "quem se forma em dezembro já pode conhecer a pós".
+//   • até 31/01 do ano SEGUINTE
+// — o que for MAIOR. Ou seja, "quem se forma em dezembro **ou em janeiro** já pode conhecer
+// a pós".
+//
+// ⚠️ 2026-08-28: a âncora era 31/12 do ano CORRENTE e recusava a turma de JANEIRO — que é a
+// mesma turma de dezembro, só com a colação de grau caindo do outro lado da virada do ano.
+// Caso real (lead Milena, 27/08): "Em janeiro finalizo" → REPROVADO_PRAZO e recontato
+// agendado pra 25/01/2027, por 31 dias de diferença. A âncora virou 31/01 do ano SEGUINTE;
+// o resto da régua (o piso de 3 meses, e o código ter a palavra final) não mudou.
 //
 // Antes era um teto fixo de 90 dias, e ele recusava justamente quem se forma no fim do
 // ano: em 21 dias o agente reprovou 434 pessoas por prazo (contra 604 aprovadas no fluxo
 // normal), e a faixa "conclui em 4-6 meses" — dezembro/janeiro — era a mais populosa entre
 // as que informaram a data.
 //
-// ⚠️ O PISO DE 3 MESES NÃO É DETALHE: sem ele, a régua "até dezembro" ficaria mais
-// RESTRITIVA que a antiga no fim do ano (em 20/12 sobrariam 10 dias, e quem se forma em
-// fevereiro passaria a ser recusado — uma regressão silenciosa a cada novembro). Com o
-// piso, a janela nunca encolhe abaixo do que já valia.
+// ⚠️ O PISO DE 3 MESES NÃO É DETALHE: sem ele, a régua ancorada no fim da turma ficaria
+// mais RESTRITIVA que a antiga na virada do ano (em 20/01 sobrariam 11 dias, e quem se
+// forma em abril passaria a ser recusado — uma regressão silenciosa a cada dezembro). Com
+// o piso, a janela nunca encolhe abaixo do que já valia.
 //
 // ⚠️ A DATA É CALCULADA EM CÓDIGO e entregue pronta ao modelo dentro do contexto temporal
 // (contexto.ts → montarContextoTemporal). O LLM erra conta de calendário — foi o caso de
@@ -43,17 +51,18 @@ export function limiteFormatura(agora: Date = new Date()): Date {
   const br = new Date(agora.getTime() - 3 * 60 * 60 * 1000);
   const ano = br.getUTCFullYear();
 
-  // Fim do ano corrente (31/12, último instante).
-  const fimDoAno = new Date(Date.UTC(ano, 11, 31, 23, 59, 59));
+  // Âncora: 31/01 do ano SEGUINTE (último instante) — a turma que termina neste ano,
+  // incluindo quem só cola grau depois da virada.
+  const fimDaTurma = new Date(Date.UTC(ano + 1, 0, 31, 23, 59, 59));
 
   // Piso: hoje + 3 meses. setUTCMonth normaliza a virada de ano sozinho (out+3 = jan).
   const piso = new Date(br.getTime());
   piso.setUTCMonth(piso.getUTCMonth() + MESES_MINIMOS);
 
-  return piso > fimDoAno ? piso : fimDoAno;
+  return piso > fimDaTurma ? piso : fimDaTurma;
 }
 
-/** "31/12/2026" — formato que o lead e o modelo leem. */
+/** "31/01/2027" — formato que o lead e o modelo leem. */
 export function limiteFormaturaFormatado(agora: Date = new Date()): string {
   const d = limiteFormatura(agora);
   const pad = (n: number) => String(n).padStart(2, '0');
@@ -288,6 +297,9 @@ Estudante que conclui a graduação **até ${limiteFormaturaFormatado(agora)}** 
 trate como apto (\`contexto_qualificacao\` = "estudante_apto"), siga o fluxo normal e pode agendar.
 Quem conclui DEPOIS dessa data ainda não pode — encerre pelo caminho do retorno na formatura.
 Use ESTA data, não calcule prazo de cabeça.
+⚠️ A data-limite **pode cair no ANO QUE VEM** — e quando cai, quem conclui até ela é APTO do
+mesmo jeito. "É do ano que vem" NÃO reprova ninguém: o que reprova é concluir DEPOIS da data.
+Ex.: com a data-limite em 31/01/2027, "finalizo em janeiro" é APTO; "finalizo em 2027.1", não.
 
 ⚠️ **SEMESTRE/PERÍODO NÃO É DATA.** Se vc perguntar quando ele conclui e a resposta for a
 POSIÇÃO dele no curso — "2 semestre", "tô no 5º período", "primeiro ano", "última fase" —, vc

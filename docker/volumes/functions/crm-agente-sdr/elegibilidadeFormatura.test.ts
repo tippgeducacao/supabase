@@ -9,9 +9,10 @@ import {
   limiteFormaturaFormatado,
 } from './elegibilidadeFormatura.ts';
 
-// Régua (usuário, 2026-08-06): elegível quem conclui a graduação em até 3 meses OU até
-// 31/12 do ano corrente — o que for MAIOR. "Quem se forma em dezembro já pode conhecer a
-// pós." Aritmética de calendário quebra nas bordas, então elas estão todas aqui.
+// Régua (usuário, 2026-08-06; âncora ampliada em 2026-08-28): elegível quem conclui a
+// graduação em até 3 meses OU até 31/01 do ano SEGUINTE — o que for MAIOR. "Quem se forma
+// em dezembro ou em janeiro já pode conhecer a pós." Aritmética de calendário quebra nas
+// bordas, então elas estão todas aqui.
 
 /** Instante UTC equivalente a uma hora de Brasília (UTC-3). */
 const brt = (iso: string) => new Date(`${iso}-03:00`);
@@ -22,25 +23,33 @@ const emDias = (agora: Date) => {
 };
 
 describe('limiteFormatura', () => {
-  it('em agosto, alcança 31/12 do ano corrente (o caso que motivou a mudança)', () => {
-    expect(limiteFormaturaFormatado(brt('2026-08-06T12:00:00'))).toBe('31/12/2026');
+  it('em agosto, alcança 31/01 do ano seguinte (o caso que motivou a mudança)', () => {
+    expect(limiteFormaturaFormatado(brt('2026-08-06T12:00:00'))).toBe('31/01/2027');
   });
 
-  it('quem se forma em dezembro é elegível; quem se forma no ano seguinte, não', () => {
+  it('quem se forma em dezembro ou em janeiro é elegível; depois disso, não', () => {
     const agora = brt('2026-08-06T12:00:00');
     const limite = limiteFormatura(agora);
     expect(new Date(Date.UTC(2026, 11, 15)) <= limite).toBe(true);  // 15/12/2026 entra
+    expect(new Date(Date.UTC(2027, 0, 31)) <= limite).toBe(true);   // 31/01/2027 entra
     expect(new Date(Date.UTC(2027, 2, 1)) <= limite).toBe(false);   // 01/03/2027 não
   });
 
-  it('no início do ano a janela cobre o ano inteiro', () => {
-    expect(limiteFormaturaFormatado(brt('2026-01-01T09:00:00'))).toBe('31/12/2026');
-    expect(limiteFormaturaFormatado(brt('2027-01-31T09:00:00'))).toBe('31/12/2027');
+  // CASO MILENA (2026-08-27): "Em janeiro finalizo" era REPROVADO_PRAZO por 31 dias de
+  // diferença — a turma de janeiro é a mesma de dezembro, só cola grau depois da virada.
+  it('CASO MILENA: quem conclui em janeiro do ano que vem entra', () => {
+    const janeiro = new Date(Date.UTC(2027, 0, 31, 23, 59, 59));
+    expect(janeiro <= limiteFormatura(brt('2026-08-27T17:10:00'))).toBe(true);
   });
 
-  // ⚠️ O PISO É O CORAÇÃO DA RÉGUA: sem ele, "até dezembro" ficaria MAIS restritiva que os
-  // 90 dias antigos a cada fim de ano (em 20/12 sobrariam 10 dias) e quem se forma em
-  // fevereiro passaria a ser recusado — regressão silenciosa, todo mês de novembro.
+  it('no início do ano a janela cobre o ano inteiro e mais janeiro', () => {
+    expect(limiteFormaturaFormatado(brt('2026-01-01T09:00:00'))).toBe('31/01/2027');
+    expect(limiteFormaturaFormatado(brt('2027-01-31T09:00:00'))).toBe('31/01/2028');
+  });
+
+  // ⚠️ O PISO É O CORAÇÃO DA RÉGUA: sem ele, a âncora de fim de turma ficaria MAIS restritiva
+  // que os 90 dias antigos a cada virada de ano (em 20/01 sobrariam 11 dias) e quem se forma
+  // em abril passaria a ser recusado — regressão silenciosa, todo mês de dezembro.
   it('nunca fica mais restritiva que os 3 meses antigos, em nenhuma data do ano', () => {
     for (let mes = 0; mes < 12; mes++) {
       for (const dia of [1, 15, 28]) {
@@ -51,27 +60,34 @@ describe('limiteFormatura', () => {
   });
 
   it('no fim do ano o piso de 3 meses assume e atravessa a virada', () => {
-    expect(limiteFormaturaFormatado(brt('2026-10-15T09:00:00'))).toBe('15/01/2027');
+    // Em outubro a âncora (31/01) ainda é maior que o piso (15/01); em dezembro o piso passa.
+    expect(limiteFormaturaFormatado(brt('2026-10-15T09:00:00'))).toBe('31/01/2027');
     expect(limiteFormaturaFormatado(brt('2026-12-20T09:00:00'))).toBe('20/03/2027');
   });
 
   it('vira o ano junto com Brasília, não com o UTC', () => {
     // 31/12/2026 23:00 BRT = 01/01/2027 02:00 UTC. Se lesse UTC, o ano seria 2027 e a
-    // janela pularia para 31/12/2027 — quase um ano a mais, em silêncio.
+    // janela pularia para 31/01/2028 — quase um ano a mais, em silêncio.
     expect(limiteFormaturaFormatado(brt('2026-12-31T23:00:00'))).toBe('31/03/2027');
   });
 
   it('sobrevive a mês de 31 dias e a ano bissexto', () => {
     expect(limiteFormaturaFormatado(brt('2026-10-31T09:00:00'))).toBe('31/01/2027');
-    expect(limiteFormaturaFormatado(brt('2028-02-29T09:00:00'))).toBe('31/12/2028');
+    expect(limiteFormaturaFormatado(brt('2028-02-29T09:00:00'))).toBe('31/01/2029');
   });
 });
 
 describe('blocoElegibilidadeFormatura', () => {
   it('entrega a data pronta ao modelo e o proíbe de calcular de cabeça', () => {
     const bloco = blocoElegibilidadeFormatura(brt('2026-08-06T12:00:00'));
-    expect(bloco).toContain('31/12/2026');
+    expect(bloco).toContain('31/01/2027');
     expect(bloco).toMatch(/não calcule/i);
+  });
+
+  // A data-limite passou a cair no ano seguinte na maior parte do ano, e "ano que vem" é
+  // justamente o gatilho que fazia o modelo reprovar de cabeça.
+  it('avisa que a data-limite pode ser do ano que vem sem que isso reprove', () => {
+    expect(blocoElegibilidadeFormatura()).toMatch(/ANO QUE VEM/);
   });
 
   it('avisa que a régua é interna e não pode ser citada ao lead', () => {
@@ -102,7 +118,7 @@ describe('blocoElegibilidadeFormatura', () => {
 // como "segundo semestre de 2026" e agendou uma aluna do 1º ano. A régua de data estava
 // certa; o que faltava era alguém dizer que aquilo NÃO ERA UMA DATA.
 
-const AGO = brt('2026-08-13T10:00:00'); // limite = 31/12/2026
+const AGO = brt('2026-08-13T10:00:00'); // limite = 31/01/2027
 
 describe('lerConclusao', () => {
   it('número de semestre/período/ano é POSIÇÃO NO CURSO, nunca data', () => {
@@ -167,6 +183,16 @@ describe('avaliarConclusao', () => {
     expect(avaliarConclusao('dezembro de 2026', null, AGO).veredito).toBe('apto');
     expect(avaliarConclusao('termino em 2027.1', null, AGO).veredito).toBe('fora_do_prazo');
     expect(avaliarConclusao('conclui em uns 2 anos', null, AGO).veredito).toBe('fora_do_prazo');
+  });
+
+  // CASO MILENA (2026-08-27): janeiro do ano que vem é a borda exata da régua nova.
+  it('CASO MILENA: "em janeiro finalizo" é apto, em qualquer das formas', () => {
+    for (const bruto of ['Em janeiro finalizo', 'janeiro', 'janeiro de 2027', '01/2027',
+                         'finalizo em janeiro']) {
+      expect(avaliarConclusao(bruto, null, AGO).veredito, bruto).toBe('apto');
+    }
+    // fevereiro do ano que vem já está fora — a régua parou em janeiro, não virou "o ano todo"
+    expect(avaliarConclusao('fevereiro de 2027', null, AGO).veredito).toBe('fora_do_prazo');
   });
 
   it('usa o normalizado do modelo quando o bruto não fecha sozinho', () => {
