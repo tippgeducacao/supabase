@@ -167,6 +167,74 @@ function renderTemplate(corpo: string, components: unknown): string {
   return texto;
 }
 
+/**
+ * Forma REAL do template NAQUELA conta (WABA): corpo aprovado + tipo do cabeçalho.
+ *
+ * ⚠️ NOME NÃO IDENTIFICA TEMPLATE — (nome, conta) identifica. O mesmo `prova_01` existe em
+ * várias WABAs com formas diferentes: numa tem cabeçalho de vídeo, na outra não tem
+ * cabeçalho nenhum. Sem este gate, a mídia fixa (global, por nome) era injetada em quem não
+ * tem cabeçalho e a Meta recusava com (#132018) "header: Template does not contain title
+ * component, no parameters allowed" — 1.600+ falhas em 7 dias (2026-08-28).
+ *
+ * Cache em `crm_whatsapp_template_bodies` por (template_name, wa_account_id): só o 1º envio
+ * de cada template por conta bate na Meta; os demais leem do banco.
+ * `header_format`: NULL = desconhecido · 'NONE' = sem cabeçalho · TEXT/IMAGE/VIDEO/DOCUMENT.
+ */
+async function formaDoTemplateNaConta(
+  admin: any,
+  wa: { id: string; waba_id?: string | null },
+  accessToken: string,
+  templateName: string,
+): Promise<{ body_text: string | null; header_format: string | null }> {
+  const vazio = { body_text: null, header_format: null };
+  if (!templateName) return vazio;
+
+  const { data: cache } = await admin
+    .from("crm_whatsapp_template_bodies")
+    .select("body_text, header_format")
+    .eq("template_name", templateName)
+    .eq("wa_account_id", wa.id)
+    .maybeSingle();
+  // Só serve se a FORMA já está gravada — linha antiga (só corpo) ainda precisa da Meta.
+  if (cache?.header_format) {
+    return { body_text: cache.body_text ?? null, header_format: String(cache.header_format).toUpperCase() };
+  }
+  if (!wa.waba_id) return { body_text: cache?.body_text ?? null, header_format: null };
+
+  try {
+    // ⚠️ `name=` na Meta casa por PREFIXO: `prova_01` traz `prova_01_utility` junto. Só o
+    // nome EXATO serve — pegar o vizinho gravaria a forma do template errado no cache.
+    const r = await fetch(
+      `${META_GRAPH}/${wa.waba_id}/message_templates?name=${encodeURIComponent(templateName)}&fields=name,components&limit=50`,
+      { headers: { Authorization: `Bearer ${accessToken}` } },
+    );
+    const j: any = await r.json().catch(() => ({}));
+    const arr = Array.isArray(j?.data) ? j.data : [];
+    const match = arr.find((t: any) => t?.name === templateName);
+    if (!match) return { body_text: cache?.body_text ?? null, header_format: null };
+    const comps = Array.isArray(match?.components) ? match.components : [];
+    const bodyText = String(
+      comps.find((c: any) => String(c?.type ?? "").toUpperCase() === "BODY")?.text ?? "",
+    );
+    const headerC = comps.find((c: any) => String(c?.type ?? "").toUpperCase() === "HEADER");
+    // Sem HEADER → 'NONE' (não é NULL: "sem cabeçalho" é um fato, não um "não sei").
+    const fmt = headerC ? String(headerC?.format ?? "TEXT").toUpperCase() : "NONE";
+    await admin.from("crm_whatsapp_template_bodies").upsert(
+      {
+        template_name: templateName,
+        wa_account_id: wa.id,
+        header_format: fmt,
+        ...(bodyText ? { body_text: bodyText } : {}),
+      },
+      { onConflict: "template_name,wa_account_id" },
+    );
+    return { body_text: bodyText || (cache?.body_text ?? null), header_format: fmt };
+  } catch (e: any) {
+    console.log("[crm-whatsapp-send] forma do template falhou:", e?.message);
+    return { body_text: cache?.body_text ?? null, header_format: null };
+  }
+}
+
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -511,6 +579,9 @@ Deno.serve(async (req) => {
     let headerMediaUrl: string | null = null;
     let headerMediaKey: string | null = null;
     let headerMediaId: string | null = null;
+    // Forma do template NESTA conta (corpo + tipo do cabeçalho), resolvida no máximo 1x por
+    // envio: decide se a mídia fixa pode ser injetada e ainda serve de corpo lá embaixo.
+    let formaTemplate: { body_text: string | null; header_format: string | null } | null = null;
     if (tipo === "text") {
       waPayload = {
         messaging_product: "whatsapp",
@@ -552,6 +623,31 @@ Deno.serve(async (req) => {
           if (media?.media_url && media?.header_format) {
             hdrUrl = String(media.media_url);
             hdrFmt = String(media.header_format).toUpperCase();
+          }
+        }
+        if (hdrUrl) {
+          // ⚠️ Antes de injetar, confere a forma do template NESTA conta. A mídia fixa é
+          // global POR NOME e o mesmo nome tem formas diferentes em cada WABA (num tem
+          // cabeçalho de vídeo, no outro não tem cabeçalho nenhum). Injetar header em
+          // template SEM cabeçalho faz a Meta recusar o disparo inteiro com (#132018)
+          // "header: Template does not contain title component, no parameters allowed"
+          // — 1.600+ falhas em 7 dias (prova_01/02/06/07, 2026-08-28).
+          // Forma desconhecida (Meta fora do ar / template não listado) ⇒ injeta como antes,
+          // pra não derrubar quem hoje funciona.
+          formaTemplate = await formaDoTemplateNaConta(admin, wa, accessToken, String(template_name));
+          const fmtReal = formaTemplate.header_format;
+          if (fmtReal && !["IMAGE", "VIDEO", "DOCUMENT"].includes(fmtReal)) {
+            console.log(
+              `[crm-whatsapp-send] header NÃO injetado: ${template_name} em "${wa.nome}" tem cabeçalho ${fmtReal} — a mídia veio de um xará em outra WABA`,
+            );
+            hdrUrl = "";
+          } else if (fmtReal && fmtReal !== hdrFmt) {
+            // Cabeçalho de mídia, mas de OUTRO tipo do que está cadastrado: o arquivo tende
+            // a não casar e a Meta responde 132012. Envia mesmo assim (a etiqueta na nossa
+            // tabela pode estar velha), mas deixa o motivo no log.
+            console.log(
+              `[crm-whatsapp-send] ⚠️ ${template_name} em "${wa.nome}": cabeçalho real é ${fmtReal} e a mídia fixa está como ${hdrFmt}`,
+            );
           }
         }
         if (hdrUrl) {
@@ -818,6 +914,8 @@ Deno.serve(async (req) => {
         .eq("nome", template_name)
         .maybeSingle();
       if (tpl?.conteudo) corpo = String(tpl.conteudo);
+      // A checagem do cabeçalho lá em cima já trouxe corpo + forma desta conta: reusa.
+      if (!corpo && formaTemplate?.body_text) corpo = String(formaTemplate.body_text);
       if (!corpo) {
         // ⚠️ Cache é POR CONTA: o mesmo NOME tem corpo (e nº de variáveis) diferente em cada
         // WABA. Buscar só pelo nome pegava o corpo da outra conta e gravava no chat um texto
@@ -835,20 +933,30 @@ Deno.serve(async (req) => {
         // Busca o corpo aprovado na Meta (1x) e cacheia para os próximos envios.
         try {
           const tr = await fetch(
-            `${META_GRAPH}/${wa.waba_id}/message_templates?name=${encodeURIComponent(String(template_name))}&fields=name,components&limit=5`,
+            `${META_GRAPH}/${wa.waba_id}/message_templates?name=${encodeURIComponent(String(template_name))}&fields=name,components&limit=50`,
             { headers: { Authorization: `Bearer ${accessToken}` } },
           );
           const tj: any = await tr.json().catch(() => ({}));
           const arr = Array.isArray(tj?.data) ? tj.data : [];
-          const match = arr.find((t: any) => t?.name === template_name) ?? arr[0];
-          const bodyComp = (Array.isArray(match?.components) ? match.components : [])
-            .find((c: any) => String(c?.type ?? "").toUpperCase() === "BODY");
+          // Nome EXATO: `name=` na Meta casa por prefixo e o vizinho (`..._utility`) tem
+          // outro corpo — cachear o do xará escrevia no chat uma mensagem que não foi enviada.
+          const match = arr.find((t: any) => t?.name === template_name);
+          const compsMeta = Array.isArray(match?.components) ? match.components : [];
+          const bodyComp = compsMeta.find((c: any) => String(c?.type ?? "").toUpperCase() === "BODY");
           const bodyText = String(bodyComp?.text ?? "");
           if (bodyText) {
             corpo = bodyText;
+            // Grava também a FORMA do cabeçalho: é o que impede a mídia fixa de um xará em
+            // outra WABA de ser injetada no próximo envio (ver formaDoTemplateNaConta).
+            const headerComp = compsMeta.find((c: any) => String(c?.type ?? "").toUpperCase() === "HEADER");
             await admin.from("crm_whatsapp_template_bodies")
               .upsert(
-                { template_name, wa_account_id: wa.id, body_text: bodyText },
+                {
+                  template_name,
+                  wa_account_id: wa.id,
+                  body_text: bodyText,
+                  header_format: headerComp ? String(headerComp?.format ?? "TEXT").toUpperCase() : "NONE",
+                },
                 { onConflict: "template_name,wa_account_id" },
               );
           }
