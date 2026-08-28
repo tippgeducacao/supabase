@@ -58,10 +58,17 @@ const WEBCHAT_WA_CONEXAO_ID = Deno.env.get("WEBCHAT_WA_CONEXAO_ID") ?? "";
 // Default no código pra funcionar sem mexer no .env da VPS; env sobrescreve se precisar.
 const WEBCHAT_TEMPLATE_CRONOGRAMA = Deno.env.get("WEBCHAT_TEMPLATE_CRONOGRAMA")
   ?? "confirmacao_de_provas_alunos_pdf_utility_pos_ia";
-// Conta "PPGVET - Pós-graduação IA" (+55 46 99907-1093) — é a WABA onde o template acima
-// está aprovado. Template vive POR WABA: trocar de número exige recriar o template lá.
+// Conta "PPGVET Pós-graduação" (+55 46 99158-928, BM 01) — é a WABA onde os dois templates
+// abaixo estão aprovados. Template vive POR WABA: trocar de número exige recriar lá.
+//
+// ⚠️ 2026-08-28: era a conta "PPGVET - Pós-graduação IA" (`d2984495…`, +55 46 99907-1093),
+// da BM Ppgagro. A Ppgagro levou restrição de política no portfólio e a ponte pro WhatsApp
+// PAROU: de 26/08 17:09 em diante, 9 envios seguidos de `webchat_continuar_conversa_utility`
+// morreram com 135000 ("Generic user error") — o visitante pedia pra seguir no WhatsApp e
+// não recebia nada. Migrado para a BM 01, onde os dois templates foram recriados com a
+// mesma casca (mesmo nome, mesmas 2 variáveis, mesmo cabeçalho/botões).
 export const WEBCHAT_WA_ACCOUNT_ID = Deno.env.get("WEBCHAT_WA_ACCOUNT_ID")
-  ?? "d2984495-f70e-4c40-a47b-4b969d735a07";
+  ?? "ad1de0bb-5c36-4ebf-8486-4a20e450f53d";
 // TEMPLATE DA PONTE PRO WHATSAPP (fase 4). Mesma WABA do cronograma acima — template vive
 // POR WABA, então trocar de número exige recriá-lo lá.
 export const WEBCHAT_TEMPLATE_CONTINUIDADE = Deno.env.get("WEBCHAT_TEMPLATE_CONTINUIDADE")
