@@ -14,7 +14,12 @@ export interface PodcastConversaMsg {
   waAccountId?: string | null;  // conta Meta do podcast (p/ a resposta sair por ela)
   direcao: "inbound" | "outbound";
   conteudo: string;
+  /** Anexos já baixados p/ o Storage (ver `_shared/waMediaInbound.ts`). Sem isso a foto/
+   *  áudio/vídeo/documento do convidado virava só o texto "[image]" no SAC. */
+  anexos?: any[] | null;
   waMessageId?: string | null;
+  /** `context.id` da Meta quando o convidado respondeu CITANDO uma mensagem nossa. */
+  replyToWaMessageId?: string | null;
   templateName?: string | null;
   /** id/payload do botão clicado (inbound). Sem isso o clique vira texto solto no chat. */
   botaoClicado?: string | null;
@@ -69,9 +74,11 @@ export async function logPodcastConversaSac(admin: any, m: PodcastConversaMsg): 
       conversa_id: conversaId,
       direcao: m.direcao,
       conteudo: m.conteudo,
+      anexos: m.anexos ?? [],
       template_name: m.templateName ?? null,
       botao_clicado: m.botaoClicado ?? null,
       wa_message_id: m.waMessageId ?? null,
+      reply_to_wa_message_id: m.replyToWaMessageId ?? null,
       enviada_em: now,
     });
     if (msgErr) { console.error("[podcastSac] insere msg erro:", msgErr.message); return; }

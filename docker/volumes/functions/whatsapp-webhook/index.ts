@@ -1,5 +1,6 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { logPodcastConversaSac } from "../_shared/podcastSac.ts";
+import { baixarAnexoInbound, extrairMidiaInbound } from "../_shared/waMediaInbound.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -8,12 +9,6 @@ const corsHeaders = {
 };
 
 const VERIFY_TOKEN = "ppgvet-pedagogico-v2";
-
-const PUBLIC_SUPABASE_URL = Deno.env.get("PUBLIC_SUPABASE_URL") || "https://api.ppgeducacao.site";
-
-function toPublicUrl(internalUrl: string): string {
-  return internalUrl.replace(/^https?:\/\/kong:8000/i, PUBLIC_SUPABASE_URL);
-}
 
 // Mapeia texto/id de botão → ação no convite
 // action: 'set_status' atualiza convite.status; 'trigger_reserva' aciona busca de reserva; 'log_only' só registra evento
@@ -106,11 +101,15 @@ Deno.serve(async (req) => {
   // tratadas à parte — só qualificam INTERESSE, não entram no fluxo de convite de professor.
   let podcastPhoneId: string | null = null;
   let podcastWaAccountId: string | null = null;
+  // Token da conta do PODCAST — o media_id só é resolvível pelo app dono do número que
+  // recebeu, então baixar mídia daqui com o token do número pedagógico daria 404.
+  let podcastAccessToken: string | null = null;
   try {
     const { data: pacc } = await supabase.rpc("get_wa_account_podcast");
     const acc = Array.isArray(pacc) ? pacc[0] : pacc;
     podcastPhoneId = acc?.phone_number_id ?? null;
     podcastWaAccountId = acc?.id ?? null;
+    podcastAccessToken = acc?.access_token ?? null;
   } catch (_e) { /* conta do podcast ainda não cadastrada */ }
 
   let body: any = null;
@@ -192,7 +191,7 @@ Deno.serve(async (req) => {
           // Fica DEPOIS dos status (acima): o `continue` aqui pula apenas o processamento
           // das MENSAGENS, não o dos status.
           if (podcastPhoneId && value?.metadata?.phone_number_id === podcastPhoneId) {
-            try { await handlePodcastInbound(supabase, value, podcastWaAccountId); } catch (e) {
+            try { await handlePodcastInbound(supabase, value, podcastWaAccountId, podcastAccessToken); } catch (e) {
               console.error("[whatsapp-webhook] podcast inbound erro", String(e));
             }
             continue;
@@ -205,7 +204,7 @@ Deno.serve(async (req) => {
               let tipoEvento: "inbound_text" | "inbound_button" | "inbound_media" = "inbound_text";
               let buttonRaw = "";
               let textoLivre = "";
-              let mediaInbound: { tipo: string; id: string; mime_type?: string; filename?: string; caption?: string } | null = null;
+              const mediaInbound = extrairMidiaInbound(msg);
               // Quando o usuário responde citando uma mensagem nossa, a Meta envia
               // `context.id` apontando para o wa_message_id da mensagem original.
               const replyToWaMessageId: string | null = msg?.context?.id || null;
@@ -219,21 +218,10 @@ Deno.serve(async (req) => {
               } else if (msg?.type === "text") {
                 tipoEvento = "inbound_text";
                 textoLivre = msg.text?.body || "";
-              } else if (msg?.type === "audio" || msg?.type === "voice") {
+              } else if (mediaInbound) {
+                // foto/áudio/vídeo/documento/figurinha — o QUE é veio de extrairMidiaInbound;
+                // o download acontece no passo 3, já com a conta certa.
                 tipoEvento = "inbound_media";
-                mediaInbound = { tipo: "audio", id: msg.audio?.id, mime_type: msg.audio?.mime_type };
-              } else if (msg?.type === "image") {
-                tipoEvento = "inbound_media";
-                mediaInbound = { tipo: "image", id: msg.image?.id, mime_type: msg.image?.mime_type, caption: msg.image?.caption };
-              } else if (msg?.type === "video") {
-                tipoEvento = "inbound_media";
-                mediaInbound = { tipo: "video", id: msg.video?.id, mime_type: msg.video?.mime_type, caption: msg.video?.caption };
-              } else if (msg?.type === "document") {
-                tipoEvento = "inbound_media";
-                mediaInbound = { tipo: "document", id: msg.document?.id, mime_type: msg.document?.mime_type, filename: msg.document?.filename, caption: msg.document?.caption };
-              } else if (msg?.type === "sticker") {
-                tipoEvento = "inbound_media";
-                mediaInbound = { tipo: "sticker", id: msg.sticker?.id, mime_type: msg.sticker?.mime_type || "image/webp" };
               } else if (msg?.type === "reaction") {
                 // Reação a uma mensagem (emoji). Antes caía no else e virava
                 // conteúdo vazio -> card mostrava o "[anexo]" genérico.
@@ -415,60 +403,13 @@ Deno.serve(async (req) => {
                 conversaId = novaConv?.id || null;
               }
 
-              // 3) Se for mídia, baixar da Meta e salvar no Storage
+              // 3) Se for mídia, baixar da Meta e salvar no Storage (helper compartilhado —
+              //    o número do podcast usa o MESMO caminho, ver handlePodcastInbound).
               let anexos: any[] = [];
               if (mediaInbound?.id) {
-                try {
-                  const { data: waRow } = await supabase.rpc("get_wa_account_pedagogico");
-                  const wa = Array.isArray(waRow) ? waRow[0] : waRow;
-                  const accessToken: string | undefined = wa?.access_token;
-                  if (accessToken) {
-                    // a) get media URL
-                    const metaUrlRes = await fetch(`https://graph.facebook.com/v21.0/${mediaInbound.id}`, {
-                      headers: { Authorization: `Bearer ${accessToken}` },
-                    });
-                    const metaUrlJson: any = await metaUrlRes.json().catch(() => ({}));
-                    const mediaUrl: string | undefined = metaUrlJson?.url;
-                    const mime: string = metaUrlJson?.mime_type || mediaInbound.mime_type || "application/octet-stream";
-                    if (mediaUrl) {
-                      // b) download bytes
-                      const binRes = await fetch(mediaUrl, {
-                        headers: { Authorization: `Bearer ${accessToken}` },
-                      });
-                      const bin = new Uint8Array(await binRes.arrayBuffer());
-                      // c) upload to storage
-                      const ext = (mime.includes("ogg") ? "ogg" :
-                        mime.includes("mpeg") && mime.includes("audio") ? "mp3" :
-                        mime.includes("mp4") && mime.includes("audio") ? "m4a" :
-                        mime === "video/mp4" ? "mp4" :
-                        mime === "image/jpeg" ? "jpg" :
-                        mime === "image/png" ? "png" :
-                        mime === "image/webp" ? "webp" :
-                        mime === "application/pdf" ? "pdf" : "bin");
-                      const path = `${new Date().toISOString().slice(0, 10)}/inbound-${crypto.randomUUID()}.${ext}`;
-                      const { error: stErr } = await supabase.storage.from("whatsapp-anexos").upload(path, bin, {
-                        contentType: mime, upsert: false,
-                      });
-                      if (stErr) {
-                        console.log("[whatsapp-webhook] storage upload inbound fail:", stErr.message);
-                      } else {
-                        const pub = toPublicUrl(supabase.storage.from("whatsapp-anexos").getPublicUrl(path).data.publicUrl);
-                        anexos = [{
-                          tipo: mediaInbound.tipo,
-                          mime_type: mime,
-                          meta_media_id: mediaInbound.id,
-                          url: pub,
-                          url_storage: pub,
-                          filename: mediaInbound.filename || `${mediaInbound.tipo}.${ext}`,
-                        }];
-                      }
-                    } else {
-                      console.log("[whatsapp-webhook] inbound media sem URL:", JSON.stringify(metaUrlJson));
-                    }
-                  }
-                } catch (mediaErr: any) {
-                  console.log("[whatsapp-webhook] erro download mídia inbound:", mediaErr.message);
-                }
+                const { data: waRow } = await supabase.rpc("get_wa_account_pedagogico");
+                const wa = Array.isArray(waRow) ? waRow[0] : waRow;
+                anexos = await baixarAnexoInbound(supabase, mediaInbound, wa?.access_token, "whatsapp-webhook");
               }
 
               // 4) INSERT mensagem real
@@ -541,7 +482,12 @@ Deno.serve(async (req) => {
 // Qualquer resposta (botão "Tenho interesse"/"Quero saber mais" ou texto livre) marca o(s)
 // candidato(s) ativo(s) daquele convidado como 'respondeu' → responsáveis do pedagógico assumem
 // manualmente (SAC/e-mail). Não envia data/Calendly (automação só descobre interesse).
-async function handlePodcastInbound(supabase: any, value: any, podcastWaAccountId: string | null) {
+async function handlePodcastInbound(
+  supabase: any,
+  value: any,
+  podcastWaAccountId: string | null,
+  podcastAccessToken: string | null,
+) {
   const messages = Array.isArray(value?.messages) ? value.messages : [];
   for (const msg of messages) {
     const from: string = msg?.from || "";
@@ -550,6 +496,11 @@ async function handlePodcastInbound(supabase: any, value: any, podcastWaAccountI
     // id/payload do botão (quando o convidado respondeu com 1 toque) — mesma precedência
     // do caminho principal; sem isso o clique fica indistinguível de texto digitado no SAC.
     let botaoClicado: string | null = null;
+    // Foto/currículo/áudio que o convidado manda (o caso real: a professora enviando a
+    // foto profissional para a divulgação). Até 28/08/2026 este ramo caía no `else` e
+    // gravava só o texto "[image]" — o arquivo NUNCA era baixado e se perdia.
+    const midia = extrairMidiaInbound(msg);
+    let anexos: any[] = [];
     if (msg?.type === "interactive" && msg?.interactive?.type === "button_reply") {
       resposta = msg.interactive.button_reply?.title || msg.interactive.button_reply?.id || "";
       botaoClicado = msg.interactive.button_reply?.id || msg.interactive.button_reply?.title || null;
@@ -558,8 +509,25 @@ async function handlePodcastInbound(supabase: any, value: any, podcastWaAccountI
       botaoClicado = msg.button?.payload || msg.button?.text || null;
     } else if (msg?.type === "text") {
       resposta = msg.text?.body || "";
+    } else if (midia) {
+      // A legenda é a mensagem quando existe (é o que a pessoa escreveu); sem legenda,
+      // o rótulo "[image]"/"[document]" segue como antes — só que agora COM o arquivo.
+      // O download em si fica DEPOIS do match do convidado (senão convidado desconhecido
+      // deixaria arquivo órfão no bucket).
+      resposta = midia.caption || `[${midia.tipo}]`;
+    } else if (msg?.type === "reaction") {
+      resposta = msg.reaction?.emoji ? `↩️ Reagiu ${msg.reaction.emoji}` : "↩️ Reação removida";
+    } else if (msg?.type === "location") {
+      const loc = msg.location || {};
+      const ref = loc.name || loc.address;
+      resposta = ref ? `📍 Localização: ${ref}` : "📍 Localização";
+    } else if (msg?.type === "contacts") {
+      const nomeContato = msg.contacts?.[0]?.name?.formatted_name;
+      resposta = nomeContato ? `👤 Contato: ${nomeContato}` : "👤 Contato";
     } else {
-      resposta = `[${msg?.type || "mensagem"}]`;
+      // "unsupported" (enquete, ver-uma-vez...): a Meta não entrega o arquivo. Dizer O QUE
+      // chegou é melhor que um "[objeto]" mudo.
+      resposta = `⚠️ Mensagem não suportada${msg?.type ? ` (${msg.type})` : ""}`;
     }
 
     // match do convidado por telefone (variantes ±9º dígito)
@@ -568,6 +536,11 @@ async function handlePodcastInbound(supabase: any, value: any, podcastWaAccountI
     if (!profRow?.id) {
       console.log("[whatsapp-webhook] podcast: convidado não encontrado p/", from);
       continue;
+    }
+
+    // Só agora baixa o arquivo: a mensagem tem dono e VAI ser gravada.
+    if (midia) {
+      anexos = await baixarAnexoInbound(supabase, midia, podcastAccessToken, "whatsapp-webhook/podcast");
     }
 
     const { data: cands } = await supabase
@@ -595,10 +568,13 @@ async function handlePodcastInbound(supabase: any, value: any, podcastWaAccountI
       waAccountId: podcastWaAccountId,
       direcao: "inbound",
       conteudo: resposta,
+      anexos,
       botaoClicado,
       waMessageId: msg?.id ?? null,
+      replyToWaMessageId: msg?.context?.id ?? null,
     });
 
-    console.log("[whatsapp-webhook] podcast:", profRow.id, "respondeu:", resposta, "→", (cands ?? []).length, "cand.");
+    console.log("[whatsapp-webhook] podcast:", profRow.id, "respondeu:", resposta,
+      "anexos=", anexos.length, "→", (cands ?? []).length, "cand.");
   }
 }
