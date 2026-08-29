@@ -192,21 +192,31 @@ async function processar(payload: any) {
     // ── Lead, card e etapa, em três consultas simples ────────────────────
     // Sem embed do PostgREST de propósito: join por nome de relacionamento quebra calado
     // se a FK for renomeada, e aqui "quebrar calado" significa o candidato sem resposta.
+    // ⚠️ O MESMO TELEFONE tem VÁRIOS leads. O webhook de captação cria duplicata com régua
+    // fraca, e no teste de 29/08 um único número tinha 14 cadastros — só UM com card no RH.
+    // Por isso a busca é pelo CARD entre todos os leads do número, e não pelo card de um
+    // lead escolhido a esmo: escolher o lead primeiro dava `sem_card` e o candidato ficava
+    // sem resposta, com o agente achando que não era com ele.
     const { data: leads } = await supabase
       .from('leads').select('id, nome, whatsapp')
-      .ilike('whatsapp', `%${fone8}`).limit(10);
-    const lead = (leads ?? []).find((l: any) => so8(l.whatsapp ?? '') === fone8);
-    if (!lead) { await evento('pulado:sem_lead', { telefone }); return; }
-    const leadId = lead.id as string;
+      .ilike('whatsapp', `%${fone8}`).limit(50);
+    const ids = (leads ?? [])
+      .filter((l: any) => so8(l.whatsapp ?? '') === fone8)
+      .map((l: any) => l.id as string);
+    if (!ids.length) { await evento('pulado:sem_lead', { telefone }); return; }
 
     const { data: card } = await supabase
       .from('crm_oportunidades')
-      .select('id, titulo, etapa_id')
-      .eq('funil_id', FUNIL_RH).eq('lead_id', leadId)
+      .select('id, titulo, etapa_id, lead_id')
+      .eq('funil_id', FUNIL_RH).in('lead_id', ids)
       .eq('status', 'aberta').eq('arquivada', false)
       .order('criada_em', { ascending: false })
       .limit(1).maybeSingle();
-    if (!card) { await evento('pulado:sem_card', { telefone, lead_id: leadId }); return; }
+    if (!card) { await evento('pulado:sem_card', { telefone, leads: ids.length }); return; }
+
+    // O lead que importa é o DONO DO CARD, não o primeiro da lista.
+    const leadId = card.lead_id as string;
+    const lead = (leads ?? []).find((l: any) => l.id === leadId) ?? { nome: null };
 
     const { data: etapaRow } = await supabase
       .from('crm_funis_etapas').select('nome').eq('id', card.etapa_id).maybeSingle();
