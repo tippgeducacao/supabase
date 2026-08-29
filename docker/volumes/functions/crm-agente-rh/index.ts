@@ -139,6 +139,33 @@ const TOOL_DADOS = {
   },
 } as const;
 
+// Contrapeso do `ignorar_nao_perturbe`: o funil de RH deixa de honrar o "não perturbe"
+// COMERCIAL, então o candidato precisa de um jeito de mandar parar que valha de verdade.
+// Isto escreve em `crm_bloqueio_whatsapp`, que barra TODOS os motores, RH incluído.
+const TOOL_PARAR = {
+  name: 'encerrar_contato',
+  description:
+    'Use quando a pessoa pedir para não ser mais procurada, disser que não tem interesse na ' +
+    'vaga ou mandar parar de mandar mensagem. Não use por desânimo passageiro nem por demora ' +
+    'em responder: só quando ela pedir de forma clara.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      motivo: { type: 'string', description: 'O que ela disse, nas palavras dela.' },
+    },
+    required: ['motivo'],
+    additionalProperties: false,
+  },
+} as const;
+
+async function bloquearContato(telefone: string, leadId: string, opId: string, motivo: string) {
+  // A canonização do telefone fica no BANCO (fn_canon_ddd8). Calcular aqui grava um `canon`
+  // que a guarda não reconhece: o bloqueio existiria na tabela e não barraria nada.
+  const { data: ok } = await supabase
+    .rpc('rh_agente_bloquear_contato', { p_telefone: telefone, p_motivo: motivo ?? '' });
+  await evento('contato_encerrado', { telefone, lead_id: leadId, oportunidade_id: opId, motivo, ok });
+}
+
 const CAMPO_POR_CHAVE: Record<string, string> = {
   cidade: '_rh_cidade',
   conhece_alguem: '_rh_conhece_alguem',
@@ -316,7 +343,7 @@ async function processar(payload: any) {
         thinking: { type: 'disabled' },
         system: [{ type: 'text', text: PROMPT_RH + contexto, cache_control: { type: 'ephemeral' } }],
         messages: historico,
-        tools: [TOOL_DADOS],
+        tools: [TOOL_DADOS, TOOL_PARAR],
       });
 
       const blocos = r?.content ?? [];
@@ -327,6 +354,11 @@ async function processar(payload: any) {
         historico.push({ role: 'assistant', content: blocos });
         const results: any[] = [];
         for (const u of usos) {
+          if (u.name === 'encerrar_contato') {
+            await bloquearContato(telefone, leadId, card.oportunidade_id, u.input?.motivo ?? '');
+            results.push({ type: 'tool_result', tool_use_id: u.id, content: 'ok, não procuramos mais' });
+            continue;
+          }
           const gravou = await gravarDados(leadId, u.input ?? {});
           dadosGravados = [...dadosGravados, ...gravou];
           results.push({ type: 'tool_result', tool_use_id: u.id, content: `ok, gravei: ${gravou.join(', ') || 'nada novo'}` });
