@@ -24,7 +24,21 @@ declare const EdgeRuntime: { waitUntil?: (p: Promise<unknown>) => void } | undef
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-const ANTHROPIC_KEY = Deno.env.get('AGENTE_RH_ANTHROPIC_KEY') ?? Deno.env.get('ANTHROPIC_API_KEY') ?? '';
+// A chave vem do env quando existe. ⚠️ `ANTHROPIC_API_KEY` do container está INVÁLIDA
+// (401 em 29/08) — quem funciona é a do agente do João. E há uma chave boa guardada em
+// `ai_api_keys`, que é o fallback: sem ele, trocar a chave exigiria redeploy.
+let ANTHROPIC_KEY = Deno.env.get('AGENTE_RH_ANTHROPIC_KEY')
+  ?? Deno.env.get('AGENTE_SDR_ANTHROPIC_KEY')
+  ?? Deno.env.get('ANTHROPIC_API_KEY')
+  ?? '';
+
+async function chaveDoBanco(): Promise<string> {
+  const { data } = await supabase
+    .from('ai_api_keys').select('api_key')
+    .eq('provider', 'anthropic').eq('is_active', true)
+    .limit(1).maybeSingle();
+  return (data?.api_key ?? '').trim();
+}
 const SEND_URL = `${SUPABASE_URL}/functions/v1/crm-whatsapp-send`;
 
 // ⚠️ Sonnet 5 recusa temperature≠default e budget_tokens (400). Nada de sampling aqui.
@@ -78,6 +92,7 @@ export function limparResposta(texto: string): string {
 // ── Anthropic com retry ────────────────────────────────────────────────────
 async function chamarClaude(body: Record<string, unknown>): Promise<any> {
   let ultimo = '';
+  let tentouBanco = false;
   for (let i = 1; i <= 4; i++) {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -90,6 +105,12 @@ async function chamarClaude(body: Record<string, unknown>): Promise<any> {
     });
     if (res.ok) return await res.json();
     ultimo = `HTTP ${res.status}: ${(await res.text()).slice(0, 400)}`;
+    // Chave do env inválida: busca a do banco UMA vez e repete. É o caso real de 29/08.
+    if (res.status === 401 && !tentouBanco) {
+      tentouBanco = true;
+      const doBanco = await chaveDoBanco();
+      if (doBanco && doBanco !== ANTHROPIC_KEY) { ANTHROPIC_KEY = doBanco; continue; }
+    }
     if (res.status >= 400 && res.status < 500 && res.status !== 429) break;
     if (i < 4) await dormir(2500);
   }
@@ -353,6 +374,7 @@ Deno.serve(async (req) => {
   // GATE 1 — número. Silencioso: mensagem de outro número não é problema, é rotina.
   if (payload?.wa_account_id !== CONTA_RH) return json({ ok: true, pulado: 'numero' });
   if (payload?.direcao !== 'inbound' || payload?.from_me === true) return json({ ok: true, pulado: 'nao_inbound' });
+  if (!ANTHROPIC_KEY) ANTHROPIC_KEY = await chaveDoBanco();
   if (!ANTHROPIC_KEY) { await evento('erro', { motivo: 'sem ANTHROPIC key' }); return json({ ok: true, pulado: 'sem_chave' }); }
 
   const tarefa = processar(payload);
