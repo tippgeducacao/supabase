@@ -192,39 +192,24 @@ async function processar(payload: any) {
     // ── Lead, card e etapa, em três consultas simples ────────────────────
     // Sem embed do PostgREST de propósito: join por nome de relacionamento quebra calado
     // se a FK for renomeada, e aqui "quebrar calado" significa o candidato sem resposta.
-    // ⚠️ O MESMO TELEFONE tem VÁRIOS leads. O webhook de captação cria duplicata com régua
-    // fraca, e no teste de 29/08 um único número tinha 14 cadastros — só UM com card no RH.
-    // Por isso a busca é pelo CARD entre todos os leads do número, e não pelo card de um
-    // lead escolhido a esmo: escolher o lead primeiro dava `sem_card` e o candidato ficava
-    // sem resposta, com o agente achando que não era com ele.
-    const { data: leads } = await supabase
-      .from('leads').select('id, nome, whatsapp')
-      .ilike('whatsapp', `%${fone8}`).limit(50);
-    const ids = (leads ?? [])
-      .filter((l: any) => so8(l.whatsapp ?? '') === fone8)
-      .map((l: any) => l.id as string);
-    if (!ids.length) { await evento('pulado:sem_lead', { telefone }); return; }
+    // A busca do card mora no BANCO (rh_agente_card_por_telefone), não aqui.
+    // Duas razões, as duas descobertas em produção:
+    //   • o MESMO telefone tem dezenas de leads duplicados e só um tem card no RH;
+    //   • `leads.whatsapp` guarda o número FORMATADO ("46 99932-1082"), então filtrar por
+    //     `ilike '%<8 dígitos>'` no cliente deixava de fora justamente o dono do card.
+    // No SQL a comparação é por dígitos, que é a régua canônica do resto do sistema.
+    const { data: achado } = await supabase
+      .rpc('rh_agente_card_por_telefone', { p_telefone: telefone });
+    const card = Array.isArray(achado) ? achado[0] : achado;
+    if (!card?.oportunidade_id) { await evento('pulado:sem_card', { telefone }); return; }
 
-    const { data: card } = await supabase
-      .from('crm_oportunidades')
-      .select('id, titulo, etapa_id, lead_id')
-      .eq('funil_id', FUNIL_RH).in('lead_id', ids)
-      .eq('status', 'aberta').eq('arquivada', false)
-      .order('criada_em', { ascending: false })
-      .limit(1).maybeSingle();
-    if (!card) { await evento('pulado:sem_card', { telefone, leads: ids.length }); return; }
-
-    // O lead que importa é o DONO DO CARD, não o primeiro da lista.
     const leadId = card.lead_id as string;
-    const lead = (leads ?? []).find((l: any) => l.id === leadId) ?? { nome: null };
-
-    const { data: etapaRow } = await supabase
-      .from('crm_funis_etapas').select('nome').eq('id', card.etapa_id).maybeSingle();
-    const etapa = etapaRow?.nome ?? '';
+    const lead = { nome: card.lead_nome as string | null };
+    const etapa = (card.etapa_nome as string) ?? '';
 
     // GATE 3 — etapa.
     if (!ETAPAS_PERMITIDAS.includes(etapa)) {
-      await evento('pulado:etapa', { telefone, lead_id: leadId, oportunidade_id: card.id, etapa });
+      await evento('pulado:etapa', { telefone, lead_id: leadId, oportunidade_id: card.oportunidade_id, etapa });
       return;
     }
 
@@ -235,14 +220,14 @@ async function processar(payload: any) {
     // é melhor o agente calar do que conversar com quem não é candidato. (E `.eq` com
     // string vazia estouraria na hora, por uuid inválido.)
     if (!campoArea?.id) {
-      await evento('pulado:sem_campo_area', { telefone, lead_id: leadId, oportunidade_id: card.id });
+      await evento('pulado:sem_campo_area', { telefone, lead_id: leadId, oportunidade_id: card.oportunidade_id });
       return;
     }
     const { data: temArea } = await supabase
       .from('crm_campo_valores').select('id')
       .eq('lead_id', leadId).eq('campo_id', campoArea.id).maybeSingle();
     if (!temArea) {
-      await evento('pulado:origem', { telefone, lead_id: leadId, oportunidade_id: card.id });
+      await evento('pulado:origem', { telefone, lead_id: leadId, oportunidade_id: card.oportunidade_id });
       return;
     }
 
@@ -270,7 +255,7 @@ async function processar(payload: any) {
       ? (Date.now() - new Date(ultimoInbound.created_at).getTime()) / 3_600_000
       : Infinity;
     if (idadeH > JANELA_HORAS) {
-      await evento('pulado:janela', { telefone, lead_id: leadId, oportunidade_id: card.id, idadeH });
+      await evento('pulado:janela', { telefone, lead_id: leadId, oportunidade_id: card.oportunidade_id, idadeH });
       return;
     }
 
@@ -337,17 +322,17 @@ async function processar(payload: any) {
     // Saída de emergência da cutucada: se o próprio modelo achar que não há o que retomar,
     // é melhor o silêncio do que uma mensagem sem motivo.
     if (ehFollowup && /^pular\.?$/i.test(resposta.trim())) {
-      await evento('followup_dispensado', { telefone, lead_id: leadId, oportunidade_id: card.id });
+      await evento('followup_dispensado', { telefone, lead_id: leadId, oportunidade_id: card.oportunidade_id });
       return;
     }
     if (!resposta) {
-      await evento('erro', { telefone, lead_id: leadId, oportunidade_id: card.id, motivo: 'resposta vazia' });
+      await evento('erro', { telefone, lead_id: leadId, oportunidade_id: card.oportunidade_id, motivo: 'resposta vazia' });
       return;
     }
 
-    await enviar(telefone, resposta, leadId, card.id);
+    await enviar(telefone, resposta, leadId, card.oportunidade_id);
     await evento(ehFollowup ? 'followup_enviado' : 'respondido', {
-      telefone, lead_id: leadId, oportunidade_id: card.id, etapa,
+      telefone, lead_id: leadId, oportunidade_id: card.oportunidade_id, etapa,
       campos: dadosGravados, rodadas: rodada, tamanho: resposta.length,
     });
   } catch (e) {
