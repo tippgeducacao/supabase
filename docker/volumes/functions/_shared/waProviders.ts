@@ -31,6 +31,33 @@ export interface WaInstanceInfo {
   numero?: string | null;
 }
 
+/**
+ * CLIQUE-PARA-WHATSAPP: o anúncio que abriu esta conversa.
+ *
+ * ⚠️ É a ÚNICA marca de origem que uma campanha de WhatsApp deixa. Não há UTM,
+ * não há landing page, não há formulário: a pessoa clica no anúncio e cai na
+ * conversa. Se este bloco não for guardado, a campanha inteira fica invisível —
+ * foi o que aconteceu até 28/08/2026: 4 campanhas ativas desde 24/07, R$ 3.347,00
+ * gastos, 1.650 cliques, 993 pessoas atendidas e ZERO leads com campanha.
+ *
+ * `sourceId` é o **ID do anúncio** e casa direto com `meta_ads.id` → campanha →
+ * formato → verba.
+ *
+ * ⚠️ Só vem na PRIMEIRA mensagem da conversa. Perdeu, perdeu: a Meta não
+ * reenvia, e não há como recuperar depois.
+ */
+export interface WaAdReferral {
+  /** ID do anúncio (Meta). Casa com meta_ads.id. */
+  sourceId: string | null;
+  /** 'ad' | 'post' — post orgânico compartilhado NÃO é anúncio. */
+  sourceType: string | null;
+  sourceUrl: string | null;
+  /** Click-to-WhatsApp click id, para conciliação com a Meta. */
+  ctwaClid: string | null;
+  headline: string | null;
+  body: string | null;
+}
+
 export interface WaInboundMessage {
   externalId: string | null;
   fromDigits: string; // remetente só com dígitos (sem @s.whatsapp.net)
@@ -44,6 +71,8 @@ export interface WaInboundMessage {
   mediaMime?: string | null;
   mediaFilename?: string | null;
   senderName?: string | null;
+  /** Anúncio que abriu a conversa (clique-para-WhatsApp). Só na 1ª mensagem. */
+  referral?: WaAdReferral | null;
   timestamp: number; // epoch seconds
 }
 
@@ -131,6 +160,75 @@ function jidToDigits(jid: unknown): string {
 
 function isGroupJid(jid: unknown): boolean {
   return String(jid ?? "").includes("@g.us") || String(jid ?? "").includes("-");
+}
+
+/**
+ * Extrai o anúncio de origem de um payload de mensagem, nos dois dialetos.
+ *
+ * ⚠️ TOLERANTE DE PROPÓSITO. A API oficial manda `referral` já pronto; a Uazapi
+ * (Baileys) manda `contextInfo.externalAdReply`, e o nome do campo varia entre
+ * versões (`sourceId`/`source_id`, `ctwaClid`/`ctwa_clid`). Uma lista de
+ * caminhos custa nada e é o que impede a régua de morrer calada num upgrade do
+ * provedor — que é exatamente como esta informação se perderia de novo.
+ *
+ * ⚠️ Devolve `null` quando não há NADA de anúncio. Não inventa: conversa que
+ * começou espontaneamente não tem campanha, e é correto que não tenha.
+ */
+export function extrairReferral(m: any): WaAdReferral | null {
+  if (!m || typeof m !== "object") return null;
+
+  // ⚠️ Normaliza ANTES de decidir. Com o trim depois da guarda, um
+  // `source_id: "   "` (que é truthy) passava e produzia um referral com id e
+  // clid nulos — "isto é um anúncio" sem dizer qual. Coberto por teste.
+  const limpo = (v: unknown): string | null => {
+    const s = v == null ? '' : String(v).trim();
+    return s || null;
+  };
+
+  const sourceId = limpo(pick<string>(m, [
+    "referral.source_id", "referral.sourceId",
+    "contextInfo.externalAdReply.sourceId", "contextInfo.externalAdReply.source_id",
+    "message.contextInfo.externalAdReply.sourceId",
+    "externalAdReply.sourceId", "externalAdReply.source_id",
+    "adReply.sourceId",
+  ]));
+
+  const ctwaClid = limpo(pick<string>(m, [
+    "referral.ctwa_clid", "referral.ctwaClid",
+    "contextInfo.externalAdReply.ctwaClid", "contextInfo.externalAdReply.ctwa_clid",
+    "message.contextInfo.externalAdReply.ctwaClid",
+    "externalAdReply.ctwaClid", "externalAdReply.ctwa_clid",
+  ]));
+
+  const sourceUrl = pick<string>(m, [
+    "referral.source_url", "referral.sourceUrl",
+    "contextInfo.externalAdReply.sourceUrl", "contextInfo.externalAdReply.source_url",
+    "message.contextInfo.externalAdReply.sourceUrl",
+    "externalAdReply.sourceUrl",
+  ]) ?? null;
+
+  // Sem ad id e sem clid não há o que atribuir — título e corpo sozinhos são
+  // só o card da prévia, que qualquer link compartilhado também tem.
+  if (!sourceId && !ctwaClid) return null;
+
+  return {
+    sourceId,
+    sourceType: (pick<string>(m, [
+      "referral.source_type", "referral.sourceType",
+      "contextInfo.externalAdReply.sourceType",
+      "externalAdReply.sourceType",
+    ]) ?? (sourceId || ctwaClid ? "ad" : null)) as string | null,
+    sourceUrl: sourceUrl ? String(sourceUrl).slice(0, 2048) : null,
+    ctwaClid,
+    headline: (pick<string>(m, [
+      "referral.headline",
+      "contextInfo.externalAdReply.title", "externalAdReply.title",
+    ]) ?? null) as string | null,
+    body: (pick<string>(m, [
+      "referral.body",
+      "contextInfo.externalAdReply.body", "externalAdReply.body",
+    ]) ?? null) as string | null,
+  };
 }
 
 function pick<T = any>(obj: any, paths: string[]): T | undefined {
@@ -395,6 +493,8 @@ const uazapi: WaProvider = {
         mediaMime: parsed.mediaMime,
         mediaFilename: parsed.mediaFilename,
         senderName: pick<string>(m, ["senderName", "pushName", "notifyName", "verifiedName"]) ?? null,
+        // O anúncio que abriu a conversa. Vem só na 1ª mensagem e não se recupera.
+        referral: extrairReferral(m),
         timestamp: Number(pick(m, ["messageTimestamp", "timestamp", "t"])) || Math.floor(Date.now() / 1000),
       });
     }

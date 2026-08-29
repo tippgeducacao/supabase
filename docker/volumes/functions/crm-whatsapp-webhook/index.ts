@@ -4,6 +4,7 @@
 // Verificação (GET): aceita o verify token GLOBAL (crm_whatsapp_config) — o que se cola em
 // App/BM novo — e, por compat, o token por conta (crm_whatsapp_accounts).
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
+import { extrairReferral } from "../_shared/waProviders.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -590,6 +591,39 @@ Deno.serve(async (req) => {
             ? `[Em resposta à mensagem: "${quotedConteudo}"] ${conteudo}`.trim()
             : conteudo;
 
+          /* ── CLIQUE-PARA-WHATSAPP: o anúncio que abriu a conversa ─────────
+             ⚠️ ESTE BLOCO ERA DESCARTADO. A campanha de WhatsApp não deixa UTM,
+             não passa por landing page e não tem formulário: `msg.referral` é a
+             ÚNICA marca de origem que ela produz. Sem guardá-lo, a campanha
+             inteira ficava invisível — medido em 28/08/2026: 4 campanhas ativas
+             desde 24/07, R$ 3.347,00 gastos, 993 pessoas atendidas e ZERO leads
+             com campanha.
+
+             ⚠️ Só vem na PRIMEIRA mensagem da conversa. A Meta não reenvia:
+             perdeu aqui, perdeu para sempre. Por isso a gravação é no ato, e
+             best-effort — falhar a atribuição NUNCA pode derrubar o inbound. */
+          const adReferral = extrairReferral(msg);
+          if (adReferral) {
+            try {
+              await admin.rpc("crm_whatsapp_referral_registrar", {
+                p_telefone: (from ?? "").replace(/\D/g, ""),
+                p_ad_id: adReferral.sourceId,
+                p_ctwa_clid: adReferral.ctwaClid,
+                p_source_type: adReferral.sourceType,
+                p_source_url: adReferral.sourceUrl,
+                p_headline: adReferral.headline,
+                p_corpo: adReferral.body,
+                p_wa_account_id: accountId,
+                p_wa_message_id: msgId ?? null,
+              });
+            } catch (refErr) {
+              console.error(
+                "[crm-whatsapp-webhook] referral do anúncio não gravado:",
+                (refErr as Error)?.message,
+              );
+            }
+          }
+
           // Resolve a PESSOA pela régua canônica única do CRM. A Meta pode entregar o
           // wa_id de celular BR sem o 9º dígito (ex.: 554688166051), enquanto `leads`
           // guarda a forma com 9 (5546988166051). Comparar texto exato — mesmo com a
@@ -632,6 +666,10 @@ Deno.serve(async (req) => {
               profile_name: profileName,
               original_type: msgType,
               timestamp: msg?.timestamp,
+              // CLIQUE-PARA-WHATSAPP: o anúncio que abriu a conversa. Guardar o
+              // bloco cru aqui é o backup — a atribuição de verdade é a linha em
+              // `crm_whatsapp_referral`, gravada logo abaixo.
+              ...(adReferral ? { referral: adReferral } : {}),
               ...(interactiveReply ? { interactive_reply: interactiveReply } : {}),
               ...(contactCards ? { contacts: contactCards } : {}),
               ...(quotedId ? { context: { id: quotedId, conteudo: quotedConteudo } } : {}),

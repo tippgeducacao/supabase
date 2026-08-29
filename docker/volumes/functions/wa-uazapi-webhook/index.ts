@@ -199,6 +199,34 @@ Deno.serve(async (req) => {
         }
       }
 
+      /* ── CLIQUE-PARA-WHATSAPP: o anúncio que abriu a conversa ─────────────
+         ⚠️ ESTE BLOCO ERA DESCARTADO aqui também. A campanha de WhatsApp não
+         deixa UTM, não passa por landing page e não tem formulário: o
+         `externalAdReply` é a ÚNICA marca de origem que ela produz.
+
+         ⚠️ Só na PRIMEIRA mensagem, e sem reenvio. Best-effort de propósito:
+         falhar a atribuição NUNCA pode derrubar a gravação do inbound. */
+      if (!m.fromMe && m.referral) {
+        try {
+          await admin.rpc("crm_whatsapp_referral_registrar", {
+            p_telefone: telefone,
+            p_ad_id: m.referral.sourceId,
+            p_ctwa_clid: m.referral.ctwaClid,
+            p_source_type: m.referral.sourceType,
+            p_source_url: m.referral.sourceUrl,
+            p_headline: m.referral.headline,
+            p_corpo: m.referral.body,
+            p_wa_account_id: null, // Uazapi não tem conta Meta
+            p_wa_message_id: m.externalId ?? null,
+          });
+        } catch (refErr) {
+          console.error(
+            "[wa-uazapi-webhook] referral do anúncio não gravado:",
+            (refErr as Error)?.message,
+          );
+        }
+      }
+
       // Mesma fonte única do webhook Meta: DDI, pontuação e ±9º dígito precisam
       // resolver para a mesma pessoa. A comparação exata antiga criava mensagens
       // órfãs quando o provedor devolvia o telefone em outra representação válida.
@@ -242,6 +270,8 @@ Deno.serve(async (req) => {
           ...(chatFoto ? { contato_foto_url: chatFoto } : {}),
           // fromMe = SDR respondeu pelo próprio celular -> conta como 'humano' no espelho
           ...(m.fromMe ? { origem: "humano" } : {}),
+          // Backup cru do anúncio; a atribuição de verdade é crm_whatsapp_referral.
+          ...(m.referral ? { referral: m.referral } : {}),
         },
       });
       if (insErr) {
