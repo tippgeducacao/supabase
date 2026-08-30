@@ -346,6 +346,7 @@ async function processar(payload: any) {
         : '');
 
     let resposta = '';
+    let textoAntesDaFerramenta = '';
     let dadosGravados: string[] = [];
     let rodada = 0;
     const historico: any[] = [...messages];
@@ -366,7 +367,15 @@ async function processar(payload: any) {
       const usos = blocos.filter((b: any) => b.type === 'tool_use');
 
       if (usos.length) {
-        historico.push({ role: 'assistant', content: blocos });
+        // ⚠️ SÓ os blocos de ferramenta entram no histórico — nunca o texto que veio
+        // junto deles. Esse texto AINDA NÃO foi enviado ao candidato; deixá-lo aqui
+        // faz o modelo acreditar que já falou, e a rodada seguinte vira um retoque do
+        // que ele acha que disse: "Fico no aguardo da sua resposta sobre a mudança"
+        // sem nunca ter perguntado, "Fico aguardando o currículo" sem nunca ter
+        // pedido, "Qualquer outra dúvida é só falar" em cima de uma pergunta direta
+        // do candidato. Nos três casos a mensagem BOA era justamente a que estava
+        // aqui e foi descartada (Luciano e Carlize, 30/08/2026).
+        historico.push({ role: 'assistant', content: usos });
         const results: any[] = [];
         for (const u of usos) {
           if (u.name === 'conferir_colaborador') {
@@ -390,10 +399,12 @@ async function processar(payload: any) {
           results.push({ type: 'tool_result', tool_use_id: u.id, content: `ok, gravei: ${gravou.join(', ') || 'nada novo'}` });
         }
         historico.push({ role: 'user', content: results });
-        if (texto) resposta = texto;
+        // Rede de segurança: se a rodada final não escrever nada, vale o que ele
+        // escreveu antes da ferramenta — melhor a mensagem boa do que o silêncio.
+        if (texto && !textoAntesDaFerramenta) textoAntesDaFerramenta = texto;
         continue;
       }
-      resposta = texto;
+      resposta = texto || textoAntesDaFerramenta;
       break;
     }
 
