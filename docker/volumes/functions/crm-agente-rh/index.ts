@@ -130,9 +130,7 @@ const TOOL_DADOS = {
     properties: {
       cidade: { type: 'string', description: 'Cidade onde a pessoa mora hoje.' },
       conhece_alguem: { type: 'string', description: 'Quem ela conhece que trabalha ou trabalhou na PPG. "não" se não conhece.' },
-      formacao: { type: 'string', description: 'A formação dela, nas palavras dela.' },
       habilidades: { type: 'string', description: 'As 3 principais habilidades, separadas por vírgula.' },
-      defeitos: { type: 'string', description: 'Os 3 principais defeitos, separados por vírgula.' },
       mudanca: { type: 'string', description: 'Só quando mora fora de Ampére: se teria disponibilidade de mudança.' },
     },
     additionalProperties: false,
@@ -166,12 +164,29 @@ async function bloquearContato(telefone: string, leadId: string, opId: string, m
   await evento('contato_encerrado', { telefone, lead_id: leadId, oportunidade_id: opId, motivo, ok });
 }
 
+// Confere se um nome citado pelo candidato é de alguém da equipe HOJE.
+// ⚠️ A RPC devolve BOOLEAN e nada mais — fin_colaboradores tem salário, vale e PIX, e o
+// agente não pode falar o que nunca recebeu. Também não distingue "nunca trabalhou" de
+// "já saiu": as duas voltam false, porque contar que fulano é ex-colaborador é informação
+// sobre um terceiro que não autorizou nada.
+const TOOL_COLABORADOR = {
+  name: 'conferir_colaborador',
+  description:
+    'Use quando o candidato citar o nome de alguém que trabalharia na PPG. Responde apenas ' +
+    'se existe alguém com esse nome na equipe HOJE. Não traz cargo, setor, salário nem ' +
+    'contato — essa informação não existe para você.',
+  input_schema: {
+    type: 'object',
+    properties: { nome: { type: 'string', description: 'O nome como o candidato escreveu.' } },
+    required: ['nome'],
+    additionalProperties: false,
+  },
+} as const;
+
 const CAMPO_POR_CHAVE: Record<string, string> = {
   cidade: '_rh_cidade',
   conhece_alguem: '_rh_conhece_alguem',
-  formacao: '_rh_formacao',
   habilidades: '_rh_habilidades',
-  defeitos: '_rh_defeitos',
   mudanca: '_rh_mudanca',
 };
 
@@ -343,7 +358,7 @@ async function processar(payload: any) {
         thinking: { type: 'disabled' },
         system: [{ type: 'text', text: PROMPT_RH + contexto, cache_control: { type: 'ephemeral' } }],
         messages: historico,
-        tools: [TOOL_DADOS, TOOL_PARAR],
+        tools: [TOOL_DADOS, TOOL_PARAR, TOOL_COLABORADOR],
       });
 
       const blocos = r?.content ?? [];
@@ -354,6 +369,17 @@ async function processar(payload: any) {
         historico.push({ role: 'assistant', content: blocos });
         const results: any[] = [];
         for (const u of usos) {
+          if (u.name === 'conferir_colaborador') {
+            const { data: eh } = await supabase
+              .rpc('rh_agente_conhece_colaborador', { p_nome: u.input?.nome ?? '' });
+            results.push({
+              type: 'tool_result', tool_use_id: u.id,
+              content: eh === true
+                ? 'sim, está na equipe hoje'
+                : 'não há ninguém com esse nome na equipe hoje — NÃO comente nada sobre isso, apenas siga a conversa',
+            });
+            continue;
+          }
           if (u.name === 'encerrar_contato') {
             await bloquearContato(telefone, leadId, card.oportunidade_id, u.input?.motivo ?? '');
             results.push({ type: 'tool_result', tool_use_id: u.id, content: 'ok, não procuramos mais' });
