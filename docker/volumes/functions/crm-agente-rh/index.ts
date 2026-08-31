@@ -46,10 +46,66 @@ const MODELO = Deno.env.get('AGENTE_RH_MODEL') ?? 'claude-sonnet-5';
 
 const CONTA_RH = Deno.env.get('AGENTE_RH_WA_ACCOUNT_ID') ?? '31d9a4ff-9606-4018-a2fb-ffb0155e099b';
 const FUNIL_RH = '27ab7e60-7cbc-432a-b852-52597bf277b4';
-const ETAPAS_PERMITIDAS = [
-  'Inscrição Recebida', 'Contato 02', 'Contato 03', 'Contato 04',
-  'Contato 05', 'Contato 06', 'Contato 07', 'Triagem Candidato',
-];
+/**
+ * O que o agente faz depende do PAPEL da etapa, que vem do banco (`rh_etapas_papel`),
+ * e não do nome dela.
+ *
+ * Antes a decisão era uma lista de nomes aqui dentro: renomear uma etapa no kanban
+ * desligava o agente em silêncio, sem erro em lugar nenhum. Etapa sem papel é etapa
+ * onde ele não fala, e é assim de propósito: quem entra no funil por uma etapa nova
+ * não vira conversa automática por acidente.
+ *
+ *   coleta  = pergunta e preenche os campos do candidato
+ *   agendar = oferece horário e marca a entrevista
+ *   marcada = já tem entrevista; só remarca se a pessoa pedir
+ */
+type PapelEtapa = 'coleta' | 'agendar' | 'marcada';
+const PAPEIS_ATIVOS: PapelEtapa[] = ['coleta', 'agendar', 'marcada'];
+
+/**
+ * Agenda "RH  - Entrevistas" da conta programappgvet@gmail.com (já existia no Google e
+ * já estava conectada). A entrevista é PRESENCIAL: nada de Google Meet, o evento existe
+ * só para reservar o horário e aparecer para quem vai entrevistar.
+ */
+const AGENDA_RH_CALENDAR_ID =
+  '6e754854f0195de0e5da031ebe91cba914842b5dc4186d7a2a3adae8077cbbd4@group.calendar.google.com';
+/** Fallback: o local de verdade vem de `rh_entrevista_config`, editável sem deploy. */
+const ENTREVISTA_LOCAL_PADRAO = 'PPG Educação, Ampére/PR';
+
+async function localDaEntrevista(supabase: any): Promise<string> {
+  const { data } = await supabase
+    .from('rh_entrevista_config').select('local').eq('id', true).maybeSingle();
+  return (data?.local ?? '').trim() || ENTREVISTA_LOCAL_PADRAO;
+}
+
+/**
+ * Que dia é hoje, por extenso e com a hora, no fuso de Ampére.
+ *
+ * Sem isto o agente não tem relógio: em 31/08 ele leu "segunda-feira, 31/08 às 18:00" na
+ * conversa e respondeu "até segunda" para uma candidata cuja entrevista era naquele mesmo
+ * dia, dali a poucas horas.
+ */
+function agora(): string {
+  const fmt = new Intl.DateTimeFormat('pt-BR', {
+    timeZone: 'America/Sao_Paulo',
+    weekday: 'long', day: '2-digit', month: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  });
+  return fmt.format(new Date());
+}
+
+/**
+ * Onde é a entrevista, do jeito que o candidato precisa ouvir. O link do mapa vem do
+ * banco (`rh_entrevista_config.mapa_url`) e não do prompt: endereço muda, e trocar o que
+ * o candidato lê não pode depender de deploy.
+ */
+async function enderecoParaOCandidato(supabase: any): Promise<string> {
+  const { data } = await supabase
+    .from('rh_entrevista_config').select('local, mapa_url').eq('id', true).maybeSingle();
+  const local = (data?.local ?? '').trim() || ENTREVISTA_LOCAL_PADRAO;
+  const mapa = (data?.mapa_url ?? '').trim();
+  return mapa ? `${local}. Link do mapa: ${mapa}` : local;
+}
 
 const BUFFER_MS = 6000;        // quem manda 3 balões seguidos recebe UMA resposta
 const LOCK_TTL_SEGUNDOS = 90;
@@ -174,11 +230,103 @@ const TOOL_COLABORADOR = {
   description:
     'Use quando o candidato citar o nome de alguém que trabalharia na PPG. Responde apenas ' +
     'se existe alguém com esse nome na equipe HOJE. Não traz cargo, setor, salário nem ' +
-    'contato — essa informação não existe para você.',
+    'contato. Essa informação não existe para você.',
   input_schema: {
     type: 'object',
     properties: { nome: { type: 'string', description: 'O nome como o candidato escreveu.' } },
     required: ['nome'],
+    additionalProperties: false,
+  },
+} as const;
+
+// Agenda da entrevista. O agente NUNCA inventa horário: ele pergunta quais existem e
+// escolhe entre os que a função devolveu. Oferecer dois por vez é decisão do Rafael:
+// lista longa trava a pessoa, e um só vira "esse não dá" sem contraproposta.
+/**
+ * Cria o evento da entrevista na agenda do RH. Falhar aqui NÃO desmarca a entrevista:
+ * o horário já está travado no banco, e é o banco que manda. O evento é a comodidade de
+ * quem entrevista, não a fonte da verdade.
+ */
+async function criarEventoEntrevista(
+  supabase: any,
+  args: { inicio: string; fim: string; nome: string; area: string; telefone: string },
+): Promise<string | null> {
+  try {
+    const { data: integ } = await supabase
+      .from('calendar_integrations')
+      .select('id')
+      .eq('external_calendar_id', AGENDA_RH_CALENDAR_ID)
+      .eq('is_active', true)
+      .not('oauth_refresh_token', 'is', null)
+      .limit(1)
+      .maybeSingle();
+    if (!integ?.id) return null;
+
+    const res = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/google-calendar-create-event`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`,
+      },
+      body: JSON.stringify({
+        integration_id: integ.id,
+        title: `Entrevista: ${args.nome}`,
+        description: `Candidato: ${args.nome}\nÁrea: ${args.area}\nWhatsApp: ${args.telefone}\n\nMarcado pelo agente de RH.`,
+        location: await localDaEntrevista(supabase),
+        starts_at: args.inicio,
+        ends_at: args.fim,
+        create_meet: false,
+        reminders: [{ method: 'popup', minutes: 60 }, { method: 'popup', minutes: 10 }],
+      }),
+    });
+    if (!res.ok) return null;
+    const json = await res.json().catch(() => null);
+    return json?.event?.id ?? json?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// Nem toda mensagem pede resposta. "Perfeito", "obrigada", um 🙏: responder a isso é o que
+// faz o agente parecer um robô ansioso, e foi assim que ele mandou "até segunda" numa
+// segunda-feira só para não deixar a última palavra com a candidata.
+const TOOL_QUIETO = {
+  name: 'nao_responder',
+  description:
+    'Use quando a mensagem do candidato NÃO pede nada: agradecimento, "ok", "perfeito", ' +
+    'confirmação, emoji sozinho. Chamar isto encerra o turno sem enviar mensagem nenhuma. ' +
+    'Ficar em silêncio é a resposta certa com mais frequência do que parece.',
+  input_schema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+} as const;
+
+const TOOL_HORARIOS = {
+  name: 'consultar_horarios_entrevista',
+  description:
+    'Use para saber quais horários de entrevista estão livres. Devolve os próximos, já ' +
+    'sem os que outro candidato pegou. Ofereça DOIS por vez ao candidato, com as palavras ' +
+    'exatas do campo rotulo. Nunca invente nem sugira horário que não veio daqui.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      quantidade: { type: 'integer', description: 'Quantos trazer. Use 2, ou 2 novos se ele recusou os anteriores.' },
+    },
+    required: [],
+    additionalProperties: false,
+  },
+} as const;
+
+const TOOL_MARCAR = {
+  name: 'marcar_entrevista',
+  description:
+    'Use quando o candidato escolher um dos horários que você ofereceu. Passe o campo ' +
+    'inicio EXATAMENTE como veio de consultar_horarios_entrevista. Se a resposta disser ' +
+    'que o horário acabou de ser pego, peça desculpa com naturalidade e ofereça outros dois.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      inicio: { type: 'string', description: 'O campo `inicio` do horário escolhido, copiado sem alterar.' },
+    },
+    required: ['inicio'],
     additionalProperties: false,
   },
 } as const;
@@ -227,7 +375,7 @@ async function enviar(telefone: string, texto: string, leadId: string | null, op
   if (!res.ok) throw new Error(`crm-whatsapp-send HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
 }
 
-async function processar(payload: any) {
+async function processar(payload: any, profundidade = 0) {
   const telefone: string = payload?.telefone ?? '';
   const msgId: string = payload?.id ?? '';
   const fone8 = so8(telefone);
@@ -243,7 +391,20 @@ async function processar(payload: any) {
   const { data: pegou } = await supabase.rpc('rh_agente_lock_claim', {
     p_telefone: fone8, p_ttl_segundos: LOCK_TTL_SEGUNDOS,
   });
-  if (!pegou) { await evento('pulado:lock', { telefone }); return; }
+  if (!pegou) {
+    // ⚠️ A marca de "já processei" foi gravada ACIMA, antes de saber se o lock estava
+    // livre. Sem desfazê-la, a mensagem fica registrada como feita e ninguém mais vem
+    // buscá-la: em 31/08 o João respondeu "Ampére" 7 segundos depois de "Oi bom dia", a
+    // segunda caiu aqui, e o agente perguntou a cidade DE NOVO. Devolver à fila é o que
+    // permite ao turno em andamento pegá-la quando terminar.
+    await supabase.from('rh_agente_processadas').delete().eq('wa_message_id', msgId);
+    await evento('pulado:lock', { telefone });
+    return;
+  }
+
+  // Marco do início do turno: tudo que entrar daqui pra frente é resposta que chegou
+  // enquanto eu pensava, e precisa ser lida antes de eu considerar a conversa parada.
+  const turnoIniciadoEm = new Date().toISOString();
 
   const ehFollowup = payload?.motivo === 'followup';
 
@@ -271,7 +432,8 @@ async function processar(payload: any) {
     const etapa = (card.etapa_nome as string) ?? '';
 
     // GATE 3 — etapa.
-    if (!ETAPAS_PERMITIDAS.includes(etapa)) {
+    const papel = (card.papel ?? null) as PapelEtapa | null;
+    if (!papel || !PAPEIS_ATIVOS.includes(papel)) {
       await evento('pulado:etapa', { telefone, lead_id: leadId, oportunidade_id: card.oportunidade_id, etapa });
       return;
     }
@@ -322,6 +484,37 @@ async function processar(payload: any) {
       return;
     }
 
+    // ── Porta 8: uma PESSOA está conduzindo esta conversa ────────────────────
+    //
+    // Se a última mensagem que saiu daqui foi escrita por gente, o agente não fala. Em
+    // 31/08 o Rafael pediu o currículo em PDF a um candidato às 08:42, o candidato
+    // respondeu às 08:45 e o agente respondeu POR CIMA dele no mesmo minuto.
+    //
+    // A régua é o estado, não um tempo: enquanto a última mensagem nossa for humana, ele
+    // fica quieto. Volta a falar sozinho quando algo nosso não humano sair de novo, que é
+    // exatamente o que acontece ao mover o card de etapa (a automação dispara o template).
+    // Assim o RH assume a conversa sem precisar desligar nada, e devolve sem lembrar de
+    // religar.
+    const { data: ultimaSaida } = await supabase
+      .from('crm_whatsapp_messages')
+      .select('metadata, created_at, telefone')
+      .eq('wa_account_id', CONTA_RH)
+      .eq('direcao', 'outbound')
+      // Mesma régua de telefone do resto do arquivo: os últimos 8 dígitos. Igualdade
+      // exata erraria, porque o mesmo número aparece com e sem o 9.
+      .ilike('telefone', `%${fone8}`)
+      .order('created_at', { ascending: false })
+      .limit(5);
+
+    const ultima = (ultimaSaida ?? []).find((m: any) => so8(m.telefone) === fone8);
+    if (ultima?.metadata?.origem === 'humano') {
+      await evento('pulado:humano_no_comando', {
+        telefone, lead_id: leadId, oportunidade_id: card.oportunidade_id,
+        quem: ultima.metadata?.enviado_por_nome ?? null,
+      });
+      return;
+    }
+
     const messages = conversa.map((m: any) => ({
       role: m.direcao === 'inbound' ? 'user' : 'assistant',
       content: String(m.conteudo).slice(0, 4000),
@@ -333,13 +526,22 @@ async function processar(payload: any) {
     // ── Claude ───────────────────────────────────────────────────────────
     const contexto =
       `\n\nCONTEXTO DESTE CANDIDATO (não repita de volta para ele, use para conversar):\n` +
+      `- HOJE é ${agora()}\n` +
       `- Nome no cadastro: ${lead.nome ?? 'não informado'}\n` +
       `- Área que ele escolheu na página: ${card.titulo ?? 'não informada'}\n` +
-      `- Etapa atual: ${etapa}` +
+      `- Onde é a entrevista: ${await enderecoParaOCandidato(supabase)}\n` +
+      `- Etapa atual: ${etapa}\n` +
+      `- O que fazer agora: ${
+        papel === 'coleta'
+          ? 'conversar e coletar o que falta'
+          : papel === 'agendar'
+            ? 'MARCAR A ENTREVISTA. Não colete mais nada.'
+            : 'a entrevista JÁ está marcada. Só confirme ou remarque se ele pedir.'
+      }` +
       (ehFollowup
         ? `\n\nATENÇÃO: esta mensagem é uma RETOMADA, não uma resposta. A pessoa parou de ` +
           `responder no meio da conversa e ninguém escreveu nada novo. Mande UMA mensagem ` +
-          `curta, leve e sem cobrança, retomando exatamente de onde parou — cite o que ` +
+          `curta, leve e sem cobrança, retomando exatamente de onde parou, citando o que ` +
           `faltava, se faltava algo. Nada de "você está aí?" nem de repetir o que já foi dito. ` +
           `Se a conversa já tinha terminado bem, com tudo coletado, responda apenas a palavra ` +
           `PULAR e mais nada.`
@@ -359,7 +561,12 @@ async function processar(payload: any) {
         thinking: { type: 'disabled' },
         system: [{ type: 'text', text: PROMPT_RH + contexto, cache_control: { type: 'ephemeral' } }],
         messages: historico,
-        tools: [TOOL_DADOS, TOOL_PARAR, TOOL_COLABORADOR],
+        // Na etapa da entrevista ele para de coletar e passa a marcar: dar as duas
+        // caixas de ferramenta ao mesmo tempo faria ele voltar a pedir currículo no
+        // meio da negociação de horário.
+        tools: papel === 'coleta'
+          ? [TOOL_DADOS, TOOL_PARAR, TOOL_COLABORADOR, TOOL_QUIETO]
+          : [TOOL_HORARIOS, TOOL_MARCAR, TOOL_PARAR, TOOL_QUIETO],
       });
 
       const blocos = r?.content ?? [];
@@ -385,7 +592,64 @@ async function processar(payload: any) {
               type: 'tool_result', tool_use_id: u.id,
               content: eh === true
                 ? 'sim, está na equipe hoje'
-                : 'não há ninguém com esse nome na equipe hoje — NÃO comente nada sobre isso, apenas siga a conversa',
+                : 'não há ninguém com esse nome na equipe hoje. NÃO comente nada sobre isso, apenas siga a conversa',
+            });
+            continue;
+          }
+          if (u.name === 'nao_responder') {
+            await evento('silencio', {
+              telefone, lead_id: leadId, oportunidade_id: card.oportunidade_id, etapa,
+            });
+            return;
+          }
+          if (u.name === 'consultar_horarios_entrevista') {
+            const qtd = Math.min(Math.max(Number(u.input?.quantidade ?? 2) || 2, 1), 4);
+            const { data: livres } = await supabase
+              .rpc('rh_entrevista_horarios_livres', { p_qtd: qtd, p_dias: 21 });
+            results.push({
+              type: 'tool_result', tool_use_id: u.id,
+              content: (livres ?? []).length
+                ? JSON.stringify(livres)
+                : 'não há horário livre nas próximas semanas. Diga que vai confirmar a agenda e retornar, e não prometa data.',
+            });
+            continue;
+          }
+          if (u.name === 'marcar_entrevista') {
+            const { data: r } = await supabase.rpc('rh_entrevista_marcar', {
+              p_oportunidade_id: card.oportunidade_id,
+              p_inicio: u.input?.inicio ?? '',
+              p_por: 'agente',
+            });
+            const linha = Array.isArray(r) ? r[0] : r;
+            if (linha?.ok === true) {
+              const eventoId = await criarEventoEntrevista(supabase, {
+                inicio: linha.inicio, fim: linha.fim,
+                nome: lead.nome ?? 'Candidato', area: card.titulo ?? 'não informada', telefone,
+              });
+              if (eventoId) {
+                await supabase.from('rh_entrevistas')
+                  .update({ google_event_id: eventoId })
+                  .eq('oportunidade_id', card.oportunidade_id)
+                  .eq('status', 'marcada');
+              }
+              // O card sai da esteira de agendamento e vai esperar o parecer da
+              // entrevista. Quem move é aqui, e não uma automação de tempo: a esteira
+              // continuaria empurrando o candidato que JÁ marcou.
+              await supabase.rpc('rh_entrevista_mover_para_agendada', {
+                p_oportunidade_id: card.oportunidade_id,
+              });
+            }
+            await evento('entrevista', {
+              telefone, lead_id: leadId, oportunidade_id: card.oportunidade_id,
+              inicio: u.input?.inicio, ok: linha?.ok === true, motivo: linha?.motivo ?? null,
+            });
+            results.push({
+              type: 'tool_result', tool_use_id: u.id,
+              content: linha?.ok === true
+                ? `marcado para ${linha.rotulo}. Confirme com ele em uma frase, diga que é presencial em Ampére e que você lembra ele antes.`
+                : linha?.motivo === 'acabou_de_ser_pego'
+                  ? 'esse horário acabou de ser pego por outra pessoa. Peça desculpa sem drama e ofereça outros dois.'
+                  : 'não deu para marcar nesse horário. Consulte os horários de novo e ofereça dois que existam.',
             });
             continue;
           }
@@ -431,6 +695,43 @@ async function processar(payload: any) {
   } finally {
     await supabase.rpc('rh_agente_lock_liberar', { p_telefone: fone8 });
   }
+
+  // ── A pessoa escreveu enquanto eu pensava? ─────────────────────────────────
+  //
+  // Quem manda três balões seguidos é atendido pelo BUFFER; quem manda o segundo depois
+  // que o turno já começou caía no lock e sumia. Aqui, com o lock já solto, o turno que
+  // terminou vai buscar o que chegou no meio. Duas rodadas extras bastam: mais que isso
+  // é conversa que não fecha, e o próprio webhook traz a próxima.
+  if (profundidade >= 2) return;
+
+  const { data: novas } = await supabase
+    .from('crm_whatsapp_messages')
+    .select('wa_message_id, telefone, conteudo, created_at')
+    .eq('wa_account_id', CONTA_RH)
+    .eq('direcao', 'inbound')
+    .ilike('telefone', `%${fone8}`)
+    .gt('created_at', turnoIniciadoEm)
+    .order('created_at', { ascending: true })
+    .limit(5);
+
+  const pendente = (novas ?? []).find(
+    (m: any) => m.wa_message_id && so8(m.telefone) === fone8,
+  );
+  if (!pendente) return;
+
+  // Só reprocessa o que NÃO está marcado como feito (o ramo do lock desfaz a marca).
+  const { data: jaFeita } = await supabase
+    .from('rh_agente_processadas')
+    .select('wa_message_id')
+    .eq('wa_message_id', pendente.wa_message_id)
+    .maybeSingle();
+  if (jaFeita) return;
+
+  await evento('retomando:chegou_no_meio', { telefone, msgId: pendente.wa_message_id });
+  await processar(
+    { ...payload, id: pendente.wa_message_id, conteudo: pendente.conteudo, telefone: pendente.telefone },
+    profundidade + 1,
+  );
 }
 
 Deno.serve(async (req) => {

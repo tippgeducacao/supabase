@@ -12,13 +12,21 @@
 //     peso entre as listas, e a campanha tinha chegado a 104 delas
 //   • `curso` virou COLUNA do mailing (antes ia grudado no identifier)
 //
-// A regua de QUEM entra vive na RPC `threec_mailing_selecionar` (fonte unica).
-// Esta function so formata, envia e marca.
+// A regua de QUEM entra vive na RPC `threec_mailing_selecionar` (fonte unica),
+// que le a lista `threec_mailing_exclusoes`. Esta function so formata, envia e
+// marca — e sabe DESFAZER (acao=expurgar).
+//
+// ⚠️ `public.leads` NAO e uma tabela so do comercial: candidato a vaga (webhooks
+// de contratacao), aluno importado pela carga do SIGA/EDUQ e inadimplente do
+// funil de cobranca nascem todos ali. Sem a lista de exclusao, todos eles caem
+// no discador de VENDAS — foi o chamado "LEADS 3C" de 31/08/2026.
 //
 // Chamada:
 //   POST /functions/v1/threec-mailing-sync            -> lista Quente, limite da config
 //   POST ?lista=base&limite=500&desde=2026-06-27      -> backfill na Base
 //   POST ?dry=1                                       -> so simula (nao envia, nao marca)
+//   POST ?acao=expurgar&dry=1                         -> quem esta na campanha e hoje e vetado
+//   POST ?acao=expurgar                               -> tira essa gente da campanha no 3C
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0'
 
@@ -131,6 +139,98 @@ const supabase = createClient(SUPABASE_URL, SERVICE_ROLE, {
   auth: { persistSession: false, autoRefreshToken: false },
 })
 
+// ----------------------------------------------------------------- expurgo ----
+// Corrigir a regua impede a PROXIMA injecao — nao desfaz as anteriores. Quem ja
+// esta na campanha continua na fila do discador ate ser ligado. Foi assim que o
+// chamado "LEADS 3C" (31/08/2026) apareceu: 238 candidatos a VAGA ja dentro da
+// campanha "Novo Lead SDR".
+//
+// Corpo confirmado ao vivo na investigacao da cobranca (docs/Financeiro e
+// Cobranca.md): campo `phone` no SINGULAR, valor em ARRAY, resposta 204.
+//     DELETE /campaigns/{id}/mailing/delete   {"phone": ["44999998888"]}
+//
+// QUEM sai vem da RPC `threec_mailing_a_expurgar`, que le a MESMA lista de
+// exclusao da regua de entrada — mexeu na lista, o expurgo acompanha. Linha de
+// exclusao com `expurgar=false` (caso do [LEADS IMPORTADOS]) barra entrada nova
+// mas nao tira ninguem retroativamente.
+const MAX_POR_DELETE = 100
+
+interface ExpurgoRow {
+  lead_id: string
+  canon: string
+  telefone: string
+  nome: string
+  motivo: string
+}
+
+async function expurgar(campanhaId: string, limite: number, dry: boolean): Promise<Response> {
+  const { data, error } = await supabase.rpc('threec_mailing_a_expurgar', { p_limite: limite })
+  if (error) return json({ error: 'falha ao listar quem expurgar', detail: error.message }, 500)
+
+  const linhas = (data ?? []) as ExpurgoRow[]
+  const porMotivo = linhas.reduce<Record<string, number>>((acc, l) => {
+    acc[l.motivo] = (acc[l.motivo] ?? 0) + 1
+    return acc
+  }, {})
+
+  if (linhas.length === 0) return json({ ok: true, expurgados: 0, motivo: 'ninguem a expurgar' })
+  if (dry) {
+    return json({
+      ok: true, dry: true, total: linhas.length, por_motivo: porMotivo,
+      amostra: linhas.slice(0, 10).map((l) => ({ nome: l.nome, telefone: l.telefone, motivo: l.motivo })),
+    })
+  }
+
+  const removidos: string[] = [] // canons que o 3C confirmou ter tirado
+  const falhas: string[] = []
+  for (let ini = 0; ini < linhas.length; ini += MAX_POR_DELETE) {
+    const fatia = linhas.slice(ini, ini + MAX_POR_DELETE)
+    const alvo = `${THREEC_BASE}/campaigns/${campanhaId}/mailing/delete?api_token=${THREEC_TOKEN}`
+    let resp: Response
+    try {
+      resp = await fetch(alvo, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ phone: fatia.map((l) => l.telefone) }),
+      })
+    } catch (err) {
+      falhas.push(`lote ${ini / MAX_POR_DELETE}: ${String(err)}`)
+      continue
+    }
+    if (resp.status >= 200 && resp.status < 300) {
+      for (const l of fatia) removidos.push(l.canon)
+    } else {
+      const corpo = await resp.text()
+      console.error('[threec-mailing-sync] 3C recusou o DELETE', { ini, status: resp.status, corpo: corpo.slice(0, 300) })
+      falhas.push(`lote ${ini / MAX_POR_DELETE}: HTTP ${resp.status} ${corpo.slice(0, 200)}`)
+    }
+  }
+
+  // So marca o que o 3C confirmou: se o DELETE falhou, a linha continua
+  // pendente e a proxima rodada tenta de novo.
+  let marcados = 0
+  if (removidos.length > 0) {
+    const { data: n, error: eMarcar } = await supabase.rpc('threec_mailing_marcar_removidos', {
+      p_canons: removidos,
+      p_motivo: 'expurgo: fora da regua do discador SDR',
+    })
+    if (eMarcar) {
+      console.error('[threec-mailing-sync] REMOVEU MAS NAO MARCOU', eMarcar.message)
+      return json({ ok: false, removidos_no_3c: removidos.length, marcados: 0, alerta: 'removido no 3C mas falhou ao marcar no banco', detail: eMarcar.message }, 500)
+    }
+    marcados = (n as number) ?? 0
+  }
+
+  return json({
+    ok: falhas.length === 0,
+    total_candidatos: linhas.length,
+    removidos_no_3c: removidos.length,
+    marcados,
+    por_motivo: porMotivo,
+    falhas: falhas.slice(0, 3),
+  })
+}
+
 async function handler(req: Request): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders })
   if (req.method !== 'POST') return json({ error: 'Method not allowed' }, 405)
@@ -157,6 +257,7 @@ async function handler(req: Request): Promise<Response> {
   if (!THREEC_TOKEN) return json({ error: '3C_TOKEN_API nao configurado no edge-runtime' }, 500)
 
   const url = new URL(req.url)
+  const acao = (url.searchParams.get('acao') ?? 'sincronizar').toLowerCase()
   const qLista = (url.searchParams.get('lista') ?? 'quente').toLowerCase()
   const qLimite = Number(url.searchParams.get('limite') ?? '') || null
   const qDesde = url.searchParams.get('desde')
@@ -168,6 +269,12 @@ async function handler(req: Request): Promise<Response> {
     .select('campanha_id, lista_quente_id, lista_base_id, ativo, limite_por_rodada')
     .maybeSingle()
   if (eCfg || !cfg) return json({ error: 'config indisponivel', detail: eCfg?.message }, 500)
+
+  // 1b) EXPURGO — tira da campanha quem ja foi injetado mas hoje a regua veta.
+  //     Roda mesmo com o pipeline pausado: pausar a entrada nao tira ninguem
+  //     da fila do discador. Vem ANTES do gate de `ativo` de proposito.
+  if (acao === 'expurgar') return await expurgar(String(cfg.campanha_id), qLimite ?? 1000, dry)
+
   if (!cfg.ativo) return json({ ok: true, skip: 'pipeline pausado (threec_mailing_config.ativo=false)' })
 
   console.log("[3c-mailing] config ok", cfg.campanha_id, "ativo=", cfg.ativo)

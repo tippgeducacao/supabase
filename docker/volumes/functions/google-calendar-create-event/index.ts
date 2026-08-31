@@ -52,10 +52,18 @@ Deno.serve(async (req) => {
     if (!authHeader?.startsWith('Bearer ')) throw new Error('Não autenticado');
     const token = authHeader.replace(/^Bearer\s+/i, '');
     const adminAuth = createClient(SUPABASE_URL, SERVICE_ROLE);
-    const { data: { user }, error: userErr } = await adminAuth.auth.getUser(token);
-    if (userErr || !user) {
-      console.error('[google-calendar-create-event] auth failed:', userErr);
-      throw new Error('Sessão inválida');
+    // Chamada de SERVIDOR (cron, agente de RH): o Bearer é a própria service role key,
+    // não um JWT de pessoa, e `auth.getUser` recusaria. Quem tem essa chave já pode tudo
+    // no banco, então não há permissão nova sendo concedida aqui.
+    const ehServidor = token === SERVICE_ROLE;
+    let user: any = null;
+    if (!ehServidor) {
+      const { data, error: userErr } = await adminAuth.auth.getUser(token);
+      if (userErr || !data?.user) {
+        console.error('[google-calendar-create-event] auth failed:', userErr);
+        throw new Error('Sessão inválida');
+      }
+      user = data.user;
     }
 
     const body = await req.json();
@@ -90,7 +98,7 @@ Deno.serve(async (req) => {
     if (!integ.oauth_refresh_token) throw new Error('Integração sem token. Reconecte a agenda.');
 
     // Permissão: pessoal só dono; global qualquer um autenticado
-    if (integ.scope === 'personal' && integ.owner_user_id !== user.id) {
+    if (!ehServidor && integ.scope === 'personal' && integ.owner_user_id !== user.id) {
       throw new Error('Sem permissão para criar nesta agenda pessoal');
     }
 
