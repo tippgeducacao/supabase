@@ -202,61 +202,68 @@ Deno.serve(async (req) => {
         wabas = [...alvo.wabasConhecidas].map((id) => ({ id }));
       }
 
-      let numerosDaBm = 0;
-      for (const w of wabas) {
-        try {
-          const [fones, waba] = await Promise.all([
-            graph(
-              `${META_GRAPH}/${w.id}/phone_numbers?fields=id,display_phone_number,verified_name,quality_rating,messaging_limit_tier,status,name_status&limit=100`,
-              alvo.token,
-            ),
-            graph(`${META_GRAPH}/${w.id}?fields=name,account_review_status,business_verification_status`, alvo.token)
-              .catch(() => null),
-          ]);
-
-          for (const p of (Array.isArray(fones?.data) ? fones.data : [])) {
-            const chave = `${w.id}|${p.id}`;
-            vistos.add(chave);
-
-            const qualidade = p.quality_rating ?? null;
-            const anterior = antes.get(chave) ?? null;
-
-            // Só registra o degrau quando a qualidade REALMENTE muda — senão toda passada
-            // de hora em hora reescreveria "mudou agora" e a queda ficaria invisível.
-            const mudou = anterior && anterior.qualidade !== qualidade;
-            const linha = {
-              bm_id: alvo.bm_id,
-              bm_nome: alvo.bm_nome,
-              waba_id: String(w.id),
-              waba_nome: waba?.name ?? w.name ?? null,
-              phone_number_id: String(p.id),
-              numero: digitos(p.display_phone_number),
-              numero_display: p.display_phone_number ?? null,
-              verified_name: p.verified_name ?? null,
-              qualidade,
-              qualidade_anterior: mudou ? anterior.qualidade : (anterior?.qualidade_anterior ?? null),
-              qualidade_mudou_em: mudou ? new Date().toISOString() : (anterior?.qualidade_mudou_em ?? null),
-              tier: p.messaging_limit_tier ?? null,
-              status_numero: p.status ?? null,
-              name_status: p.name_status ?? null,
-              waba_revisao: waba?.account_review_status ?? null,
-              waba_verificacao: waba?.business_verification_status ?? null,
-              wa_account_id: contaPorPhoneId.get(String(p.id)) ?? null,
-              visto_em: new Date().toISOString(),
-              sumiu_em: null,
-            };
-
-            const { error: upErr } = await admin
-              .from("crm_wa_bm_numeros")
-              .upsert(linha, { onConflict: "waba_id,phone_number_id" });
-            if (upErr) console.error("[crm-wa-numeros-scan] upsert:", upErr.message);
-            numerosDaBm++;
-            totalNumeros++;
+      // As WABAs de uma BM são lidas EM PARALELO. Sequencial, a Ppgagro sozinha (21 WABAs
+      // × 2 chamadas) levava ~20s, e o botão "Atualizar agora" da tela segura o navegador
+      // esse tempo todo. Em paralelo a varredura inteira cai para poucos segundos.
+      const lotes = await Promise.all(
+        wabas.map(async (w) => {
+          try {
+            const [fones, waba] = await Promise.all([
+              graph(
+                `${META_GRAPH}/${w.id}/phone_numbers?fields=id,display_phone_number,verified_name,quality_rating,messaging_limit_tier,status,name_status&limit=100`,
+                alvo.token,
+              ),
+              graph(`${META_GRAPH}/${w.id}?fields=name,account_review_status,business_verification_status`, alvo.token)
+                .catch(() => null), // WABA é complemento: falhou, mostra só o número
+            ]);
+            const agora = new Date().toISOString();
+            return (Array.isArray(fones?.data) ? fones.data : []).map((p: any) => {
+              const chave = `${w.id}|${p.id}`;
+              vistos.add(chave);
+              const qualidade = p.quality_rating ?? null;
+              const anterior = antes.get(chave) ?? null;
+              // Só registra o degrau quando a qualidade REALMENTE muda — senão toda passada
+              // de hora em hora reescreveria "mudou agora" e a queda ficaria invisível.
+              const mudou = anterior && anterior.qualidade !== qualidade;
+              return {
+                bm_id: alvo.bm_id,
+                bm_nome: alvo.bm_nome,
+                waba_id: String(w.id),
+                waba_nome: waba?.name ?? w.name ?? null,
+                phone_number_id: String(p.id),
+                numero: digitos(p.display_phone_number),
+                numero_display: p.display_phone_number ?? null,
+                verified_name: p.verified_name ?? null,
+                qualidade,
+                qualidade_anterior: mudou ? anterior.qualidade : (anterior?.qualidade_anterior ?? null),
+                qualidade_mudou_em: mudou ? agora : (anterior?.qualidade_mudou_em ?? null),
+                tier: p.messaging_limit_tier ?? null,
+                status_numero: p.status ?? null,
+                name_status: p.name_status ?? null,
+                waba_revisao: waba?.account_review_status ?? null,
+                waba_verificacao: waba?.business_verification_status ?? null,
+                wa_account_id: contaPorPhoneId.get(String(p.id)) ?? null,
+                visto_em: agora,
+                sumiu_em: null,
+              };
+            });
+          } catch (e) {
+            console.error(`[crm-wa-numeros-scan] WABA ${w.id}:`, e instanceof Error ? e.message : e);
+            return [];
           }
-        } catch (e) {
-          console.error(`[crm-wa-numeros-scan] WABA ${w.id}:`, e instanceof Error ? e.message : e);
-        }
+        }),
+      );
+
+      // Um upsert por BM, não um por número: eram ~33 idas ao banco por varredura.
+      const linhas = lotes.flat();
+      if (linhas.length > 0) {
+        const { error: upErr } = await admin
+          .from("crm_wa_bm_numeros")
+          .upsert(linhas, { onConflict: "waba_id,phone_number_id" });
+        if (upErr) console.error("[crm-wa-numeros-scan] upsert:", upErr.message);
       }
+      const numerosDaBm = linhas.length;
+      totalNumeros += numerosDaBm;
 
       await admin.from("crm_wa_bm_varreduras").upsert({
         bm_id: alvo.bm_id,
