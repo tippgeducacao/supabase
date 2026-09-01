@@ -515,12 +515,27 @@ async function processar(payload: any, profundidade = 0) {
       return;
     }
 
-    const messages = conversa.map((m: any) => ({
-      role: m.direcao === 'inbound' ? 'user' : 'assistant',
-      content: String(m.conteudo).slice(0, 4000),
-    }));
+    const messages = conversa
+      .map((m: any) => ({
+        role: m.direcao === 'inbound' ? 'user' : 'assistant',
+        content: String(m.conteudo ?? '').slice(0, 4000).trim(),
+      }))
+      // ⚠️ Bloco de conteúdo VAZIO derruba a chamada inteira com HTTP 400
+      // ("messages.N: user messages must have non-empty content"). Um áudio ou um PDF
+      // sem legenda chega assim.
+      .filter((m: any) => m.content.length > 0);
+
     if (!messages.length || messages[messages.length - 1].role !== 'user') {
-      messages.push({ role: 'user', content: String(payload?.conteudo ?? '').slice(0, 4000) });
+      const texto = String(payload?.conteudo ?? '').trim();
+      messages.push({
+        role: 'user',
+        // Na RETOMADA não existe mensagem nova: é o cron cutucando o agente. Empurrar
+        // string vazia aqui é o que fazia toda retomada morrer em 400, e como o cron
+        // nasceu desligado ninguém tinha visto ainda.
+        content: texto.slice(0, 4000) || (ehFollowup
+          ? '(sem mensagem nova: a pessoa parou de responder e você está retomando a conversa)'
+          : '(a pessoa mandou algo sem texto, como um arquivo ou um áudio)'),
+      });
     }
 
     // ── Claude ───────────────────────────────────────────────────────────
