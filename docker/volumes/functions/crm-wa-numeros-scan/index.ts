@@ -76,16 +76,34 @@ interface Alvo {
   wabasConhecidas: Set<string>;
 }
 
+/** A claim `role` do JWT já validado pelo gateway. Token torto devolve null. */
+function papelDoToken(authHeader: string): string | null {
+  try {
+    const bruto = authHeader.replace(/^Bearer\s+/i, "");
+    const payload = bruto.split(".")[1];
+    if (!payload) return null;
+    const json = atob(payload.replace(/-/g, "+").replace(/_/g, "/"));
+    return (JSON.parse(json) as { role?: string }).role ?? null;
+  } catch {
+    return null;
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   try {
     // Cron chama com a service_role; a tela chama com o usuário logado. Os dois valem,
     // qualquer outro não — a varredura gasta cota da Graph API.
+    //
+    // A régua do serviço é a claim `role` do JWT, não comparar a chave com a env: o
+    // `_get_service_role_key()` do banco e a `SUPABASE_SERVICE_ROLE_KEY` da function são
+    // dois lugares diferentes que podem carregar chaves diferentes (foi o que deu 401 no
+    // primeiro teste do cron). Ler a claim é seguro porque o gateway JÁ validou a
+    // assinatura antes de chegar aqui — a function não é pública (`verify_jwt` ligado).
     const authHeader = req.headers.get("Authorization") ?? "";
     if (!authHeader) return json({ error: "não autorizado" }, 401);
-    const ehServico = authHeader.includes(SERVICE_ROLE);
-    if (!ehServico) {
+    if (papelDoToken(authHeader) !== "service_role") {
       const asUser = createClient(SUPABASE_URL, ANON_KEY, {
         global: { headers: { Authorization: authHeader } },
         auth: { persistSession: false },
