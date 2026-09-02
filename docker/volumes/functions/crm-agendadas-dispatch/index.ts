@@ -36,6 +36,9 @@ function jsonResp(body: unknown, status = 200) {
 type Agendada = {
   id: string;
   wa_account_id: string | null;
+  // Linha de WhatsApp Web (wa_conexoes). Quando presente, o envio sai pelo adapter do
+  // provider (Uazapi) em vez da Meta — sem janela de 24h e sem template.
+  wa_conexao_id: string | null;
   telefone: string;
   lead_id: string | null;
   oportunidade_id: string | null;
@@ -138,6 +141,9 @@ async function processarUma(
     // Monta o corpo para a crm-whatsapp-send conforme o tipo
     const sendBody: Record<string, unknown> = {
       wa_account_id: row.wa_account_id ?? undefined,
+      // Linha web manda no roteamento: a crm-whatsapp-send, ao ver wa_conexao_id, envia
+      // pelo provider da linha (Uazapi) e ignora conta Meta/janela/template.
+      wa_conexao_id: row.wa_conexao_id ?? undefined,
       telefone: row.telefone,
       tipo: row.tipo_mensagem === "template" ? "template" : "text",
       lead_id: row.lead_id ?? undefined,
