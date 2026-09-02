@@ -99,6 +99,12 @@ function agora(): string {
  * banco (`rh_entrevista_config.mapa_url`) e não do prompt: endereço muda, e trocar o que
  * o candidato lê não pode depender de deploy.
  */
+async function contatoDoPedagogico(supabase: any): Promise<string> {
+  const { data } = await supabase
+    .from('rh_entrevista_config').select('pedagogico_contato').eq('id', true).maybeSingle();
+  return (data?.pedagogico_contato ?? '').trim();
+}
+
 async function enderecoParaOCandidato(supabase: any): Promise<string> {
   const { data } = await supabase
     .from('rh_entrevista_config').select('local, mapa_url').eq('id', true).maybeSingle();
@@ -290,6 +296,25 @@ async function criarEventoEntrevista(
 // Nem toda mensagem pede resposta. "Perfeito", "obrigada", um 🙏: responder a isso é o que
 // faz o agente parecer um robô ansioso, e foi assim que ele mandou "até segunda" numa
 // segunda-feira só para não deixar a última palavra com a candidata.
+// Quem escreve querendo DAR AULA não está na esteira de vagas. Pedir currículo, cidade e
+// "3 habilidades" dessa pessoa é constrangedor e não serve para nada: quem decide isso é o
+// RH olhando o caso. Movido para a Triagem, o agente fica mudo por conta própria, porque
+// a etapa não tem papel.
+const TOOL_PROFESSOR = {
+  name: 'encaminhar_para_triagem',
+  description:
+    'Use quando a pessoa quer ser PROFESSOR, dar aula, palestrar ou oferecer conteúdo, ' +
+    'em vez de se candidatar a uma vaga administrativa ou comercial. NÃO peça currículo ' +
+    'nem faça as perguntas do cadastro nesse caso. Depois de chamar isto, o assunto está ' +
+    'encerrado: o RH assume.',
+  input_schema: {
+    type: 'object',
+    properties: { motivo: { type: 'string', description: 'Em poucas palavras, o que a pessoa quer.' } },
+    required: ['motivo'],
+    additionalProperties: false,
+  },
+} as const;
+
 const TOOL_QUIETO = {
   name: 'nao_responder',
   description:
@@ -545,6 +570,9 @@ async function processar(payload: any, profundidade = 0) {
       `- Nome no cadastro: ${lead.nome ?? 'não informado'}\n` +
       `- Área que ele escolheu na página: ${card.titulo ?? 'não informada'}\n` +
       `- Onde é a entrevista: ${await enderecoParaOCandidato(supabase)}\n` +
+      `- Contato do time pedagógico (para quem quer dar aula): ${
+        (await contatoDoPedagogico(supabase)) || 'não temos um número para passar'
+      }\n` +
       `- Etapa atual: ${etapa}\n` +
       `- O que fazer agora: ${
         papel === 'coleta'
@@ -580,7 +608,7 @@ async function processar(payload: any, profundidade = 0) {
         // caixas de ferramenta ao mesmo tempo faria ele voltar a pedir currículo no
         // meio da negociação de horário.
         tools: papel === 'coleta'
-          ? [TOOL_DADOS, TOOL_PARAR, TOOL_COLABORADOR, TOOL_QUIETO]
+          ? [TOOL_DADOS, TOOL_PARAR, TOOL_COLABORADOR, TOOL_QUIETO, TOOL_PROFESSOR]
           : [TOOL_HORARIOS, TOOL_MARCAR, TOOL_PARAR, TOOL_QUIETO],
       });
 
@@ -608,6 +636,21 @@ async function processar(payload: any, profundidade = 0) {
               content: eh === true
                 ? 'sim, está na equipe hoje'
                 : 'não há ninguém com esse nome na equipe hoje. NÃO comente nada sobre isso, apenas siga a conversa',
+            });
+            continue;
+          }
+          if (u.name === 'encaminhar_para_triagem') {
+            await supabase.rpc('rh_encaminhar_para_triagem', {
+              p_oportunidade_id: card.oportunidade_id,
+              p_motivo: u.input?.motivo ?? null,
+            });
+            await evento('encaminhado:professor', {
+              telefone, lead_id: leadId, oportunidade_id: card.oportunidade_id,
+              motivo: u.input?.motivo ?? null,
+            });
+            results.push({
+              type: 'tool_result', tool_use_id: u.id,
+              content: 'encaminhado. Escreva a mensagem de agradecimento e encerre; não pergunte mais nada.',
             });
             continue;
           }
