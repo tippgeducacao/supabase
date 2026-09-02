@@ -53,6 +53,45 @@ function b64ToBytes(b64: string): Uint8Array {
   return out;
 }
 
+/**
+ * Acorda o agente de RH quando a mensagem chega pela linha Web que o RH atende.
+ *
+ * A linha Web sempre foi humana: o `docs/WhatsApp Web (Uazapi).md` diz que ela "não passa
+ * pelo agente de IA". Isso mudou em 02/09, quando a BM da Meta foi travada
+ * ("Business Account locked", 131031) e o número oficial do RH parou de entregar. Só a
+ * conexão marcada em `rh_entrevista_config.wa_conexao_id` acorda o agente; as outras
+ * linhas Web continuam humanas, como sempre foram.
+ *
+ * O relay é o mesmo padrão do webhook da Meta: kong INTERNO, nunca a URL pública (o
+ * container do edge-runtime não alcança api.ppgeducacao.site por hairpin NAT).
+ */
+async function relayAgenteRh(
+  admin: any,
+  conexaoId: string | null,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  try {
+    if (!conexaoId) return;
+    const { data: conexaoDoRh } = await admin.rpc("rh_conexao_web");
+    if (!conexaoDoRh || String(conexaoDoRh) !== String(conexaoId)) return;
+
+    const base = Deno.env.get("SUPABASE_URL") ?? "";
+    if (!base) return;
+    await fetch(`${base}/functions/v1/crm-agente-rh`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""}`,
+      },
+      body: JSON.stringify(payload),
+    });
+  } catch (e) {
+    // O agente não pode derrubar a entrada: mensagem gravada é o que importa, e sem isso
+    // o webhook devolveria 500 e a Uazapi reentregaria em laço.
+    console.error("[wa-uazapi-webhook] relay do agente falhou:", e instanceof Error ? e.message : String(e));
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   // Alguns provedores validam o webhook com um GET; respondemos 200.
@@ -298,6 +337,18 @@ Deno.serve(async (req) => {
         }
       } else {
         processed++;
+        // Só o que a PESSOA mandou; `fromMe` é a própria Marisa escrevendo.
+        if (direcao === "inbound") {
+          await relayAgenteRh(admin, conexaoId, {
+            telefone,
+            id: m.externalId,
+            conteudo: m.conteudo,
+            direcao: "inbound",
+            from_me: false,
+            wa_conexao_id: conexaoId,
+            provider: PROVIDER,
+          });
+        }
       }
     }
 

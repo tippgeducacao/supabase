@@ -32,6 +32,26 @@ let ANTHROPIC_KEY = Deno.env.get('AGENTE_RH_ANTHROPIC_KEY')
   ?? Deno.env.get('ANTHROPIC_API_KEY')
   ?? '';
 
+/**
+ * O RH atende por DOIS canais: o número oficial da Meta e, desde 02/09, a linha de
+ * WhatsApp Web da Marisa. Não é troca, é soma: a BM foi travada
+ * ("Business Account locked", 131031) e o oficial parou de entregar, mas quando voltar as
+ * duas convivem e o agente responde por onde a pessoa escreveu.
+ *
+ * A conexão Web vem de `rh_entrevista_config.wa_conexao_id`. Vazia, o Web fica de fora.
+ */
+async function conexaoWebDoRh(supabase: any): Promise<string | null> {
+  const { data } = await supabase.rpc('rh_conexao_web');
+  return data ? String(data) : null;
+}
+
+/** Filtro de canal para as consultas de mensagem: a conta da Meta OU a conexão Web. */
+function filtroDeCanal(conexaoWeb: string | null): string {
+  return conexaoWeb
+    ? `wa_account_id.eq.${CONTA_RH},wa_conexao_id.eq.${conexaoWeb}`
+    : `wa_account_id.eq.${CONTA_RH}`;
+}
+
 async function chaveDoBanco(): Promise<string> {
   const { data } = await supabase
     .from('ai_api_keys').select('api_key')
@@ -388,19 +408,32 @@ async function gravarDados(leadId: string, dados: Record<string, string>): Promi
   return gravados;
 }
 
-async function enviar(telefone: string, texto: string, leadId: string | null, opId: string | null) {
+async function enviar(
+  telefone: string,
+  texto: string,
+  leadId: string | null,
+  opId: string | null,
+  conexaoId: string | null,
+) {
   const res = await fetch(SEND_URL, {
     method: 'POST',
     headers: { Authorization: `Bearer ${SERVICE_ROLE}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      telefone, tipo: 'text', conteudo: texto,
-      wa_account_id: CONTA_RH, lead_id: leadId, oportunidade_id: opId,
-    }),
+    // Responde POR ONDE a pessoa escreveu. O `crm-whatsapp-send` já roteia por conexão
+    // quando recebe `wa_conexao_id`; mandar os dois faria ele preferir a conta e a
+    // resposta sairia pelo número travado.
+    body: JSON.stringify(
+      conexaoId
+        ? { telefone, tipo: 'text', conteudo: texto, wa_conexao_id: conexaoId, lead_id: leadId, oportunidade_id: opId }
+        : { telefone, tipo: 'text', conteudo: texto, wa_account_id: CONTA_RH, lead_id: leadId, oportunidade_id: opId },
+    ),
   });
   if (!res.ok) throw new Error(`crm-whatsapp-send HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
 }
 
 async function processar(payload: any, profundidade = 0) {
+  // Por onde a pessoa escreveu: null = número oficial da Meta.
+  const conexaoId: string | null = payload?.wa_conexao_id ? String(payload.wa_conexao_id) : null;
+  const conexaoWeb = await conexaoWebDoRh(supabase);
   const telefone: string = payload?.telefone ?? '';
   const msgId: string = payload?.id ?? '';
   const fone8 = so8(telefone);
@@ -489,7 +522,7 @@ async function processar(payload: any, profundidade = 0) {
     const { data: msgs } = await supabase
       .from('crm_whatsapp_messages')
       .select('direcao, conteudo, created_at, telefone')
-      .eq('wa_account_id', CONTA_RH)
+      .or(filtroDeCanal(conexaoWeb))
       .ilike('telefone', `%${fone8}`)
       .order('created_at', { ascending: false })
       .limit(120);
@@ -523,7 +556,7 @@ async function processar(payload: any, profundidade = 0) {
     const { data: ultimaSaida } = await supabase
       .from('crm_whatsapp_messages')
       .select('metadata, created_at, telefone')
-      .eq('wa_account_id', CONTA_RH)
+      .or(filtroDeCanal(conexaoWeb))
       .eq('direcao', 'outbound')
       // Mesma régua de telefone do resto do arquivo: os últimos 8 dígitos. Igualdade
       // exata erraria, porque o mesmo número aparece com e sem o 9.
@@ -742,7 +775,7 @@ async function processar(payload: any, profundidade = 0) {
       return;
     }
 
-    await enviar(telefone, resposta, leadId, card.oportunidade_id);
+    await enviar(telefone, resposta, leadId, card.oportunidade_id, conexaoId);
     await evento(ehFollowup ? 'followup_enviado' : 'respondido', {
       telefone, lead_id: leadId, oportunidade_id: card.oportunidade_id, etapa,
       campos: dadosGravados, rodadas: rodada, tamanho: resposta.length,
@@ -765,7 +798,7 @@ async function processar(payload: any, profundidade = 0) {
   const { data: novas } = await supabase
     .from('crm_whatsapp_messages')
     .select('wa_message_id, telefone, conteudo, created_at')
-    .eq('wa_account_id', CONTA_RH)
+    .or(filtroDeCanal(conexaoWeb))
     .eq('direcao', 'inbound')
     .ilike('telefone', `%${fone8}`)
     .gt('created_at', turnoIniciadoEm)
@@ -800,7 +833,13 @@ Deno.serve(async (req) => {
   try { payload = await req.json(); } catch { return json({ erro: 'json inválido' }, 400); }
 
   // GATE 1 — número. Silencioso: mensagem de outro número não é problema, é rotina.
-  if (payload?.wa_account_id !== CONTA_RH) return json({ ok: true, pulado: 'numero' });
+  // GATE 1 — canal. Aceita o número oficial da Meta OU a linha Web que o RH atende.
+  const conexaoDoPayload = payload?.wa_conexao_id ? String(payload.wa_conexao_id) : null;
+  const conexaoWeb = await conexaoWebDoRh(supabase);
+  const ehCanalDoRh =
+    payload?.wa_account_id === CONTA_RH ||
+    (!!conexaoDoPayload && !!conexaoWeb && conexaoDoPayload === conexaoWeb);
+  if (!ehCanalDoRh) return json({ ok: true, pulado: 'numero' });
   if (payload?.direcao !== 'inbound' || payload?.from_me === true) return json({ ok: true, pulado: 'nao_inbound' });
   if (!ANTHROPIC_KEY) ANTHROPIC_KEY = await chaveDoBanco();
   if (!ANTHROPIC_KEY) { await evento('erro', { motivo: 'sem ANTHROPIC key' }); return json({ ok: true, pulado: 'sem_chave' }); }
