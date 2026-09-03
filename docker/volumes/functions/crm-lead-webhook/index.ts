@@ -1244,6 +1244,27 @@ Deno.serve(async (req) => {
           }
         }
 
+        // ESPELHO DE ALUNO (03/09/2026): quem ja e aluno vivo nao ganha card novo do
+        // MESMO curso que ele cursa — o card da matricula e posicionado no funil de
+        // destino. O gatilho do banco faria isso sozinho, mas cancelando o INSERT: o
+        // .select().single() abaixo voltaria "0 linhas" e a acao morreria no catch.
+        // Perguntando antes, o webhook segue com o card certo em maos.
+        if (leadId) {
+          try {
+            const { data: espelhado } = await admin.rpc("crm_aluno_espelhar_em", {
+              p_lead: leadId, p_funil: p.funilId, p_etapa: p.etapaId,
+              p_titulo: tituloResolved, p_manual: false,
+            });
+            if (espelhado) {
+              console.log(`[crm-lead-webhook] lead ${leadId} ja e aluno — card espelhado (${espelhado}) em vez de criado`);
+              if (!oportunidadeId) oportunidadeId = espelhado as string;
+              continue;
+            }
+          } catch (e: any) {
+            console.error("[crm-lead-webhook] crm_aluno_espelhar_em falhou:", e?.message);
+          }
+        }
+
         const rawValor = resolveWebhookVar(p.valor, dados).replace(",", ".").replace(/[^0-9.\-]/g, "").trim();
         const valorNum = rawValor !== "" && Number.isFinite(Number(rawValor)) ? Number(rawValor) : null;
         const statusOp = (p.status === "ganha" || p.status === "perdida") ? p.status : "aberta";
