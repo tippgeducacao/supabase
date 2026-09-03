@@ -186,6 +186,150 @@ function mapearAlerta(field: string, value: any): AlertaConta | null {
   }
 }
 
+/** 55 + DDD + 9 + 8 — chave do espelho de permissão de ligação. */
+function canonicalBrPhoneWh(raw: string): string {
+  let d = (raw ?? "").replace(/\D/g, "");
+  if (d.startsWith("55")) d = d.slice(2);
+  if (d.length === 10 && ["6", "7", "8", "9"].includes(d[2])) {
+    d = d.slice(0, 2) + "9" + d.slice(2);
+  }
+  return `55${d}`;
+}
+
+/**
+ * Eventos da Calling API (field = "calls").
+ *
+ * ⚠️ ESTE É O CAMINHO DO ÁUDIO. O `connect` traz o **SDP answer** da Meta, e é a única
+ * via por onde ele chega: a resposta HTTP do `POST /calls` só devolve o call_id. O
+ * UPDATE em `crm_chamadas` abaixo é o que acorda o navegador do SDR pelo Realtime
+ * (a tabela está na publicação `supabase_realtime`, com replica identity full). Sem
+ * este ramo a ligação sai, toca no aparelho do lead e não passa som nenhum.
+ *
+ * Ligação RECEBIDA chega aqui como `connect` com sdp_type=offer e sem linha nossa —
+ * criamos a linha na hora, e é ela que faz o softphone tocar.
+ */
+async function processarEventoChamada(admin: any, value: any): Promise<number> {
+  let n = 0;
+  const phoneNumberId = value?.metadata?.phone_number_id;
+
+  // Resolve a conta uma vez (as duas listas abaixo pertencem ao mesmo número).
+  let accountId: string | null = null;
+  if (phoneNumberId) {
+    const { data } = await admin
+      .from("crm_whatsapp_accounts")
+      .select("id")
+      .eq("phone_number_id", phoneNumberId)
+      .limit(1);
+    accountId = data?.[0]?.id ?? null;
+  }
+
+  for (const call of value?.calls ?? []) {
+    const callId = call?.id ?? null;
+    if (!callId) continue;
+
+    const evento = String(call?.event ?? "").toLowerCase();
+    const status = upper(call?.status);
+    const sdp = call?.session?.sdp ?? null;
+    const sdpType = String(call?.session?.sdp_type ?? "").toLowerCase();
+    const agora = new Date().toISOString();
+
+    // A linha já existe quando a ligação partiu daqui (crm-whatsapp-call gravou antes
+    // do POST justamente para este momento).
+    const { data: existente } = await admin
+      .from("crm_chamadas")
+      .select("id, direcao, status")
+      .eq("call_id", callId)
+      .maybeSingle();
+
+    if (evento === "connect") {
+      if (existente) {
+        // Saída: o answer da Meta fecha a negociação WebRTC no browser.
+        await admin.from("crm_chamadas").update({
+          ...(sdpType === "answer" && sdp ? { sdp_answer: sdp } : {}),
+          status: "ringing",
+        }).eq("id", existente.id);
+      } else if (accountId) {
+        // Entrada: o lead está ligando. A linha nova é o que faz o softphone tocar.
+        await admin.from("crm_chamadas").insert({
+          wa_account_id: accountId,
+          call_id: callId,
+          direcao: "entrada",
+          telefone: String(call?.from ?? ""),
+          status: "ringing",
+          ...(sdpType === "offer" && sdp ? { sdp_offer: sdp } : {}),
+          biz_opaque: call?.biz_opaque_callback_data ?? null,
+          metadata: call ?? {},
+        });
+      } else {
+        console.warn("[crm-whatsapp-webhook] calls: phone_number_id sem conta:", phoneNumberId);
+        continue;
+      }
+      n++;
+      continue;
+    }
+
+    if (!existente) {
+      console.warn("[crm-whatsapp-webhook] calls: evento de chamada desconhecida", callId, evento, status);
+      continue;
+    }
+
+    if (evento === "terminate") {
+      const duracao = call?.duration != null ? Number(call.duration) : null;
+      await admin.from("crm_chamadas").update({
+        status: upper(call?.status) === "COMPLETED" ? "completed" : "failed",
+        encerrada_em: call?.end_time ? new Date(Number(call.end_time) * 1000).toISOString() : agora,
+        duracao_segundos: Number.isFinite(duracao as number) ? duracao : null,
+        erro_codigo: call?.error?.code ?? call?.errors?.[0]?.code ?? null,
+        erro_msg: call?.error?.message ?? call?.errors?.[0]?.title ?? null,
+      }).eq("id", existente.id);
+      n++;
+      continue;
+    }
+
+    // Eventos de status puro: RINGING / ACCEPTED / REJECTED.
+    const mapa: Record<string, string> = {
+      RINGING: "ringing", ACCEPTED: "accepted", REJECTED: "rejected",
+    };
+    const novo = mapa[status ?? ""];
+    if (novo) {
+      await admin.from("crm_chamadas").update({
+        status: novo,
+        ...(novo === "accepted" ? { atendida_em: agora } : {}),
+        ...(novo === "rejected" ? { encerrada_em: agora } : {}),
+      }).eq("id", existente.id);
+      n++;
+    }
+  }
+
+  // Resposta ao pedido de permissão. A Meta ainda varia o envelope entre versões, então
+  // aceitamos as duas formas que ela já usou e logamos o resto em vez de perder o evento.
+  const permissoes = value?.call_permission_updates ?? value?.call_permissions ?? [];
+  for (const p of permissoes) {
+    const resposta = String(p?.response ?? p?.call_permission_reply?.response ?? "").toLowerCase();
+    const isPermanent = p?.is_permanent ?? p?.call_permission_reply?.is_permanent ?? false;
+    const expTs = p?.expiration_timestamp ?? p?.call_permission_reply?.expiration_timestamp ?? null;
+    const de = String(p?.user_wa_id ?? p?.from ?? "");
+    if (!de || !accountId) continue;
+
+    await admin.from("crm_call_permissions").upsert({
+      wa_account_id: accountId,
+      telefone_canonico: canonicalBrPhoneWh(de),
+      status: resposta === "accept" ? (isPermanent ? "permanent" : "temporary") : "no_permission",
+      expira_em: expTs ? new Date(Number(expTs) * 1000).toISOString() : null,
+      respondido_em: new Date().toISOString(),
+      ultima_resposta: resposta === "accept" ? "accept" : "reject",
+      metadata: p ?? {},
+    }, { onConflict: "wa_account_id,telefone_canonico" });
+    n++;
+  }
+
+  if (n === 0) {
+    // Envelope que não soubemos ler é pior que erro: some sem deixar rastro.
+    console.warn("[crm-whatsapp-webhook] calls: envelope não reconhecido:", JSON.stringify(value).slice(0, 1000));
+  }
+  return n;
+}
+
 async function processarAlertaConta(admin: any, entry: any, field: string, value: any): Promise<boolean> {
   const alerta = mapearAlerta(field, value);
   if (!alerta) return false;
@@ -365,6 +509,7 @@ Deno.serve(async (req) => {
     let processedMessages = 0;
     let processedStatuses = 0;
     let processedAlertas = 0;
+    let processedChamadas = 0;
     // Inbound que NÃO conseguiu ser gravado. Com >0 devolvemos erro pra Meta reentregar —
     // silêncio aqui significa mensagem de lead perdida pra sempre.
     let falhasPersistencia = 0;
@@ -375,6 +520,17 @@ Deno.serve(async (req) => {
       for (const change of changes) {
         const value = change?.value;
         if (!value) continue;
+
+        // Ligações (Calling API). Vem ANTES do ramo de alertas porque `calls` não é
+        // saúde de conta — e é o caminho por onde o SDP answer chega no softphone.
+        if (change?.field === "calls") {
+          try {
+            processedChamadas += await processarEventoChamada(admin, value);
+          } catch (e) {
+            console.error("[crm-whatsapp-webhook] calls erro:", e instanceof Error ? e.message : String(e));
+          }
+          continue;
+        }
 
         // Eventos de SAÚDE DA CONTA (template/conta/número) — não são mensagens.
         if (change?.field !== "messages") {
@@ -813,7 +969,7 @@ Deno.serve(async (req) => {
     }
 
     console.log(
-      `[crm-whatsapp-webhook] processado: ${processedMessages} msgs, ${processedStatuses} statuses, ${processedAlertas} alertas`,
+      `[crm-whatsapp-webhook] processado: ${processedMessages} msgs, ${processedStatuses} statuses, ${processedAlertas} alertas, ${processedChamadas} chamadas`,
     );
     // Falha de persistência NUNCA responde 200: a Meta reentrega e a mensagem se salva.
     // A reentrega do que já gravou cai no "retry benigno" acima, então é idempotente.
@@ -825,7 +981,7 @@ Deno.serve(async (req) => {
         messages: processedMessages,
       }, 503);
     }
-    return json({ ok: true, messages: processedMessages, statuses: processedStatuses, alertas: processedAlertas });
+    return json({ ok: true, messages: processedMessages, statuses: processedStatuses, alertas: processedAlertas, chamadas: processedChamadas });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error("[crm-whatsapp-webhook] erro de processamento:", msg);
