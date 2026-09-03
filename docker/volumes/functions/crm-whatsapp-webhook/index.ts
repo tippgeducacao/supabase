@@ -206,7 +206,14 @@ function canonicalBrPhoneWh(raw: string): string {
  * este ramo a ligação sai, toca no aparelho do lead e não passa som nenhum.
  *
  * Ligação RECEBIDA chega aqui como `connect` com sdp_type=offer e sem linha nossa —
- * criamos a linha na hora, e é ela que faz o softphone tocar.
+ * criamos a linha na hora.
+ *
+ * ⚠️ ATENDER LIGAÇÃO RECEBIDA AINDA NÃO EXISTE (03/09/2026). A linha é gravada e para
+ * por aí: NENHUMA tela assina o INSERT, ninguém é notificado e o `atender()` do
+ * `useSoftphoneWhatsapp` nunca é chamado — o lead ouve chamando até a Meta desistir.
+ * Por isso o número está com `call_icon_visibility: DISABLE_ALL`, que esconde o botão
+ * de ligar no WhatsApp do lead. **Não vire o ícone para DEFAULT antes de existir a tela
+ * que toca.**
  */
 async function processarEventoChamada(admin: any, value: any): Promise<number> {
   let n = 0;
