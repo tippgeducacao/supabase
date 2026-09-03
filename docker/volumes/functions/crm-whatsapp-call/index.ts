@@ -22,6 +22,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { corsHeaders } from "../_shared/cors.ts";
 import { telefoneEnviavel, digitosParaEnvio } from "../_shared/telefone.ts";
+import { TEXTO_PADRAO_PEDIDO_PERMISSAO, textoPedidoPermissao } from "./pedidoPermissao.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -142,6 +143,22 @@ Deno.serve(async (req) => {
         metadata: resp,
       }, { onConflict: "wa_account_id,telefone_canonico" });
 
+      // Estado LOCAL do pedido — a Meta não tem "pendente". Quem sabe que pedimos é o
+      // espelho (`solicitado_em`, gravado no permissao_pedir) e quem sabe que o lead
+      // respondeu é o webhook (`respondido_em`/`ultima_resposta`). O painel usa isso
+      // para dizer "pedido enviado em X por Fulano, aguardando" em vez de "cota esgotada".
+      const { data: local } = await admin
+        .from("crm_call_permissions")
+        .select("solicitado_em, respondido_em, ultima_resposta, solicitado_por_id")
+        .eq("wa_account_id", acc.id)
+        .eq("telefone_canonico", canonicalBrPhone(to))
+        .maybeSingle();
+      let solicitadoPorNome: string | null = null;
+      if (local?.solicitado_por_id) {
+        const { data: prof } = await admin.from("profiles").select("name").eq("id", local.solicitado_por_id).maybeSingle();
+        solicitadoPorNome = (prof?.name ?? "").trim() || null;
+      }
+
       return json({
         ok: true,
         status,
@@ -149,6 +166,10 @@ Deno.serve(async (req) => {
         pode_pedir_permissao: podePedir?.can_perform_action === true,
         pode_ligar: podeLigar?.can_perform_action === true,
         limites: podePedir?.limits ?? [],
+        solicitado_em: local?.solicitado_em ?? null,
+        respondido_em: local?.respondido_em ?? null,
+        ultima_resposta: local?.ultima_resposta ?? null,
+        solicitado_por_nome: solicitadoPorNome,
       });
     }
 
@@ -167,8 +188,7 @@ Deno.serve(async (req) => {
       const to = digitosParaEnvio(telefoneRaw);
       if (!to) return json({ error: "telefone inválido" }, 400);
 
-      const texto = String(body?.texto ?? "").trim() ||
-        "Podemos te ligar aqui pelo WhatsApp para explicar melhor? É mais rápido que digitar.";
+      const texto = String(body?.texto ?? "").trim() || TEXTO_PADRAO_PEDIDO_PERMISSAO;
 
       const r = await fetch(`${META_GRAPH}/${acc.phone_number_id}/messages`, {
         method: "POST",
@@ -188,14 +208,54 @@ Deno.serve(async (req) => {
       const resp = await r.json().catch(() => ({}));
       console.log(`[crm-whatsapp-call] permissao_pedir ${acc.nome} -> ${to} status=${r.status}`, JSON.stringify(resp));
       if (!r.ok || resp?.error) return json(erroMeta(resp, r.status), 422);
+      const messageId: string | null = resp?.messages?.[0]?.id ?? null;
 
       await admin.from("crm_call_permissions").upsert({
         wa_account_id: acc.id,
         telefone_canonico: canonicalBrPhone(to),
         solicitado_em: new Date().toISOString(),
+        // Quem pediu é quem recebe o aviso no sino quando o lead autorizar (trigger
+        // `crm_ligacao_permissao_notificar`). Chamada de serviço fica sem dono.
+        solicitado_por_id: atendenteId,
       }, { onConflict: "wa_account_id,telefone_canonico" });
 
-      return json({ ok: true, message_id: resp?.messages?.[0]?.id ?? null });
+      // O pedido é uma MENSAGEM de verdade (a Meta devolve wamid) e ficava invisível na
+      // conversa: o atendente não sabia se tinha saído, se o lead tinha recebido, nem
+      // que já gastou o 1 pedido/24h daquele lead (relato 03/09/2026). Gravado como
+      // SAÍDA, o espelho leva ao SAC, o webhook de status pinta os tiques (entregue/
+      // lida) pelo wamid, e a resposta do lead (inbound `call_permission_reply`) fica
+      // logo abaixo. Best-effort: o pedido já saiu; falhar aqui não pode virar 4xx.
+      try {
+        let enviadoPorNome: string | null = null;
+        if (atendenteId) {
+          const { data: prof } = await admin.from("profiles").select("name").eq("id", atendenteId).maybeSingle();
+          enviadoPorNome = (prof?.name ?? "").trim() || null;
+        }
+        const { data: leadId } = await admin.rpc("crm_lead_find_by_canon", { p_telefone: to });
+        const { error: msgErr } = await admin.from("crm_whatsapp_messages").insert({
+          wa_account_id: acc.id,
+          lead_id: typeof leadId === "string" ? leadId : null,
+          telefone: to,
+          direcao: "outbound",
+          tipo: "interactive",
+          conteudo: textoPedidoPermissao(texto),
+          wa_message_id: messageId,
+          status_entrega: "sent",
+          metadata: {
+            interactive_tipo: "call_permission_request",
+            origem: atendenteId ? "humano" : "automacao",
+            ...(atendenteId ? { enviado_por_id: atendenteId, enviado_por_nome: enviadoPorNome } : {}),
+          },
+        });
+        if (msgErr) console.error("[crm-whatsapp-call] pedido de permissão não gravado na conversa:", msgErr.message);
+      } catch (e) {
+        console.error(
+          "[crm-whatsapp-call] pedido de permissão não gravado na conversa:",
+          e instanceof Error ? e.message : String(e),
+        );
+      }
+
+      return json({ ok: true, message_id: messageId });
     }
 
     // ══ Ligar (empresa → lead) ═════════════════════════════════════════════

@@ -5,6 +5,7 @@
 // App/BM novo — e, por compat, o token por conta (crm_whatsapp_accounts).
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { extrairReferral } from "../_shared/waProviders.ts";
+import { carimboInbound } from "./carimbo.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -912,6 +913,13 @@ Deno.serve(async (req) => {
             oportunidadeId = opRows?.[0]?.id ?? null;
           }
 
+          // ⚠️ Hora REAL da mensagem, não a de chegada. A Meta reentrega evento rejeitado
+          // (401 de App Secret, edge fora) horas ou DIAS depois; com `created_at` = agora a
+          // janela de 24h (contada de quando o lead ESCREVEU) parecia aberta com a Meta já
+          // recusando texto livre (131047). Caso BM 02, 03/09/2026: 89 telefones assim e 58
+          // envios humanos recusados num dia. Chegada normal (< 60s) segue com o carimbo do
+          // servidor; reentrega grava o relógio da Meta e guarda a chegada no metadata.
+          const carimbo = carimboInbound(msg?.timestamp, Date.now());
           const { error: insertErr } = await admin.from("crm_whatsapp_messages").insert({
             wa_account_id: accountId,
             lead_id: leadId,
@@ -923,10 +931,12 @@ Deno.serve(async (req) => {
             anexos,
             wa_message_id: msgId,
             status_entrega: "delivered",
+            created_at: carimbo.iso,
             metadata: {
               profile_name: profileName,
               original_type: msgType,
               timestamp: msg?.timestamp,
+              ...(carimbo.reentrega ? { chegou_em: carimbo.chegouEm, atraso_s: carimbo.atrasoS } : {}),
               // CLIQUE-PARA-WHATSAPP: o anúncio que abriu a conversa. Guardar o
               // bloco cru aqui é o backup — a atribuição de verdade é a linha em
               // `crm_whatsapp_referral`, gravada logo abaixo.
@@ -967,6 +977,35 @@ Deno.serve(async (req) => {
             console.log(
               `[crm-whatsapp-webhook] msg inbound de ${from} (lead=${leadId ?? "?"}, op=${oportunidadeId ?? "?"}, anexos=${anexos.length}): ${conteudo.slice(0, 80)}`,
             );
+            if (carimbo.reentrega && msgId) {
+              // Reentrega da Meta: a mensagem entrou com a hora REAL (antiga). A denormalização
+              // de `sac_conversas` tem anti-retrocesso — carimbo antigo não sobe o card nem
+              // troca o preview, e está certo, ela NÃO é nova. Mas o atendente precisa vê-la:
+              // marca a conversa como não lida à mão. Best-effort, nunca derruba o inbound.
+              console.log(
+                `[crm-whatsapp-webhook] inbound ${msgId} REENTREGUE pela Meta com ` +
+                `${Math.round(carimbo.atrasoS / 60)}min de atraso — gravado com a hora real ` +
+                `(${carimbo.iso}); chegada em metadata.chegou_em`,
+              );
+              try {
+                const { data: espelho } = await admin
+                  .from("sac_mensagens")
+                  .select("conversa_id")
+                  .eq("wa_message_id", msgId)
+                  .not("conversa_id", "is", null)
+                  .limit(1);
+                const conversaId = espelho?.[0]?.conversa_id ?? null;
+                if (conversaId) {
+                  const { error: naoLidoErr } = await admin
+                    .from("sac_conversas")
+                    .update({ nao_lido: true })
+                    .eq("id", conversaId);
+                  if (naoLidoErr) console.error("[crm-whatsapp-webhook] reentrega: marcar não lida falhou:", naoLidoErr.message);
+                }
+              } catch (e) {
+                console.error("[crm-whatsapp-webhook] reentrega: marcar não lida falhou:", (e as Error)?.message);
+              }
+            }
 
             // Espelho da permissão de ligação. A Meta continua sendo a autoridade (a tela
             // reconsulta GET /call_permissions ao abrir) — isto é o que faz o selo do card
