@@ -662,6 +662,29 @@ Deno.serve(async (req) => {
           let contactCards: any[] | null = null;
           if (msgType === "text") {
             conteudo = msg?.text?.body ?? "";
+          } else if (msgType === "interactive" && msg?.interactive?.type === "call_permission_reply") {
+            // RESPOSTA AO PEDIDO DE PERMISSÃO DE LIGAÇÃO (Calling API). Chega como
+            // mensagem inbound comum — e é bom que chegue: entra na timeline, sobe o
+            // card e avisa o dono pelo notificador sem nenhum caminho novo. O que falta
+            // sem este ramo é o TEXTO (virava "[interativo]") e o espelho em
+            // crm_call_permissions. Formato: response accept|reject, is_permanent,
+            // expiration_timestamp (unix), response_source user_action|automatic.
+            const cpr = msg.interactive.call_permission_reply ?? {};
+            const aceitou = String(cpr.response ?? "").toLowerCase() === "accept";
+            const permanente = cpr.is_permanent === true;
+            conteudo = aceitou
+              ? (permanente
+                ? "✅ Autorizou receber ligações da PPG (permanente)"
+                : "✅ Autorizou receber ligações da PPG (7 dias)")
+              : "❌ Recusou receber ligações da PPG";
+            interactiveReply = {
+              tipo: "call_permission_reply",
+              id: aceitou ? "accept" : "reject",
+              title: conteudo,
+              description: cpr.expiration_timestamp
+                ? new Date(Number(cpr.expiration_timestamp) * 1000).toISOString()
+                : (permanente ? "permanente" : null),
+            };
           } else if (msgType === "interactive") {
             const br = msg?.interactive?.button_reply;
             const lr = msg?.interactive?.list_reply;
@@ -927,6 +950,28 @@ Deno.serve(async (req) => {
             console.log(
               `[crm-whatsapp-webhook] msg inbound de ${from} (lead=${leadId ?? "?"}, op=${oportunidadeId ?? "?"}, anexos=${anexos.length}): ${conteudo.slice(0, 80)}`,
             );
+
+            // Espelho da permissão de ligação. A Meta continua sendo a autoridade (a tela
+            // reconsulta GET /call_permissions ao abrir) — isto é o que faz o selo do card
+            // e o "pode ligar" aparecerem sem esperar ninguém abrir o painel.
+            if (interactiveReply?.tipo === "call_permission_reply") {
+              const cpr = msg?.interactive?.call_permission_reply ?? {};
+              const aceitou = interactiveReply.id === "accept";
+              const permanente = cpr.is_permanent === true;
+              const { error: permErr } = await admin.from("crm_call_permissions").upsert({
+                wa_account_id: accountId,
+                telefone_canonico: canonicalBrPhoneWh(phoneDigits),
+                status: aceitou ? (permanente ? "permanent" : "temporary") : "no_permission",
+                expira_em: aceitou && !permanente && cpr.expiration_timestamp
+                  ? new Date(Number(cpr.expiration_timestamp) * 1000).toISOString()
+                  : null,
+                respondido_em: new Date().toISOString(),
+                ultima_resposta: aceitou ? "accept" : "reject",
+                metadata: { reply: cpr, wa_message_id: msgId },
+              }, { onConflict: "wa_account_id,telefone_canonico" });
+              if (permErr) console.error("[crm-whatsapp-webhook] espelho de permissão falhou:", permErr.message);
+              else console.log(`[crm-whatsapp-webhook] permissão de ligação de ${from}: ${aceitou ? (permanente ? "PERMANENTE" : "7 dias") : "recusada"}`);
+            }
             // Relay pro agente de IA — SÓ se este número está marcado com agente_ia_ativo.
             // (at-most-once garantido pelo índice único em wa_message_id no insert acima.)
             // Idade REAL da mensagem (relógio da Meta), não o created_at: numa
@@ -938,7 +983,11 @@ Deno.serve(async (req) => {
               : 0;
             const redelivery = idadeS > RELAY_IDADE_MAX_S;
 
-            if (accountIaAtivo && redelivery) {
+            if (interactiveReply?.tipo === "call_permission_reply") {
+              // Clique em "Permitir ligações" não é fala do lead. Repassar ao agente faria
+              // o João responder a um botão de sistema com texto de venda.
+              console.log(`[crm-whatsapp-webhook] resposta de permissão de ligação — relay ao agente pulado`);
+            } else if (accountIaAtivo && redelivery) {
               console.warn(
                 `[crm-whatsapp-webhook] inbound de ${from} tem ${Math.round(idadeS / 60)}min ` +
                 `(limite ${Math.round(RELAY_IDADE_MAX_S / 60)}min) — redelivery da Meta, ` +
