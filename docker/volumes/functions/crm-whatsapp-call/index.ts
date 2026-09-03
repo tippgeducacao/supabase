@@ -213,6 +213,23 @@ Deno.serve(async (req) => {
       const sdp = String(body?.sdp ?? "").trim();
       if (!sdp) return json({ error: "sdp (offer) obrigatório" }, 400);
 
+      // QUAL card do SAC v2 é o desta ligação — o da LINHA de onde ela sai. Mesma coisa
+      // que o webhook grava na ligação recebida, e pelo mesmo motivo: é daqui que o
+      // painel da chamada monta o botão "Conversa". Só por telefone a v2 abre o card
+      // ativo mais recente da pessoa, que pode ser de OUTRO número (03/09/2026).
+      let alvoV2: { funil_id: string | null; atendimento_id: string | null } | null = null;
+      try {
+        const { data } = await admin.rpc("crm_chamada_alvo_v2", {
+          p_wa_account_id: acc.id,
+          p_telefone: to,
+        });
+        const linha = Array.isArray(data) ? data[0] : data;
+        if (linha?.atendimento_id) alvoV2 = linha;
+      } catch (e) {
+        // Ligação sem card resolvido continua ligação — o botão é que fica sem atalho.
+        console.error("[crm-whatsapp-call] alvo v2 falhou:", e instanceof Error ? e.message : String(e));
+      }
+
       // Linha ANTES do POST: se a Meta responder rápido demais, o webhook `calls` pode
       // chegar antes da nossa resposta HTTP — e sem linha ele não teria onde gravar.
       const { data: chamada, error: insErr } = await admin.from("crm_chamadas").insert({
@@ -225,6 +242,8 @@ Deno.serve(async (req) => {
         sac_contato_id: body?.sac_contato_id ?? null,
         oportunidade_id: body?.oportunidade_id ?? null,
         lead_id: body?.lead_id ?? null,
+        sac_v2_funil_id: alvoV2?.funil_id ?? null,
+        sac_v2_atendimento_id: alvoV2?.atendimento_id ?? null,
         biz_opaque: body?.biz_opaque ?? null,
       }).select("id").single();
       if (insErr || !chamada) return json({ error: `falha ao registrar chamada: ${insErr?.message}` }, 500);
