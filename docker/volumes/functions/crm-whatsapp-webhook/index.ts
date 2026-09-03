@@ -279,6 +279,21 @@ async function processarEventoChamada(admin: any, value: any): Promise<number> {
         }
         const plantaoEm = new Date(Date.now() + (alvo ? 15_000 : 0)).toISOString();
 
+        // QUAL card do SAC v2 é o desta ligação: o da LINHA que recebeu. Vai gravado na
+        // própria chamada para o "Abrir" da notificação cair nele — navegar só por
+        // telefone caía no card de OUTRA linha (Web/Cobrança) em 03/09/2026.
+        let alvoV2: { funil_id: string | null; atendimento_id: string | null } | null = null;
+        try {
+          const { data } = await admin.rpc("crm_chamada_alvo_v2", {
+            p_wa_account_id: accountId,
+            p_telefone: de,
+          });
+          const linha = Array.isArray(data) ? data[0] : data;
+          if (linha?.atendimento_id) alvoV2 = linha;
+        } catch (e) {
+          console.error("[crm-whatsapp-webhook] alvo v2 falhou:", e instanceof Error ? e.message : String(e));
+        }
+
         await admin.from("crm_chamadas").insert({
           wa_account_id: accountId,
           call_id: callId,
@@ -287,6 +302,8 @@ async function processarEventoChamada(admin: any, value: any): Promise<number> {
           status: "ringing",
           atendente_alvo_id: alvo,
           plantao_em: plantaoEm,
+          sac_v2_funil_id: alvoV2?.funil_id ?? null,
+          sac_v2_atendimento_id: alvoV2?.atendimento_id ?? null,
           ...(sdpType === "offer" && sdp ? { sdp_offer: sdp } : {}),
           biz_opaque: call?.biz_opaque_callback_data ?? null,
           metadata: call ?? {},
