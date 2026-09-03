@@ -208,12 +208,11 @@ function canonicalBrPhoneWh(raw: string): string {
  * Ligação RECEBIDA chega aqui como `connect` com sdp_type=offer e sem linha nossa —
  * criamos a linha na hora.
  *
- * ⚠️ ATENDER LIGAÇÃO RECEBIDA AINDA NÃO EXISTE (03/09/2026). A linha é gravada e para
- * por aí: NENHUMA tela assina o INSERT, ninguém é notificado e o `atender()` do
- * `useSoftphoneWhatsapp` nunca é chamado — o lead ouve chamando até a Meta desistir.
- * Por isso o número está com `call_icon_visibility: DISABLE_ALL`, que esconde o botão
- * de ligar no WhatsApp do lead. **Não vire o ícone para DEFAULT antes de existir a tela
- * que toca.**
+ * É esse INSERT que faz o telefone tocar: o `ChamadaRecebidaDialog` (montado uma vez no
+ * CrmLayout) assina a tabela pelo Realtime. Por isso os dois campos de roteamento são
+ * gravados AQUI e não no navegador — `atendente_alvo_id` (dono do atendimento, atende
+ * primeiro) e `plantao_em` (quando abre para todos). Relógio de cliente diverge; se cada
+ * aba calculasse o plantão sozinha, ou todas tocariam juntas ou nenhuma tocaria.
  */
 async function processarEventoChamada(admin: any, value: any): Promise<number> {
   let n = 0;
@@ -261,17 +260,38 @@ async function processarEventoChamada(admin: any, value: any): Promise<number> {
           status: "ringing",
         }).eq("id", existente.id);
       } else if (accountId) {
-        // Entrada: o lead está ligando. A linha nova é o que faz o softphone tocar.
+        // Entrada: o lead está ligando. A linha é o que a tela assina para tocar.
+        const de = String(call?.from ?? "");
+
+        // Para QUEM toca. A ligação chega num número, não numa pessoa: o dono do
+        // atendimento daquele telefone atende primeiro, e o plantão (todo mundo com o
+        // CRM aberto) entra 15s depois. Sem dono, já nasce no plantão.
+        let alvo: string | null = null;
+        try {
+          const { data } = await admin.rpc("crm_chamada_resolver_alvo", {
+            p_wa_account_id: accountId,
+            p_telefone: de,
+          });
+          alvo = (data as string | null) ?? null;
+        } catch (e) {
+          // Falhar aqui não pode calar o telefone — sem dono, toca para todos.
+          console.error("[crm-whatsapp-webhook] resolver alvo falhou:", e instanceof Error ? e.message : String(e));
+        }
+        const plantaoEm = new Date(Date.now() + (alvo ? 15_000 : 0)).toISOString();
+
         await admin.from("crm_chamadas").insert({
           wa_account_id: accountId,
           call_id: callId,
           direcao: "entrada",
-          telefone: String(call?.from ?? ""),
+          telefone: de,
           status: "ringing",
+          atendente_alvo_id: alvo,
+          plantao_em: plantaoEm,
           ...(sdpType === "offer" && sdp ? { sdp_offer: sdp } : {}),
           biz_opaque: call?.biz_opaque_callback_data ?? null,
           metadata: call ?? {},
         });
+        console.log(`[crm-whatsapp-webhook] chamada recebida de ${de} — alvo=${alvo ?? "plantão"}`);
       } else {
         console.warn("[crm-whatsapp-webhook] calls: phone_number_id sem conta:", phoneNumberId);
         continue;

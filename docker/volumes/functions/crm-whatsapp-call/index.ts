@@ -264,6 +264,18 @@ Deno.serve(async (req) => {
       const sdp = String(body?.sdp ?? "").trim();
       if (!sdp) return json({ error: "sdp (answer) obrigatório" }, 400);
 
+      // Reivindica ANTES de falar com a Meta. Ligação recebida toca em vários
+      // navegadores ao mesmo tempo (dono + plantão); sem esta trava, dois atendentes
+      // apertando "Atender" mandariam DOIS SDP answers para a mesma chamada. Quem
+      // chegar primeiro leva; o segundo recebe 409 e a tela dele diz que já foi.
+      if (ch.direcao === "entrada" && atendenteId) {
+        const { data: ganhou } = await admin.rpc("crm_chamada_reivindicar", {
+          p_chamada_id: ch.id,
+          p_atendente_id: atendenteId,
+        });
+        if (ganhou !== true) return json({ error: "ja_atendida" }, 409);
+      }
+
       const r = await metaCalls(acc.phone_number_id, acc.access_token, {
         call_id: ch.call_id,
         action: acao === "pre_aceitar" ? "pre_accept" : "accept",
