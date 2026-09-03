@@ -84,6 +84,10 @@ Deno.serve(async (req) => {
 
   const body = await req.json().catch(() => ({}));
   const acao = String(body?.acao ?? "").trim();
+  // Toda ação entra no log com quem chamou. Um 4xx devolvido em silêncio custou uma
+  // noite de diagnóstico em 03/09: o front chamava, a função respondia erro e nada
+  // ficava registrado em lugar nenhum.
+  console.log(`[crm-whatsapp-call] acao=${acao} chamada=${body?.chamada_id ?? "—"} atendente=${atendenteId ?? "service"}`);
 
   // ── Resolve a conta (por wa_account_id direto ou pela chamada existente) ──
   async function contaDe(waAccountId: string) {
@@ -258,7 +262,11 @@ Deno.serve(async (req) => {
     // primeiras palavras), accept em seguida. Há ~30-60s para responder.
     if (acao === "pre_aceitar" || acao === "aceitar") {
       const ch = await chamadaDe(String(body?.chamada_id ?? ""));
-      if (!ch?.call_id) return json({ error: "chamada não encontrada ou sem call_id" }, 404);
+      if (!ch?.call_id) {
+        console.warn(`[crm-whatsapp-call] ${acao}: chamada ${body?.chamada_id} não encontrada/sem call_id`);
+        return json({ error: "chamada não encontrada ou sem call_id" }, 404);
+      }
+      console.log(`[crm-whatsapp-call] ${acao}: chamada=${ch.id} status=${ch.status} direcao=${ch.direcao} atendente_atual=${ch.atendente_id ?? "—"}`);
       const acc = await contaDe(ch.wa_account_id);
       if (!acc) return json({ error: "conta não encontrada" }, 404);
       const sdp = String(body?.sdp ?? "").trim();
@@ -273,7 +281,10 @@ Deno.serve(async (req) => {
           p_chamada_id: ch.id,
           p_atendente_id: atendenteId,
         });
-        if (ganhou !== true) return json({ error: "ja_atendida" }, 409);
+        if (ganhou !== true) {
+          console.warn(`[crm-whatsapp-call] ${acao}: reivindicação perdida (chamada=${ch.id})`);
+          return json({ error: "ja_atendida" }, 409);
+        }
       }
 
       const r = await metaCalls(acc.phone_number_id, acc.access_token, {
@@ -281,6 +292,7 @@ Deno.serve(async (req) => {
         action: acao === "pre_aceitar" ? "pre_accept" : "accept",
         session: { sdp_type: "answer", sdp },
       });
+      console.log(`[crm-whatsapp-call] ${acao}: meta status=${r.status} resp=${JSON.stringify(r.body).slice(0, 600)}`);
       if (!r.ok) return json(erroMeta(r.body, r.status), 422);
 
       if (acao === "aceitar") {
