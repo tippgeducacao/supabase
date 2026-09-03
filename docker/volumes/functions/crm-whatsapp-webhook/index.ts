@@ -300,6 +300,7 @@ async function processarEventoChamada(admin: any, value: any): Promise<number> {
           p_wa_account_id: accountId,
           p_telefone: de,
           p_preview: "📞 Ligação recebida",
+          p_modo: "tocando",
         }).then(({ error }: { error: unknown }) => {
           if (error) console.error("[crm-whatsapp-webhook] bump SAC falhou:", error);
         });
@@ -330,6 +331,8 @@ async function processarEventoChamada(admin: any, value: any): Promise<number> {
         p_wa_account_id: existente.wa_account_id,
         p_telefone: existente.telefone,
         p_preview: preview,
+        // Atendida limpa o "aguardando resposta" (conversamos); perdida deixa a pendência.
+        p_modo: seg > 0 ? "atendida" : "perdida",
       }).then(({ error }: { error: unknown }) => {
         if (error) console.error("[crm-whatsapp-webhook] bump SAC (fim) falhou:", error);
       });
