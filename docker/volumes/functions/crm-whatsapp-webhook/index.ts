@@ -248,7 +248,7 @@ async function processarEventoChamada(admin: any, value: any): Promise<number> {
     // do POST justamente para este momento).
     const { data: existente } = await admin
       .from("crm_chamadas")
-      .select("id, direcao, status")
+      .select("id, direcao, status, telefone, wa_account_id")
       .eq("call_id", callId)
       .maybeSingle();
 
@@ -292,6 +292,17 @@ async function processarEventoChamada(admin: any, value: any): Promise<number> {
           metadata: call ?? {},
         });
         console.log(`[crm-whatsapp-webhook] chamada recebida de ${de} — alvo=${alvo ?? "plantão"}`);
+
+        // Faz o card SUBIR e marcar não lido, como faria uma mensagem nova — só que sem
+        // inserir mensagem nenhuma (ver o porquê na migration 20260903030000). Sem isto,
+        // ligação que ninguém pegou no ato não deixa rastro em lugar nenhum.
+        await admin.rpc("crm_chamada_marcar_no_sac", {
+          p_wa_account_id: accountId,
+          p_telefone: de,
+          p_preview: "📞 Ligação recebida",
+        }).then(({ error }: { error: unknown }) => {
+          if (error) console.error("[crm-whatsapp-webhook] bump SAC falhou:", error);
+        });
       } else {
         console.warn("[crm-whatsapp-webhook] calls: phone_number_id sem conta:", phoneNumberId);
         continue;
@@ -307,6 +318,22 @@ async function processarEventoChamada(admin: any, value: any): Promise<number> {
 
     if (evento === "terminate") {
       const duracao = call?.duration != null ? Number(call.duration) : null;
+
+      // Desfecho no card. "Perdida" é a informação mais valiosa das duas: é o lead que
+      // procurou a PPG e não foi atendido.
+      const seg = Number.isFinite(duracao as number) ? (duracao as number) : 0;
+      const dur = seg > 0 ? `${Math.floor(seg / 60)}min${String(seg % 60).padStart(2, "0")}` : "";
+      const preview = existente.direcao === "entrada"
+        ? (seg > 0 ? `📞 Ligação recebida · ${dur}` : "📞 Ligação perdida")
+        : (seg > 0 ? `📞 Ligação feita · ${dur}` : "📞 Ligação não atendida");
+      await admin.rpc("crm_chamada_marcar_no_sac", {
+        p_wa_account_id: existente.wa_account_id,
+        p_telefone: existente.telefone,
+        p_preview: preview,
+      }).then(({ error }: { error: unknown }) => {
+        if (error) console.error("[crm-whatsapp-webhook] bump SAC (fim) falhou:", error);
+      });
+
       await admin.from("crm_chamadas").update({
         status: upper(call?.status) === "COMPLETED" ? "completed" : "failed",
         encerrada_em: call?.end_time ? new Date(Number(call.end_time) * 1000).toISOString() : agora,
