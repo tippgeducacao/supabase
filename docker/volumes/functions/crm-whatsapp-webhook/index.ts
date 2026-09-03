@@ -233,6 +233,11 @@ async function processarEventoChamada(admin: any, value: any): Promise<number> {
     const sdpType = String(call?.session?.sdp_type ?? "").toLowerCase();
     const agora = new Date().toISOString();
 
+    // A forma exata do envelope de `calls` ainda está sendo aprendida em produção —
+    // sem este log, evento não mapeado vira chamada travada num status errado e
+    // ninguém descobre por quê.
+    console.log(`[crm-whatsapp-webhook] calls: event=${evento || "—"} status=${status || "—"} sdp=${sdpType || "—"} id=${callId}`);
+
     // A linha já existe quando a ligação partiu daqui (crm-whatsapp-call gravou antes
     // do POST justamente para este momento).
     const { data: existente } = await admin
@@ -286,11 +291,14 @@ async function processarEventoChamada(admin: any, value: any): Promise<number> {
       continue;
     }
 
-    // Eventos de status puro: RINGING / ACCEPTED / REJECTED.
+    // Status da chamada. A Meta ora manda em `status` (RINGING/ACCEPTED/REJECTED), ora
+    // no próprio `event` — a primeira ligação real (03/09/2026) ficou parada em
+    // "ringing" mesmo tendo sido atendida porque só o `status` era consultado aqui.
     const mapa: Record<string, string> = {
       RINGING: "ringing", ACCEPTED: "accepted", REJECTED: "rejected",
+      ACCEPT: "accepted", REJECT: "rejected",
     };
-    const novo = mapa[status ?? ""];
+    const novo = mapa[status ?? ""] ?? mapa[upper(evento)];
     if (novo) {
       await admin.from("crm_chamadas").update({
         status: novo,
