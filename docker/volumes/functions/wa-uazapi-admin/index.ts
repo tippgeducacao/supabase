@@ -1,8 +1,9 @@
 // wa-uazapi-admin
 // ----------------------------------------------------------------------------
 // Orquestra o ciclo de vida das linhas de WhatsApp (provider-agnóstico via
-// _shared/waProviders). Chamado pelo front (admin/diretor) na tela "Conexões de
-// WhatsApp". Faz o passo a passo que o usuário pediu: criar instância -> setar
+// _shared/waProviders). Chamado pelo front na tela "WhatsApp Web (Uazapi)" — por
+// QUALQUER usuário ativo (gate pode_gerenciar_wa_conexoes, aberto em 2026-09-04).
+// Faz o passo a passo que o usuário pediu: criar instância -> setar
 // webhook -> gerar QR -> checar status -> desconectar -> deletar.
 //
 // SEGREDO: o token da instância é gravado em wa_conexoes_secrets (service_role-
@@ -44,7 +45,7 @@ Deno.serve(async (req) => {
 
   const admin = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 
-  // ── Gate: admin/diretor/supervisor/monitor + SDR (pode_gerenciar_wa_conexoes) ──
+  // ── Gate: qualquer usuário ATIVO (pode_gerenciar_wa_conexoes) — desativado/anon = 403 ──
   const authHeader = req.headers.get("Authorization") ?? "";
   const jwt = authHeader.replace(/^Bearer\s+/i, "").trim();
   if (!jwt) return json({ error: "não autenticado" }, 401);
@@ -53,7 +54,7 @@ Deno.serve(async (req) => {
     auth: { persistSession: false },
   });
   const { data: podeGerenciar, error: gateErr } = await userClient.rpc("pode_gerenciar_wa_conexoes");
-  if (gateErr || podeGerenciar !== true) return json({ error: "acesso restrito a admin/diretor/supervisor/monitor e SDR" }, 403);
+  if (gateErr || podeGerenciar !== true) return json({ error: "acesso restrito a usuários ativos do sistema" }, 403);
 
   const provider = getWaProvider(PROVIDER);
   const body = await req.json().catch(() => ({}));
