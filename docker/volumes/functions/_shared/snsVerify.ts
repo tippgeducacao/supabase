@@ -108,9 +108,34 @@ export function extrairChavePublicaDer(der: Uint8Array): Uint8Array {
     // O SubjectPublicKeyInfo que o WebCrypto quer é o SPKI inteiro, do início da
     // SEQUENCE que contém o OID. Recuamos até o começo dessa SEQUENCE.
     const inicioSpki = acharInicioSequencia(der, i);
-    if (inicioSpki >= 0) return der.slice(inicioSpki);
+    if (inicioSpki < 0) continue;
+    // ⚠️ NÃO fatiar até o fim do certificado: isso leva junto a assinatura e as
+    // extensões. O WebCrypto do Node ignora o excedente, mas o do Deno — que é o que
+    // roda em produção — recusa com "ASN.1 error: trailing data at end of DER message:
+    // decoded 294 bytes, 361 bytes remaining". Como o `catch` de assinaturaSnsValida
+    // engole o erro, TODA mensagem SNS era rejeitada como assinatura inválida, sem log.
+    // Os testes não pegaram porque injetam `verificarAssinatura: async () => true` e
+    // nunca executam este caminho (04/09/2026).
+    return der.slice(inicioSpki, inicioSpki + tamanhoDer(der, inicioSpki));
   }
   throw new Error("chave pública RSA não encontrada no certificado");
+}
+
+/**
+ * Comprimento TOTAL (cabeçalho + conteúdo) da estrutura DER que começa em `inicio`.
+ * O byte de tamanho é curto (< 0x80) ou longo (0x80 | nº de bytes do tamanho).
+ */
+function tamanhoDer(der: Uint8Array, inicio: number): number {
+  let k = inicio + 1;
+  let tamanho = der[k];
+  if (tamanho & 0x80) {
+    const bytes = tamanho & 0x7f;
+    tamanho = 0;
+    for (let b = 1; b <= bytes; b++) tamanho = (tamanho << 8) | der[k + b];
+    k += bytes;
+  }
+  k++;
+  return (k - inicio) + tamanho;
 }
 
 /** Recua do OID até o cabeçalho da SEQUENCE que abre o SubjectPublicKeyInfo. */
