@@ -26,10 +26,11 @@ const BLOCO = [
   "",
   "O que isso muda na sua fala:",
   "",
-  "- O cronograma e o valor que você enviou **estão NESTA conversa, logo acima**. Ao citá-los, fale como quem já mandou aqui (\"te mandei aqui em cima\").",
+  "- A mudança para o WhatsApp **não comprova envio de cronograma ou valor**. Só afirme envio do que estiver confirmado no histórico; uma mensagem de continuidade pode ter sido o único envio.",
+  "- Se o histórico confirmar material enviado no WhatsApp, trate-o como enviado **nesta conversa**. Não afirme que está 'logo acima' sem evidência da posição atual.",
   "- ⛔ É PROIBIDO dizer que mandou \"pelo whats\", \"no seu whatsapp\" ou \"no seu número\": é exatamente onde vocês estão, e ela vai achar que você se perdeu.",
   "- ⛔ Também não mande ela \"voltar ao site\" nem trate o chat como um lugar separado onde algo ficou. O que foi combinado lá vale aqui.",
-  "- ⛔ NÃO se reapresente e NÃO recomece a qualificação: o que ela já respondeu no site continua valendo, e repetir pergunta que ela acabou de responder é o jeito mais rápido de perder o lead.",
+  "- ⛔ NÃO se reapresente nem repita perguntas já respondidas no site. Continue do estágio real: valide os dados ainda ausentes, sem presumir graduação concluída ou qualificação por causa da mudança de canal.",
 ].join("\n");
 
 /**

@@ -22,7 +22,9 @@
 // Escrita nas tabelas SÓ por aqui (service role); RLS não tem policy de escrita.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
-import { responderWebchat, aberturaWebchat, frasePedidoCronograma } from "./agente.ts";
+import { responderWebchat, aberturaWebchat } from "./agente.ts";
+import { processarRodadaWebchat } from "./rodada.ts";
+import { semearHistoricoWhatsApp } from "./continuidade.ts";
 // A ponte pro WhatsApp tem DUAS origens (a tool do João e o botão do atendente) e uma
 // idempotência só. O template e a conta vêm do agente pra não divergirem entre as duas.
 import { WEBCHAT_TEMPLATE_CONTINUIDADE, WEBCHAT_WA_ACCOUNT_ID, WHATSAPP_REENVIO_COOLDOWN_MIN } from "./agente.ts";
@@ -275,129 +277,49 @@ async function checarLimitesInbound(sessaoId: string): Promise<Response | null> 
 async function responderComoJoao(
   sessao: NonNullable<Awaited<ReturnType<typeof carregarSessao>>>,
   sessaoId: string,
-): Promise<void> {
-  try {
-    const { data: hist } = await supabase
-      .from("webchat_mensagens")
-      .select("direcao, conteudo")
-      .eq("sessao_id", sessaoId)
-      .order("id", { ascending: true })
-      .limit(40);
-    const history = (hist ?? []).map((m: any) => ({
-      role: (m.direcao === "inbound" ? "user" : "assistant") as "user" | "assistant",
-      text: String(m.conteudo ?? ""),
-    })).filter((m) => m.text);
+) {
+  const rodada = await processarRodadaWebchat(supabase, sessaoId, sessao, responderWebchat);
+  if (rodada.erro) console.error(`[crm-webchat] cerebro: ${rodada.erro}`);
 
-    const { chunks, estagio, tools } = await responderWebchat(
-      sessao.nome ?? "",
-      sessao.telefone ?? "",
-      sessao.curso ?? null,
-      history,
-      sessao.estagio === "qualificador" ? "qualificador" : "validacao",
-      sessao.lead_id ?? null,
-      sessao.produto === "escola" ? "escola" : "pos",
-      sessao.modo_teste === true,
-      sessaoId,
-    );
-    // ratchet: promoção validação→qualificador é persistida (nunca regride)
-    if (estagio === "qualificador" && sessao.estagio !== "qualificador") {
-      await supabase.from("webchat_sessoes").update({ estagio: "qualificador" }).eq("id", sessaoId);
-    }
-    // um balão por chunk (o widget mostra "digitando" entre eles)
-    for (const chunk of chunks) {
-      await supabase.from("webchat_mensagens").insert({
-        sessao_id: sessaoId, direcao: "outbound", origem: "ia", conteudo: chunk,
-      });
-      await syncSac(sessaoId, "outbound", "ia", chunk);
-    }
-
-    // Pediu o cronograma ⇒ o material foi pro WhatsApp e a conversa pode continuar lá.
-    if (tools.some((t) => t.nome === "envia_informacoes" && !t.mockado)) {
-      await semearHistoricoWhatsApp(sessaoId, sessao, String(sessao.curso ?? ""));
-    }
-
-    if (tools.length) {
-      // ⚠️ Até 20/08/2026 isto só rodava em modo_teste, e conversa REAL não deixava
-      // rastro nenhum de qual ferramenta o modelo chamou. Sem isso, "ele não mandou o
-      // cronograma" é indistinguível de "ele mandou e o handler recusou" — e a
-      // investigação vira adivinhação no prompt. O agente de WhatsApp já registrava
-      // tudo em crm_agente_sdr_eventos; o chat não registrava nada.
-      const anteriores = Array.isArray(sessao.teste_tool_chamadas) ? sessao.teste_tool_chamadas : [];
-      const em = new Date().toISOString();
-      try {
-        await supabase.from("webchat_sessoes").update({
-          teste_tool_chamadas: [...anteriores, ...tools.map((tool) => ({ ...tool, em }))],
-        }).eq("id", sessaoId);
-      } catch (e) {
-        // Telemetria nunca derruba atendimento.
-        console.error(`[crm-webchat] registrar tools: ${(e as Error).message}`);
-      }
-    }
-
-    // NOVA MENSAGEM em SEGUNDO PLANO → push imediato no navegador (com som do sistema).
-    // Dispara quando a aba está OCULTA (widget avisa via acao 'presenca') OU quando o
-    // sinal de presença é velho (>2min = navegador fechado sem o pagehide chegar).
-    // Best-effort: sem subscription/lib, simplesmente não notifica (o cutucão de 20min
-    // do cron segue como rede de segurança).
-    if (!sessao.modo_teste) {
-      try {
-        const { data: pres } = await supabase
-          .from("webchat_sessoes")
-          .select("chat_visivel, presenca_em, origem_url, nome")
-          .eq("id", sessaoId)
-          .maybeSingle();
-        const presencaVelha = !pres?.presenca_em ||
-          (Date.now() - new Date(pres.presenca_em).getTime()) > 120_000;
-        if (pres && (pres.chat_visivel === false || presencaVelha)) {
-          const primeiro = (pres.nome ?? "").trim().split(/\s+/)[0];
-          await pushParaSessao(supabase, sessaoId, {
-            title: "💬 João te respondeu",
-            body: `${primeiro ? primeiro + ", a" : "A"} resposta chegou — volte pra conversa quando puder.`,
-            url: pres.origem_url || "/",
-            tag: "ppgwc-nova-mensagem",
-          });
-        }
-      } catch (e) {
-        console.error(`[crm-webchat] push nova mensagem: ${(e as Error).message}`);
-      }
-    }
-  } catch (e) {
-    const erro = (e as Error)?.message ?? String(e);
-    console.error(`[crm-webchat] cerebro: ${erro}`);
-    /*
-      ⚠️ GUARDA A FALHA NA SESSÃO. O log da edge dura 24h: quatro conversas caíram aqui em
-      22/08 e, dois dias depois, não havia onde olhar pra saber por quê — só o balão genérico
-      na tela do lead. O agente de WhatsApp tem `crm_agente_sdr_eventos` justamente pra isso;
-      o chat não tinha equivalente. Best-effort: registrar não pode derrubar o fallback.
-    */
+  // A tool registra o EFEITO confirmado, não uma tentativa nem uma frase do modelo.
+  // Mesmo que um humano assuma durante a geração, o envio que já ocorreu é real.
+  for (const tool of rodada.tools) {
+    if (tool.mockado || !tool.efeito_whatsapp) continue;
     try {
-      const { data: s } = await supabase
-        .from("webchat_sessoes").select("falhas").eq("id", sessaoId).maybeSingle();
-      const falhas = Array.isArray((s as { falhas?: unknown } | null)?.falhas)
-        ? (s as { falhas: unknown[] }).falhas
-        : [];
-      const { count } = await supabase
-        .from("webchat_mensagens")
-        .select("id", { count: "exact", head: true })
-        .eq("sessao_id", sessaoId);
-      falhas.push({ em: new Date().toISOString(), erro: erro.slice(0, 500), msgs: count ?? null });
-      await supabase.from("webchat_sessoes")
-        .update({ falhas: falhas.slice(-20) }).eq("id", sessaoId);
-    } catch (e2) {
-      console.error(`[crm-webchat] registrar falha: ${(e2 as Error).message}`);
+      await semearHistoricoWhatsApp(supabase, sessaoId, tool.efeito_whatsapp);
+    } catch (e) {
+      console.error("[crm-webchat] continuidade WhatsApp:", e instanceof Error ? e.message : String(e));
     }
-    /*
-      ⚠️ O texto NÃO promete mais "já já te respondo". Nada tenta de novo depois daqui — a
-      resposta só volta se o próprio visitante escrever. Prometer retorno que não vem é pior
-      que assumir a falha: ele fica esperando em vez de repetir a pergunta.
-    */
-    const fb = "Desculpa, tive um problema aqui e não consegui responder. "
-      + "Pode mandar de novo? 🙏";
-    await supabase.from("webchat_mensagens").insert({
-      sessao_id: sessaoId, direcao: "outbound", origem: "sistema", conteudo: fb,
-    });
-    await syncSac(sessaoId, "outbound", "sistema", fb);
   }
+  if (rodada.status !== "publicado") return rodada;
+
+  // Só espelha/notifica balões que passaram pelo commit e pelo gate de humano.
+  for (const mensagem of rodada.mensagens ?? []) {
+    await syncSac(sessaoId, "outbound", rodada.erro ? "sistema" : "ia", mensagem.conteudo);
+  }
+  if (!sessao.modo_teste && rodada.mensagens?.length) {
+    try {
+      const { data: pres } = await supabase
+        .from("webchat_sessoes")
+        .select("chat_visivel, presenca_em, origem_url, nome")
+        .eq("id", sessaoId)
+        .maybeSingle();
+      const presencaVelha = !pres?.presenca_em ||
+        (Date.now() - new Date(pres.presenca_em).getTime()) > 120_000;
+      if (pres && (pres.chat_visivel === false || presencaVelha)) {
+        const primeiro = (pres.nome ?? "").trim().split(/\s+/)[0];
+        await pushParaSessao(supabase, sessaoId, {
+          title: "💬 João te respondeu",
+          body: `${primeiro ? primeiro + ", a" : "A"} resposta chegou — volte pra conversa quando puder.`,
+          url: pres.origem_url || "/",
+          tag: "ppgwc-nova-mensagem",
+        });
+      }
+    } catch (e) {
+      console.error(`[crm-webchat] push nova mensagem: ${(e as Error).message}`);
+    }
+  }
+  return rodada;
 }
 
 // ── ações ────────────────────────────────────────────────────────────────────
@@ -667,100 +589,6 @@ async function acaoEscolherPos(body: Record<string, unknown>) {
   return json({ ok: true });
 }
 
-// ── Continuidade site → WhatsApp (2026-08-19) ───────────────────────────────
-// Quando o cronograma sai por template, a conversa TENDE A CONTINUAR no WhatsApp — e o
-// João de lá lê outro histórico (cliente_ppg_mensagens_sdr, por remotejid). Sem isto ele
-// assume a conversa sem saber de nada e repergunta a graduação que a pessoa já respondeu
-// no site.
-// Copiamos a conversa REAL do site (é a mesma pessoa e o mesmo João, então não há fala
-// inventada) e deixamos a sessão em `agente_qualificador`, que é a persona que agenda —
-// o objetivo é o agendamento sair automático, sem passar por humano.
-async function semearHistoricoWhatsApp(sessaoId: string, sessao: { telefone: string | null; nome: string | null; curso: string | null; modo_teste: boolean }, curso: string): Promise<void> {
-  try {
-    if (sessao.modo_teste) return; // harness nunca escreve no histórico de produção
-    const tel = String(sessao.telefone ?? "").replace(/\D/g, "");
-    if (tel.length < 10) return;
-
-    const { data: atual } = await supabase
-      .from("webchat_sessoes").select("historico_semeado_em").eq("id", sessaoId).maybeSingle();
-    if ((atual as { historico_semeado_em?: string } | null)?.historico_semeado_em) return;
-
-    // remotejid canônico: as variantes cobrem com/sem o 9º dígito. Se o lead já existe do
-    // lado do WhatsApp, reusamos a CHAVE DELE — criar outra duplicaria a mesma pessoa.
-    const { data: vars } = await supabase.rpc("sac_phone_variants", { p: tel });
-    const jids = (Array.isArray(vars) ? vars as string[] : [`55${tel}`])
-      .map((v) => `${v}@s.whatsapp.net`);
-    const { data: leadWa } = await supabase
-      .from("cliente_ppg_leads_sdr")
-      .select("remotejid, agente_atual, curso_interesse_original")
-      .in("remotejid", jids).limit(1).maybeSingle();
-    const lead = leadWa as { remotejid: string; agente_atual: string | null; curso_interesse_original: string | null } | null;
-    const remotejid = lead?.remotejid ?? jids[0];
-
-    if (!lead) {
-      await supabase.from("cliente_ppg_leads_sdr").insert({
-        remotejid,
-        nome: sessao.nome ?? null,
-        curso_interesse_original: curso || null,
-        agente_atual: "agente_qualificador",
-        fonte: "webchat",
-        // Marca a MIGRAÇÃO DE CANAL. `fonte` guarda de onde o LEAD veio (e quase sempre
-        // já existe, vindo do sprinthub); isto aqui diz por onde ESTA conversa começou.
-        // É o que liga o bloco de continuidade no prompt do agente de WhatsApp.
-        veio_do_webchat_em: new Date().toISOString(),
-        // ⚠️ followup_ativado e iniciar_atendimento têm DEFAULT TRUE na tabela: criar a
-        // linha sem desligar inscreveria o visitante do site na esteira de 7 toques de
-        // template do WhatsApp, que ninguém pediu. O que tem que ser automático é o
-        // AGENDAMENTO quando ela responder, não perseguição. Ligar isso é decisão à parte.
-        followup_ativado: false,
-        timestamp: new Date().toISOString(),
-      });
-    } else {
-      // Ratchet: quem já está em qualificador não volta pra validação.
-      await supabase.from("cliente_ppg_leads_sdr").update({
-        agente_atual: "agente_qualificador",
-        veio_do_webchat_em: new Date().toISOString(),
-        ...(curso && !lead.curso_interesse_original ? { curso_interesse_original: curso } : {}),
-      }).eq("remotejid", remotejid);
-    }
-
-    const { data: msgs } = await supabase
-      .from("webchat_mensagens").select("direcao, conteudo")
-      .eq("sessao_id", sessaoId).order("id", { ascending: true });
-    const linhas = ((msgs ?? []) as { direcao: string; conteudo: string | null }[])
-      .map((m) => ({
-        role: m.direcao === "inbound" ? "user" : "assistant",
-        content: String(m.conteudo ?? "").trim(),
-      }))
-      .filter((m) => m.content);
-    // O template que sai agora também é fala dele — sem isso ele oferece o cronograma
-    // de novo, achando que ainda não mandou.
-    linhas.push({ role: "assistant", content: frasePedidoCronograma(curso) });
-    // ⚠️ MARCO DE CANAL. Sem ele o João leva a linguagem do site pro WhatsApp: disse
-    // "mas já te adiantei o cronograma e o valor pelo whats" CONVERSANDO no WhatsApp, com
-    // o PDF logo acima na tela. É o espelho do bug do "aqui em cima" — a mesma frase é
-    // verdadeira num canal e falsa no outro, e ele não tinha como saber onde virou.
-    linhas.push({
-      role: "assistant",
-      content: "[NOTA INTERNA — não repita isto ao lead] As mensagens acima aconteceram no CHAT DO SITE. "
-        + "Daqui em diante a conversa é no WHATSAPP, e o cronograma e o valor JÁ FORAM ENVIADOS e estão "
-        + "nesta mesma conversa, logo acima. Ao citá-los, fale como quem já mandou aqui (\"te mandei aqui em cima\"): "
-        + "⛔ é PROIBIDO dizer que mandou \"pelo whats\" ou \"no seu whatsapp\", porque é exatamente onde vocês estão.",
-    });
-    if (!linhas.length) return;
-
-    const agora = new Date().toISOString();
-    await supabase.from("cliente_ppg_mensagens_sdr").insert(
-      linhas.map((l) => ({ remotejid, conversation_history: l, timestamp: agora })),
-    );
-    await supabase.from("webchat_sessoes")
-      .update({ historico_semeado_em: agora }).eq("id", sessaoId);
-  } catch (e) {
-    // Best-effort: falhar aqui NÃO pode derrubar a resposta do chat.
-    console.error(`[crm-webchat] semear historico whatsapp: ${(e as Error).message}`);
-  }
-}
-
 async function acaoEnviar(body: Record<string, unknown>, canal: "publico" | "teste" = "publico") {
   const sessaoId = texto(body.sessao_id, 40);
   const conteudo = texto(body.conteudo, MAX_CONTEUDO);
@@ -800,7 +628,7 @@ async function acaoEnviar(body: Record<string, unknown>, canal: "publico" | "tes
 }
 
 // Roda o cérebro do João (1 balão por chunk). Separado de 'enviar'/'audio' p/ caber no limite
-// de CPU/wall-clock do edge. Só responde se a última mensagem for do lead (anti-spam do LLM).
+// de CPU/wall-clock do edge. A reserva no banco identifica os inbounds ainda não consumidos.
 async function acaoResponder(body: Record<string, unknown>, canal: "publico" | "teste" = "publico") {
   const sessaoId = texto(body.sessao_id, 40);
   if (!UUID_RE.test(sessaoId)) return json({ ok: false, erro: "sessao_invalida" }, 400);
@@ -817,17 +645,12 @@ async function acaoResponder(body: Record<string, unknown>, canal: "publico" | "
   */
   if (sessao.atendimento_humano) return json({ ok: true, skip: "atendimento_humano" });
 
-  const { data: ult } = await supabase
-    .from("webchat_mensagens")
-    .select("direcao")
-    .eq("sessao_id", sessaoId)
-    .order("id", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (!ult || (ult as any).direcao !== "inbound") return json({ ok: true, skip: "sem_pendencia" });
-
-  await responderComoJoao(sessao, sessaoId);
-  return json({ ok: true });
+  const rodada = await responderComoJoao(sessao, sessaoId);
+  return json({
+    ok: true,
+    ...(rodada.status !== "publicado" ? { skip: rodada.status } : {}),
+    pendente: rodada.ha_pendencia === true,
+  });
 }
 
 /**
@@ -1089,10 +912,11 @@ async function acaoLevarParaWhatsapp(body: Record<string, unknown>, req: Request
 
   const { data: s, error } = await supabase
     .from("webchat_sessoes")
-    .select("id, nome, telefone, curso, levado_para_whatsapp_em")
+    .select("id, nome, telefone, curso, levado_para_whatsapp_em, modo_teste")
     .eq("id", sessaoId)
     .maybeSingle();
   if (error || !s) return json({ ok: false, erro: "sessao_nao_encontrada" }, 404);
+  if (s.modo_teste) return json({ ok: false, erro: "sessao_de_teste" }, 403);
   if (!String(s.telefone ?? "").trim()) return json({ ok: false, erro: "sem_telefone" }, 400);
   const levadoEm = s.levado_para_whatsapp_em as string | null;
   if (
@@ -1126,13 +950,20 @@ async function acaoLevarParaWhatsapp(body: Record<string, unknown>, req: Request
     }),
   });
   const b: any = await r.json().catch(() => ({}));
-  if (r.status < 200 || r.status >= 300) {
+  // crm-whatsapp-send confirma o aceite com success:true. HTTP 2xx sozinho,
+  // inclusive corpo vazio/inválido, não comprova que a mensagem foi enviada.
+  if (!r.ok || b?.success !== true || b?.error || b?.data?.error || b?.ok === false) {
     console.error(`[crm-webchat] levar_para_whatsapp manual: ${b?.error ?? r.status}`);
     return json({ ok: false, erro: b?.error ?? "falha_no_envio" }, 400);
   }
   await supabase.from("webchat_sessoes")
     .update({ levado_para_whatsapp_em: new Date().toISOString() })
     .eq("id", sessaoId);
+  try {
+    await semearHistoricoWhatsApp(supabase, sessaoId, { tipo: "transferencia", curso: s.curso });
+  } catch (e) {
+    console.error("[crm-webchat] continuidade manual:", e instanceof Error ? e.message : String(e));
+  }
   return json({ ok: true, ja_enviado: false });
 }
 

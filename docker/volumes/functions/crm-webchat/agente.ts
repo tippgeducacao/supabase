@@ -37,6 +37,7 @@ import {
   corrigirCanal,
   DESPEDIDA_GENERICA,
   despedidaDe,
+  ehDespedidaDeVerdade,
   type Encerramento,
   notaDoNome,
   temLinkDeMeet,
@@ -100,7 +101,10 @@ export type WebchatToolChamada = {
    * explicação. Foi o que aconteceu no reteste de 20/08: só dava pra ver a chamada.
    */
   resultado?: string;
+  /** Só existe após o servidor confirmar um envio real; recusa, consulta e mock não contam. */
+  efeito_whatsapp?: { tipo: "cronograma" | "transferencia"; curso: string | null };
 };
+type ResultadoToolWebchat = Record<string, unknown> & Pick<WebchatToolChamada, "efeito_whatsapp">;
 type Msg = { role: "user" | "assistant"; content: any };
 // CtxConversa do agente real — no webchat waAccountId/oportunidadeId ficam nulos.
 type CtxConversa = { remotejid: string; telefone: string; waAccountId: string | null; leadId: string | null; oportunidadeId: string | null; nome?: string | null };
@@ -183,7 +187,7 @@ async function webchatEnviaInformacoes(
   curso: string | null,
   nome: string,
   sessaoId: string | null = null,
-): Promise<Record<string, unknown>> {
+): Promise<ResultadoToolWebchat> {
   const input = tu.input ?? {};
   const conteudo = input.conteudo || "cronograma";
   const pos = String(input.curso_escolhido ?? "").trim() || limparCurso(curso);
@@ -254,13 +258,16 @@ async function webchatEnviaInformacoes(
     });
     const b: any = await r.json().catch(() => ({}));
     const d = b?.data ?? {};
-    if (r.status < 200 || r.status >= 300) {
+    if (r.status < 200 || r.status >= 300 || b?.error || d.error) {
       const code = d.code || b?.code || "";
       if (code === "cronograma_nao_cadastrado") return { resultado: "Cronograma ainda não cadastrado pra esse curso. Diga que manda o material em seguida e conduza a conversa.", id: tu.id };
       return { resultado: `Não consegui enviar agora (${d.error || b?.error || r.status}). Diga que vai enviar em seguida e conduza, sem citar o erro.`, id: tu.id };
     }
     const partes: string[] = [];
-    if (d.cronograma_enviado) {
+    // O texto da tool é para o modelo; a continuidade entre canais usa o efeito tipado.
+    // Só o booleano do servidor confirma envio. Consulta de valor nunca semeia material.
+    const cronogramaEnviado = mandaCronograma && d.cronograma_enviado === true;
+    if (cronogramaEnviado) {
       partes.push("Cronograma ENVIADO no WHATSAPP do visitante. ⛔ Ele NÃO aparece neste chat: NUNCA diga \"aqui em cima\" nem \"acima\". Confirme dizendo o canal (ex.: \"acabei de mandar no seu whats\").");
       // Anota que ESTE curso já saiu nesta conversa — é o que impede o reenvio.
       if (sessaoId) {
@@ -276,7 +283,11 @@ async function webchatEnviaInformacoes(
     else if (d.cronograma_erro) partes.push(`Cronograma NÃO enviado (${d.cronograma_erro}) — diga que manda em seguida, sem citar erro técnico.`);
     if (d.valor_integral) partes.push(`Valor integral da pós: ${d.valor_integral}.`);
     if (d.valor_matricula) partes.push(`Valor da matrícula (garante a vaga): ${d.valor_matricula}.`);
-    return { resultado: partes.join(" ") || "Feito.", id: tu.id };
+    return {
+      resultado: partes.join(" ") || "Consulta concluída sem confirmação de envio. NÃO diga que mandou material.",
+      id: tu.id,
+      ...(cronogramaEnviado ? { efeito_whatsapp: { tipo: "cronograma" as const, curso: pos } } : {}),
+    };
   } catch (e) {
     return { resultado: `Erro técnico ao enviar (${(e as Error).message}). Diga que envia em seguida e conduza.`, id: tu.id };
   }
@@ -324,7 +335,7 @@ async function webchatLevarParaWhatsapp(
   curso: string | null,
   nome: string,
   sessaoId: string | null,
-): Promise<Record<string, unknown>> {
+): Promise<ResultadoToolWebchat> {
   if (!telefone) {
     return {
       resultado: "RECUSADO: não há WhatsApp cadastrado nesta conversa.",
@@ -378,9 +389,12 @@ async function webchatLevarParaWhatsapp(
       }),
     });
     const b: any = await r.json().catch(() => ({}));
-    if (r.status < 200 || r.status >= 300) {
+    // HTTP 200 sozinho não confirma o envio: corpo vazio/inválido ou falha explícita
+    // não pode iniciar continuidade nem consumir o cooldown. Este é o contrato real
+    // de crm-whatsapp-send; wa_message_id pode ser nulo mesmo num envio aceito.
+    if (!r.ok || b?.success !== true || b?.error || b?.data?.error || b?.ok === false) {
       return {
-        resultado: `Não consegui mandar agora (${b?.error || r.status}). Diga que manda em seguida e siga a conversa, sem citar o erro.`,
+        resultado: `Não consegui mandar agora (${b?.error || b?.data?.error || (r.ok ? "envio não confirmado pelo servidor" : r.status)}). NÃO diga que enviou; informe que não foi possível mandar agora e siga a conversa, sem citar o erro técnico.`,
         id: tu.id,
       };
     }
@@ -398,9 +412,10 @@ async function webchatLevarParaWhatsapp(
         + "confirme dizendo o canal (ex.: \"acabei de te mandar no seu whats\") e avise que é "
         + "só responder por lá que você continua de onde pararam.",
       id: tu.id,
+      efeito_whatsapp: { tipo: "transferencia", curso: limparCurso(curso) || null },
     };
   } catch (e) {
-    return { resultado: `Erro técnico ao enviar (${(e as Error).message}). Diga que manda em seguida e conduza.`, id: tu.id };
+    return { resultado: `Erro técnico ao enviar (${(e as Error).message}). NÃO diga que enviou; informe que não foi possível mandar agora e conduza, sem citar o erro técnico.`, id: tu.id };
   }
 }
 
@@ -627,7 +642,7 @@ export async function responderWebchat(
       const mockado = toolDeveSerMockada(modoTeste, nomeTool);
       const registro: WebchatToolChamada = { nome: nomeTool, input, mockado };
       chamadas.push(registro);
-      let saidaTool: Record<string, unknown>;
+      let saidaTool: ResultadoToolWebchat;
       if (mockado) saidaTool = resultadoToolMockado(tu, limparCurso(curso));
       else if (nomeTool === "envia_informacoes") saidaTool = await webchatEnviaInformacoes(tu, telefone, curso, nome, sessaoId);
       else if (nomeTool === "levar_para_whatsapp") saidaTool = await webchatLevarParaWhatsapp(tu, telefone, curso, nome, sessaoId);
@@ -636,6 +651,11 @@ export async function responderWebchat(
       registro.resultado = String(
         saidaTool?.resultado ?? saidaTool?.instrucao ?? JSON.stringify(saidaTool ?? {}),
       ).slice(0, 500);
+      // Chamar uma tool ou ler "enviado" no resultado não prova que houve envio. O
+      // marcador nasce só nas implementações locais, após a confirmação do servidor.
+      if (!mockado && (nomeTool === "envia_informacoes" || nomeTool === "levar_para_whatsapp") && saidaTool.efeito_whatsapp) {
+        registro.efeito_whatsapp = saidaTool.efeito_whatsapp;
+      }
       // Reunião criada: guarda o retorno pra garantir o link na saída, aconteça o que
       // acontecer com o texto do modelo (ag-07 marcou reunião e não mandou o link).
       if (nomeTool === "confirmar_agendamento" && !mockado && saidaTool?.agendamento_id) {
