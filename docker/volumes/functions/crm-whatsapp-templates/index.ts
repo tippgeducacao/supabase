@@ -180,16 +180,28 @@ Deno.serve(async (req) => {
     // ── LIST (default) ─────────────────────────────────────────────────────────
     // `fields` explícito garante que `components` venha com os `example` (exigidos
     // ao reeditar variáveis na tela de edição).
-    const r = await fetch(
-      `${META_GRAPH}/${wabaId}/message_templates?limit=200&fields=name,language,status,category,id,components`,
-      { method: "GET", headers: authHeaders },
-    );
-    const metaResp = await r.json().catch(() => ({}));
-    console.log("[crm-whatsapp-templates] list <- Meta status:", r.status);
+    // ⚠️ PAGINA. `limit=200` sozinho MENTE quando a WABA passa disso: a Meta devolve a 1ª
+    // página e o resto fica invisível — template existente vira "não existe nesta conta"
+    // (achado em 2026-09-04, com duas WABAs já em 239 e 235 templates, e a edição em massa
+    // recusando troca legítima por causa disso). Segue `paging.next` até acabar, com teto de
+    // páginas para nunca virar laço infinito se a Meta devolver um cursor repetido.
+    const MAX_PAGINAS = 20;
+    let url: string | null =
+      `${META_GRAPH}/${wabaId}/message_templates?limit=200&fields=name,language,status,category,id,components`;
+    const data: any[] = [];
+    let metaResp: any = {};
 
-    if (!r.ok) return json({ error: metaErro(metaResp, r.status) }, 500);
-
-    const data = Array.isArray(metaResp?.data) ? metaResp.data : [];
+    for (let pagina = 0; pagina < MAX_PAGINAS && url; pagina++) {
+      const r: Response = await fetch(url, { method: "GET", headers: authHeaders });
+      metaResp = await r.json().catch(() => ({}));
+      console.log("[crm-whatsapp-templates] list página", pagina + 1, "<- Meta status:", r.status);
+      if (!r.ok) return json({ error: metaErro(metaResp, r.status) }, 500);
+      const lote = Array.isArray(metaResp?.data) ? metaResp.data : [];
+      data.push(...lote);
+      const proxima = metaResp?.paging?.next;
+      url = typeof proxima === "string" && proxima !== url ? proxima : null;
+    }
+    console.log("[crm-whatsapp-templates] list total:", data.length);
     const templates = data.map((t: any) => {
       const components = Array.isArray(t?.components) ? t.components : [];
       const up = (c: any) => String(c?.type ?? "").toUpperCase();
