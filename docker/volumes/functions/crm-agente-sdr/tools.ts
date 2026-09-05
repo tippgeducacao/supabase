@@ -21,6 +21,10 @@ import {
 } from './elegibilidadeFormatura.ts';
 import { atualizarLead, buscarLead } from './historico.ts';
 import { chamarAnthropic } from './agente.ts';
+import {
+  type ContextoElegibilidade, iniciarAvaliacao, finalizarAvaliacao, consultarAprovacao,
+  recusaElegibilidade, VERSAO_REGRA_ELEGIBILIDADE,
+} from './elegibilidadeAgendamento.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
 const SDR_API_URL = (Deno.env.get('AGENTE_SDR_SDRAPI_URL') ?? `${SUPABASE_URL}/functions/v1/sdr-api`).replace(/\/$/, '');
@@ -33,7 +37,7 @@ const GCAL_INTEGRATION_ID = Deno.env.get('AGENTE_SDR_GCAL_INTEGRATION_ID') ?? ''
 const GOOGLE_CLIENT_ID = Deno.env.get('GOOGLE_CALENDAR_CLIENT_ID') ?? '';
 const GOOGLE_CLIENT_SECRET = Deno.env.get('GOOGLE_CALENDAR_CLIENT_SECRET') ?? '';
 
-export type CtxConversa = {
+export type CtxConversa = ContextoElegibilidade & {
   remotejid: string;
   telefone: string;            // só dígitos, sem @s.whatsapp.net
   waAccountId: string | null;
@@ -306,25 +310,20 @@ async function deletarEventoMeet(supabase: any, calendarId: string, eventId: str
 }
 
 async function confirmarAgendamento(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
-  // Gate determinístico de FORMAÇÃO (2026-07-23, caso Carla): reunião só é criada
-  // depois que a formação do lead passou pela matriz — verificar_compatibilidade_curso
-  // persiste formacao_academica no lead, e sem ela a tool recusa. Fail-open em erro
-  // de leitura (o gate protege o funil, não pode derrubar agendamento por infra).
+  // 05/09/2026: a análise pode REPROVAR depois de salvar a formação. A autorização
+  // agora vem da decisão persistida, e a RPC de criação confere de novo sob lock.
+  let aprovacao: Awaited<ReturnType<typeof consultarAprovacao>>;
   try {
-    const lead = await buscarLead(supabase, ctx.remotejid);
-    if (lead && !String(lead.formacao_academica ?? '').trim()) {
-      return {
-        resultado: 'RECUSADO: a formação deste lead ainda não foi verificada nesta base.',
-        instrucao: 'NÃO diga que a reunião está marcada. Antes de agendar: se a graduação do lead já apareceu ' +
-          'nesta conversa (ou no histórico), rode verificar_compatibilidade_curso em segundo plano com ela; ' +
-          'se não apareceu, pergunte de forma natural ("só pra acertar o horário certo, me confirma: qual é a ' +
-          'sua graduação?") e rode a verificação com a resposta. Só depois do APROVADO chame confirmar_agendamento de novo.',
-        agendamento_id: null,
-        id: toolUseId,
-      };
-    }
-  } catch (e) {
-    console.log(`[crm-agente-sdr] gate de formação falhou (segue): ${(e as Error).message}`);
+    aprovacao = await consultarAprovacao(supabase, ctx, input.curso_escolhido);
+  } catch {
+    return recusaElegibilidade(toolUseId, 'falha_ao_consultar_elegibilidade');
+  }
+  if (!aprovacao.aprovada) return recusaElegibilidade(toolUseId, aprovacao.motivo);
+  if (ctx.modoTeste) {
+    return {
+      resultado: 'Agendamento simulado após aprovação de elegibilidade para este curso.',
+      agendamento_id: null, simulado: true, id: toolUseId,
+    };
   }
   try {
     // ⚠️ MANDE O lead_id QUANDO EXISTIR. O sdr-api resolve o lead por busca (8 últimos
@@ -334,12 +333,15 @@ async function confirmarAgendamento(supabase: any, input: any, ctx: CtxConversa,
     // e o modelo chamou confirmar_agendamento CINCO vezes até estourar o loop. O
     // visitante escolheu o horário e a reunião nunca nasceu. Com o lead_id em mãos a
     // busca nem roda; o `nome` fica como último recurso.
-    const post = await sdrApi('agendamentos', {
+    const post = await sdrApi('agendamentos-agente', {
       method: 'POST',
       body: JSON.stringify({
         ...(ctx.leadId ? { lead_id: ctx.leadId } : {}),
         lead: { whatsapp: ctx.telefone, ...(ctx.nome ? { nome: ctx.nome } : {}) },
         pos_graduacao_interesse: input.curso_escolhido,
+        telefone: ctx.telefone,
+        elegibilidade_id: aprovacao.avaliacaoId,
+        elegibilidade_versao: VERSAO_REGRA_ELEGIBILIDADE,
         vendedor_id: input.vendedor_id,
         data_agendamento: `${input.data_escolhida}T${input.horario_escolhido}:00-03:00`,
       }),
@@ -576,14 +578,35 @@ function validarMatriz(resultado: any): any {
 }
 
 async function verificarCompatibilidade(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
-  // Side effect do subfluxo: grava objetivos/área no lead (não bloqueante).
-  // formacao_academica também é persistida (2026-07-23): dá visibilidade ao time
-  // ("você é med vet?" some) e alimenta o gate de formação do confirmar_agendamento.
+  const avaliacao = await iniciarAvaliacao(supabase, ctx, input);
+  try {
+    const resultado = await avaliarCompatibilidade(supabase, input, ctx, toolUseId);
+    return await finalizarAvaliacao(supabase, ctx, avaliacao, resultado);
+  } catch (e) {
+    // Revogação ocorre no início. Se matriz ou escrita final falhar, nenhuma licença
+    // antiga sobrevive nesta rodada. Anotar a falha nunca pode recuperar aprovação.
+    if (ctx.ultimaElegibilidade) {
+      ctx.ultimaElegibilidade.decisao = 'pendente';
+      ctx.ultimaElegibilidade.motivo = 'FALHA_TECNICA';
+    }
+    try {
+      await finalizarAvaliacao(supabase, ctx, avaliacao, {
+        output: 'FALHA_TECNICA', pode_cursar: null, compativel: null,
+      });
+    } catch {
+      // A avaliação já está pendente; a próxima confirmação ainda confere o banco.
+    }
+    throw e;
+  }
+}
+
+async function avaliarCompatibilidade(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
+  // Formação é salva atomicamente pela RPC de início, junto da revogação da
+  // aprovação anterior. Objetivo/área permanecem dados comerciais não bloqueantes.
   const patch: Record<string, unknown> = {};
-  if (input.formacao_academica) patch.formacao_academica = input.formacao_academica;
   if (input.objetivos_profissionais) patch.objetivos_profissionais = input.objetivos_profissionais;
   if (input.area_trabalho) patch.situacao_trabalho_atual = input.area_trabalho;
-  if (Object.keys(patch).length) {
+  if (!ctx.modoTeste && Object.keys(patch).length) {
     try { await atualizarLead(supabase, ctx.remotejid, patch); } catch (e) {
       console.log(`[crm-agente-sdr] update lead na matriz falhou (segue): ${(e as Error).message}`);
     }
@@ -1079,7 +1102,9 @@ async function consultaPosDisponiveis(supabase: any, input: any, ctx: CtxConvers
   // Nome natural pra conversa/registro (sem "PÓS |"; "MBA |" vira "MBA ").
   const nomeConversa = nomeOficial.replace(/^p[oó]s\s*\|\s*/i, '').replace(/^mba\s*\|\s*/i, 'MBA ').trim();
   try {
-    await atualizarLead(supabase, ctx.remotejid, { curso_interesse_original: nomeConversa });
+    // O harness consulta o catálogo real, mas a troca acadêmica fica na sessão
+    // simulada: não deve invalidar ou gravar a elegibilidade de nenhum cadastro.
+    if (!ctx.modoTeste) await atualizarLead(supabase, ctx.remotejid, { curso_interesse_original: nomeConversa });
   } catch (e) {
     console.error(`[crm-agente-sdr] consulta_pos: atualizar interesse falhou (segue): ${(e as Error).message}`);
   }

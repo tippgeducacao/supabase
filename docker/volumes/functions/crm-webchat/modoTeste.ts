@@ -1,3 +1,7 @@
+import {
+  type EstadoElegibilidade, normalizarCursoTeste, recusaElegibilidade, VERSAO_REGRA_ELEGIBILIDADE,
+} from '../crm-agente-sdr/elegibilidadeAgendamento.ts';
+
 /**
  * Allowlist deliberadamente pequena: tool nova nasce bloqueada no harness até ser
  * classificada. As ferramentas abaixo podem consultar serviços reais, mas recebem um
@@ -16,6 +20,7 @@ export function toolDeveSerMockada(modoTeste: boolean, nome: string): boolean {
 export function resultadoToolMockado(
   tu: { id: string; name?: string; input?: Record<string, unknown> },
   cursoLimpo: string,
+  elegibilidade?: EstadoElegibilidade,
 ): Record<string, unknown> {
   const id = tu.id;
   const nome = String(tu.name ?? "");
@@ -24,6 +29,12 @@ export function resultadoToolMockado(
     case "envia_informacoes":
       return { resultado: `Cronograma de ${cursoEscolhido} enviado com sucesso no WhatsApp informado.`, id };
     case "confirmar_agendamento":
+      // Simular o envio não pode simular uma aprovação que a análise não produziu.
+      if (elegibilidade?.decisao !== 'aprovado'
+        || elegibilidade.regra_versao !== VERSAO_REGRA_ELEGIBILIDADE
+        || normalizarCursoTeste(elegibilidade.curso) !== normalizarCursoTeste(cursoEscolhido)) {
+        return recusaElegibilidade(id, elegibilidade?.motivo ?? 'elegibilidade_ausente');
+      }
       return {
         resultado: "Agendamento confirmado. id: teste-seguro, data: horário escolhido pelo lead, monitor: monitor de teste, link: https://meet.google.com/teste-seguro",
         id,

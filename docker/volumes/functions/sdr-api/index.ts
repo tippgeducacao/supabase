@@ -15,6 +15,7 @@
 // ============================================================================
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3'
+import { VERSAO_REGRA_ELEGIBILIDADE } from '../crm-agente-sdr/elegibilidadeAgendamento.ts'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -240,13 +241,34 @@ async function resolverLead(body: any): Promise<{ lead_id?: string; criado?: boo
   return { lead_id: novo.id, criado: true }
 }
 
-async function handleAgendar(sdrId: string, body: any): Promise<Response> {
+async function handleAgendar(sdrId: string, body: any, viaAgente = false): Promise<Response> {
   if (!body?.data_agendamento) return json(422, { error: 'data_agendamento é obrigatório (ISO-8601)', code: 'data_obrigatoria' })
+
+  // A rota exclusiva do agente exige a prova antes de buscar/criar qualquer lead.
+  // O tipo da rota vem do roteador, nunca de flag no body; falha nesta prova não
+  // pode cair no agendamento geral. O banco reconfere a decisão no mesmo lock da criação.
+  const prova: Record<string, unknown> = {}
+  if (viaAgente) {
+    if (typeof body.telefone !== 'string' || !body.telefone.trim()) {
+      return json(422, { error: 'Telefone da avaliação é obrigatório', code: 'telefone_avaliacao_obrigatorio' })
+    }
+    if (typeof body.elegibilidade_id !== 'string'
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(body.elegibilidade_id)) {
+      return json(422, { error: 'Identificador da avaliação é obrigatório e deve ser um UUID', code: 'avaliacao_invalida' })
+    }
+    if (body.elegibilidade_versao !== VERSAO_REGRA_ELEGIBILIDADE) {
+      return json(422, { error: 'A regra de elegibilidade mudou; verifique novamente', code: 'elegibilidade_regra_divergente' })
+    }
+    prova.p_telefone = body.telefone.trim()
+    prova.p_avaliacao_id = body.elegibilidade_id
+    // A versão executada é a constante do servidor, nunca um valor livre do caller.
+    prova.p_regra_versao = VERSAO_REGRA_ELEGIBILIDADE
+  }
 
   const r = await resolverLead(body)
   if (r.error) return r.error
 
-  const { data, error } = await supabase.rpc('fn_sdr_api_agendar_reuniao', {
+  const { data, error } = await supabase.rpc(viaAgente ? 'fn_sdr_api_agendar_reuniao_agente' : 'fn_sdr_api_agendar_reuniao', {
     p_sdr_id: sdrId,
     p_lead_id: r.lead_id,
     p_pos_graduacao: body.pos_graduacao_interesse ?? body.pos_graduacao ?? '',
@@ -259,6 +281,7 @@ async function handleAgendar(sdrId: string, body: any): Promise<Response> {
     p_local_trabalho: body.local_trabalho ?? null,
     p_principal_dor_objetivo: body.principal_dor_objetivo ?? null,
     p_observacoes: body.observacoes ?? null,
+    ...prova,
   })
   if (error) return json(500, { error: error.message })
   // injeta lead_criado no resultado de sucesso (mantém o padrão do rpcResult)
@@ -627,6 +650,10 @@ Deno.serve(async (req) => {
 
     if (route[0] === 'disponibilidade' && method === 'GET' && route.length === 1) {
       return await handleDisponibilidade(sdrId, url)
+    }
+
+    if (route[0] === 'agendamentos-agente' && method === 'POST' && route.length === 1) {
+      return await handleAgendar(sdrId, body, true)
     }
 
     if (route[0] === 'agendamentos') {

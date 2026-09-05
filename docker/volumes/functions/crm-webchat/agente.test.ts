@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LINK_ESCOLA_GRATUITA } from '../crm-agente-sdr/escolaGratuita';
 import type { Estagio, Produto } from './agente';
+import { type EstadoElegibilidade, VERSAO_REGRA_ELEGIBILIDADE } from '../crm-agente-sdr/elegibilidadeAgendamento';
 
 // Exercita o loop real, inclusive as guardas e os envios interceptados pelo webchat.
 // Só as fronteiras com banco, rede e modelo são simuladas: nenhum lead é contatado.
@@ -12,23 +13,25 @@ const mocks = vi.hoisted(() => ({
   buscarLead: vi.fn(),
   fetch: vi.fn(),
   update: vi.fn(),
+  from: vi.fn(),
+  rpc: vi.fn(),
+  matriz: vi.fn(),
+  selecionarSessao: vi.fn(),
+  escreverLead: vi.fn(),
   sessao: {} as Record<string, unknown>,
 }));
 
 vi.mock('https://esm.sh/@supabase/supabase-js@2.49.4', () => ({
   createClient: () => ({
-    from: () => ({
-      select: () => ({
-        eq: () => ({ maybeSingle: async () => ({ data: mocks.sessao, error: null }) }),
-      }),
-      update: mocks.update,
-    }),
+    from: mocks.from,
+    rpc: mocks.rpc,
   }),
 }));
 vi.mock('../crm-agente-sdr/agente.ts', () => ({
   carregarTools: mocks.carregarTools,
   chamarAgentePrincipal: mocks.principal,
   chamarRouter: mocks.router,
+  chamarAnthropic: mocks.matriz,
 }));
 vi.mock('../crm-agente-sdr/historico.ts', async (original) => ({
   ...await original<typeof import('../crm-agente-sdr/historico')>(),
@@ -44,6 +47,7 @@ vi.mock('../crm-agente-sdr/saida.ts', () => ({
 }));
 
 let responderWebchat: typeof import('./agente').responderWebchat;
+let executarToolReal: typeof import('../crm-agente-sdr/tools').executarTool;
 beforeAll(async () => {
   vi.stubGlobal('Deno', { env: { get: (chave: string) => ({
     AGENTE_SDR_ANTHROPIC_KEY: 'chave-sintetica-sem-acesso',
@@ -52,6 +56,7 @@ beforeAll(async () => {
     WEBCHAT_REENVIO_WHATSAPP_COOLDOWN_MIN: '10',
   })[chave] } });
   vi.stubGlobal('fetch', mocks.fetch);
+  ({ executarTool: executarToolReal } = await vi.importActual<typeof import('../crm-agente-sdr/tools')>('../crm-agente-sdr/tools.ts'));
   ({ responderWebchat } = await import('./agente'));
 });
 afterAll(() => vi.unstubAllGlobals());
@@ -59,6 +64,32 @@ afterAll(() => vi.unstubAllGlobals());
 beforeEach(() => {
   vi.resetAllMocks();
   mocks.sessao = { cronogramas_enviados: [], levado_para_whatsapp_em: null };
+  mocks.selecionarSessao.mockImplementation(() => ({
+    eq: () => ({ maybeSingle: async () => ({ data: mocks.sessao, error: null }) }),
+  }));
+  mocks.from.mockImplementation((tabela: string) => {
+    if (tabela === 'webchat_sessoes') return { select: mocks.selecionarSessao, update: mocks.update };
+    if (tabela === 'cliente_ppg_leads_sdr') return { update: mocks.escreverLead };
+    if (tabela === 'cursos_pos_graduacao' || tabela === 'cursos') {
+      const consulta = {
+        eq: () => consulta,
+        order: async () => ({ data: tabela === 'cursos'
+          ? [{ nome: 'PÓS | Sanidade Avícola' }, { nome: 'PÓS | Cannabis Medicinal' }]
+          : [{ pos_graduacao: 'Sanidade Avícola', pode_fazer: 'Medicina Veterinária', parcialmente_aceitas: '', status: 'ativo' }],
+        error: null }),
+      };
+      return { select: () => consulta };
+    }
+    throw new Error(`Tabela não simulada neste teste: ${tabela}`);
+  });
+  mocks.rpc.mockImplementation(async (rpc: string) => {
+    if (rpc === 'fn_sdr_api_resolver_pos_graduacao') {
+      return { data: { id: '00000000-0000-4000-8000-000000000004', nome: 'PÓS | Cannabis Medicinal' }, error: null };
+    }
+    return { data: { success: false, code: 'elegibilidade_ausente' }, error: null };
+  });
+  mocks.escreverLead.mockImplementation(() => { throw new Error('Tentativa de escrita SDR em teste isolado'); });
+  mocks.matriz.mockRejectedValue(new Error('Matriz não simulada neste cenário'));
   mocks.update.mockImplementation((dados: Record<string, unknown>) => {
     Object.assign(mocks.sessao, dados);
     return { eq: async () => ({ error: null }) };
@@ -260,5 +291,160 @@ describe('responderWebchat: nenhuma tentativa vira envio por inferência de text
     expect(prompt).not.toContain('Uma vez por conversa. Se já mandou');
     expect(prompt).toContain('Aguarde o retorno da ferramenta');
     expect(prompt).toContain('10 minutos');
+  });
+});
+
+describe('responderWebchat: elegibilidade isolada do harness', () => {
+  const curso = 'Sanidade Avícola';
+  const aprovada: EstadoElegibilidade = {
+    curso, decisao: 'aprovado', motivo: 'APROVADO', regra_versao: VERSAO_REGRA_ELEGIBILIDADE,
+  };
+  const verificacao = {
+    formacao_academica: 'Medicina Veterinária', curso_interesse: curso, contexto_qualificacao: 'normal',
+  };
+  beforeEach(() => {
+    mocks.sessao.modo_teste = true;
+    mocks.executarTool.mockImplementation(executarToolReal);
+    mocks.matriz.mockResolvedValue({ content: [{ type: 'text', text: JSON.stringify({
+      formacao_identificada: 'Medicina Veterinária', e_medico_veterinario: true,
+      curso_solicitado: curso, pode_cursar: true, compativel: true,
+      curso_exclusivo_veterinario: true, curso_alternativo_recomendado: false,
+      curso_alternativo: null, mensagem_para_lead: 'Formação compatível.', output: 'APROVADO',
+    }) }] });
+  });
+
+  function restaurarLogs(...estados: EstadoElegibilidade[]) {
+    mocks.sessao.teste_tool_chamadas = estados.map((estado) => ({ elegibilidade_teste: estado }));
+  }
+  function teste(nome: string, input: Record<string, unknown> = {}) {
+    return rodar(nome, input, { modoTeste: true, curso });
+  }
+  async function sequencia(tools: ReturnType<typeof chamada>[]) {
+    mocks.principal.mockResolvedValueOnce({ content: tools });
+    return responderWebchat(
+      'Visitante Teste', '5500000000000', curso,
+      [{ role: 'user', text: 'Pedido sintético do harness' }], 'qualificador',
+      'lead-sintetico', 'pos', true, 'sessao-sintetica',
+    );
+  }
+
+  it('passa modoTeste ao executor real e registra a aprovação simulada no log', async () => {
+    const resposta = await teste('verificar_compatibilidade_curso', verificacao);
+    expect(mocks.executarTool).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      name: 'verificar_compatibilidade_curso',
+    }), expect.objectContaining({ modoTeste: true }));
+    expect(mocks.matriz).toHaveBeenCalledTimes(1);
+    expect(resposta.tools[0]).toMatchObject({ mockado: false, elegibilidade_teste: aprovada });
+    expect(mocks.principal.mock.calls[0][0].contextoTemporal).toContain('AMBIENTE DE TESTE: elegibilidade_simulada=true');
+    expect(mocks.rpc).not.toHaveBeenCalled();
+    expect(mocks.escreverLead).not.toHaveBeenCalled();
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
+  it('restaura a aprovação do log serializado numa segunda rodada de sessão de teste', async () => {
+    const primeira = await teste('verificar_compatibilidade_curso', verificacao);
+    mocks.sessao.teste_tool_chamadas = JSON.parse(JSON.stringify(primeira.tools));
+    const segunda = await teste('confirmar_agendamento', { curso_escolhido: curso });
+    expect(segunda.tools[0]).toMatchObject({ mockado: true, elegibilidade_teste: aprovada });
+    expect(segunda.tools[0].resultado).toContain('Agendamento confirmado. id: teste-seguro');
+    expect(mocks.executarTool).toHaveBeenCalledTimes(1);
+    expect(mocks.rpc).not.toHaveBeenCalled();
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([false, undefined, 'true'])('não restaura aprovação se modo_teste da sessão é %j', async (flag) => {
+    mocks.sessao.modo_teste = flag;
+    restaurarLogs(aprovada);
+    const resposta = await teste('confirmar_agendamento', { curso_escolhido: curso });
+    expect(resposta.tools[0].resultado).toContain('RECUSADO');
+    expect(resposta.tools[0].elegibilidade_teste).toBeUndefined();
+    expect(mocks.executarTool).not.toHaveBeenCalled();
+  });
+
+  it('produção ignora logs de simulação mesmo quando existem na sessão', async () => {
+    restaurarLogs(aprovada);
+    const resposta = await rodar('confirmar_agendamento', { curso_escolhido: curso }, { curso, modoTeste: false });
+    expect(resposta.tools[0].mockado).toBe(false);
+    expect(resposta.tools[0].resultado).toContain('RECUSADO');
+    expect(resposta.tools[0].elegibilidade_teste).toBeUndefined();
+    expect(mocks.selecionarSessao).not.toHaveBeenCalled();
+    expect(mocks.principal.mock.calls[0][0].contextoTemporal).not.toContain('AMBIENTE DE TESTE');
+    expect(mocks.executarTool.mock.calls[0][2]).toMatchObject({ modoTeste: false });
+    expect(mocks.executarTool.mock.calls[0][2].ultimaElegibilidade).toBeUndefined();
+    expect(mocks.rpc).toHaveBeenCalledWith('crm_agente_elegibilidade_consultar', expect.anything());
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
+  it.each<EstadoElegibilidade['decisao']>(['pendente', 'reprovado'])(
+    'a decisão %s mais recente substitui aprovação antiga do log', async (decisao) => {
+      restaurarLogs(aprovada, { ...aprovada, decisao, motivo: 'Revisão posterior' });
+      const resposta = await teste('confirmar_agendamento', { curso_escolhido: curso });
+      expect(resposta.tools[0].resultado).toContain('RECUSADO');
+      expect(resposta.tools[0].elegibilidade_teste?.decisao).toBe(decisao);
+    },
+  );
+
+  it('não restaura aprovação registrada sob versão antiga da regra', async () => {
+    restaurarLogs({ ...aprovada, regra_versao: 'regra-antiga' });
+    const resposta = await teste('confirmar_agendamento', { curso_escolhido: curso });
+    expect(resposta.tools[0].resultado).toContain('RECUSADO');
+    expect(resposta.tools[0].elegibilidade_teste).toBeUndefined();
+  });
+
+  it.each([
+    { formacao: 'Zootecnia' },
+    { tempo_formacao: 'concluo em 2028' },
+  ])('alteração de qualificação invalida antes da confirmação na mesma rodada: %j', async (input) => {
+    restaurarLogs(aprovada);
+    const resposta = await sequencia([
+      chamada('atualizar_dados_lead', input),
+      chamada('confirmar_agendamento', { curso_escolhido: curso }, 'confirmar-2'),
+    ]);
+    expect(resposta.tools[0].elegibilidade_teste).toMatchObject({ decisao: 'pendente', motivo: 'dados_alterados' });
+    expect(resposta.tools[1].resultado).toContain('RECUSADO');
+    expect(mocks.executarTool).not.toHaveBeenCalled();
+    expect(mocks.escreverLead).not.toHaveBeenCalled();
+  });
+
+  it('alteração apenas de nome conserva aprovação e evita requalificação desnecessária', async () => {
+    restaurarLogs(aprovada);
+    const resposta = await sequencia([
+      chamada('atualizar_dados_lead', { nome: 'Nome corrigido' }),
+      chamada('confirmar_agendamento', { curso_escolhido: curso }, 'confirmar-2'),
+    ]);
+    expect(resposta.tools[1].resultado).toContain('Agendamento confirmado. id: teste-seguro');
+    expect(mocks.escreverLead).not.toHaveBeenCalled();
+  });
+
+  it('troca de curso usa executor real, invalida aprovação e não escreve interesse no SDR', async () => {
+    restaurarLogs(aprovada);
+    const resposta = await sequencia([
+      chamada('consulta_pos_disponiveis', { trocar_para: 'Cannabis Medicinal' }),
+      chamada('confirmar_agendamento', { curso_escolhido: 'Cannabis Medicinal' }, 'confirmar-2'),
+    ]);
+    expect(resposta.tools[0]).toMatchObject({ mockado: false, elegibilidade_teste: {
+      curso: 'Cannabis Medicinal', decisao: 'pendente', motivo: 'dados_alterados',
+    } });
+    expect(resposta.tools[1].resultado).toContain('RECUSADO');
+    expect(mocks.escreverLead).not.toHaveBeenCalled();
+    expect(mocks.rpc).toHaveBeenCalledTimes(1);
+    expect(mocks.rpc).toHaveBeenCalledWith('fn_sdr_api_resolver_pos_graduacao', { p_valor: 'Cannabis Medicinal' });
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
+  it('prazo reprovado pelo executor real permanece reprovado e não pode ser confirmado no mock', async () => {
+    const resposta = await sequencia([
+      chamada('verificar_compatibilidade_curso', {
+        ...verificacao, contexto_qualificacao: 'estudante_fora_do_prazo',
+        conclusao_graduacao_bruta: 'concluo em dezembro de 2099', conclusao_graduacao: '12/2099',
+      }),
+      chamada('confirmar_agendamento', { curso_escolhido: curso }, 'confirmar-2'),
+    ]);
+    expect(resposta.tools[0].elegibilidade_teste).toMatchObject({ decisao: 'reprovado', motivo: 'REPROVADO_PRAZO' });
+    expect(resposta.tools[1].resultado).toContain('RECUSADO');
+    expect(mocks.matriz).not.toHaveBeenCalled();
+    expect(mocks.rpc).not.toHaveBeenCalled();
+    expect(mocks.escreverLead).not.toHaveBeenCalled();
+    expect(mocks.fetch).not.toHaveBeenCalled();
   });
 });

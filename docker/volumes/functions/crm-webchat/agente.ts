@@ -17,7 +17,8 @@ import { WEBCHAT_QUALIFICADOR, WEBCHAT_VALIDACAO } from "./prompts-webchat.ts";
 import { montarContextoTemporal, renderPrompt } from "../crm-agente-sdr/contexto.ts";
 import { comPresenteEscola, LINK_ESCOLA_GRATUITA } from "../crm-agente-sdr/escolaGratuita.ts";
 import { carregarTools, chamarAgentePrincipal, chamarRouter } from "../crm-agente-sdr/agente.ts";
-import { executarTool, montarToolResults } from "../crm-agente-sdr/tools.ts";
+import { type CtxConversa, executarTool, montarToolResults } from "../crm-agente-sdr/tools.ts";
+import { type EstadoElegibilidade, VERSAO_REGRA_ELEGIBILIDADE } from "../crm-agente-sdr/elegibilidadeAgendamento.ts";
 // Frases que viram PARÂMETRO de template ficam num módulo puro pra poderem ser testadas:
 // elas saem no WhatsApp de um lead, com a marca da PPGVET.
 import { fraseConviteWhatsapp, frasePedidoCronograma, limparCurso } from "./frases.ts";
@@ -103,11 +104,11 @@ export type WebchatToolChamada = {
   resultado?: string;
   /** Só existe após o servidor confirmar um envio real; recusa, consulta e mock não contam. */
   efeito_whatsapp?: { tipo: "cronograma" | "transferencia"; curso: string | null };
+  /** Estado do harness, restrito a sessões modo_teste; nunca autoriza agendamento real. */
+  elegibilidade_teste?: EstadoElegibilidade;
 };
 type ResultadoToolWebchat = Record<string, unknown> & Pick<WebchatToolChamada, "efeito_whatsapp">;
 type Msg = { role: "user" | "assistant"; content: any };
-// CtxConversa do agente real — no webchat waAccountId/oportunidadeId ficam nulos.
-type CtxConversa = { remotejid: string; telefone: string; waAccountId: string | null; leadId: string | null; oportunidadeId: string | null; nome?: string | null };
 
 
 // Nota do CANAL apensada ao prompt real (o João de WhatsApp não sabe que aqui é chat de site).
@@ -552,8 +553,28 @@ export async function responderWebchat(
   // O nome vai JUNTO do contexto temporal porque este bloco é reinjetado a cada turno, no
   // fim do contexto. No topo do prompt ele fica a dezenas de mensagens de distância, e foi
   // assim que a Flávia virou "vitória" numa conversa de 28 mensagens (21/08/2026).
-  const contextoTemporal = montarContextoTemporal() + notaDoNome(nome);
+  const contextoTemporal = montarContextoTemporal() + notaDoNome(nome) + (modoTeste
+    ? '\n\nAMBIENTE DE TESTE: elegibilidade_simulada=true com elegibilidade_status=aprovado equivale à decisão registrada apenas nesta simulação. Pode seguir para a confirmação simulada do mesmo curso. Não refaça a análise só porque elegibilidade_registrada=false. Pendência e reprovação continuam impedindo agendar. Não cite este ambiente ao visitante.'
+    : '');
   const ctx = ctxDe(telefone, leadId, nome || null);
+  ctx.modoTeste = modoTeste;
+  if (modoTeste && sessaoId) {
+    // A análise pode acontecer em um turno e a confirmação em outro. O harness
+    // conserva seu estado nos próprios logs da sessão, sem escrever aprovação SDR.
+    const { data: s, error } = await supabase.from('webchat_sessoes')
+      .select('modo_teste, teste_tool_chamadas').eq('id', sessaoId).maybeSingle();
+    if (error) throw new Error('Não foi possível ler o estado do teste');
+    if (s?.modo_teste === true && Array.isArray(s.teste_tool_chamadas)) {
+      for (const chamada of s.teste_tool_chamadas) {
+        const estado = chamada?.elegibilidade_teste;
+        if (estado?.regra_versao === VERSAO_REGRA_ELEGIBILIDADE
+          && typeof estado.curso === 'string'
+          && ['aprovado', 'reprovado', 'pendente'].includes(estado.decisao)) {
+          ctx.ultimaElegibilidade = { ...estado };
+        }
+      }
+    }
+  }
 
   let tools: any[] = [];
   try { tools = await carregarTools(supabase, agente); } catch (e) { console.error(`[crm-webchat] carregarTools: ${(e as Error).message}`); }
@@ -643,10 +664,20 @@ export async function responderWebchat(
       const registro: WebchatToolChamada = { nome: nomeTool, input, mockado };
       chamadas.push(registro);
       let saidaTool: ResultadoToolWebchat;
-      if (mockado) saidaTool = resultadoToolMockado(tu, limparCurso(curso));
+      if (mockado) saidaTool = resultadoToolMockado(tu, limparCurso(curso), ctx.ultimaElegibilidade);
       else if (nomeTool === "envia_informacoes") saidaTool = await webchatEnviaInformacoes(tu, telefone, curso, nome, sessaoId);
       else if (nomeTool === "levar_para_whatsapp") saidaTool = await webchatLevarParaWhatsapp(tu, telefone, curso, nome, sessaoId);
       else saidaTool = await executarTool(supabase, tu, ctx);
+      if (modoTeste) {
+        if ((nomeTool === 'atualizar_dados_lead' && (input.formacao || input.tempo_formacao))
+          || (nomeTool === 'consulta_pos_disponiveis' && input.trocar_para)) {
+          ctx.ultimaElegibilidade = {
+            curso: String(input.trocar_para ?? curso ?? ''), decisao: 'pendente',
+            motivo: 'dados_alterados', regra_versao: VERSAO_REGRA_ELEGIBILIDADE,
+          };
+        }
+        if (ctx.ultimaElegibilidade) registro.elegibilidade_teste = { ...ctx.ultimaElegibilidade };
+      }
       // Guarda a resposta da tool no MESMO registro (o push foi por referência).
       registro.resultado = String(
         saidaTool?.resultado ?? saidaTool?.instrucao ?? JSON.stringify(saidaTool ?? {}),

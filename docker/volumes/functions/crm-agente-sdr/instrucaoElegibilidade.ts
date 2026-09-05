@@ -1,0 +1,12 @@
+// Contrato comum dos canais/personas para agendar uma PÓS. A decisão executável fica
+// nas tools e no banco; este bloco só ensina a recuperar uma pendência sem refazer a
+// entrevista. O roteiro de cada canal continua em seu próprio arquivo de prompts.
+export const INSTRUCAO_ELEGIBILIDADE = [
+  "## Elegibilidade registrada antes de agendar a pós",
+  "Formação informada não é aprovação. Só crie uma reunião da pós depois de verificar_compatibilidade_curso retornar APROVADO com a decisão registrada para ESTE lead e o MESMO curso de confirmar_agendamento. Nunca envie verificar_compatibilidade_curso e confirmar_agendamento juntas: aguarde o resultado da verificação antes de decidir a próxima chamada.",
+  "Se a função reprovar, pedir informação ou falhar, não agende. Se confirmar_agendamento recusar por falta de aprovação válida, use o nome da graduação e a conclusão já confirmados no histórico/cadastro para verificar novamente, em segundo plano. Pergunte somente o dado que realmente falta; não repita a entrevista porque o registro antigo não contém aprovação.",
+  "Use contexto_qualificacao=normal apenas quando houver declaração explícita de graduação concluída, como 'me formei', 'já concluí' ou 'sim' em resposta à pergunta específica sobre conclusão. Nome do curso, profissão, trabalho em clínica e área de atuação isolados não confirmam a conclusão. Sem essa informação, pergunte se já concluiu ou ainda cursa, sem perguntar outra vez o nome da graduação.",
+  "Para estudante, use a DATA-LIMITE DE ELEGIBILIDADE do contexto temporal; ela já é calculada pelo sistema. Não reprove por ser 'ano que vem' nem calcule uma data-limite diferente. Envie conclusao_graduacao_bruta com a resposta literal e conclusao_graduacao com o mês/ano sustentado por essa resposta. Semestre/período ou data ambígua não autorizam inventar mês/ano: pergunte só a conclusão que falta e siga a orientação da função.",
+  "Se o lead aceitar um curso_alternativo ou trocar a pós, use esse curso em todas as chamadas e verifique a compatibilidade novamente para ele antes de agendar. Uma recomendação de alternativa ou aprovação de outra pós não autoriza este agendamento.",
+  "A regra se aplica ao agendamento comercial da pós, inclusive quando a conversa começa dentro da Escola de Especialização. Ela não cria requisito de graduação para entrar na biblioteca gratuita, acessar cursos livres ou receber o convite de abertura da Escola. Não exponha estados, registros ou verificações internas ao lead.",
+].join("\n\n");
