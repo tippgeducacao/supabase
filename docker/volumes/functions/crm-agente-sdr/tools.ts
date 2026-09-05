@@ -21,6 +21,7 @@ import {
 } from './elegibilidadeFormatura.ts';
 import { atualizarLead, buscarLead } from './historico.ts';
 import { chamarAnthropic } from './agente.ts';
+import { temDorFinanceira } from './objecaoFinanceira.ts';
 import {
   type ContextoElegibilidade, iniciarAvaliacao, finalizarAvaliacao, consultarAprovacao,
   recusaElegibilidade, VERSAO_REGRA_ELEGIBILIDADE,
@@ -751,15 +752,15 @@ const TIPOS_OBJECAO = new Set([
 // ⚠️ `pergunta_preco` é o cluster de "quanto custa?" e devolve INSTRUÇÃO INTERNA
 // pra chamar envia_informacoes com o valor integral — mandar o valor cheio pra
 // quem já disse que não cabe no bolso é o oposto do que a conversa pede.
-const RE_DOR_FINANCEIRA =
-  /\b(?:n[ãa]o\s+(?:tenho|tenho\s+como|consigo|dá\s+pra|da\s+pra|teria)\s+(?:condi[çc][õo]es|condi[çc][ãa]o|pagar|assumir|arcar|bancar)|sem\s+(?:condi[çc][õo]es|dinheiro|renda|grana|or[çc]amento)|fora\s+do\s+(?:meu\s+)?or[çc]amento|apertad[oa]\s+(?:agora|no\s+momento)|desempregad[oa]|entre\s+empregos|n[ãa]o\s+cabe\s+no\s+(?:meu\s+)?bolso|parcela\s+(?:alta|pesada|salgada)|t[áa]\s+caro\s+demais|muito\s+caro\s+pra\s+mim)\b/i;
+// A negação ligada à expressão é tratada em objecaoFinanceira.ts; não suprimir
+// a regra inteira só porque existe um "não" em outro assunto da mensagem.
 
 // Rótulo que o modelo pode emitir mas que não tem cluster próprio na base.
 const APELIDO_TIPO: Record<string, string> = { objecao_financeira: 'pergunta_condicao' };
 
 function filtroDaObjecao(input: any): Record<string, string> {
   const mensagem = String(input?.mensagem_lead ?? '');
-  if (RE_DOR_FINANCEIRA.test(mensagem)) return { tipo_objecao: 'pergunta_condicao' };
+  if (temDorFinanceira(mensagem)) return { tipo_objecao: 'pergunta_condicao' };
   const bruto = String(input?.tipo_objecao ?? '');
   const tipo = APELIDO_TIPO[bruto] ?? bruto;
   return TIPOS_OBJECAO.has(tipo) ? { tipo_objecao: tipo } : {};
