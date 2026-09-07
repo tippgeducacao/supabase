@@ -1,8 +1,10 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.2";
+import { ErroAcessoMimosa, bearerMimosa, usuarioMimosa, payloadMimosa, autorizarMimosa } from "./seguranca.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers":
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
@@ -179,22 +181,6 @@ function errorResponse(code: string, message: string, status = 500, extras: Reco
   return jsonResponse({ ok: false, code, error: message, ...extras }, status);
 }
 
-async function getUserId(req: Request): Promise<string | null> {
-  const authHeader = req.headers.get("Authorization");
-  if (!authHeader) return null;
-  try {
-    const supa = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_ANON_KEY")!,
-      { global: { headers: { Authorization: authHeader } } },
-    );
-    const { data } = await supa.auth.getUser();
-    return data.user?.id ?? null;
-  } catch {
-    return null;
-  }
-}
-
 async function callAnthropic(apiKey: string, config: any, userPrompt: string) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 90_000);
@@ -246,9 +232,19 @@ async function callGoogle(apiKey: string, config: any, userPrompt: string) {
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
+  if (req.method !== "POST") return errorResponse("METHOD_NOT_ALLOWED", "Use POST para acessar a Mimosa.", 405);
+
   try {
-    const payload = await req.json();
-    const acao = payload?.acao;
+    // 07/09/2026: o gateway self-hosted não autentica esta função. Todas as ações
+    // precisam passar por Auth, acesso ao recurso e cota ANTES de buscar chaves/dados.
+    const token = bearerMimosa(req);
+    const clienteUsuario = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_ANON_KEY")!, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+    });
+    const userId = await usuarioMimosa(clienteUsuario, token);
+    const payload = await payloadMimosa(req);
+    await autorizarMimosa(adminClient(), userId, payload);
+    const acao = payload.acao;
 
     if (acao === "gerar") {
       const { tipo = "pre_reuniao", lead_id, lead_snapshot = {}, dados = {}, agendamento_id = null, versao_anterior = 0 } = payload;
@@ -504,7 +500,6 @@ serve(async (req) => {
         return errorResponse("EMPTY", "A Mimosa retornou uma resposta vazia. Tente regenerar.", 422);
       }
 
-      const userId = await getUserId(req);
       const admin = adminClient();
       const { data: inserted, error: insertErr } = await admin
         .from("mimosa_analises")
@@ -569,7 +564,13 @@ serve(async (req) => {
 
     return errorResponse("BAD_REQUEST", "Ação não reconhecida. Use 'gerar', 'aprovar' ou 'vincular_agendamento'.", 400);
   } catch (e) {
-    console.error("mimosa-analise fatal", e);
-    return errorResponse("INTERNAL", e instanceof Error ? e.message : "Erro desconhecido", 500);
+    if (e instanceof ErroAcessoMimosa) {
+      const response = errorResponse(e.code, e.message, e.status);
+      if (e.retryAfter) response.headers.set("Retry-After", String(e.retryAfter));
+      return response;
+    }
+    // Não devolver detalhes internos do banco/provedor nem dados do solicitante.
+    console.error("mimosa-analise: falha interna");
+    return errorResponse("INTERNAL", "Não foi possível processar a análise. Tente novamente.", 500);
   }
 });
