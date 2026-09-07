@@ -4,6 +4,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { getWaProvider } from "../_shared/waProviders.ts";
 import { telefoneEnviavel, digitosParaEnvio } from "../_shared/telefone.ts";
+import { phoneVariants, canonicalConversationPhone } from "./telefoneConversa.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -100,38 +101,12 @@ async function invalidarMediaId(admin: any, fileUrl: string, phoneNumberId: stri
 
 /**
  * Número que vai pra Meta/Uazapi. Delega pra `digitosParaEnvio` (régua compartilhada),
- * que além de garantir o DDI 55 tira o "0" de tronco de quem digitou "(0xx) …" — são
+ * que preserva o DDI internacional e tira o "0" de tronco de quem digitou "(0xx) …" — são
  * 167 contatos na base (18/08/2026) que hoje têm número perfeitamente válido e mesmo
  * assim nunca receberiam nada, porque "5501499668988" não existe em E.164.
  */
 function formatPhone(raw: string): string | null {
   return digitosParaEnvio(raw);
-}
-
-// Variantes p/ casar a conversa pelo telefone apesar do 9º dígito (Uazapi e Meta
-// dropam o 9 no inbound). Gera com/sem DDI 55 e com/sem o 9 do celular.
-function phoneVariants(raw: string): string[] {
-  let d = (raw ?? "").replace(/\D/g, "");
-  if (d.startsWith("55")) d = d.slice(2);
-  const ddd = d.slice(0, 2);
-  const rest = d.slice(2);
-  const set = new Set<string>();
-  const add = (x: string) => { set.add(x); set.add(`55${x}`); };
-  if (rest) add(ddd + rest);
-  if (rest.length === 8) add(`${ddd}9${rest}`);            // sem 9 -> adiciona
-  if (rest.length === 9 && rest[0] === "9") add(ddd + rest.slice(1)); // com 9 -> remove
-  return [...set];
-}
-
-// Canoniza p/ o formato COM 9º dígito (igual à crm-lead-webhook) — usado no remotejid
-// do cliente_ppg_mensagens_sdr pra casar com o lead que o agente busca.
-function canonicalBrPhone(raw: string): string {
-  let d = (raw ?? "").replace(/\D/g, "");
-  if (d.startsWith("55")) d = d.slice(2);
-  if (d.length === 10 && ["6", "7", "8", "9"].includes(d[2])) {
-    d = d.slice(0, 2) + "9" + d.slice(2);
-  }
-  return `55${d}`;
 }
 
 // A Meta REJEITA parâmetro de corpo de template que contenha quebra de linha (\n),
@@ -267,7 +242,7 @@ async function enviarViaConexao(admin: any, p: {
   if (!sec?.token) return json({ error: "token da conexão ausente" }, 500);
 
   const provider = getWaProvider(conex.provider);
-  const numberDigits = p.to; // já normalizado (55 + dígitos)
+  const numberDigits = p.to; // já normalizado (DDI original + número)
 
   let result: { externalId: string | null; ok: boolean; raw: unknown };
   let anexosPersist: any[] = [];
@@ -447,9 +422,8 @@ Deno.serve(async (req) => {
     // intake não descarta mais o número (ele é gravado e sinalizado no Contato 360);
     // quem impede o prejuízo é este `if`.
     //
-    // Roda no valor CRU, antes do `formatPhone`, que prefixa "55" em qualquer coisa e
-    // transformaria um número estrangeiro legítimo em falso positivo. `telefoneEnviavel`
-    // só barra o impossível: internacional e fixo passam.
+    // Valida o valor CRU. O formatador preserva o DDI estrangeiro e só aplica
+    // a régua brasileira a números BR; internacional e fixo continuam aceitos.
     if (!telefoneEnviavel(telefone)) {
       return json({
         error: "telefone_impossivel",
@@ -506,7 +480,7 @@ Deno.serve(async (req) => {
         .select("provider, wa_conexao_id")
         .order("created_at", { ascending: false })
         .limit(1);
-      q = lead_id ? q.eq("lead_id", lead_id) : q.in("telefone", phoneVariants(to));
+      q = lead_id ? q.eq("lead_id", lead_id) : q.in("telefone", phoneVariants(telefone));
       const { data: lastRows } = await q;
       const last = (lastRows?.[0] ?? null) as { provider?: string; wa_conexao_id?: string } | null;
       if (last?.wa_conexao_id && last.provider && last.provider !== "meta") {
@@ -1070,7 +1044,7 @@ Deno.serve(async (req) => {
     // SEMPRE que o envio à Meta deu OK: usa o texto real quando temos o corpo (custom/cache/
     // Meta), senão um marcador "[template] <nome>" (a IA ao menos sabe que um template saiu).
     if (tipo === "template" && r.ok) {
-      const remoteJid = `${canonicalBrPhone(telefone)}@s.whatsapp.net`;
+      const remoteJid = `${canonicalConversationPhone(telefone)}@s.whatsapp.net`;
       const conteudoSeed = templateTexto ?? `[template] ${template_name}`;
       const { error: histErr } = await admin.from("cliente_ppg_mensagens_sdr").insert({
         remotejid: remoteJid,
@@ -1089,7 +1063,7 @@ Deno.serve(async (req) => {
     // PRÓPRIA IA (tool envia_informacoes) NÃO semeia aqui — o contexto já chega pelo
     // tool_result (cronograma_enviado), semear de novo duplicaria.
     if (tipo === "document" && r.ok && origemFinal === "humano") {
-      const remoteJid = `${canonicalBrPhone(telefone)}@s.whatsapp.net`;
+      const remoteJid = `${canonicalConversationPhone(telefone)}@s.whatsapp.net`;
       const nomeDoc = docFilename || "documento";
       const quem = enviadoPorNome ? `O atendente humano ${enviadoPorNome}` : "Um atendente humano";
       const { error: histErr } = await admin.from("cliente_ppg_mensagens_sdr").insert({

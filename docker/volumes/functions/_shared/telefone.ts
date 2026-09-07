@@ -54,8 +54,9 @@ export function canonicalBrClassificacao(raw: string): string {
 }
 
 /**
- * Dígitos que devem IR PRA META, dado o valor guardado no cadastro. Faz uma correção
- * só — o zero de tronco —, porque é a única que não muda a identidade do número.
+ * Dígitos que devem IR PRA META/UAZAPI. Preserva o DDI estrangeiro e acrescenta
+ * 55 apenas ao formato nacional BR. A validação e o destino precisam concordar:
+ * antes o argentino passava pela guarda, mas saía como 5554… (07/09/2026).
  *
  * ⚠️ NÃO insere o 9º dígito de propósito: a Meta e a Uazapi tratam o 9 do celular BR
  * de formas diferentes no inbound (é por isso que existe `phoneVariants`), e mexer
@@ -64,8 +65,12 @@ export function canonicalBrClassificacao(raw: string): string {
 export function digitosParaEnvio(raw: string | null | undefined): string | null {
   const d = digitsTelefone(raw);
   if (!d) return null;
-  const corrigido = d.startsWith("55") && d.length >= 12 ? `55${semZeroDeTronco(d.slice(2))}` : d;
-  return corrigido.startsWith("55") ? corrigido : `55${corrigido}`;
+  const classe = classificaTelefone(raw);
+  if (classe === "internacional") return d;
+  if (classe !== "br") return null;
+  return d.startsWith("55") && d.length >= 12
+    ? `55${semZeroDeTronco(d.slice(2))}`
+    : `55${d}`;
 }
 
 /**
@@ -91,7 +96,8 @@ export type ClasseTelefone =
 /**
  * Decide como tratar o número. A ordem importa:
  *
- * 1. FORMATO NACIONAL primeiro (10 dígitos, ou 11 com o 9 no 3º lugar) — assim
+ * 0. DDI estrangeiro explícito com + preserva a identidade internacional.
+ * 1. Sem esse sinal, FORMATO NACIONAL (10 dígitos, ou 11 com o 9 no 3º lugar) — assim
  *    "5599912345" é lido como DDD 55, não como DDI + número quebrado. Espelha a
  *    régua de `src/lib/sac/phone.ts` (normalizePhone).
  * 2. Depois DDI 55 + nacional (12–13 dígitos).
@@ -107,6 +113,13 @@ export function classificaTelefone(raw: string | null | undefined): ClasseTelefo
   // Preenchido mas sem dígito nenhum ("Adão Vital Maciel Junior" no campo telefone —
   // 27 casos na base em 18/08/2026) é lixo, não é vazio: merece o alerta.
   if (!d) return "impossivel";
+
+  // DDI explícito estrangeiro vence a heurística de comprimento nacional.
+  // +39… pode ter 10 dígitos e +1… pode ter 9 na terceira posição.
+  // +0… continua legado de tronco brasileiro, tratado abaixo.
+  if (/^\+\s*[1-9]/.test(bruto) && !d.startsWith("55")) {
+    return d.length >= 8 && d.length <= 15 ? "internacional" : "impossivel";
+  }
 
   const nacional = d.length === 10 || (d.length === 11 && d[2] === "9");
   // 14 dígitos entram aqui quando o extra é o zero de tronco ("55" + "0" + 11 díg.).
