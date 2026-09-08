@@ -352,17 +352,14 @@ async function handler(req: Request): Promise<Response> {
   const qLimite = Number(url.searchParams.get('limite') ?? '') || null
   const dry = url.searchParams.get('dry') === '1'
 
-  // a campanha pedida, ou a mais atrasada da fila
-  let q = supabase
-    .from('threec_mailing_listas')
-    .select('id, nome, campanha_id, lista_id, recorte, limite_por_rodada')
-    .eq('ativo', true)
-  if (qLista) q = supabase
-    .from('threec_mailing_listas')
-    .select('id, nome, campanha_id, lista_id, recorte, limite_por_rodada')
-    .eq('id', qLista)
+  // a campanha pedida, ou a mais atrasada da fila. Cada ação tem a SUA fila: ordenar
+  // o expurgo por `ultima_sync_em` faria ele voltar sempre à mesma campanha.
+  const colunaFila = acao === 'expurgar' ? 'ultimo_expurgo_em' : 'ultima_sync_em'
+  const campos = 'id, nome, campanha_id, lista_id, recorte, limite_por_rodada'
+  let q = supabase.from('threec_mailing_listas').select(campos)
+  q = qLista ? q.eq('id', qLista) : q.eq('ativo', true)
   const { data: linhas, error: eCfg } = await q
-    .order('ultima_sync_em', { ascending: true, nullsFirst: true })
+    .order(colunaFila, { ascending: true, nullsFirst: true })
     .limit(1)
   if (eCfg) return json({ error: 'falha ao ler a config', detail: eCfg.message }, 500)
   const cfg = (linhas ?? [])[0] as ListaCfg | undefined

@@ -84,8 +84,14 @@ const PAPEIS_ATIVOS: PapelEtapa[] = ['coleta', 'agendar', 'marcada'];
 
 /**
  * Agenda "RH  - Entrevistas" da conta programappgvet@gmail.com (já existia no Google e
- * já estava conectada). A entrevista é PRESENCIAL: nada de Google Meet, o evento existe
- * só para reservar o horário e aparecer para quem vai entrevistar.
+ * já estava conectada). O evento nunca é a fonte da verdade: ele reserva o horário e
+ * aparece para quem vai entrevistar.
+ *
+ * O agente só marca entrevista PRESENCIAL, então o evento que sai daqui nasce sem Google
+ * Meet. Online existe desde 08/09/2026 (`rh_entrevistas.modalidade`), mas é exceção que o
+ * time registra, e a sala dela é aberta na hora de registrar, não aqui: a edge
+ * `google-calendar-create-event` aceita `create_meet: true` e devolve o `meetLink`, que foi
+ * como a sala do Pedro nasceu.
  */
 const AGENDA_RH_CALENDAR_ID =
   '6e754854f0195de0e5da031ebe91cba914842b5dc4186d7a2a3adae8077cbbd4@group.calendar.google.com';
@@ -123,6 +129,46 @@ async function contatoDoPedagogico(supabase: any): Promise<string> {
   const { data } = await supabase
     .from('rh_entrevista_config').select('pedagogico_contato').eq('id', true).maybeSingle();
   return (data?.pedagogico_contato ?? '').trim();
+}
+
+/**
+ * A entrevista marcada deste card, quando existe: se é presencial ou online, e o link da
+ * sala. Presencial continua o padrão da casa; online é a exceção, e desde 08/09/2026 é uma
+ * exceção registrada em `rh_entrevistas.modalidade` em vez de alguém lembrar.
+ *
+ * Sem isto o agente não sabe a diferença. Foi assim que o Pedro, que mora em Balneário
+ * Camboriú e ia fazer entrevista online, ouviu de nós que a entrevista dele era presencial
+ * em Ampére; ele respondeu que achou que não tinha visto no anúncio que a vaga era
+ * presencial e quase desistiu. Ninguém errou, não havia onde marcar.
+ *
+ * O link vem da própria entrevista. `rh_entrevista_config.link_online_padrao` é a sala fixa
+ * da casa e hoje está VAZIA de propósito: sala reaproveitada por dois candidatos no mesmo
+ * dia é gente entrando na entrevista do outro. Vazia significa "abre uma sala por
+ * entrevista", e aí o candidato ouve que o link chega antes, sem prazo prometido.
+ */
+type EntrevistaMarcada = { modalidade: 'presencial' | 'online'; link: string };
+
+async function entrevistaMarcada(supabase: any, opId: string): Promise<EntrevistaMarcada | null> {
+  const { data } = await supabase
+    .from('rh_entrevistas')
+    .select('modalidade, link_online')
+    .eq('oportunidade_id', opId)
+    .eq('status', 'marcada')
+    .order('inicio', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (!data) return null;
+
+  const modalidade: 'presencial' | 'online' = data.modalidade === 'online' ? 'online' : 'presencial';
+  if (modalidade !== 'online') return { modalidade, link: '' };
+
+  let link = String(data.link_online ?? '').trim();
+  if (!link) {
+    const { data: cfg } = await supabase
+      .from('rh_entrevista_config').select('link_online_padrao').eq('id', true).maybeSingle();
+    link = String(cfg?.link_online_padrao ?? '').trim();
+  }
+  return { modalidade, link };
 }
 
 async function enderecoParaOCandidato(supabase: any): Promise<string> {
@@ -597,12 +643,29 @@ async function processar(payload: any, profundidade = 0) {
     }
 
     // ── Claude ───────────────────────────────────────────────────────────
+    // Presencial é o padrão, online é exceção registrada. Sem esta linha o endereço logo
+    // acima vira a única pista que o modelo tem, e ele afirma "presencial em Ampére" para
+    // quem vai fazer online. Foi o caso do Pedro, em 08/09.
+    const entrevista = await entrevistaMarcada(supabase, card.oportunidade_id);
+    const linhaDaModalidade = !entrevista
+      ? ''
+      : entrevista.modalidade === 'online'
+        ? `- ATENÇÃO: a entrevista JÁ MARCADA desta pessoa é ONLINE, não presencial. Nunca ` +
+          `diga que ela é presencial e nunca peça para a pessoa vir até Ampére. ${
+            entrevista.link
+              ? `O link da sala é ${entrevista.link}, e é esse que você manda, copiado igual.`
+              : 'Ainda não existe link. Se ela perguntar, diga que o link chega antes da ' +
+                'entrevista, e não prometa prazo nem horário.'
+          }\n`
+        : `- A entrevista JÁ MARCADA desta pessoa é PRESENCIAL, no endereço acima.\n`;
+
     const contexto =
       `\n\nCONTEXTO DESTE CANDIDATO (não repita de volta para ele, use para conversar):\n` +
       `- HOJE é ${agora()}\n` +
       `- Nome no cadastro: ${lead.nome ?? 'não informado'}\n` +
       `- Área que ele escolheu na página: ${card.titulo ?? 'não informada'}\n` +
       `- Onde é a entrevista: ${await enderecoParaOCandidato(supabase)}\n` +
+      linhaDaModalidade +
       `- Contato do time pedagógico (para quem quer dar aula): ${
         (await contatoDoPedagogico(supabase)) || 'não temos um número para passar'
       }\n` +
@@ -706,6 +769,10 @@ async function processar(payload: any, profundidade = 0) {
             continue;
           }
           if (u.name === 'marcar_entrevista') {
+            // Quatro argumentos de propósito: a RPC assume `presencial`. Quem decide que uma
+            // entrevista é online é o time, e isso não está definido em lugar nenhum, então o
+            // agente não ganha esse poder. Online se registra fora daqui, pela tela do RH
+            // (`rh_entrevista_definir_modalidade`), e o agente só precisa saber ler.
             const { data: r } = await supabase.rpc('rh_entrevista_marcar', {
               p_oportunidade_id: card.oportunidade_id,
               p_inicio: u.input?.inicio ?? '',
@@ -730,14 +797,26 @@ async function processar(payload: any, profundidade = 0) {
                 p_oportunidade_id: card.oportunidade_id,
               });
             }
+            // O que confirmar sai do BANCO, não do costume: a entrevista acabou de ser
+            // gravada, então é ela quem diz se é presencial ou online.
+            const gravada = linha?.ok === true
+              ? await entrevistaMarcada(supabase, card.oportunidade_id)
+              : null;
+            const ondeEla = gravada?.modalidade === 'online'
+              ? (gravada.link
+                  ? `que é online, e mande o link: ${gravada.link}`
+                  : 'que é online e que o link chega antes da entrevista, sem prometer prazo')
+              : 'que é presencial, aqui em Ampére';
+
             await evento('entrevista', {
               telefone, lead_id: leadId, oportunidade_id: card.oportunidade_id,
-              inicio: u.input?.inicio, ok: linha?.ok === true, motivo: linha?.motivo ?? null,
+              inicio: u.input?.inicio, ok: linha?.ok === true,
+              modalidade: gravada?.modalidade ?? null, motivo: linha?.motivo ?? null,
             });
             results.push({
               type: 'tool_result', tool_use_id: u.id,
               content: linha?.ok === true
-                ? `marcado para ${linha.rotulo}. Confirme com ele em uma frase, diga que é presencial em Ampére e que você lembra ele antes.`
+                ? `marcado para ${linha.rotulo}. Confirme com ele em uma frase: o dia e a hora, ${ondeEla}, e que você lembra ele antes.`
                 : linha?.motivo === 'acabou_de_ser_pego'
                   ? 'esse horário acabou de ser pego por outra pessoa. Peça desculpa sem drama e ofereça outros dois.'
                   : 'não deu para marcar nesse horário. Consulte os horários de novo e ofereça dois que existam.',
