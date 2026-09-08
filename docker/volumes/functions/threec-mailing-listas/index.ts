@@ -58,11 +58,11 @@ const humanizarFormacao = (s: string): string => {
   return base ? base.charAt(0).toUpperCase() + base.slice(1) : ''
 }
 
-const montarIdentifier = (nome: string, curso: string): string => {
-  const n = limpar(nome) || 'Lead'
-  const c = limpar(curso)
-  return (c ? `${n} - ${c}` : n).slice(0, 120)
-}
+// O `identifier` é o NÚMERO, em DDD + telefone (11 dígitos, sem DDI) — pedido do
+// usuário em 08/09/2026: "sempre colocar o numero na hora de validar as listas como
+// DDD+telefone, de resto nao precisa mais nada estar com identificador". É por ele que
+// se confere uma linha do mailing contra o CRM; nome e curso continuam nas colunas.
+const montarIdentifier = (telefone: string): string => telefone
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), {
@@ -232,7 +232,7 @@ async function sincronizar(cfg: ListaCfg, limite: number | null, dry: boolean): 
   }
 
   const mailing = rows.map((r) => ({
-    identifier: montarIdentifier(r.nome, r.curso),
+    identifier: montarIdentifier(r.telefone),
     areacode: r.telefone.substring(0, 2),
     phone: r.telefone,
     nome: limpar(r.nome),
