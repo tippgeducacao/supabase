@@ -166,6 +166,11 @@ async function handler(req: Request): Promise<Response> {
   // ("WorkerRequestCancelled: request has been cancelled by supervisor"): são ~9 mil
   // chamadas por dia, 500 por página. Use `?dia=AAAA-MM-DD` num laço externo.
   const diaUnico = url.searchParams.get('dia')
+  // dia grande (>25 mil chamadas) não cabe numa invocação: processe em blocos de hora
+  //   ?dia=AAAA-MM-DD&hora_de=00:00:00&hora_ate=12:59:59&somar=1
+  const horaDe = url.searchParams.get('hora_de') ?? '00:00:00'
+  const horaAte = url.searchParams.get('hora_ate') ?? '23:59:59'
+  const somar = url.searchParams.get('somar') === '1'
   const diasBackfill = diaUnico ? 0 : Math.min(Number(url.searchParams.get('dias') ?? '0') || 0, 3)
   let lidas = 0
   const diasProcessados: string[] = []
@@ -187,7 +192,7 @@ async function handler(req: Request): Promise<Response> {
     while (pagina <= 80) {
       const q = new URLSearchParams({
         api_token: THREEC_TOKEN,
-        start_date: `${alvoDia} 00:00:00`, end_date: `${alvoDia} 23:59:59`,
+        start_date: `${alvoDia} ${horaDe}`, end_date: `${alvoDia} ${horaAte}`,
         per_page: '500', page: String(pagina),
       })
       let corpo: { data?: unknown[]; meta?: { pagination?: { total_pages?: number } } } | null = null
@@ -253,7 +258,7 @@ async function handler(req: Request): Promise<Response> {
         return { campanha_id, dimensao, valor: resto.join('|'), chamadas: n }
       })
       const { error: eDia } = await supabase.rpc('threec_campanha_dia_gravar', {
-        p_dia: alvoDia, p_dias: pDias, p_desfechos: pDesfechos,
+        p_dia: alvoDia, p_dias: pDias, p_desfechos: pDesfechos, p_somar: somar,
       })
       if (eDia) falhas.push(`dia ${alvoDia}: ${eDia.message}`)
       else diasProcessados.push(alvoDia)
