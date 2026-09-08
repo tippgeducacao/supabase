@@ -1,7 +1,7 @@
 // Edge Function: email-descadastro
 // Alvo do link "Descadastrar" e do cabeçalho List-Unsubscribe dos disparos.
 //
-// Sem estado: o token é um HMAC do próprio e-mail (_shared/resend.ts), então não há
+// Sem estado: o token é um HMAC do próprio e-mail (_shared/envioComum.ts), então não há
 // tabela de tokens e o link só descadastra o endereço que ele assina.
 //
 // Aceita GET (clique humano) e POST (one-click do Gmail/Yahoo, que exigem

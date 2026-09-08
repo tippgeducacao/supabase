@@ -22,6 +22,16 @@ export interface EventoSesInterpretado {
   detalhe?: string;
 }
 
+/**
+ * Tipos que este módulo sabe interpretar. Usado pelo LOG para separar "não entendi o
+ * evento" de "entendi e não achei o e-mail" — sem isso as duas falhas viram a mesma
+ * linha na tela e quem diagnostica não sabe para onde olhar.
+ */
+export const TIPOS_CONHECIDOS: ReadonlySet<string> = new Set<TipoEventoSes>([
+  "Send", "Delivery", "Bounce", "Complaint",
+  "Reject", "Open", "Click", "DeliveryDelay", "Subscription",
+]);
+
 /** Mapa evento → status. Mesmos valores do enum `email_envio_status` já existente. */
 const STATUS: Partial<Record<TipoEventoSes, string>> = {
   Send: "enviado",

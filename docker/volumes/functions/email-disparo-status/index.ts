@@ -1,19 +1,17 @@
 // Edge Function: email-disparo-status
 // Responde "o disparo está realmente ligado?" — para o provedor que a operação usa.
 //
-// Substitui o `email-resend-status` como porta única da tela: aquele só sabia falar de
-// Resend e, depois do SES entrar, dizia "RESEND_API_KEY ausente" mesmo quando o Resend
-// não era mais o provedor escolhido — aviso verdadeiro sobre a coisa errada.
+// Porta única da tela para "o disparo está ligado?". O antecessor sabia falar só de um
+// provedor e dizia "chave ausente" mesmo quando aquele provedor não era o escolhido —
+// aviso verdadeiro sobre a coisa errada. A régua é o que está CADASTRADO.
 //
 // A régua é o que está CADASTRADO em `email_remetentes`, não uma constante no código:
 //   - sem remetente de disparo → não há provedor a checar, e é isso que a tela diz;
 //   - remetente SES  → confere credencial AWS + identidades verificadas;
-//   - remetente Resend → confere a API key + domínios verificados.
 //
 // Gate: admin/diretor (expõe estado de configuração da conta).
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { listarIdentidadesSes, temCredenciaisSes } from "../_shared/emailProviders/ses.ts";
-import { listarDominios, modoSeco, temResend } from "../_shared/resend.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -27,7 +25,7 @@ const json = (c: unknown, s = 200) =>
 export interface StatusDisparo {
   /** Verde só quando dá para enviar de verdade. */
   ok: boolean;
-  /** 'ses' | 'resend' | null (nenhum remetente de disparo cadastrado). */
+  /** 'ses' | null (nenhum remetente de disparo cadastrado). */
   provider: string | null;
   credencialConfigurada: boolean;
   apiRespondeu: boolean;
@@ -62,14 +60,14 @@ Deno.serve(async (req) => {
 
     const base: StatusDisparo = {
       ok: false, provider: null, credencialConfigurada: false, apiRespondeu: false,
-      dominiosVerificados: 0, dominiosPendentes: 0, modoSeco: modoSeco(), mensagem: "",
+      dominiosVerificados: 0, dominiosPendentes: 0, modoSeco: false, mensagem: "",
     };
 
     // Quem manda é o cadastro. Ativo primeiro: um remetente desativado não envia.
     const { data: remetentes } = await supabase
       .from("email_remetentes")
       .select("provider, ativo")
-      .in("provider", ["ses", "resend"])
+      .eq("provider", "ses")
       .order("ativo", { ascending: false });
 
     const emUso = (remetentes ?? []).find((r) => r.ativo)?.provider
@@ -80,7 +78,7 @@ Deno.serve(async (req) => {
       return json({
         ...base,
         mensagem: "Nenhum remetente de disparo cadastrado — nada é enviado por campanha ainda.",
-        comoResolver: "Em Remetentes, crie um remetente e escolha Amazon SES (ou Resend).",
+        comoResolver: "Em Remetentes, crie um remetente e escolha Amazon SES.",
       });
     }
 
@@ -127,44 +125,13 @@ Deno.serve(async (req) => {
       });
     }
 
-    // ── Resend ────────────────────────────────────────────────────────────────
-    base.credencialConfigurada = temResend();
-    if (!base.credencialConfigurada) {
-      return json({
-        ...base,
-        mensagem: "RESEND_API_KEY não está configurada no ambiente das edge functions.",
-        comoResolver: "Adicione a secret ao serviço `functions` do compose e recrie só esse container — nunca clique em Deploy no Dokploy.",
-      });
-    }
-
-    const res = await listarDominios();
-    if (!res.ok) {
-      return json({
-        ...base,
-        mensagem: res.status === 401
-          ? "A RESEND_API_KEY existe, mas o Resend recusou (401). A chave está inválida ou foi revogada."
-          : "A chave existe, mas a API do Resend não respondeu.",
-        detalhe: res.erro,
-      });
-    }
-
-    const dominios = res.data?.data ?? [];
-    const verificados = dominios.filter((d) => d.status === "verified");
-    const pendentes = dominios.filter((d) => d.status !== "verified");
-    const ok = verificados.length > 0;
-
+    // Nenhum outro provedor de disparo existe: o Resend foi removido do sistema em
+    // 2026-09-08. Se `emUso` não for 'ses', o cadastro tem um provider que ninguém
+    // consegue usar — dizer isso é melhor que devolver um verde falso.
     return json({
       ...base,
-      ok,
-      apiRespondeu: true,
-      dominiosVerificados: verificados.length,
-      dominiosPendentes: pendentes.length,
-      mensagem: ok
-        ? `Conectado ao Resend. ${verificados.length} domínio(s) verificado(s): ${verificados.map((d) => d.name).join(", ")}.`
-        : dominios.length === 0
-        ? "Conectado ao Resend, mas nenhum domínio foi cadastrado ainda."
-        : "Conectado ao Resend, mas nenhum domínio está verificado — o envio será recusado.",
-      detalhe: pendentes.length ? `Pendentes: ${pendentes.map((d) => `${d.name} (${d.status})`).join(", ")}` : undefined,
+      mensagem: `Remetente cadastrado com provedor "${emUso}", que este sistema não envia mais.`,
+      comoResolver: "Em Remetentes, edite o remetente e escolha Amazon SES.",
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

@@ -7,7 +7,8 @@
  * verificação de assinatura) entra por injeção.
  */
 import { assinaturaSnsValida, type MensagemSns } from "../_shared/snsVerify.ts";
-import { interpretarEventoSes } from "../_shared/sesEventos.ts";
+import { interpretarEventoSes, TIPOS_CONHECIDOS } from "../_shared/sesEventos.ts";
+import { montarLinhaLog } from "../_shared/webhookLog.ts";
 
 export const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -81,19 +82,6 @@ export async function tratarEventoSns(req: Request, deps: DepsWebhookSes): Promi
 
   if (msg.Type !== "Notification") return json({ ok: true, ignorado: msg.Type });
 
-  // --- Dedupe de reentrega ---------------------------------------------------------
-  // O SNS reentrega quando não recebe 200 rápido. Sem esta trava, a segunda entrega do
-  // mesmo evento contaria de novo e a métrica inflaria sozinha.
-  const { error: dup } = await supabase.from("email_webhook_eventos").insert({
-    evento_id: msg.MessageId,
-    tipo: "sns",
-    provider: "ses",
-  });
-  if (dup) {
-    if ((dup as { code?: string }).code === "23505") return json({ ok: true, repetido: true });
-    console.error("webhooks-ses-events: falha ao registrar evento", dup.message);
-  }
-
   // O payload do SES vem como STRING dentro de `Message`.
   let corpoSes: unknown;
   try {
@@ -102,43 +90,73 @@ export async function tratarEventoSns(req: Request, deps: DepsWebhookSes): Promi
     return json({ error: "campo Message não é JSON" }, 400);
   }
 
+  // Interpretar ANTES do dedupe: é computação pura, sem efeito colateral, e assim a
+  // linha do log nasce completa num único insert. Na ordem antiga o insert vinha
+  // primeiro e gravava `tipo: "sns"` — a string literal, não o tipo do evento — o que
+  // deixava o log incapaz de dizer se tinha chegado um bounce ou uma entrega.
   const evento = interpretarEventoSes(corpoSes);
   const agora = new Date().toISOString();
 
-  // --- Atualiza o log da mensagem --------------------------------------------------
+  // Buscar o e-mail correspondente também é leitura: pode vir antes da trava.
+  let log: {
+    id: string; status: string; aberto_count: number | null; clicado_count: number | null;
+    contexto_tipo: string | null; contexto_id: string | null;
+  } | null = null;
   if (evento.messageId) {
-    const { data: log } = await supabase
+    const { data } = await supabase
       .from("emails_enviados")
       .select("id, status, aberto_count, clicado_count, contexto_tipo, contexto_id")
       .eq("provider_message_id", evento.messageId)
       .maybeSingle();
+    log = data ?? null;
+  }
 
-    if (log) {
-      const update: Record<string, unknown> = {};
-      if (evento.status && (PESO[evento.status] ?? 0) >= (PESO[log.status] ?? 0)) {
-        update.status = evento.status;
-      }
-      if (evento.tipo === "Delivery") update.entregue_em = agora;
-      if (evento.tipo === "Open") {
-        update.aberto_em = agora;
-        update.aberto_count = (log.aberto_count ?? 0) + 1;
-      }
-      if (evento.tipo === "Click") update.clicado_count = (log.clicado_count ?? 0) + 1;
-      if (evento.detalhe) update.erro_msg = evento.detalhe;
+  // --- Dedupe de reentrega, agora carregando o log inteiro --------------------------
+  // O SNS reentrega quando não recebe 200 rápido. Sem esta trava, a segunda entrega do
+  // mesmo evento contaria de novo e a métrica inflaria sozinha. O insert continua sendo
+  // a trava — só passou a gravar junto o que a tela de Entregas precisa mostrar.
+  const { error: dup } = await supabase.from("email_webhook_eventos").insert(montarLinhaLog({
+    evento_id: msg.MessageId,
+    provider: "ses",
+    tipo: evento.tipo,
+    email_id: evento.messageId,
+    destinatario: evento.destinatarios[0] ?? null,
+    motivo: evento.detalhe ?? null,
+    tipoConhecido: TIPOS_CONHECIDOS.has(evento.tipo),
+    achouEmail: !!log,
+    corpo: corpoSes,
+  }));
+  if (dup) {
+    if ((dup as { code?: string }).code === "23505") return json({ ok: true, repetido: true });
+    console.error("webhooks-ses-events: falha ao registrar evento", dup.message);
+  }
 
-      if (Object.keys(update).length) {
-        await supabase.from("emails_enviados").update(update).eq("id", log.id);
-      }
+  // --- Atualiza o log da mensagem --------------------------------------------------
+  if (log) {
+    const update: Record<string, unknown> = {};
+    if (evento.status && (PESO[evento.status] ?? 0) >= (PESO[log.status] ?? 0)) {
+      update.status = evento.status;
+    }
+    if (evento.tipo === "Delivery") update.entregue_em = agora;
+    if (evento.tipo === "Open") {
+      update.aberto_em = agora;
+      update.aberto_count = (log.aberto_count ?? 0) + 1;
+    }
+    if (evento.tipo === "Click") update.clicado_count = (log.clicado_count ?? 0) + 1;
+    if (evento.detalhe) update.erro_msg = evento.detalhe;
 
-      if (log.contexto_tipo === "campanha" && log.contexto_id) {
-        const inc: Record<string, number> = {};
-        if (evento.tipo === "Delivery") inc.p_entregues = 1;
-        if (evento.tipo === "Open") inc.p_abertos = 1;
-        if (evento.tipo === "Click") inc.p_clicados = 1;
-        if (evento.tipo === "Bounce" && evento.suprimir.length) inc.p_bounces = 1;
-        if (Object.keys(inc).length) {
-          await supabase.rpc("email_campanha_incrementa", { p_campanha: log.contexto_id, ...inc });
-        }
+    if (Object.keys(update).length) {
+      await supabase.from("emails_enviados").update(update).eq("id", log.id);
+    }
+
+    if (log.contexto_tipo === "campanha" && log.contexto_id) {
+      const inc: Record<string, number> = {};
+      if (evento.tipo === "Delivery") inc.p_entregues = 1;
+      if (evento.tipo === "Open") inc.p_abertos = 1;
+      if (evento.tipo === "Click") inc.p_clicados = 1;
+      if (evento.tipo === "Bounce" && evento.suprimir.length) inc.p_bounces = 1;
+      if (Object.keys(inc).length) {
+        await supabase.rpc("email_campanha_incrementa", { p_campanha: log.contexto_id, ...inc });
       }
     }
   }

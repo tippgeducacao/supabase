@@ -15,7 +15,7 @@ export * from "./types.ts";
 export { SesProvider } from "./ses.ts";
 export { SmtpProvider } from "./smtp.ts";
 
-export type NomeProvedor = "smtp" | "ses" | "resend";
+export type NomeProvedor = "smtp" | "ses";
 
 function lerEnv(chave: string): string | undefined {
   const g = globalThis as { Deno?: { env: { get(k: string): string | undefined } } };
@@ -25,7 +25,7 @@ function lerEnv(chave: string): string | undefined {
 /** Padrão do ambiente. `smtp` de propósito: nada de produção sai sem configuração explícita. */
 export function provedorPadrao(): NomeProvedor {
   const v = (lerEnv("EMAIL_PROVIDER") ?? "smtp").toLowerCase();
-  return v === "ses" || v === "resend" ? v : "smtp";
+  return v === "ses" ? v : "smtp";
 }
 
 /** Rate limit do provedor, em mensagens por segundo. SES começa em 14/s na maioria das contas. */
@@ -57,15 +57,10 @@ export interface OpcoesFabrica {
 export function provedorEfetivo(doRemetente?: string | null): NomeProvedor {
   if (provedorPadrao() === "smtp") return "smtp";
   const n = (doRemetente ?? "") as NomeProvedor;
-  return n === "ses" || n === "resend" || n === "smtp" ? n : provedorPadrao();
+  return n === "ses" || n === "smtp" ? n : provedorPadrao();
 }
 
-/**
- * Devolve o provedor a usar. `resend` não é instanciado aqui: ele vive em
- * `_shared/resend.ts` com a própria lógica de retry e idempotência, e o `email-send`
- * continua chamando aquele caminho — trazê-lo para cá exigiria reescrever o que já
- * está testado, sem ganho.
- */
+/** Devolve o provedor a usar. */
 export function obterProvedor(opcoes: OpcoesFabrica = {}): EmailProvider {
   const nome = provedorEfetivo(opcoes.doRemetente);
 
@@ -78,8 +73,6 @@ export function obterProvedor(opcoes: OpcoesFabrica = {}): EmailProvider {
     case "smtp":
       return new SmtpProvider();
     default:
-      throw new Error(
-        `provedor "${nome}" não é instanciável por esta fábrica (resend tem caminho próprio em _shared/resend.ts)`,
-      );
+      throw new Error(`provedor "${nome}" não é instanciável por esta fábrica`);
   }
 }

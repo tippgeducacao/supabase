@@ -4,20 +4,13 @@
 //
 //   gmail  -> Gmail API com OAuth do Workspace (calendar_integrations). E-mail 1:1:
 //             a resposta do aluno cai na caixa e o enviado aparece na thread.
-//   resend -> API do Resend. Disparo em massa/automação: métrica de entrega real,
-//             bounce/spam via webhook e domínio próprio.
+//   ses    -> Amazon SES. Disparo em massa/automação: métrica de entrega real,
+//             bounce/spam pelo SNS e domínio próprio.
 //
 // A separação é de propósito: bounce de campanha não pode queimar a reputação do
 // domínio que manda o e-mail de aprovação de TCC. Ver docs/E-mail e Caixas.md.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
-import {
-  chaveIdempotencia,
-  enviarEmail,
-  formatarFrom,
-  linkDescadastro,
-  tagSegura,
-  temResend,
-} from "../_shared/resend.ts";
+import { formatarFrom, linkDescadastro, tagSegura } from "../_shared/envioComum.ts";
 import { ErroEnvio, obterProvedor } from "../_shared/emailProviders/index.ts";
 import { buscarSupressao, supressaoSeAplica } from "../_shared/supressao.ts";
 
@@ -222,8 +215,7 @@ Deno.serve(async (req) => {
         status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
-    const provider: "gmail" | "resend" | "ses" =
-      rem.provider === "resend" ? "resend" : rem.provider === "ses" ? "ses" : "gmail";
+    const provider: "gmail" | "ses" = rem.provider === "ses" ? "ses" : "gmail";
     const caixaEmail = rem.gmail_caixa_email ?? rem.email_completo;
     const fromName = rem.nome_remetente;
     const replyTo = rem.reply_to_email;
@@ -284,13 +276,6 @@ Deno.serve(async (req) => {
       }
       // `provider === "ses"` não precisa de checagem prévia: a AWS só é contatada no
       // envio, e sem credencial o SDK devolve erro nomeado que o catch traduz.
-    } else if (provider === "resend" && !temResend()) {
-      // Falha cedo e com nome: sem a chave, o Resend devolveria 401 já com o log gravado.
-      return new Response(JSON.stringify({
-        error: "RESEND_API_KEY não configurada no ambiente das edge functions. " +
-          "Configure a secret antes de usar um remetente Resend.",
-        remetente: rem.email_completo,
-      }), { status: 412, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
     // Cria log enfileirado
@@ -456,73 +441,6 @@ Deno.serve(async (req) => {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
-    }
-
-    // --- Motor Resend ------------------------------------------------------------
-    if (provider === "resend") {
-      // Chave de idempotência ESTÁVEL entre tentativas do mesmo envio lógico: se o
-      // worker morrer depois do Resend aceitar mas antes de gravarmos o resultado, a
-      // repetição não entrega duas vezes. Deriva da entidade (chave do chamador ou
-      // contexto+destinatário), nunca de uuid/timestamp novo — que anularia o efeito.
-      const idempotencyKey = payload.idempotencia_key
-        ? chaveIdempotencia(payload.contexto_tipo ?? "email", payload.idempotencia_key)
-        : chaveIdempotencia(
-          payload.contexto_tipo ?? "email",
-          `${payload.contexto_id ?? templateId ?? remetenteId}:${payload.destinatario_email}`,
-        );
-
-      const res = await enviarEmail({
-        from: formatarFrom(fromName, rem.email_completo),
-        to: payload.destinatario_email,
-        subject: assunto,
-        html: corpoHtml,
-        text: corpoTexto ?? undefined,
-        reply_to: replyTo ?? undefined,
-        headers: urlDescadastro
-          ? {
-            "List-Unsubscribe": `<${urlDescadastro}>`,
-            "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
-          }
-          : undefined,
-        attachments: payload.anexos?.map((a) => ({
-          filename: a.filename,
-          content: a.content_base64,
-          content_type: a.content_type,
-        })),
-        tags: [
-          { name: "log_id", value: tagSegura(log.id) },
-          ...(payload.contexto_tipo
-            ? [{ name: "contexto", value: tagSegura(payload.contexto_tipo) }]
-            : []),
-          ...(payload.contexto_id
-            ? [{ name: "contexto_id", value: tagSegura(payload.contexto_id) }]
-            : []),
-        ],
-      }, { idempotencyKey });
-
-      if (!res.ok) {
-        await supabaseAdmin.from("emails_enviados").update({
-          status: "falhou", erro_msg: res.erro ?? "Resend falhou",
-        }).eq("id", log.id);
-        // Preserva o 429 para o dispatcher pausar a campanha em vez de insistir.
-        return new Response(JSON.stringify({
-          error: "Resend falhou", details: res.erro, log_id: log.id, rate_limited: res.rateLimited,
-        }), {
-          status: res.rateLimited ? 429 : 502,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-
-      await supabaseAdmin.from("emails_enviados").update({
-        status: "enviado",
-        corpo_html_render: corpoHtml,
-        resend_email_id: res.data?.id ?? null,
-        enviado_em: new Date().toISOString(),
-      }).eq("id", log.id);
-
-      return new Response(JSON.stringify({
-        ok: true, log_id: log.id, provider: "resend", resend_id: res.data?.id,
-      }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
     // --- Motor Gmail: monta RFC 2822 e envia (com 1 retry em 429) ----------------

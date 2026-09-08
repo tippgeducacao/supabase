@@ -11,7 +11,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { compilarDocumento } from "../_shared/emailBuilder/compile.ts";
 import type { DocumentoEmail } from "../_shared/emailBuilder/types.ts";
-import { linkDescadastro } from "../_shared/resend.ts";
+import { linkDescadastro } from "../_shared/envioComum.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",

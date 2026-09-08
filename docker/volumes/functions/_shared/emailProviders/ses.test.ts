@@ -219,7 +219,6 @@ describe("fábrica de provedor", () => {
     g.Deno = { env: { get: (k) => (k === "EMAIL_PROVIDER" ? "ses" : undefined) } };
     try {
       expect(provedorEfetivo("ses")).toBe("ses");
-      expect(provedorEfetivo("resend")).toBe("resend");
       // Remetente Gmail não é da alçada desta fábrica: cai no padrão do ambiente.
       expect(provedorEfetivo("gmail")).toBe("ses");
     } finally {
@@ -227,12 +226,16 @@ describe("fábrica de provedor", () => {
     }
   });
 
-  it("resend não é instanciável aqui — tem caminho próprio já testado", () => {
+  it("provedor que a fábrica não conhece cai no padrão do ambiente, não estoura", () => {
+    // O Resend foi removido em 2026-09-08 e a coluna `provider` ganhou CHECK
+    // ('gmail','ses'), então um valor estranho só chega aqui por bug ou dado antigo.
+    // Cair no padrão é melhor que derrubar o envio: o `email-send` já falha com nome
+    // quando o provedor real recusa.
     const g = globalThis as { Deno?: { env: { get(k: string): string | undefined } } };
     const anterior = g.Deno;
-    g.Deno = { env: { get: (k) => (k === "EMAIL_PROVIDER" ? "resend" : undefined) } };
+    g.Deno = { env: { get: (k) => (k === "EMAIL_PROVIDER" ? "ses" : undefined) } };
     try {
-      expect(() => obterProvedor({ doRemetente: "resend" })).toThrow(/resend/);
+      expect(provedorEfetivo("provedor-que-nao-existe")).toBe("ses");
     } finally {
       g.Deno = anterior;
     }

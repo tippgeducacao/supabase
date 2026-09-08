@@ -2,7 +2,7 @@
  * Miolo do descadastro. Fora do `Deno.serve` para ser testável — ver o mesmo padrão
  * em `webhooks-ses-events/handler.ts`.
  */
-import { conferirDescadastro } from "../_shared/resend.ts";
+import { conferirDescadastro } from "../_shared/envioComum.ts";
 
 export const corsHeaders = {
   "Access-Control-Allow-Origin": "*",

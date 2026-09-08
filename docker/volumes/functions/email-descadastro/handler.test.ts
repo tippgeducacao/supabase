@@ -5,7 +5,7 @@
 import { describe, expect, it } from "vitest";
 import { FakeSupabase } from "../../../tests/helpers/fakeSupabase.ts";
 import { tratarDescadastro } from "./handler.ts";
-import { assinarDescadastro } from "../_shared/resend.ts";
+import { assinarDescadastro } from "../_shared/envioComum.ts";
 
 // O módulo lê Deno.env dentro das funções; um stub basta para o HMAC ter chave.
 (globalThis as { Deno?: unknown }).Deno = {
