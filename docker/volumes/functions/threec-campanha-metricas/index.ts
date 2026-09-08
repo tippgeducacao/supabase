@@ -153,49 +153,99 @@ async function handler(req: Request): Promise<Response> {
     if (eGravar) return json({ error: 'falha ao gravar', detail: eGravar.message }, 500)
   }
 
-  // ── causa de desligamento do dia, por campanha ────────────────────────────────
-  // GET /calls exige data COM HORA. Percorre no máximo 40 páginas de 500 (20 mil
-  // chamadas/dia) — acima disso o dado do dia já é representativo o suficiente.
-  const causas = new Map<string, number>()   // "campanha|causa" -> n
-  let pagina = 1, lidas = 0
-  while (pagina <= 40) {
-    const q = new URLSearchParams({
-      api_token: THREEC_TOKEN,
-      start_date: `${hoje} 00:00:00`, end_date: `${hoje} 23:59:59`,
-      per_page: '500', page: String(pagina),
-    })
-    let corpo: { data?: unknown[]; meta?: { pagination?: { total_pages?: number } } } | null = null
-    try {
-      const r = await fetch(`${THREEC_BASE}/calls?${q}`, { headers: { Accept: 'application/json' } })
-      if (!r.ok) { falhas.push(`calls p${pagina}: HTTP ${r.status}`); break }
-      corpo = await r.json()
-    } catch (err) {
-      falhas.push(`calls p${pagina}: ${String(err)}`); break
-    }
-    const rows = (corpo?.data ?? []) as Array<Record<string, unknown>>
-    if (rows.length === 0) break
-    for (const c of rows) {
-      const camp = String(c.campaign_id ?? '')
-      const causa = String(c.readable_hangup_cause_text ?? c.hangup_cause_text ?? 'desconhecida')
-      if (!camp) continue
-      const chave = `${camp}|${causa}`
-      causas.set(chave, (causas.get(chave) ?? 0) + 1)
-      lidas++
-    }
-    const totalPaginas = corpo?.meta?.pagination?.total_pages ?? 1
-    if (pagina >= totalPaginas) break
-    pagina++
-  }
+  // ── desfecho das ligações, por campanha e DIA ─────────────────────────────────
+  // Quatro dimensões da mesma chamada, que respondem coisas diferentes:
+  //   causa  = por que terminou (é onde aparece a operadora barrando a saída)
+  //   status = desfecho macro (falha, caixa postal, finalizada, abandonada)
+  //   qualificacao = o que o AGENTE marcou — bloqueio, sem interesse, mudo…
+  //   amd    = humano × caixa postal
+  // `?dias=N` reprocessa N dias para trás (backfill); sem ele, só o dia de hoje.
+  const diasBackfill = Math.min(Number(url.searchParams.get('dias') ?? '0') || 0, 60)
+  let lidas = 0
+  const diasProcessados: string[] = []
 
-  if (causas.size > 0) {
-    const linhasCausa = [...causas.entries()].map(([chave, n]) => {
-      const [campanha_id, causa] = chave.split('|')
-      return { campanha_id, causa, chamadas: n }
-    })
-    const { error: eCausas } = await supabase.rpc('threec_campanha_causas_gravar', {
-      p_dia: hoje, p_linhas: linhasCausa,
-    })
-    if (eCausas) falhas.push(`causas: ${eCausas.message}`)
+  for (let volta = diasBackfill; volta >= 0; volta--) {
+    const alvoDia = dia(volta)
+    const agregado = new Map<string, {
+      nome: string; chamadas: number; humanos: number; caixa_postal: number
+      falhas: number; abandonadas: number; qualificadas: number; bloqueios: number
+      sem_interesse: number; numero_invalido: number; barrado_operadora: number
+    }>()
+    const desfechos = new Map<string, number>()   // "campanha|dimensao|valor"
+
+    let pagina = 1
+    while (pagina <= 40) {
+      const q = new URLSearchParams({
+        api_token: THREEC_TOKEN,
+        start_date: `${alvoDia} 00:00:00`, end_date: `${alvoDia} 23:59:59`,
+        per_page: '500', page: String(pagina),
+      })
+      let corpo: { data?: unknown[]; meta?: { pagination?: { total_pages?: number } } } | null = null
+      try {
+        const r = await fetch(`${THREEC_BASE}/calls?${q}`, { headers: { Accept: 'application/json' } })
+        if (!r.ok) { falhas.push(`calls ${alvoDia} p${pagina}: HTTP ${r.status}`); break }
+        corpo = await r.json()
+      } catch (err) {
+        falhas.push(`calls ${alvoDia} p${pagina}: ${String(err)}`); break
+      }
+      const rows = (corpo?.data ?? []) as Array<Record<string, unknown>>
+      if (rows.length === 0) break
+
+      for (const c of rows) {
+        const camp = String(c.campaign_id ?? '')
+        if (!camp) continue
+        const causa = String(c.readable_hangup_cause_text ?? c.hangup_cause_text ?? 'desconhecida')
+        const status = String(c.readable_status_text ?? '-')
+        const qual = String(c.qualification ?? '-')
+        const amd = String(c.readable_amd_status_text ?? '-')
+
+        const a = agregado.get(camp) ?? {
+          nome: String(c.campaign ?? ''), chamadas: 0, humanos: 0, caixa_postal: 0,
+          falhas: 0, abandonadas: 0, qualificadas: 0, bloqueios: 0,
+          sem_interesse: 0, numero_invalido: 0, barrado_operadora: 0,
+        }
+        a.chamadas++
+        if (amd === 'Humano') a.humanos++
+        if (amd === 'Caixa postal') a.caixa_postal++
+        if (status === 'Falha') a.falhas++
+        if (status === 'Abandonada') a.abandonadas++
+        if (qual !== '-' && qual !== '') a.qualificadas++
+        if (/bloque/i.test(qual)) a.bloqueios++
+        if (/sem interesse/i.test(qual)) a.sem_interesse++
+        if (/unallocated/i.test(causa)) a.numero_invalido++
+        if (/outgoing calls barred/i.test(causa)) a.barrado_operadora++
+        agregado.set(camp, a)
+
+        for (const [dim, val] of [['causa', causa], ['status', status],
+                                  ['qualificacao', qual], ['amd', amd]] as const) {
+          if (val === '-' || val === '') continue
+          const chave = `${camp}|${dim}|${val}`
+          desfechos.set(chave, (desfechos.get(chave) ?? 0) + 1)
+        }
+        lidas++
+      }
+      const totalPaginas = corpo?.meta?.pagination?.total_pages ?? 1
+      if (pagina >= totalPaginas) break
+      pagina++
+    }
+
+    if (agregado.size > 0) {
+      const pDias = [...agregado.entries()].map(([campanha_id, a]) => ({
+        campanha_id, campanha_nome: a.nome, chamadas: a.chamadas, humanos: a.humanos,
+        caixa_postal: a.caixa_postal, falhas: a.falhas, abandonadas: a.abandonadas,
+        qualificadas: a.qualificadas, bloqueios: a.bloqueios, sem_interesse: a.sem_interesse,
+        numero_invalido: a.numero_invalido, barrado_operadora: a.barrado_operadora,
+      }))
+      const pDesfechos = [...desfechos.entries()].map(([chave, n]) => {
+        const [campanha_id, dimensao, ...resto] = chave.split('|')
+        return { campanha_id, dimensao, valor: resto.join('|'), chamadas: n }
+      })
+      const { error: eDia } = await supabase.rpc('threec_campanha_dia_gravar', {
+        p_dia: alvoDia, p_dias: pDias, p_desfechos: pDesfechos,
+      })
+      if (eDia) falhas.push(`dia ${alvoDia}: ${eDia.message}`)
+      else diasProcessados.push(alvoDia)
+    }
   }
 
   return json({
@@ -203,7 +253,7 @@ async function handler(req: Request): Promise<Response> {
     campanhas: campanhas.length,
     gravadas: linhas.length,
     chamadas_lidas: lidas,
-    causas: causas.size,
+    dias_processados: diasProcessados,
     falhas: falhas.slice(0, 5),
   })
 }
