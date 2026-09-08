@@ -579,8 +579,9 @@ function conferir(doc: DocumentoEmail, o: OpcoesCompilacao, bytes: number): stri
         if (ehImagem && !(b.props.alt ?? "").trim()) semAlt++;
         const precisaHref = ["botao", "link", "imagem-link", "video"].includes(b.tipo);
         const href = (b.props.href ?? "").trim();
-        // "https://" é o placeholder com que o bloco nasce: clicar nele não vai a lugar nenhum.
-        if (precisaHref && (!href || href === "https://" || href === "http://")) linksVazios++;
+        // "https://" nasce no editor; "#" vem de propostas IA sem destino fornecido.
+        // Ambos precisam ser preenchidos antes de enviar a campanha.
+        if (precisaHref && (!href || href === "#" || href === "https://" || href === "http://")) linksVazios++;
       }
     }
   }

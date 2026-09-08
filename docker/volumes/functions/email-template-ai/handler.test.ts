@@ -3,6 +3,7 @@ import { criarHandlerEmailIA, lerCorpoEmailIA, MODELOS_EMAIL_IA, validarPedidoEm
 import { docVazio, type DocumentoEmail } from '../_shared/emailBuilder/types';
 import { validarDocumentoIA, PROMPT_DOCUMENTO_IA } from '../_shared/emailBuilder/ai';
 import { compilarDocumento } from '../_shared/emailBuilder/compile';
+import { SCHEMA_RESULTADO_EMAIL_IA } from '../_shared/emailBuilder/aiSchema';
 
 const USUARIO = '11111111-1111-4111-8111-111111111111';
 const AGENTE = '22222222-2222-4222-8222-222222222222';
@@ -73,7 +74,7 @@ function cenario(opcoes: Opcoes = {}) {
     const resultado = opcoes.resultado === undefined ? { documento: DOCUMENTO, resumo: 'Organizei o convite.' } : opcoes.resultado;
     return String(url).includes('googleapis')
       ? Response.json({ candidates: [{ finishReason: opcoes.truncado ? 'MAX_TOKENS' : 'STOP', content: { parts: [{ text: JSON.stringify(resultado) }] } }] })
-      : Response.json({ stop_reason: opcoes.truncado ? 'max_tokens' : 'tool_use', content: [{ type: 'tool_use', name: 'entregar_template', input: resultado }] });
+      : Response.json({ stop_reason: opcoes.truncado ? 'max_tokens' : 'end_turn', content: [{ type: 'text', text: JSON.stringify(resultado) }] });
   });
   const cliente = { auth: { getUser }, rpc, from } as unknown as DependenciasEmailIA['cliente'];
   const handler = criarHandlerEmailIA({ cliente, buscar: buscar as typeof fetch, validarDocumento: opcoes.contratoReal ? validarDocumentoIA : validar, promptDocumento: opcoes.contratoReal ? PROMPT_DOCUMENTO_IA : 'CONTRATO_EDITAVEL', urlPublica: URL_PUBLICA });
@@ -182,13 +183,21 @@ describe('geração estruturada sem ferramentas externas', () => {
     if (modelo.provider === 'anthropic') {
       expect(body.model).toBe(modelo.id);
       expect(body.thinking).toEqual({ type: 'disabled' });
-      expect(body.tools).toHaveLength(1);
-      expect(body.tools[0].name).toBe('entregar_template');
+      expect(body.tools).toBeUndefined();
+      expect(body.tool_choice).toBeUndefined();
+      expect(body.output_config.format).toEqual({ type: 'json_schema', schema: SCHEMA_RESULTADO_EMAIL_IA });
+      expect(body.system).toContain('O pedido atual define o tema');
+      expect(body.system).toContain('UMA proposta COMPLETA');
+      expect(body.system).not.toContain('PROMPT_PRIVADO');
+      expect(JSON.parse(body.messages[0].content.at(-1).text).referencia_estilo_agente).toEqual({ nome: 'Diretor de Arte', orientacoes: 'PROMPT_PRIVADO' });
       expect(body.messages[0].content[0].source).toEqual({ type: 'base64', media_type: 'image/png', data: PNG });
     } else {
       expect(body.generationConfig.responseMimeType).toBe('application/json');
+      expect(body.generationConfig.responseJsonSchema).toEqual(SCHEMA_RESULTADO_EMAIL_IA);
       expect(body.contents[0].parts[0].inlineData).toEqual({ mimeType: 'image/png', data: PNG });
       expect(body.tools).toBeUndefined();
+      expect(body.systemInstruction.parts[0].text).not.toContain('PROMPT_PRIVADO');
+      expect(JSON.parse(body.contents[0].parts.at(-1).text).referencia_estilo_agente).toEqual({ nome: 'Diretor de Arte', orientacoes: 'PROMPT_PRIVADO' });
     }
     expect(c.consultas.some(v => /sessions|email_templates|storage/.test(v.tabela))).toBe(false);
   });
@@ -219,8 +228,68 @@ describe('geração estruturada sem ferramentas externas', () => {
   it.each([null, { documento: {}, resumo: 'Inválido' }, { documento: DOCUMENTO }, { documento: DOCUMENTO, resumo: '' }])('recusa saída sem documento ou resumo válido', async resultado => {
     expect((await cenario({ resultado }).chamar()).status).toBe(422);
   });
+  it('registra o campo recusado sem revelar conteúdo, prompt ou credenciais', async () => {
+    const aviso = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const c = cenario({ contratoReal: true, resultado: {
+        resumo: 'Resumo privado', documento: { ...DOCUMENTO, linhas: [{ colunas: [{ blocos: [
+          { tipo: 'texto', props: { texto: 'CONTEUDO_PRIVADO' }, estilo: { corTexto: 'VALOR_PRIVADO' } },
+        ] }] }] },
+      } });
+      const resposta = await c.chamar();
+      expect(resposta.status).toBe(422);
+      expect(aviso).toHaveBeenCalledWith('[email-template-ai] proposta recusada', {
+        modelo: 'claude-sonnet-5', codigo: 'INVALID_OUTPUT',
+        campo: 'linhas[0].colunas[0].blocos[0].estilo.corTexto', motivo: 'texto excede 7 caracteres',
+      });
+      const saidas = JSON.stringify(aviso.mock.calls) + await resposta.text();
+      expect(saidas).not.toMatch(/CONTEUDO_PRIVADO|VALOR_PRIVADO|PROMPT_PRIVADO|CHAVE_PRIVADA|Resumo privado/);
+      expect(c.buscar).toHaveBeenCalledTimes(1);
+    } finally { aviso.mockRestore(); }
+  });
+  it.each(MODELOS_EMAIL_IA)('aceita JSON serializado de $nome apenas após validação real', async modelo => {
+    const documento = { ...DOCUMENTO, linhas: [{ colunas: [{ blocos: [
+      { tipo: 'texto', props: { texto: 'Conheça nossas pós-graduações.' } },
+    ] }] }] };
+    const c = cenario({ contratoReal: true, resultado: { resumo: 'Convite', documento: JSON.stringify(documento) } });
+    const resposta = await c.chamar({ ...PEDIDO, modelo_id: modelo.id });
+    expect(resposta.status).toBe(200);
+    const resultado = await resposta.json();
+    expect(typeof resultado.documento).toBe('object');
+    expect(compilarDocumento(resultado.documento).html).toContain('Conheça nossas pós-graduações.');
+    expect(c.buscar).toHaveBeenCalledTimes(1);
+  });
   it.each(MODELOS_EMAIL_IA)('recusa truncamento em $nome', async modelo => {
     expect((await cenario({ truncado: true }).chamar({ ...PEDIDO, modelo_id: modelo.id })).status).toBe(422);
+  });
+  it.each(MODELOS_EMAIL_IA)('recusa JSON nativo malformado de $nome sem repetir a chamada', async modelo => {
+    const c = cenario();
+    c.buscar.mockResolvedValue(Response.json(modelo.provider === 'anthropic'
+      ? { stop_reason: 'end_turn', content: [{ type: 'text', text: '{"documento":' }] }
+      : { candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '{"documento":' }] } }] }));
+    const resposta = await c.chamar({ ...PEDIDO, modelo_id: modelo.id });
+    expect(resposta.status).toBe(422);
+    expect(await resposta.json()).toMatchObject({ code: 'INVALID_OUTPUT' });
+    expect(c.buscar).toHaveBeenCalledTimes(1);
+  });
+  it('aguarda geração longa e cancela antes do timeout do aplicativo sem repetir consumo', async () => {
+    vi.useFakeTimers();
+    try {
+      const c = cenario();
+      c.buscar.mockImplementation((_url, init) => new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new DOMException('Cancelado', 'AbortError')));
+      }));
+      let terminou = false;
+      const pendente = c.chamar().then(r => { terminou = true; return r; });
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(terminou).toBe(false);
+      await vi.advanceTimersByTimeAsync(60_000);
+      const resposta = await pendente;
+      expect(resposta.status).toBe(503);
+      expect(await resposta.json()).toMatchObject({ code: 'PROVIDER_UNAVAILABLE' });
+      expect(c.buscar).toHaveBeenCalledTimes(1);
+      expect(c.rpc.mock.calls.filter(([nome]) => nome === 'email_template_ia_consumir_cota')).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
   });
 });
 

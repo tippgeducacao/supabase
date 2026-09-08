@@ -19,8 +19,17 @@ const FONTES: Record<string, string> = {
   "courier new": "'Courier New', Courier, monospace",
 };
 
+/** Metadados definidos pelo contrato, sem valores gerados ou dados do pedido.
+ * A edge pode diagnosticar uma recusa sem registrar o e-mail nem prompts. */
+export class ErroDocumentoIA extends Error {
+  constructor(public readonly caminho: string, public readonly motivo: string) {
+    super(`Documento da IA inválido em ${caminho}: ${motivo}.`);
+    this.name = "ErroDocumentoIA";
+  }
+}
+
 function erro(caminho: string, motivo: string): never {
-  throw new Error(`Documento da IA inválido em ${caminho}: ${motivo}.`);
+  throw new ErroDocumentoIA(caminho, motivo);
 }
 
 function objeto(valor: unknown, caminho: string): Objeto {
@@ -133,6 +142,9 @@ function estilo(valor: unknown, caminho: string, nivel: "bloco" | "coluna" | "li
  * preenchida pelo servidor: uma variável livre poderia resolver para javascript:. */
 function url(valor: unknown, caminho: string, imagem = false): string {
   const v = texto(valor, caminho, 2048, true);
+  // CTA sem destino informado ainda pode ser desenhado. O compilador sinaliza
+  // esse placeholder para revisão antes do envio; não aceita outros fragmentos.
+  if (!imagem && v === "#") return v;
   if (!imagem && /^\{\{\s*descadastro_url\s*\}\}$/.test(v)) return "{{descadastro_url}}";
   if (temControle(v) || /[\s<>"'`\\{}]/.test(v) || /%(?:0[0-9a-f]|1[0-9a-f]|7f)/i.test(v)) erro(caminho, "URL contém caracteres não permitidos");
   if (!imagem && /^mailto:[a-z0-9.!#$%&*+/=?^_~-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(v)) return v;
@@ -201,6 +213,13 @@ function globais(valor: unknown): GlobaisDoc {
  * IDs não são conteúdo: substituídos por caminhos determinísticos únicos, evitando
  * colisão de seleção do editor e injeção nos seletores CSS do compilador. */
 export function validarDocumentoIA(valor: unknown): DocumentoEmail {
+  // Alguns provedores serializam o documento dentro do envelope. Aceitamos uma
+  // única camada de JSON válido, nunca Markdown, HTML ou extração por heurística.
+  // O objeto decodificado passa pela mesma lista de campos e regras de segurança.
+  if (typeof valor === "string") {
+    if (valor.length > 160000) erro("documento", "conteúdo excede o tamanho permitido");
+    try { valor = JSON.parse(valor); } catch { erro("documento", "JSON malformado"); }
+  }
   const v = objeto(valor, "documento");
   let serializado: string;
   try { serializado = JSON.stringify(v); } catch { erro("documento", "JSON malformado"); }
@@ -282,5 +301,5 @@ Bloco: {"tipo":"texto","nome":"Título","props":{"texto":"Sua próxima conquista
 - separador: props {espessura:1}.
 - espacador: props {altura:24}.
 Estilos de bloco desktop/mobile: corTexto,corFundo (hex); fonte web-safe (Arial, Helvetica, Verdana, Tahoma, Trebuchet MS, Georgia, Times New Roman ou Courier New); tamanhoFonte numérico 10–72; pesoFonte numérico 100–900; alturaLinha numérica 1–3; alinhamento left/center/right/justify; padding {topo,direita,baixo,esquerda} numérico 0–80; borda {largura:0–8,cor:"#...",estilo:"solid"/"dashed"/"dotted"}; raio numérico 0–60; largura/altura "100%", "200px" ou "auto". Não use objetos de CSS livre, expressões, URLs de fundo, classes ou nomes de fonte externos.
-NUNCA produza html, html-dinamico, texto-composto, props.html, cssCustomizado, scripts, tags HTML ou handlers. Formatação vem dos estilos de blocos separados. Links apenas http(s), mailto, tel ou a tag exata {{descadastro_url}}. Não use outras variáveis como destino. Texto pode conter {{contato.primeiro_nome | fallback:"Olá"}} e variáveis existentes fornecidas no contexto.
+NUNCA produza html, html-dinamico, texto-composto, props.html, cssCustomizado, scripts, tags HTML ou handlers. Formatação vem dos estilos de blocos separados. Links apenas http(s), mailto, tel ou a tag exata {{descadastro_url}}. Quando o pedido não fornecer destino para o CTA, use exatamente href:"#" como placeholder editável, que será sinalizado para revisão; nunca invente URL. Não use outras variáveis como destino. Texto pode conter {{contato.primeiro_nome | fallback:"Olá"}} e variáveis existentes fornecidas no contexto.
 Crie composição visual intencional, não uma parede de texto: hero com título forte e fundo de destaque; abertura curta; benefícios em blocos ou colunas; CTA claro com contraste; respiros, separadores e rodapé discreto. Use imagem somente quando houver URL fornecida; sem imagem, hero tipográfico com cor. Evite inventar preços, prazos, provas sociais ou promessas. Preserve informações do pedido/documento atual. Títulos 28–40px e corpo 16–18px; no mobile reduza títulos e padding, mantendo leitura confortável e colunas empilhadas. Inclua um bloco link de rodapé com texto "Descadastrar" e href "{{descadastro_url}}". Retorne o documento COMPLETO editável, não HTML compilado nem instruções para o usuário.`;

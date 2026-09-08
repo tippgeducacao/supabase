@@ -22,6 +22,43 @@ function todosIds(doc: DocumentoEmail): string[] {
 }
 
 describe("documentos de IA seguros para o construtor de e-mails", () => {
+  it("decodifica documento serializado uma vez e mantém a mesma validação e compilação", () => {
+    const entrada = documento();
+    const doc = validarDocumentoIA(JSON.stringify(entrada));
+    expect(doc).toEqual(validarDocumentoIA(entrada));
+    expect(compilarDocumento(doc).html).toContain("Uma nova etapa começa aqui");
+  });
+
+  it("recusa JSON truncado, cercas Markdown e conteúdo extra sem tentar recuperar por heurística", () => {
+    const json = JSON.stringify(documento());
+    for (const entrada of [json.slice(0, -1), json + " texto extra", "```json\n" + json + "\n```", JSON.stringify(json)]) {
+      expect(() => validarDocumentoIA(entrada)).toThrow(/Documento da IA inválido/);
+    }
+  });
+
+  it("não permite contornar regras de HTML, CSS, links ou tamanho serializando o documento", () => {
+    for (const entrada of [
+      documento([{ tipo: "html", props: { html: "<script>alert(1)</script>" } }]),
+      documento(undefined, { cssCustomizado: "body{display:none}" }),
+      documento([{ tipo: "botao", props: { texto: "Abrir", href: "javascript:alert(1)" } }]),
+    ]) expect(() => validarDocumentoIA(JSON.stringify(entrada))).toThrow(/Documento da IA inválido/);
+    expect(() => validarDocumentoIA(" ".repeat(160001))).toThrow(/tamanho permitido/);
+  });
+
+  it("preserva CTA editável sem URL fornecida e avisa sobre o destino pendente", () => {
+    const doc = validarDocumentoIA(documento([
+      { tipo: "botao", props: { texto: "Conheça nossas pós-graduações", href: "#" } },
+      { tipo: "link", props: { texto: "Descadastrar", href: "{{descadastro_url}}" } },
+    ]));
+    const compilado = compilarDocumento(doc, { descadastroUrl: "#" });
+    expect(compilado.html).toContain('href="#"');
+    expect(compilado.avisos).toContain("1 link(s) ainda sem destino — o botão vai sair clicável para lugar nenhum.");
+    for (const href of ["#javascript:alert(1)", "#secao", "//example.com", "javascript:alert(1)"]) {
+      expect(() => validarDocumentoIA(documento([{ tipo: "botao", props: { texto: "Abrir", href } }]))).toThrow(/href/);
+    }
+    expect(() => validarDocumentoIA(documento([{ tipo: "imagem", props: { src: "#", alt: "Imagem" } }]))).toThrow(/src/);
+  });
+
   it("reconstrói um documento visual com os nove blocos nativos e compila HTML de e-mail", () => {
     const doc = validarDocumentoIA(documento([
       { ...blocoTexto, estilo: { tamanhoFonte: 36, pesoFonte: 700, corTexto: "#ffffff", corFundo: "#7633aa", padding: { topo: 32, baixo: 24 } }, estiloMobile: { tamanhoFonte: 28, padding: { direita: 12, esquerda: 12 } } },
