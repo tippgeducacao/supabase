@@ -28,6 +28,7 @@ import {
 import { humanizarTexto } from '../crm-agente-sdr/saida.ts';
 import { limparParaRouter } from '../crm-agente-sdr/historico.ts';
 import { gerarFollowup } from '../crm-agente-sdr/followup.ts';
+import { VERSAO_MEMORIA_HUMANA } from '../crm-agente-sdr/memoriaHumana.ts';
 import { executarFollowupSimulado, executarSimulacao, extrairUso, MAX_CARACTERES_SIMULACAO, validarEntradaSimulacao, type AgenteRouter } from './simulacao.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
@@ -219,7 +220,7 @@ Deno.serve(async (req) => {
     try {
       // Não passar supabase real: a geração recebe um banco bloqueado e telemetria
       // em memória. Nenhuma função da esteira, elegibilidade, lock ou envio é chamada.
-      return json({ ...(await executarFollowupSimulado(entrada, { gerar: gerarFollowup, humanizar: humanizarTexto })), modelo: MODELO_AGENTE });
+      return json({ ...(await executarFollowupSimulado(entrada, { gerar: gerarFollowup, humanizar: humanizarTexto })), modelo: MODELO_AGENTE, memoria_versao: VERSAO_MEMORIA_HUMANA });
     } catch {
       return json({ error: 'falha na simulação de followup; nenhuma ação comercial foi executada' }, 502);
     }
@@ -294,7 +295,7 @@ Deno.serve(async (req) => {
         return resposta;
       },
     });
-    return json({ ...resultado, modelo: MODELO_AGENTE, usar_router: entrada.usar_router, routers });
+    return json({ ...resultado, modelo: MODELO_AGENTE, usar_router: entrada.usar_router, routers, memoria_versao: VERSAO_MEMORIA_HUMANA });
   } catch {
     // Não devolver body cru de falha da API nem histórico/credenciais em logs.
     return json({ error: 'falha na simulação; nenhuma ação comercial foi executada' }, 502);
