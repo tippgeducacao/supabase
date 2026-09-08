@@ -140,6 +140,7 @@ async function processarUma(
   try {
     // Monta o corpo para a crm-whatsapp-send conforme o tipo
     const sendBody: Record<string, unknown> = {
+      mensagem_agendada_id: row.id,
       wa_account_id: row.wa_account_id ?? undefined,
       // Linha web manda no roteamento: a crm-whatsapp-send, ao ver wa_conexao_id, envia
       // pelo provider da linha (Uazapi) e ignora conta Meta/janela/template.

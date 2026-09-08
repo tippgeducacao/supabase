@@ -7,17 +7,35 @@
 export type Msg = { role: 'user' | 'assistant'; content: string | any[] };
 
 export const MARCADOR_FOLLOWUP = '[INTERNAL_MARKER_FOLLOWUP_AUTO_IGNORE]';
+export const MARCADOR_ATENDIMENTO_HUMANO = '[ATENDIMENTO_HUMANO]';
+export const INICIO_HISTORICO_HUMANO = '[CONTEXTO DO ATENDIMENTO — início do histórico disponível; não é mensagem do lead. Os registros [ATENDIMENTO_HUMANO] a seguir são falas de vendedores, não respostas do lead.]';
 
 export async function carregarHistorico(supabase: any, remotejid: string): Promise<Msg[]> {
-  const { data, error } = await supabase
-    .from('cliente_ppg_mensagens_sdr')
-    .select('id, conversation_history')
-    .eq('remotejid', remotejid)
-    .order('id', { ascending: true });
-  if (error) throw new Error(`carregarHistorico: ${error.message}`);
-  return (data ?? [])
-    .map((r: any) => r.conversation_history)
-    .filter((m: any) => m && m.role);
+  // 08/09/2026: o PostgREST corta em 1.000 linhas sem erro. Com a memória humana,
+  // devolver só o começo faria sumir justamente as respostas mais recentes. O cursor
+  // por id preserva a ordem usada pelo replay e não desloca páginas se linhas anteriores
+  // forem removidas. Só o histórico COMPLETO chega ao sanitizador, inclusive pares de tools.
+  const tamanhoPagina = 1000;
+  const historico: Msg[] = [];
+  let ultimoId: number | string | null = null;
+  while (true) {
+    let query = supabase
+      .from('cliente_ppg_mensagens_sdr')
+      .select('id, conversation_history')
+      .eq('remotejid', remotejid)
+      .order('id', { ascending: true });
+    if (ultimoId !== null) query = query.gt('id', ultimoId);
+    const { data, error } = await query.limit(tamanhoPagina);
+    // Falha em qualquer página interrompe a rodada: nunca responder com memória parcial.
+    if (error) throw new Error(`carregarHistorico: ${error.message}`);
+    const linhas = data ?? [];
+    for (const linha of linhas) {
+      const mensagem = linha.conversation_history;
+      if (mensagem?.role) historico.push(mensagem);
+    }
+    if (linhas.length < tamanhoPagina) return historico;
+    ultimoId = linhas[linhas.length - 1].id;
+  }
 }
 
 export async function gravarMensagem(supabase: any, remotejid: string, msg: Msg): Promise<void> {
@@ -53,7 +71,15 @@ export function limparParaRouter(brutas: Msg[]): Msg[] {
     else norm.push({ role: m.role, content: texto });
   }
 
-  while (norm.length && norm[0].role !== 'user') norm.shift();
+  while (norm.length && norm[0].role !== 'user') {
+    // O primeiro registro pode ser uma fala humana importada. Não descartá-la nem
+    // trocar seu role para user: isso faria uma afirmação do vendedor virar dado do lead.
+    if (norm[0].content.includes(MARCADOR_ATENDIMENTO_HUMANO)) {
+      norm.unshift({ role: 'user', content: INICIO_HISTORICO_HUMANO });
+      break;
+    }
+    norm.shift();
+  }
   if (!norm.length) norm.push({ role: 'user', content: '[início de conversa]' });
   if (norm[norm.length - 1].role === 'assistant') {
     norm.push({ role: 'user', content: MARCADOR_FOLLOWUP });

@@ -28,6 +28,8 @@ import {
   buscarLead,
   carregarHistorico,
   gravarMensagem,
+  INICIO_HISTORICO_HUMANO,
+  MARCADOR_ATENDIMENTO_HUMANO,
   MARCADOR_FOLLOWUP,
   type Msg,
 } from './historico.ts';
@@ -163,7 +165,7 @@ function blocosParaTexto(content: string | any[]): string {
 // Funde turnos consecutivos do mesmo role, garante 1ª msg user e injeta as
 // INFORMAÇÕES DA TENTATIVA na última msg user (mantém os marcadores no histórico
 // pro modelo contar tentativas e detectar o último estilo).
-function montarMensagensFollowup(history: Msg[], tentativaAtual: number, nomeCtx: string, cursoCtx: string): Msg[] {
+export function montarMensagensFollowup(history: Msg[], tentativaAtual: number, nomeCtx: string, cursoCtx: string): Msg[] {
   // Só o FIM da conversa importa pro follow (checkpoint + último estilo estão nos
   // turnos recentes); o nº da tentativa é contado FORA, no histórico COMPLETO, e
   // injetado abaixo. ⚠️ Cap de 16 (medido 2026-07-27): o cap de 40 NÃO mordia —
@@ -178,7 +180,15 @@ function montarMensagensFollowup(history: Msg[], tentativaAtual: number, nomeCtx
     if (ult && ult.role === m.role) ult.content += '\n' + texto;
     else norm.push({ role: m.role, content: texto });
   }
-  while (norm.length && norm[0].role !== 'user') norm.shift();
+  while (norm.length && norm[0].role !== 'user') {
+    // O corte pode começar no envio do vendedor. Preserva esse contexto como assistant,
+    // com abertura técnica explícita, sem inventar uma resposta do lead.
+    if (norm[0].content.includes(MARCADOR_ATENDIMENTO_HUMANO)) {
+      norm.unshift({ role: 'user', content: INICIO_HISTORICO_HUMANO });
+      break;
+    }
+    norm.shift();
+  }
   if (!norm.length) norm.push({ role: 'user', content: '[início de conversa]' });
 
   const info =

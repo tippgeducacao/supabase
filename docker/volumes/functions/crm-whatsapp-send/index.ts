@@ -5,6 +5,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { getWaProvider } from "../_shared/waProviders.ts";
 import { telefoneEnviavel, digitosParaEnvio } from "../_shared/telefone.ts";
 import { phoneVariants, canonicalConversationPhone } from "./telefoneConversa.ts";
+import { autorDaMensagemAgendada, confirmarAutoriaAposEco } from "./autoria.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -275,6 +276,14 @@ async function enviarViaConexao(admin: any, p: {
   }
 
   const nowIso = new Date().toISOString();
+  const metadataSaida = {
+    provider: conex.provider,
+    origem: p.origemFinal,
+    ...(p.fluxoId ? { fluxo_id: p.fluxoId } : {}),
+    ...(p.sacV2AutomacaoId ? { sac_v2_automacao_id: p.sacV2AutomacaoId } : {}),
+    enviado_por_id: p.enviadoPorId ?? null,
+    enviado_por_nome: p.enviadoPorNome ?? null,
+  };
   const { error: msgErr } = await admin.from("crm_whatsapp_messages").insert({
     provider: conex.provider,
     wa_conexao_id: p.conexaoId,
@@ -289,15 +298,19 @@ async function enviarViaConexao(admin: any, p: {
     wa_message_id: result.externalId,
     status_entrega: result.ok ? "sent" : "failed",
     erro: result.ok ? null : { provider_response: result.raw },
-    metadata: {
-      provider: conex.provider,
-      ...(p.origemFinal ? { origem: p.origemFinal } : {}),
-      ...(p.fluxoId ? { fluxo_id: p.fluxoId } : {}),
-      ...(p.sacV2AutomacaoId ? { sac_v2_automacao_id: p.sacV2AutomacaoId } : {}),
-      ...(p.enviadoPorId ? { enviado_por_id: p.enviadoPorId, enviado_por_nome: p.enviadoPorNome } : {}),
-    },
+    metadata: metadataSaida,
   });
-  if (msgErr) console.error("[crm-whatsapp-send] insert (conexao) erro:", msgErr.message);
+  if (msgErr) {
+    console.error("[crm-whatsapp-send] insert (conexao) erro:", msgErr.message);
+    // A mensagem já saiu: falha de contexto não pode responder erro de envio e
+    // induzir o atendente/dispatcher a repetir a mensagem para o lead.
+    try {
+      await confirmarAutoriaAposEco(admin, {
+        erro: msgErr, aceito: result.ok, waMessageId: result.externalId,
+        conexaoId: p.conexaoId, metadata: metadataSaida,
+      });
+    } catch { console.error("[crm-whatsapp-send] autoria do eco não sincronizada"); }
+  }
 
   if (!result.ok) {
     // 422 (NUNCA 502/504): o Cloudflare na frente da api. substitui 502/504 da
@@ -341,6 +354,8 @@ Deno.serve(async (req) => {
       // Quem disparou: 'humano' (composer/atendente). Ausente = IA/automação (o
       // espelho trata template à parte). Guardado em metadata.origem p/ colorir o chat.
       origem,
+      // O dispatcher informa só o id; autoria é conferida no registro real abaixo.
+      mensagem_agendada_id,
       // Fluxo (crm_fluxos) que originou o envio. Vai pra metadata.fluxo_id e é o que permite
       // a aba Entregas contar mensagem SEM template (texto/mídia) — que não tem template_name
       // por onde casar. Só o motor do fluxo manda (crm_fluxo_exec_acao).
@@ -459,6 +474,14 @@ Deno.serve(async (req) => {
             if (!origemFinal) origemFinal = "humano";
           }
         } catch { /* token não-usuário (anon/serviço): não é humano */ }
+      }
+      if (!enviadoPorId) {
+        enviadoPorId = await autorDaMensagemAgendada(admin, {
+          serviceRole: authToken === SERVICE_ROLE,
+          mensagemId: mensagem_agendada_id, telefone: to, origem: origemFinal,
+          fluxoId: fluxo_id, automacaoId: sac_v2_automacao_id,
+        });
+        if (enviadoPorId) origemFinal = "humano";
       }
     }
     if (enviadoPorId) {

@@ -4,6 +4,8 @@
 // transcrever no chat com Gemini disputaria o MESMO rate limit do agente — então aqui
 // usamos OpenAI pra isolar a carga. Resultado é cacheado em sac_mensagens.transcricao.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
+import { acessoWorkerAutorizado, processarHistoricoSdr } from "./historicoSdr.ts";
+import { codigoErroSeguro, transcreverAudio } from "./transcricao.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -23,28 +25,39 @@ function json(data: unknown, status = 200) {
   });
 }
 
-/** Extensão de arquivo a partir do mime (whisper exige nome com extensão reconhecível). */
-function extDoMime(mime: string): string {
-  const m = (mime || "").toLowerCase();
-  if (m.includes("ogg") || m.includes("opus")) return "ogg";
-  if (m.includes("mpeg") || m.includes("mp3")) return "mp3";
-  if (m.includes("mp4") || m.includes("m4a") || m.includes("aac")) return "m4a";
-  if (m.includes("wav")) return "wav";
-  if (m.includes("webm")) return "webm";
-  return "ogg";
-}
-
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  if (req.method !== "POST") return json({ error: "método não permitido" }, 405);
+
+  const admin = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
+  const transcrever = (url: string, mime: string | null) => transcreverAudio(url, mime, {
+    chave: OPENAI_KEY, modelo: MODELO,
+  });
+
+  if (new URL(req.url).searchParams.get("mode") === "historico-sdr") {
+    try {
+      // O service_role do cron pode diferir do container no self-hosted. O segredo
+      // compartilhado só é lido no servidor; JWT de atendente não autoriza o worker.
+      const { data: cfg, error: cfgErr } = await admin.from("crm_agente_sdr_config")
+        .select("followup_secret").eq("id", 1).maybeSingle();
+      if (cfgErr) return json({ error: "configuracao_indisponivel" }, 500);
+      if (!acessoWorkerAutorizado(req.method, req.headers.get("x-sdr-historico-key"), cfg?.followup_secret)) {
+        return json({ error: "não autorizado" }, 401);
+      }
+      const resultado = await processarHistoricoSdr({
+        rpc: async (nome, parametros) => await admin.rpc(nome, parametros),
+        transcrever,
+      });
+      return json({ ok: true, ...resultado });
+    } catch (erro) {
+      return json({ error: codigoErroSeguro(erro) }, 500);
+    }
+  }
 
   try {
-    if (!OPENAI_KEY) return json({ error: "OPENAI key não configurada" }, 500);
-
     const body = await req.json().catch(() => ({}));
     const mensagemId = String(body?.mensagem_id ?? "").trim();
     if (!mensagemId) return json({ error: "mensagem_id obrigatório" }, 400);
-
-    const admin = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 
     // Só atendente logado transcreve (não anon). O front chama via invoke (manda o JWT).
     const authToken = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
@@ -72,33 +85,19 @@ Deno.serve(async (req) => {
     const audioUrl = audio?.url ?? audio?.url_storage;
     if (!audioUrl) return json({ error: "mensagem sem áudio" }, 400);
 
-    // Baixa o áudio e manda pro OpenAI (multipart).
-    const audioRes = await fetch(audioUrl);
-    // 422 (nunca 502/504): o Cloudflare na frente da api. troca 502/504 da origem
-    // pela página dele sem headers CORS → o navegador vê "Failed to send a request".
-    if (!audioRes.ok) return json({ error: `download do áudio falhou (HTTP ${audioRes.status})` }, 422);
-    const mime = audio?.mime_type ?? audioRes.headers.get("content-type") ?? "audio/ogg";
-    const blob = await audioRes.blob();
-
-    const form = new FormData();
-    form.append("file", blob, `audio.${extDoMime(mime)}`);
-    form.append("model", MODELO);
-    form.append("language", "pt");
-
-    const oa = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${OPENAI_KEY}` },
-      body: form,
-    });
-    const oaJson = await oa.json().catch(() => ({}));
-    if (!oa.ok) {
-      return json({ error: `OpenAI HTTP ${oa.status}: ${oaJson?.error?.message ?? "falha"}` }, 422);
+    let transcricao: string;
+    try {
+      transcricao = await transcrever(String(audioUrl), audio?.mime_type ?? null);
+    } catch (erro) {
+      const codigo = codigoErroSeguro(erro);
+      // O botão reconhece transcrição vazia como ausência de fala, sem toast de erro.
+      return json({ error: codigo === "TRANSCRICAO_VAZIA" ? "transcrição vazia" : codigo }, 422);
     }
-    const transcricao = String(oaJson?.text ?? "").trim();
-    if (!transcricao) return json({ error: "transcrição vazia" }, 422);
 
-    // Cacheia.
-    await admin.from("sac_mensagens").update({ transcricao }).eq("id", mensagemId);
+    // O trigger propaga a transcrição ao CRM e à memória do SDR. Não devolvemos
+    // sucesso se o banco não salvou: o operador precisa poder tentar novamente.
+    const { error: salvarErr } = await admin.from("sac_mensagens").update({ transcricao }).eq("id", mensagemId);
+    if (salvarErr) return json({ error: "falha ao salvar transcrição" }, 500);
 
     return json({ transcricao, cached: false });
   } catch (e) {
