@@ -23,6 +23,7 @@
 import { FOLLOWUP_SYSTEM } from './prompts-followup.ts';
 import { chamarAnthropic, MODELO_AGENTE } from './agente.ts';
 import { extrairPrimeiroNome, montarContextoTemporal } from './contexto.ts';
+import { INSTRUCAO_MEMORIA_HUMANA } from './memoriaHumana.ts';
 import {
   atualizarLead,
   buscarLead,
@@ -236,7 +237,9 @@ const RE_RETENCAO = /(te cham\w*|te avis\w*)[^.?!]{0,40}pr[óo]xima turma/i;
 
 function ehMensagemRealDoLead(m: Msg): boolean {
   if (m.role !== 'user') return false;
-  if (Array.isArray(m.content)) return false;            // tool_result, não é fala do lead
+  // Entradas com arquivo + legenda agora são um único turno de blocos text.
+  // Só resultados de tools (inclusive misturados com texto) ficam fora da autoria.
+  if (Array.isArray(m.content) && !m.content.every((bloco) => bloco?.type === 'text')) return false;
   const t = blocosParaTexto(m.content);
   return Boolean(t) && !t.includes(MARCADOR_FOLLOWUP);   // marcador de follow não é fala do lead
 }
@@ -270,7 +273,7 @@ function parseResposta(resp: any): { message: string; final_answer: string } {
 }
 
 // ── geração da mensagem de follow via Claude ────────────────────────────────
-async function gerarFollowup(
+export async function gerarFollowup(
   supabase: any,
   lead: any,
   stage: number,
@@ -282,11 +285,11 @@ async function gerarFollowup(
 
   const nome = extrairPrimeiroNome(lead.nome);
   const curso = (lead.curso_interesse_original ?? '').trim();
-  // Fallback explícito quando o lead não tem nome/curso: o prompt instrui a OMITIR
-  // (em vez de deixar "e aí ," ou "a pós em ." com o placeholder vazio). Os dados
+  // Cadastro vazio pode ter resposta explícita no histórico humano. Sem essa resposta,
+  // a instrução de memória manda OMITIR o dado (sem "e aí ," ou "a pós em ."). Os dados
   // vão no bloco INFORMAÇÕES DA TENTATIVA (última mensagem) — o system fica ESTÁTICO.
-  const nomeCtx = nome || '(não informado — não use nome)';
-  const cursoCtx = curso || '(não informado — fale "a pós" sem nomear o curso)';
+  const nomeCtx = nome || '(ausente no cadastro; use apenas autoidentificação explícita do lead no histórico)';
+  const cursoCtx = curso || '(ausente no cadastro; use apenas curso explicitamente escolhido pelo lead no histórico)';
   const contextoTemporal = montarContextoTemporal();
   const messages = montarMensagensFollowup(history, tentativaAtual, nomeCtx, cursoCtx);
 
@@ -302,7 +305,8 @@ async function gerarFollowup(
     // mantém o TTL de 5 min sempre quente, então quase toda chamada lê a 0,1x.
     // O temporal (muda a cada minuto) fica FORA do prefixo, depois do breakpoint.
     system: [
-      { type: 'text', text: FOLLOWUP_SYSTEM, cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: FOLLOWUP_SYSTEM },
+      { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA, cache_control: { type: 'ephemeral' } },
       { type: 'text', text: contextoTemporal },
     ],
     messages,

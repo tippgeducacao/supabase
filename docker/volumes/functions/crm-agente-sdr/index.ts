@@ -23,6 +23,7 @@ import { atualizarAgenteComRatchet, atualizarLead, buscarLead, carregarHistorico
 import { carregarTools, chamarAgentePrincipal, chamarRouter } from './agente.ts';
 import { type CtxConversa, executarTool, montarToolResults } from './tools.ts';
 import { prepararMensagem } from './midia.ts';
+import { persistirEntradasDoLote, registrarEntrada } from './historicoEntradaPausa.ts';
 import { conversaTexto, enviarResposta, horariosInventados, humanizarTexto, removerRaciocinioVazado } from './saida.ts';
 import { contaDoLead } from './conta.ts';
 import { rodarEsteiraFollowup } from './followup.ts';
@@ -214,6 +215,14 @@ async function toolsDaVez(agenteEfetivo: string, ehCampanha: boolean): Promise<a
 
 async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): Promise<void> {
   const inicioRodada = Date.now();
+  // 08/09/2026: a pausa pode ter capturado parte do lote antes da drenagem.
+  // Essas falas já são contexto; despausar não autoriza respondê-las por replay.
+  itens = await persistirEntradasDoLote(supabase, remotejid, itens);
+  if (!itens.length) {
+    tel.registrar('envio_abortado_pausa', { onde: 'historico_entrada', motivo: 'lote sem entrada ativa' });
+    return;
+  }
+  const conteudo = itens.map((item: any) => item.mensagem).filter(Boolean).join('\n');
   tel.registrar('rodada_inicio', {
     mensagens: itens.map((i: any) => resumir(i.mensagem, 300)),
     arquivos: itens.filter((i: any) => i.arquivo).length,
@@ -257,13 +266,6 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     template_5_dia: false, template_6_dia: false, template_7_dia: false,
     template_followup_em: null,
   });
-
-  // Arquivos analisados viram mensagem própria; o texto acumulado vira UMA mensagem.
-  for (const item of itens) {
-    if (item.arquivo) await gravarMensagem(supabase, remotejid, { role: 'user', content: item.arquivo });
-  }
-  const conteudo = itens.map((i: any) => i.mensagem).filter(Boolean).join('\n');
-  if (conteudo) await gravarMensagem(supabase, remotejid, { role: 'user', content: conteudo });
 
   // Contexto do lead + temporal (mesma montagem do node "normalizador").
   const formacaoNormalizada = encontrarFormacao(lead?.formacao_academica ?? '');
@@ -747,8 +749,9 @@ async function processarInbound(payload: any): Promise<void> {
         // Pausou durante o debounce (45s)? Não gera nem responde esta leva — o lead
         // fica registrado no histórico mas a IA não fala (defesa em profundidade barata).
         if (await iaPausada(remotejid)) {
+          await persistirEntradasDoLote(supabase, remotejid, itens, true);
           criarTelemetria(supabase, remotejid).registrar('envio_abortado_pausa', {
-            onde: 'pos_debounce', mensagens_descartadas: itens.length,
+            onde: 'pos_debounce', mensagens_preservadas: itens.length,
           });
           break;
         }
@@ -762,6 +765,13 @@ async function processarInbound(payload: any): Promise<void> {
       await lockSoltar(remotejid);
     }
   } catch (e) {
+    // Uma falha ao baixar/transcrever pode ocorrer depois de o vendedor pausar.
+    // Preserva a origem (áudio pendente entra na fila) sem chamar o modelo novamente.
+    try {
+      if (await iaPausada(remotejid)) {
+        await registrarEntrada(supabase, remotejid, { msg_id: payload.id }, { pausaObservada: true });
+      }
+    } catch { console.error('[crm-agente-sdr] não foi possível preservar entrada durante pausa'); }
     console.error(`[crm-agente-sdr] erro processando ${remotejid}:`, e);
     (telAtual ?? telPrep).registrar(
       'erro',
@@ -880,6 +890,22 @@ Deno.serve(async (req) => {
   }
 
   let lead = await buscarLead(supabase, payload.remotejid);
+  // O CRM captura a chegada durante pausa; esta conferência cobre a pausa aplicada
+  // entre a persistência no webhook e o relay. Também barra replay após despausar.
+  // Campanha direta pode ainda criar o lead abaixo. Não rejeitar sua primeira
+  // mensagem só porque o CRM existe antes do cadastro SDR.
+  if (lead) {
+    try {
+      const memoria = await registrarEntrada(supabase, payload.remotejid, { msg_id: payload.id }, {
+        pausaObservada: lead.pausa_ia === true,
+      });
+      if (memoria.estado === 'contato_invalido') return json({ ok: true, skip: 'origem_contato_invalido' });
+      if (memoria.estado === 'pausa') return json({ ok: true, skip: 'mensagem_recebida_em_pausa' });
+      if (memoria.remotejid) payload.remotejid = memoria.remotejid;
+    } catch {
+      return json({ error: 'historico_entrada_indisponivel' }, 503);
+    }
+  }
   if (lead?.modo_recontato !== true) {
     if (payload.agente_ia_persona === 'recontato') return json({ ok: true, skip: 'fora_do_modo_recontato' });
     if (ehCampanhaDireta) {

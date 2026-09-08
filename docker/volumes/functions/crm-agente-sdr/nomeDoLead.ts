@@ -15,12 +15,17 @@
 export function notaDoNome(nome: string | null | undefined): string {
   const limpo = String(nome ?? '').trim();
   if (!limpo) {
-    return '\n\n**⛔ VOCÊ NÃO SABE O NOME DESTA PESSOA.**\n'
-      + 'Não escreva nome nenhum — nem chute, nem "amigo", nem "colega". Fale sem vocativo.';
+    return '\n\n**NOME DO LEAD AINDA NÃO INFORMADO NO CADASTRO.**\n'
+      + 'Isso não apaga uma resposta no histórico: use apenas o primeiro nome da autoidentificação '
+      + 'explícita mais recente do próprio lead, se houver. Nome do vendedor, de terceiro ou citado '
+      + 'só pelo atendente não identifica o lead. Sem essa autoidentificação, fale sem vocativo: '
+      + 'não invente nome — nem chute, nem "amigo", nem "colega".';
   }
   const primeiro = limpo.split(/\s+/)[0];
-  return `\n\n**A PESSOA COM QUEM VOCÊ ESTÁ FALANDO SE CHAMA: ${primeiro}**\n`
-    + `É o ÚNICO nome que existe nesta conversa. Se for usar nome, use "${primeiro}" — mais nenhum.\n`
+  return `\n\n**NOME DO LEAD NO CADASTRO: ${primeiro}**\n`
+    + `Se for usar nome, use "${primeiro}", salvo autoidentificação ou correção explícita mais recente `
+    + 'do próprio lead no histórico; nesse caso, use o primeiro nome que ele informou. '
+    + 'Não substitua pelo nome do vendedor ou de terceiros.\n'
     + '⛔ Na dúvida, NÃO use nome: falar sem nome é neutro, falar o nome errado é o erro mais '
     + 'visível que existe. A pessoa sabe o próprio nome e percebe na hora.';
 }

@@ -4,6 +4,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { PROMPT_ROUTER } from './prompts.ts';
 import type { Msg } from './historico.ts';
+import { INSTRUCAO_MEMORIA_HUMANA } from './memoriaHumana.ts';
 
 const ANTHROPIC_KEY = Deno.env.get('AGENTE_SDR_ANTHROPIC_KEY') ?? Deno.env.get('ANTHROPIC_API_KEY') ?? '';
 // Override por env se um dia mudar. ⚠️ Sonnet 5: budget_tokens e temperature≠default
@@ -36,14 +37,22 @@ export async function chamarAnthropic(body: Record<string, unknown>, extraHeader
 // ── Router: decide validação × qualificador (tool forçada, sem thinking) ─────
 // thinking disabled EXPLÍCITO: no Sonnet 5, omitir liga o adaptativo — o router quer
 // resposta imediata com tool forçada, não raciocínio.
-export async function chamarRouter(historicoLimpo: Msg[]): Promise<'agente_validacao' | 'agente_qualificador'> {
+export type MetadadosRespostaRouter = { model?: string; usage?: Record<string, unknown> };
+
+export async function chamarRouter(
+  historicoLimpo: Msg[],
+  aoResponder?: (metadados: MetadadosRespostaRouter) => void,
+): Promise<'agente_validacao' | 'agente_qualificador'> {
   const resp = await chamarAnthropic({
     model: MODELO_AGENTE,
     max_tokens: 512,
     thinking: { type: 'disabled' },
     // PROMPT_ROUTER é estático → prefixo (tool do router + system) COMPARTILHADO entre
     // TODOS os leads: todo inbound roteado paga 0,1x nessa parte.
-    system: [{ type: 'text', text: PROMPT_ROUTER, cache_control: { type: 'ephemeral' } }],
+    system: [
+      { type: 'text', text: PROMPT_ROUTER },
+      { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA, cache_control: { type: 'ephemeral' } },
+    ],
     messages: historicoLimpo,
     tools: [{
       name: 'router_output',
@@ -57,6 +66,9 @@ export async function chamarRouter(historicoLimpo: Msg[]): Promise<'agente_valid
     }],
     tool_choice: { type: 'tool', name: 'router_output' },
   }, { 'anthropic-beta': 'structured-outputs-2025-11-13' });
+
+  // O harness observa modelo/uso sem receber conteúdo ou pensamento do router.
+  aoResponder?.({ model: resp.model, usage: resp.usage });
 
   const bloco = (resp.content ?? []).find((b: any) => b.type === 'tool_use');
   const agente = bloco?.input?.agent;
@@ -84,7 +96,8 @@ export async function chamarAgentePrincipal(opts: {
   tools: any[];
 }): Promise<any> {
   const system: any[] = [
-    { type: 'text', text: opts.promptAgente, cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: opts.promptAgente },
+    { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA, cache_control: { type: 'ephemeral' } },
   ];
 
   const tools = opts.tools.length

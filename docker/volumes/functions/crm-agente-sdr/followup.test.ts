@@ -5,8 +5,9 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('./agente.ts', () => ({ chamarAnthropic: vi.fn(), MODELO_AGENTE: 'modelo-teste' }));
 vi.mock('./saida.ts', () => ({ enviarResposta: vi.fn() }));
 
-import { montarMensagensFollowup } from './followup';
+import { montarMensagensFollowup, retencaoPendente } from './followup';
 import { INICIO_HISTORICO_HUMANO, type Msg } from './historico';
+import { mensagemPreparada } from './historicoEntradaPausa';
 
 describe('memória humana na janela de contexto do follow-up', () => {
   it('preserva a fala humana que inicia os últimos 16 turnos, com autoria e sem ampliar a janela', () => {
@@ -34,5 +35,21 @@ describe('memória humana na janela de contexto do follow-up', () => {
     expect(mensagens[1]).toEqual(mensagem);
     expect(mensagens[2].role).toBe('user');
     expect(mensagens[2].content).toContain('INFORMAÇÕES DA TENTATIVA DE FOLLOW-UP');
+  });
+});
+
+describe('resposta com mídia após a oferta de retenção', () => {
+  const retencao: Msg = { role: 'assistant', content: 'quer que eu te chame quando abrir a próxima turma?' };
+
+  it('reconhece arquivo e legenda preparados como uma resposta real do lead', () => {
+    const resposta = mensagemPreparada({ arquivo: 'Análise do arquivo', mensagem: 'Sim, pode me avisar.' })!;
+    expect(retencaoPendente([retencao, resposta])).toBe(false);
+  });
+
+  it.each([
+    [{ type: 'tool_result', tool_use_id: 'tool-sintetica', content: 'resultado' }],
+    [{ type: 'tool_result', tool_use_id: 'tool-sintetica', content: 'resultado' }, { type: 'text', text: 'contexto técnico' }],
+  ])('não transforma retorno de ferramenta em resposta do lead: %j', (content) => {
+    expect(retencaoPendente([retencao, { role: 'user', content }])).toBe(true);
   });
 });

@@ -198,19 +198,19 @@ describe('o nome repetido a cada turno', () => {
   // Flávia virou "vitória" (21/08/2026).
   it('manda usar só o primeiro nome do lead', () => {
     const n = notaDoNome('Flávia Radaelli Corá');
-    expect(n).toContain('SE CHAMA: Flávia');
+    expect(n).toContain('NOME DO LEAD NO CADASTRO: Flávia');
     expect(n).not.toContain('Radaelli');
     expect(n).toContain('Na dúvida, NÃO use nome');
   });
 
   it('sem nome, proíbe chutar em vez de ficar em silêncio', () => {
     const n = notaDoNome('');
-    expect(n).toContain('NÃO SABE O NOME');
+    expect(n).toContain('NOME DO LEAD AINDA NÃO INFORMADO NO CADASTRO');
     expect(n).toContain('nem chute');
   });
 
   it('trata nulo como ausência de nome', () => {
-    expect(notaDoNome(null)).toContain('NÃO SABE O NOME');
-    expect(notaDoNome(undefined)).toContain('NÃO SABE O NOME');
+    expect(notaDoNome(null)).toContain('NOME DO LEAD AINDA NÃO INFORMADO NO CADASTRO');
+    expect(notaDoNome(undefined)).toContain('NOME DO LEAD AINDA NÃO INFORMADO NO CADASTRO');
   });
 });

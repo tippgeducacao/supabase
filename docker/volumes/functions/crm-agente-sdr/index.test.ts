@@ -1,0 +1,149 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const fronteiras = vi.hoisted(() => ({
+  from: vi.fn(), rpc: vi.fn(), buscarLead: vi.fn(), criarLead: vi.fn(), atualizarLead: vi.fn(),
+  prepararMensagem: vi.fn(), chamarPrincipal: vi.fn(), chamarRouter: vi.fn(), enviar: vi.fn(),
+  registrar: vi.fn(), bufferInserir: vi.fn(), buffer: [] as { id: number; payload: Record<string, unknown> }[],
+  pausaNoDebounce: false,
+}));
+vi.mock('https://esm.sh/@supabase/supabase-js@2.50.3', () => ({
+  createClient: () => ({ from: fronteiras.from, rpc: fronteiras.rpc }),
+}));
+vi.mock('./historico.ts', async (original) => ({
+  ...await original<typeof import('./historico')>(),
+  buscarLead: fronteiras.buscarLead, criarLead: fronteiras.criarLead, atualizarLead: fronteiras.atualizarLead,
+}));
+vi.mock('./agente.ts', () => ({
+  carregarTools: vi.fn(), chamarAgentePrincipal: fronteiras.chamarPrincipal, chamarRouter: fronteiras.chamarRouter,
+}));
+vi.mock('./tools.ts', () => ({ executarTool: vi.fn(), montarToolResults: vi.fn() }));
+vi.mock('./midia.ts', () => ({ prepararMensagem: fronteiras.prepararMensagem }));
+vi.mock('./saida.ts', () => ({
+  enviarResposta: fronteiras.enviar, conversaTexto: vi.fn(), horariosInventados: vi.fn(),
+  humanizarTexto: vi.fn(), removerRaciocinioVazado: vi.fn(),
+}));
+vi.mock('./followup.ts', () => ({ rodarEsteiraFollowup: vi.fn() }));
+vi.mock('./followup-template.ts', () => ({ rodarEsteiraFollowupTemplate: vi.fn() }));
+vi.mock('./eventos.ts', () => ({
+  criarTelemetria: () => ({ rodadaId: 'rodada-sintetica', registrar: fronteiras.registrar }),
+  resumir: (valor: unknown) => valor,
+}));
+
+let handler: (req: Request) => Promise<Response>;
+const leadAtivo = { remotejid: '5511999990001@s.whatsapp.net', iniciar_atendimento: true, pausa_ia: false };
+const payload = {
+  direcao: 'inbound', from_me: false, telefone: '5511999990001', remotejid: leadAtivo.remotejid,
+  id: 'wamid.SINTETICO.PAUSA', conteudo: 'Sou veterinária formada.', tipo: 'text',
+};
+
+async function chamar(extra: Record<string, unknown> = {}) {
+  return await handler(new Request('https://edge.invalid/crm-agente-sdr', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...payload, ...extra }),
+  }));
+}
+function semResposta() {
+  expect(fronteiras.chamarPrincipal).not.toHaveBeenCalled();
+  expect(fronteiras.chamarRouter).not.toHaveBeenCalled();
+  expect(fronteiras.enviar).not.toHaveBeenCalled();
+  expect(fronteiras.atualizarLead).not.toHaveBeenCalled();
+}
+
+beforeAll(async () => {
+  vi.stubGlobal('Deno', {
+    env: { get: (chave: string) => chave === 'SUPABASE_URL' ? 'https://supabase.invalid' : '' },
+    serve: (fn: typeof handler) => { handler = fn; },
+  });
+  vi.stubGlobal('fetch', vi.fn(() => { throw new Error('Rede não autorizada neste teste'); }));
+  await import('./index');
+});
+afterAll(() => vi.unstubAllGlobals());
+beforeEach(() => {
+  vi.resetAllMocks();
+  fronteiras.buffer = [];
+  fronteiras.pausaNoDebounce = false;
+  fronteiras.buscarLead.mockResolvedValue({ ...leadAtivo });
+  fronteiras.prepararMensagem.mockResolvedValue({ mensagem: payload.conteudo });
+  fronteiras.rpc.mockImplementation(async (nome: string) => {
+    if (nome === 'crm_sdr_registrar_entrada') return { data: { estado: 'ativa', gravada: false }, error: null };
+    if (nome === 'crm_e_aluno_telefone') return { data: false, error: null };
+    if (nome === 'crm_agente_sdr_lock_claim') return { data: false, error: null };
+    throw new Error(`RPC inesperada: ${nome}`);
+  });
+  fronteiras.from.mockImplementation((tabela: string) => {
+    if (tabela === 'crm_agente_sdr_config') return {
+      select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { teste_telefones: [] }, error: null }) }) }),
+    };
+    if (tabela === 'crm_pipeline_settings') return {
+      select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { agente_sdr_delay_segundos: 0 }, error: null }) }) }),
+    };
+    if (tabela === 'cliente_ppg_leads_sdr') return {
+      select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { pausa_ia: fronteiras.pausaNoDebounce }, error: null }) }) }),
+    };
+    if (tabela === 'crm_agente_sdr_buffer') return {
+      insert: fronteiras.bufferInserir.mockImplementation(async (linha: { payload: Record<string, unknown> }) => {
+        fronteiras.buffer.push({ id: 1, payload: linha.payload });
+        return { error: null };
+      }),
+      select: () => ({ eq: () => ({ order: async () => ({ data: [...fronteiras.buffer], error: null }) }) }),
+      delete: () => ({ in: async () => { fronteiras.buffer = []; return { error: null }; } }),
+    };
+    if (tabela === 'crm_agente_sdr_lock') return { delete: () => ({ eq: async () => ({ error: null }) }) };
+    throw new Error(`Tabela inesperada: ${tabela}`);
+  });
+});
+
+describe('entrada HTTP: memória da pausa antes de mídia, buffer e LLM', () => {
+  it.each([true, false])('barra mensagem recebida em pausa, mesmo após despausar: pausa atual=%s', async (pausaAtual) => {
+    fronteiras.buscarLead.mockResolvedValue({ ...leadAtivo, pausa_ia: pausaAtual });
+    fronteiras.rpc.mockResolvedValue({ data: { estado: 'pausa', gravada: true }, error: null });
+    const resposta = await chamar();
+    expect(resposta.status).toBe(200);
+    expect(await resposta.json()).toEqual({ ok: true, skip: 'mensagem_recebida_em_pausa' });
+    expect(fronteiras.rpc).toHaveBeenCalledExactlyOnceWith('crm_sdr_registrar_entrada', {
+      p_wa_message_id: payload.id, p_remotejid: payload.remotejid, p_mensagem: null, p_pausa_observada: pausaAtual,
+    });
+    expect(fronteiras.prepararMensagem).not.toHaveBeenCalled();
+    expect(fronteiras.bufferInserir).not.toHaveBeenCalled();
+    semResposta();
+  });
+
+  it('cria lead novo da campanha antes de exigir identidade SDR da primeira mensagem', async () => {
+    fronteiras.buscarLead.mockResolvedValueOnce(null).mockResolvedValue({ ...leadAtivo });
+    const resposta = await chamar({ agente_ia_persona: 'campanha_direta' });
+    expect(resposta.status).toBe(200);
+    expect(fronteiras.criarLead).toHaveBeenCalledExactlyOnceWith(expect.anything(), payload.remotejid);
+    expect(fronteiras.rpc.mock.calls.some(([nome]) => nome === 'crm_sdr_registrar_entrada')).toBe(false);
+    expect(fronteiras.prepararMensagem).toHaveBeenCalledOnce();
+    expect(fronteiras.bufferInserir).toHaveBeenCalledOnce();
+    semResposta(); // outro worker segura o lock: o teste para antes da rodada.
+  });
+
+  it('preserva o lote drenado quando a pausa é aplicada durante o debounce', async () => {
+    fronteiras.pausaNoDebounce = true;
+    fronteiras.rpc.mockImplementation(async (nome: string, parametros: Record<string, unknown>) => {
+      if (nome === 'crm_sdr_registrar_entrada') return {
+        data: { estado: parametros.p_pausa_observada ? 'pausa' : 'ativa', gravada: Boolean(parametros.p_mensagem) }, error: null,
+      };
+      if (nome === 'crm_e_aluno_telefone') return { data: false, error: null };
+      if (nome === 'crm_agente_sdr_lock_claim') return { data: true, error: null };
+      throw new Error(`RPC inesperada: ${nome}`);
+    });
+    expect((await chamar()).status).toBe(200);
+    expect(fronteiras.rpc).toHaveBeenCalledWith('crm_sdr_registrar_entrada', {
+      p_wa_message_id: payload.id, p_remotejid: payload.remotejid,
+      p_mensagem: { role: 'user', content: payload.conteudo }, p_pausa_observada: true,
+    });
+    expect(fronteiras.registrar).toHaveBeenCalledWith('envio_abortado_pausa', { onde: 'pos_debounce', mensagens_preservadas: 1 });
+    expect(fronteiras.buffer).toEqual([]);
+    semResposta();
+  });
+
+  it('falha fechada antes da mídia se a memória não puder confirmar a origem', async () => {
+    fronteiras.rpc.mockResolvedValue({ data: null, error: { message: 'RPC sintética indisponível' } });
+    const resposta = await chamar();
+    expect(resposta.status).toBe(503);
+    expect(await resposta.json()).toEqual({ error: 'historico_entrada_indisponivel' });
+    expect(fronteiras.prepararMensagem).not.toHaveBeenCalled();
+    semResposta();
+  });
+});

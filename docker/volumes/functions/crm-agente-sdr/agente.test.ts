@@ -1,0 +1,174 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { limparParaRouter, sanitizarHistorico, type Msg } from './historico';
+import { montarContextoTemporal, notaDoNome } from './contexto';
+import { INSTRUCAO_MEMORIA_HUMANA, MARCADOR_MENSAGEM_LEAD_PAUSA } from './memoriaHumana';
+import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO, PROMPT_ROUTER } from './prompts';
+import { AGENTE_CAMPANHA_DIRETA } from './prompts-campanha-direta';
+import { AGENTE_RECONTATO } from './prompts-recontato';
+import { FOLLOWUP_SYSTEM } from './prompts-followup';
+
+// Exercita o request HTTP real das três rotas, com o transporte como única fronteira
+// de IA simulada. Nenhuma mensagem, tool, consulta ou escrita externa é executada.
+vi.mock('./saida.ts', () => ({ enviarResposta: vi.fn() }));
+
+const transporte = vi.fn();
+let chamarRouter: typeof import('./agente').chamarRouter;
+let chamarAgentePrincipal: typeof import('./agente').chamarAgentePrincipal;
+let gerarFollowup: typeof import('./followup').gerarFollowup;
+
+type Pedido = {
+  system: { type: string; text: string; cache_control?: { type: string } }[];
+  messages: Msg[];
+  thinking: { type: string };
+  tool_choice?: { type: string; name: string };
+};
+
+const memoria: Msg[] = [
+  { role: 'assistant', content: '[ATENDIMENTO_HUMANO] Letícia · 2026-09-08 18:00 UTC\nVocê já concluiu Medicina Veterinária?' },
+  { role: 'user', content: `${MARCADOR_MENSAGEM_LEAD_PAUSA} 2026-09-08 18:01 UTC\nMeu nome é Ana. Concluí em 2022 e trabalho com aves.` },
+  { role: 'assistant', content: '[ATENDIMENTO_HUMANO] Letícia · 2026-09-08 18:02 UTC\nDocumento enviado: cronograma.pdf' },
+  { role: 'user', content: 'Pode continuar por aqui.' },
+];
+
+function ultimoPedido(): Pedido {
+  const [, opts] = transporte.mock.calls.at(-1) as [string, RequestInit];
+  return JSON.parse(String(opts.body));
+}
+
+beforeAll(async () => {
+  vi.stubGlobal('Deno', { env: { get: (chave: string) => chave === 'AGENTE_SDR_MODEL' ? 'modelo-sintetico' : '' } });
+  vi.stubGlobal('fetch', transporte);
+  ({ chamarRouter, chamarAgentePrincipal } = await import('./agente'));
+  ({ gerarFollowup } = await import('./followup'));
+});
+afterAll(() => vi.unstubAllGlobals());
+beforeEach(() => {
+  transporte.mockReset();
+  transporte.mockImplementation(async (url: string, opts: RequestInit) => {
+    if (url !== 'https://api.anthropic.com/v1/messages') throw new Error(`HTTP inesperado: ${url}`);
+    const body: Pedido = JSON.parse(String(opts.body));
+    const content = body.tool_choice
+      ? [{ type: 'tool_use', id: 'router-teste', name: 'router_output', input: { agent: 'agente_qualificador' } }]
+      : [{ type: 'text', text: '{"message":"mensagem sintética","final_answer":"teste"}' }];
+    return new Response(JSON.stringify({
+      model: 'modelo-resposta-sintetico', usage: { input_tokens: 10, output_tokens: 5 },
+      content, thinking: 'não deve chegar ao callback',
+    }), { status: 200 });
+  });
+});
+
+describe('instrução de memória no system enviado à Anthropic', () => {
+  it('chega ao router, com roles originais, sem tratar pergunta do vendedor como resposta', async () => {
+    const entrada = limparParaRouter(memoria);
+    expect(await chamarRouter(entrada)).toBe('agente_qualificador');
+    const pedido = ultimoPedido();
+    expect(pedido.system).toEqual([
+      { type: 'text', text: PROMPT_ROUTER },
+      { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA, cache_control: { type: 'ephemeral' } },
+    ]);
+    expect(pedido.messages).toEqual(entrada);
+    expect(pedido.messages[1]).toEqual(memoria[0]);
+    expect(pedido.messages[2]).toEqual(memoria[1]);
+    expect(pedido.thinking).toEqual({ type: 'disabled' });
+    expect(pedido.tool_choice).toEqual({ type: 'tool', name: 'router_output' });
+  });
+
+  it('entrega somente modelo e uso ao callback opcional do router', async () => {
+    const aoResponder = vi.fn();
+    await chamarRouter(limparParaRouter(memoria), aoResponder);
+    expect(aoResponder).toHaveBeenCalledExactlyOnceWith({
+      model: 'modelo-resposta-sintetico', usage: { input_tokens: 10, output_tokens: 5 },
+    });
+    expect(Object.keys(aoResponder.mock.calls[0][0]).sort()).toEqual(['model', 'usage']);
+  });
+
+  it.each([
+    ['validação', AGENTE_VALIDACAO],
+    ['qualificação', AGENTE_QUALIFICADOR],
+    ['campanha direta', AGENTE_CAMPANHA_DIRETA],
+    ['recontato', AGENTE_RECONTATO],
+  ])('chega ao principal de %s sem depender de cadastro ou do último turno', async (_persona, prompt) => {
+    const messages = sanitizarHistorico(memoria);
+    const copia = structuredClone(messages);
+    const temporal = montarContextoTemporal() + notaDoNome('');
+    await chamarAgentePrincipal({ promptAgente: prompt, contextoTemporal: temporal, messages, tools: [] });
+    const pedido = ultimoPedido();
+    expect(pedido.system).toEqual([
+      { type: 'text', text: prompt },
+      { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA, cache_control: { type: 'ephemeral' } },
+    ]);
+    expect(pedido.messages[0].role).toBe('assistant');
+    expect(JSON.stringify(pedido.messages[0])).toContain('[ATENDIMENTO_HUMANO] Letícia');
+    expect(pedido.messages[1].role).toBe('user');
+    expect(JSON.stringify(pedido.messages[1])).toContain(MARCADOR_MENSAGEM_LEAD_PAUSA);
+    expect(JSON.stringify(pedido.messages)).not.toContain(INSTRUCAO_MEMORIA_HUMANA);
+    expect(JSON.stringify(pedido.messages.at(-1))).toContain('NOME DO LEAD AINDA NÃO INFORMADO NO CADASTRO');
+    expect(JSON.stringify(pedido.messages.at(-1))).not.toContain('VOCÊ NÃO SABE O NOME');
+    expect(pedido.thinking).toEqual({ type: 'adaptive' });
+    expect(messages).toEqual(copia);
+  });
+
+  it('preserva a cadeia de tool_result e o cache incremental após consultar uma ferramenta', async () => {
+    const messages: Msg[] = [
+      ...memoria,
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'consulta-1', name: 'consulta_curso', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'consulta-1', content: 'resultado sintético' }] },
+    ];
+    const copia = structuredClone(messages);
+    await chamarAgentePrincipal({ promptAgente: AGENTE_QUALIFICADOR, contextoTemporal: 'DATA SINTÉTICA', messages, tools: [] });
+    const pedido = ultimoPedido();
+    expect(pedido.messages.at(-1)).toEqual({ role: 'user', content: [
+      { type: 'tool_result', tool_use_id: 'consulta-1', content: 'resultado sintético', cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: expect.stringContaining('DATA SINTÉTICA') },
+    ] });
+    expect(pedido.system[1].text).toBe(INSTRUCAO_MEMORIA_HUMANA);
+    expect(messages).toEqual(copia);
+  });
+
+  it('chega ao follow-up em bloco estático, preservando a fala humana inicial e o limite de 16 registros', async () => {
+    const history: Msg[] = [
+      { role: 'user', content: 'conteúdo antigo fora da janela' },
+      memoria[0], memoria[1], memoria[2],
+      ...Array.from({ length: 13 }, (_, i): Msg => ({ role: i % 2 === 0 ? 'user' : 'assistant', content: `turno ${i}` })),
+    ];
+    const copia = structuredClone(history);
+    const banco = { from: vi.fn(() => { throw new Error('Sem acesso a banco neste teste'); }) };
+    const tel = { rodadaId: 'rodada-sintetica', registrar: vi.fn() };
+    await gerarFollowup(banco, { remotejid: 'contato-sintetico', nome: null, curso_interesse_original: null }, 1, tel, history);
+    const pedido = ultimoPedido();
+    expect(pedido.system[0]).toEqual({ type: 'text', text: FOLLOWUP_SYSTEM });
+    expect(pedido.system[1]).toEqual({ type: 'text', text: INSTRUCAO_MEMORIA_HUMANA, cache_control: { type: 'ephemeral' } });
+    expect(pedido.system[2].text).toContain('AGORA:');
+    expect(pedido.system[2].text).not.toContain(INSTRUCAO_MEMORIA_HUMANA);
+    expect(pedido.messages[1]).toEqual(memoria[0]);
+    expect(pedido.messages[2]).toEqual(memoria[1]);
+    expect(JSON.stringify(pedido.messages)).not.toContain('conteúdo antigo fora da janela');
+    expect(JSON.stringify(pedido.messages.at(-1))).toContain('ausente no cadastro');
+    expect(JSON.stringify(pedido.messages.at(-1))).not.toContain('não use nome');
+    expect(pedido.thinking).toEqual({ type: 'disabled' });
+    expect(banco.from).not.toHaveBeenCalled();
+    expect(history).toEqual(copia);
+  });
+});
+
+describe('contrato de autoria e continuidade no system', () => {
+  it('separa perguntas do vendedor de dados explícitos do lead recebidos durante a pausa', () => {
+    expect(INSTRUCAO_MEMORIA_HUMANA).toContain(`${MARCADOR_MENSAGEM_LEAD_PAUSA} com role=user são mensagens reais do lead`);
+    expect(INSTRUCAO_MEMORIA_HUMANA).toContain('O nome do autor é do vendedor, não do lead');
+    expect(INSTRUCAO_MEMORIA_HUMANA).toContain('Não se atribua fala ou ação do vendedor');
+    expect(INSTRUCAO_MEMORIA_HUMANA).toContain('O curso de interesse válido no cadastro pode orientar o contexto, mas não comprova aceite do lead');
+    expect(INSTRUCAO_MEMORIA_HUMANA).toContain('não comprova nome, resposta, formação, conclusão da graduação ou aceite do lead');
+    expect(INSTRUCAO_MEMORIA_HUMANA).toContain('mesmo que o cadastro esteja vazio ou desatualizado');
+    expect(INSTRUCAO_MEMORIA_HUMANA).toContain('considere atendido cada dado já respondido pelo lead e pergunte somente o que falta');
+  });
+
+  it('mantém conteúdo de áudio pendente desconhecido, sem aprovação ou reenvio automático', () => {
+    expect(INSTRUCAO_MEMORIA_HUMANA).toContain('Áudio sem transcrição concluída registra apenas o envio ou recebimento');
+    expect(INSTRUCAO_MEMORIA_HUMANA).toContain('não suponha seu conteúdo');
+    expect(INSTRUCAO_MEMORIA_HUMANA).toContain('nem ofereça enviar de novo material já enviado');
+    expect(INSTRUCAO_MEMORIA_HUMANA).toContain('sem contradizê-lo só porque há registro de envio');
+    expect(INSTRUCAO_MEMORIA_HUMANA).toContain('Formação informada não é aprovação');
+    expect(INSTRUCAO_MEMORIA_HUMANA).toContain('aprovação registrada para este lead e curso');
+    expect(INSTRUCAO_MEMORIA_HUMANA).toContain('não autorizam reabrir atendimento pausado nem ignorar recusa');
+  });
+});

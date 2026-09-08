@@ -18,14 +18,17 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3';
 import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO } from '../crm-agente-sdr/prompts.ts';
 import { AGENTE_CAMPANHA_DIRETA } from '../crm-agente-sdr/prompts-campanha-direta.ts';
-import { carregarTools, chamarAgentePrincipal } from '../crm-agente-sdr/agente.ts';
-import { montarContextoTemporal, montarPerguntaFormacao, renderPrompt } from '../crm-agente-sdr/contexto.ts';
+import { carregarTools, chamarAgentePrincipal, chamarRouter, MODELO_AGENTE } from '../crm-agente-sdr/agente.ts';
+import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoNome, renderPrompt } from '../crm-agente-sdr/contexto.ts';
 import { comPresenteEscola } from '../crm-agente-sdr/escolaGratuita.ts';
 import {
   decidirPrazoEstudante,
   instrucaoPerguntarConclusao,
 } from '../crm-agente-sdr/elegibilidadeFormatura.ts';
 import { humanizarTexto } from '../crm-agente-sdr/saida.ts';
+import { limparParaRouter } from '../crm-agente-sdr/historico.ts';
+import { gerarFollowup } from '../crm-agente-sdr/followup.ts';
+import { executarFollowupSimulado, executarSimulacao, extrairUso, MAX_CARACTERES_SIMULACAO, validarEntradaSimulacao, type AgenteRouter } from './simulacao.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
@@ -203,93 +206,97 @@ Deno.serve(async (req) => {
   if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405);
   if (!(await autorizado(req))) return json({ error: 'unauthorized' }, 401);
 
-  let body: any;
-  try { body = await req.json(); } catch { return json({ error: 'payload inválido' }, 400); }
+  let entrada;
+  try {
+    const bruto = await req.text();
+    if (bruto.length > MAX_CARACTERES_SIMULACAO) return json({ error: 'limite de 200000 caracteres excedido' }, 400);
+    entrada = validarEntradaSimulacao(JSON.parse(bruto));
+  } catch (e) {
+    return json({ error: e instanceof SyntaxError ? 'payload inválido' : (e as Error).message }, 400);
+  }
 
-  const persona: string = body?.persona ?? 'campanha_direta';
-  const mensagensLead: string[] = Array.isArray(body?.mensagens) ? body.mensagens : [];
-  const mocks = body?.mocks ?? {};
-  if (!mensagensLead.length) return json({ error: 'mensagens[] obrigatório' }, 400);
-
-  // agente_override: permite carregar as tools de uma persona de TESTE
-  // (ex.: agente_teste_analise) sem tocar nas 4 personas de produção.
-  const agente = String(body?.agente_override ?? '').trim()
-    || (persona === 'campanha_direta' ? 'agente_campanha_direta'
-        : persona === 'qualificador' ? 'agente_qualificador' : 'agente_validacao');
-  const promptBase = persona === 'campanha_direta'
-    ? AGENTE_CAMPANHA_DIRETA
-    : persona === 'qualificador' ? AGENTE_QUALIFICADOR : AGENTE_VALIDACAO;
-
-  const vars = {
-    nome: String(body?.nome_lead ?? ''),
-    curso_interesse_original: String(body?.curso ?? ''),
-    pergunta_formacao: montarPerguntaFormacao(''),
-  };
-  // prompt_extra: bloco anexado ao FIM do prompt real, só nesta simulação.
-  // Serve pra validar redação nova ANTES de commitá-la em prompts.ts (que é
-  // código e, uma vez deployado, já vale pra produção).
-  const promptExtra = String(body?.prompt_extra ?? '').trim();
-  // ⚠️ ESPELHO do index.ts: em produção o "presente da Escola" é apensado ao prompt DEPOIS
-  // do render, no ponto único das 4 personas. Sem aplicá-lo aqui, todo teste de ENCERRAMENTO
-  // passaria sem o convite e daria falso negativo — a mesma armadilha do mock que não espelha
-  // o executor real (caso consulta_pos_disponiveis). `sem_presente_escola: true` desliga.
-  const semPresente = body?.sem_presente_escola === true;
-  const promptRenderizado = semPresente
-    ? renderPrompt(promptBase, vars)
-    : comPresenteEscola(renderPrompt(promptBase, vars));
-  const promptAgente = promptRenderizado + (promptExtra ? `\n\n${promptExtra}` : '');
-  const contextoTemporal = montarContextoTemporal();
-  const tools = await carregarTools(supabase, agente);
-
-  const messages: any[] = [];
-  const transcript: any[] = [];
-
-  for (const msgLead of mensagensLead) {
-    messages.push({ role: 'user', content: msgLead });
-    transcript.push({ quem: 'lead', texto: msgLead });
-
-    // Loop agêntico igual ao de produção, com teto baixo (é teste).
-    for (let volta = 0; volta < 6; volta++) {
-      const resp: any = await chamarAgentePrincipal({ promptAgente, contextoTemporal, messages, tools });
-      const blocos = (resp.content ?? []) as any[];
-      const textoCru = blocos.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
-      // ⚠️ O transcript tem que mostrar o que o LEAD RECEBERIA, não o que o modelo
-      // gerou: em produção todo balão passa por humanizarTexto (removerRaciocinioVazado
-      // + removerLinhasMeta). Sem isto o harness MENTE nos dois sentidos — mostra
-      // vazamento que não existe (caso "*sem novas ações necessárias*", que o filtro
-      // remove) e esconderia um que existisse. `filtrado` registra o que saiu.
-      const texto = humanizarTexto(textoCru);
-      const filtrado = texto !== textoCru ? textoCru : null;
-      const toolUses = blocos.filter((b) => b.type === 'tool_use');
-
-      messages.push({ role: 'assistant', content: resp.content });
-
-      if (toolUses.length) {
-        for (const tu of toolUses) {
-          transcript.push({ quem: 'tool', nome: tu.name, input: tu.input });
-        }
-        const results = [];
-        for (const tu of toolUses) {
-          results.push({
-            type: 'tool_result',
-            tool_use_id: tu.id,
-            content: await mockTool(tu.name, tu.input, mocks),
-          });
-        }
-        messages.push({ role: 'user', content: results });
-        if (texto) transcript.push({ quem: 'joao', texto, ...(filtrado ? { filtrado } : {}) });
-        else if (filtrado) transcript.push({ quem: 'joao', texto: '', filtrado, silenciado: true });
-        // pausa_ia encerra o atendimento — nada mais é dito.
-        if (toolUses.some((tu: any) => tu.name === 'pausa_ia')) { volta = 99; break; }
-        continue;
-      }
-
-      if (texto) transcript.push({ quem: 'joao', texto, ...(filtrado ? { filtrado } : {}) });
-      else if (filtrado) transcript.push({ quem: 'joao', texto: '', filtrado, silenciado: true });
-      break;
+  if (entrada.modo === 'followup') {
+    try {
+      // Não passar supabase real: a geração recebe um banco bloqueado e telemetria
+      // em memória. Nenhuma função da esteira, elegibilidade, lock ou envio é chamada.
+      return json({ ...(await executarFollowupSimulado(entrada, { gerar: gerarFollowup, humanizar: humanizarTexto })), modelo: MODELO_AGENTE });
+    } catch {
+      return json({ error: 'falha na simulação de followup; nenhuma ação comercial foi executada' }, 502);
     }
   }
 
-  const toolsChamadas = transcript.filter((t) => t.quem === 'tool').map((t) => t.nome);
-  return json({ ok: true, persona, agente, transcript, tools_chamadas: toolsChamadas });
+  // Todo estado é local à chamada: NÃO usar atualizarLead/ratchet de banco neste harness.
+  const estado = { nome: entrada.nome_lead, formacao: entrada.formacao_academica };
+  let agenteAtual: AgenteRouter = entrada.agente_atual ?? 'agente_validacao';
+  const routers: Record<string, unknown>[] = [];
+  const cacheTools = new Map<string, any[]>();
+  const toolsDe = async (agente: string) => {
+    if (!cacheTools.has(agente)) cacheTools.set(agente, await carregarTools(supabase, agente));
+    return cacheTools.get(agente)!;
+  };
+
+  try {
+    const resultado = await executarSimulacao(entrada, {
+      prepararRodada: async (messages, turno) => {
+        let agente = entrada.persona === 'campanha_direta' ? 'agente_campanha_direta'
+          : entrada.persona === 'qualificador' ? 'agente_qualificador' : 'agente_validacao';
+        if (entrada.usar_router) {
+          const anterior = agenteAtual;
+          const campanha = entrada.persona === 'campanha_direta';
+          // Espelha a promoção da campanha: sem nome+formação, permanece na coleta.
+          const consultar = !campanha || (anterior !== 'agente_qualificador' && Boolean(estado.nome.trim() && estado.formacao.trim()));
+          let decidiu = anterior;
+          let fallback = false;
+          let usoRouter: Record<string, number> = {};
+          let modeloRouter = MODELO_AGENTE;
+          if (consultar) {
+            try {
+              decidiu = await chamarRouter(limparParaRouter(messages), (resposta) => {
+                usoRouter = extrairUso(resposta.usage);
+                modeloRouter = resposta.model ?? MODELO_AGENTE;
+              });
+            } catch {
+              fallback = true;
+            }
+          }
+          agenteAtual = anterior === 'agente_qualificador' ? anterior : decidiu;
+          agente = campanha && agenteAtual === 'agente_validacao' ? 'agente_campanha_direta' : agenteAtual;
+          routers.push({ turno, anterior, decidiu, efetivo: agenteAtual, consultado: consultar, fallback,
+            ...(consultar ? { modelo: modeloRouter, usage: usoRouter } : {}) });
+        }
+        const promptBase = agente === 'agente_campanha_direta' ? AGENTE_CAMPANHA_DIRETA
+          : agente === 'agente_qualificador' ? AGENTE_QUALIFICADOR : AGENTE_VALIDACAO;
+        const vars = {
+          nome: extrairPrimeiroNome(estado.nome),
+          curso_interesse_original: entrada.curso,
+          pergunta_formacao: montarPerguntaFormacao(encontrarFormacao(estado.formacao)),
+        };
+        let promptAgente = renderPrompt(promptBase, vars);
+        if (!entrada.sem_presente_escola) promptAgente = comPresenteEscola(promptAgente);
+        if (entrada.prompt_extra) promptAgente += `\n\n${entrada.prompt_extra}`;
+        const agenteTools = entrada.agente_override || agente;
+        let tools = await toolsDe(agenteTools);
+        if (entrada.usar_router && !entrada.agente_override && entrada.persona === 'campanha_direta' && agente === 'agente_qualificador') {
+          const extras = (await toolsDe('agente_campanha_direta')).filter((t) => t?.name === 'atualizar_dados_lead');
+          tools = [...tools, ...extras];
+        }
+        return { agente: agenteTools, promptAgente, contextoTemporal: montarContextoTemporal() + notaDoNome(vars.nome), tools };
+      },
+      chamarPrincipal: chamarAgentePrincipal,
+      humanizar: humanizarTexto,
+      mockTool: async (nome, input) => {
+        const dados = input as Record<string, unknown>;
+        const resposta = await mockTool(nome, dados, entrada.mocks);
+        if (nome === 'atualizar_dados_lead') {
+          if (typeof dados?.nome === 'string') estado.nome = dados.nome;
+          if (typeof dados?.formacao === 'string') estado.formacao = dados.formacao;
+        }
+        return resposta;
+      },
+    });
+    return json({ ...resultado, modelo: MODELO_AGENTE, usar_router: entrada.usar_router, routers });
+  } catch {
+    // Não devolver body cru de falha da API nem histórico/credenciais em logs.
+    return json({ error: 'falha na simulação; nenhuma ação comercial foi executada' }, 502);
+  }
 });

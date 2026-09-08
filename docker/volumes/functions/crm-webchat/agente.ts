@@ -15,6 +15,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { WEBCHAT_QUALIFICADOR, WEBCHAT_VALIDACAO } from "./prompts-webchat.ts";
 import { montarContextoTemporal, renderPrompt } from "../crm-agente-sdr/contexto.ts";
+import { INSTRUCAO_MEMORIA_HUMANA } from "../crm-agente-sdr/memoriaHumana.ts";
 import { comPresenteEscola, LINK_ESCOLA_GRATUITA } from "../crm-agente-sdr/escolaGratuita.ts";
 import { carregarTools, chamarAgentePrincipal, chamarRouter } from "../crm-agente-sdr/agente.ts";
 import { type CtxConversa, executarTool, montarToolResults } from "../crm-agente-sdr/tools.ts";
@@ -465,6 +466,7 @@ export async function aberturaWebchat(nome: string, curso: string | null, produt
         thinking: { type: "disabled" },
         system: [
           { type: "text", text: promptDoEstagio(nome, curso, "validacao", produto) },
+          { type: "text", text: INSTRUCAO_MEMORIA_HUMANA },
           { type: "text", text: montarContextoTemporal() },
         ],
         messages: [{
