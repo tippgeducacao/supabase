@@ -179,8 +179,12 @@ async function handler(req: Request): Promise<Response> {
     }>()
     const desfechos = new Map<string, number>()   // "campanha|dimensao|valor"
 
+    // 80 páginas de 500 = 40 mil chamadas/dia. Os dias cheios do 3C chegaram a 29 mil
+    // (04/09/2026); com 40 páginas os dias grandes ficavam truncados em 20 mil e ninguém
+    // via. Se ainda assim cortar, `truncado` avisa em vez de mentir.
     let pagina = 1
-    while (pagina <= 40) {
+    let truncado = false
+    while (pagina <= 80) {
       const q = new URLSearchParams({
         api_token: THREEC_TOKEN,
         start_date: `${alvoDia} 00:00:00`, end_date: `${alvoDia} 23:59:59`,
@@ -232,8 +236,10 @@ async function handler(req: Request): Promise<Response> {
       }
       const totalPaginas = corpo?.meta?.pagination?.total_pages ?? 1
       if (pagina >= totalPaginas) break
+      if (pagina >= 80) { truncado = true; break }
       pagina++
     }
+    if (truncado) falhas.push(`${alvoDia}: dia truncado em 40 mil chamadas`)
 
     if (agregado.size > 0) {
       const pDias = [...agregado.entries()].map(([campanha_id, a]) => ({
