@@ -162,12 +162,16 @@ async function handler(req: Request): Promise<Response> {
   //   qualificacao = o que o AGENTE marcou — bloqueio, sem interesse, mudo…
   //   amd    = humano × caixa postal
   // `?dias=N` reprocessa N dias para trás (backfill); sem ele, só o dia de hoje.
-  const diasBackfill = Math.min(Number(url.searchParams.get('dias') ?? '0') || 0, 60)
+  // ⚠️ UM dia por invocação no backfill. `?dias=6` de uma vez estourou o tempo da edge
+  // ("WorkerRequestCancelled: request has been cancelled by supervisor"): são ~9 mil
+  // chamadas por dia, 500 por página. Use `?dia=AAAA-MM-DD` num laço externo.
+  const diaUnico = url.searchParams.get('dia')
+  const diasBackfill = diaUnico ? 0 : Math.min(Number(url.searchParams.get('dias') ?? '0') || 0, 3)
   let lidas = 0
   const diasProcessados: string[] = []
 
   for (let volta = diasBackfill; volta >= 0; volta--) {
-    const alvoDia = dia(volta)
+    const alvoDia = diaUnico ?? dia(volta)
     const agregado = new Map<string, {
       nome: string; chamadas: number; humanos: number; caixa_postal: number
       falhas: number; abandonadas: number; qualificadas: number; bloqueios: number
