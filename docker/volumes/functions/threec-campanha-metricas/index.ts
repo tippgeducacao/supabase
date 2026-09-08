@@ -108,6 +108,8 @@ async function handler(req: Request): Promise<Response> {
   }
   if (!THREEC_TOKEN) return json({ error: '3C_TOKEN_API nao configurado' }, 500)
 
+  const url = new URL(req.url)
+
   const { data: listas, error } = await supabase
     .from('threec_mailing_listas')
     .select('campanha_id')
