@@ -146,12 +146,14 @@ async function contatoDoPedagogico(supabase: any): Promise<string> {
  * dia é gente entrando na entrevista do outro. Vazia significa "abre uma sala por
  * entrevista", e aí o candidato ouve que o link chega antes, sem prazo prometido.
  */
-type EntrevistaMarcada = { modalidade: 'presencial' | 'online'; link: string };
+type EntrevistaMarcada = { modalidade: 'presencial' | 'online'; link: string
+  decidido: boolean;
+};
 
 async function entrevistaMarcada(supabase: any, opId: string): Promise<EntrevistaMarcada | null> {
   const { data } = await supabase
     .from('rh_entrevistas')
-    .select('modalidade, link_online')
+    .select('modalidade, link_online, marcada_por')
     .eq('oportunidade_id', opId)
     .eq('status', 'marcada')
     .order('inicio', { ascending: false })
@@ -160,7 +162,13 @@ async function entrevistaMarcada(supabase: any, opId: string): Promise<Entrevist
   if (!data) return null;
 
   const modalidade: 'presencial' | 'online' = data.modalidade === 'online' ? 'online' : 'presencial';
-  if (modalidade !== 'online') return { modalidade, link: '' };
+  // ⚠️ `presencial` é o DEFAULT da coluna, não necessariamente uma decisão sobre esta
+  // pessoa. Quem marcou pelo CRM escolheu o formato na tela; quem foi marcado pelo próprio
+  // agente ficou presencial porque é o padrão, e ninguém olhou. O Pedro perguntou "a
+  // entrevista é presencial?" nesse segundo estado, e confirmar teria sido um chute com
+  // cara de fato.
+  const decidido = data.marcada_por === 'manual';
+  if (modalidade !== 'online') return { modalidade, link: '', decidido };
 
   let link = String(data.link_online ?? '').trim();
   if (!link) {
@@ -168,7 +176,7 @@ async function entrevistaMarcada(supabase: any, opId: string): Promise<Entrevist
       .from('rh_entrevista_config').select('link_online_padrao').eq('id', true).maybeSingle();
     link = String(cfg?.link_online_padrao ?? '').trim();
   }
-  return { modalidade, link };
+  return { modalidade, link, decidido };
 }
 
 async function enderecoParaOCandidato(supabase: any): Promise<string> {
@@ -384,10 +392,25 @@ const TOOL_PROFESSOR = {
 const TOOL_QUIETO = {
   name: 'nao_responder',
   description:
-    'Use quando a mensagem do candidato NÃO pede nada: agradecimento, "ok", "perfeito", ' +
-    'confirmação, emoji sozinho. Chamar isto encerra o turno sem enviar mensagem nenhuma. ' +
-    'Ficar em silêncio é a resposta certa com mais frequência do que parece.',
-  input_schema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+    'Use em DOIS casos. Primeiro: a mensagem não pede nada, é agradecimento, "ok", ' +
+    '"perfeito", confirmação, emoji sozinho. Segundo, e mais importante: você NÃO SABE a ' +
+    'resposta e responder seria chutar. Nesse caso não invente, não desconverse e não ' +
+    'prometa que alguém retorna: apenas fique quieto, que uma pessoa do RH assume a ' +
+    'conversa. Chamar isto encerra o turno sem enviar mensagem nenhuma. Ficar em silêncio ' +
+    'é a resposta certa com mais frequência do que parece.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      motivo: {
+        type: 'string',
+        description:
+          'Em poucas palavras, por que você não respondeu. Isso não vai para o candidato, ' +
+          'fica no registro para o RH saber o que a pessoa perguntou e você não soube.',
+      },
+    },
+    required: [],
+    additionalProperties: false,
+  },
 } as const;
 
 const TOOL_HORARIOS = {
@@ -657,7 +680,14 @@ async function processar(payload: any, profundidade = 0) {
               : 'Ainda não existe link. Se ela perguntar, diga que o link chega antes da ' +
                 'entrevista, e não prometa prazo nem horário.'
           }\n`
-        : `- A entrevista JÁ MARCADA desta pessoa é PRESENCIAL, no endereço acima.\n`;
+        : entrevista.decidido
+          ? `- A entrevista JÁ MARCADA desta pessoa é PRESENCIAL, no endereço acima. Alguém do ` +
+            `RH escolheu esse formato para ela, então pode confirmar.\n`
+          : `- A entrevista desta pessoa está como presencial, mas isso é só o PADRÃO da casa: ` +
+            `ninguém decidiu o formato dela ainda. Você pode falar do endereço quando ela ` +
+            `estiver combinando o horário. Mas se ela QUESTIONAR o formato, perguntar se pode ` +
+            `ser online ou remoto, ou disser que mora longe, NÃO confirme que é presencial: ` +
+            `fique quieto com nao_responder e escreva o motivo, que uma pessoa decide isso.\n`;
 
     const contexto =
       `\n\nCONTEXTO DESTE CANDIDATO (não repita de volta para ele, use para conversar):\n` +
@@ -751,8 +781,12 @@ async function processar(payload: any, profundidade = 0) {
             continue;
           }
           if (u.name === 'nao_responder') {
+            // O motivo é o que faz o silêncio ser útil. Sem ele, ninguém do RH descobre o
+            // que o candidato perguntou e o agente não soube responder, e a pergunta fica
+            // esperando alguém abrir a conversa por acaso.
+            const motivo = String(u.input?.motivo ?? '').trim().slice(0, 300) || null;
             await evento('silencio', {
-              telefone, lead_id: leadId, oportunidade_id: card.oportunidade_id, etapa,
+              telefone, lead_id: leadId, oportunidade_id: card.oportunidade_id, etapa, motivo,
             });
             return;
           }
