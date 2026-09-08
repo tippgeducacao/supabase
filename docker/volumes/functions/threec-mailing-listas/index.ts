@@ -74,6 +74,33 @@ const supabase = createClient(SUPABASE_URL, SERVICE_ROLE, {
   auth: { persistSession: false, autoRefreshToken: false },
 })
 
+// Toda rodada vira uma linha em `threec_mailing_rodadas` — é o que a aba "Listas
+// automáticas" do Dash Ligação lê. Sucesso E erro: rodada que falhou sem registro é
+// exatamente o que deixou a operação cega até 08/09/2026.
+async function registrar(
+  lista: string,
+  acao: 'sincronizar' | 'expurgar',
+  n: { enviados?: number; aceitos?: number; descartados?: number; removidos?: number },
+  erro?: string,
+  detalhe?: unknown,
+) {
+  try {
+    await supabase.rpc('threec_mailing_rodada_registrar', {
+      p_lista: lista,
+      p_acao: acao,
+      p_enviados: n.enviados ?? 0,
+      p_aceitos: n.aceitos ?? 0,
+      p_descartados: n.descartados ?? 0,
+      p_removidos: n.removidos ?? 0,
+      p_erro: erro ?? null,
+      p_detalhe: detalhe ? JSON.parse(JSON.stringify(detalhe)) : null,
+    })
+  } catch (err) {
+    // registrar é observabilidade: nunca pode derrubar a rodada em si
+    console.error('[threec-mailing-listas] falhou ao registrar a rodada', String(err))
+  }
+}
+
 interface ListaCfg {
   id: string
   nome: string
@@ -151,7 +178,10 @@ async function expurgar(cfg: ListaCfg, limite: number, dry: boolean): Promise<Re
     p_lista: cfg.id,
     p_limite: limite,
   })
-  if (error) return json({ error: 'falha ao listar quem expurgar', detail: error.message }, 500)
+  if (error) {
+    await registrar(cfg.id, 'expurgar', {}, `falha ao listar quem expurgar: ${error.message}`)
+    return json({ error: 'falha ao listar quem expurgar', detail: error.message }, 500)
+  }
 
   const linhas = (data ?? []) as ExpurgoRow[]
   if (linhas.length === 0) return json({ ok: true, campanha: cfg.nome, expurgados: 0 })
@@ -204,6 +234,8 @@ async function expurgar(cfg: ListaCfg, limite: number, dry: boolean): Promise<Re
 
   await supabase.from('threec_mailing_listas')
     .update({ ultimo_expurgo_em: new Date().toISOString() }).eq('id', cfg.id)
+  await registrar(cfg.id, 'expurgar', { removidos: marcados },
+    falhas.length ? falhas.slice(0, 3).join(' | ') : undefined, { por_motivo: porMotivo })
 
   return json({
     ok: falhas.length === 0, campanha: cfg.nome,
@@ -218,7 +250,10 @@ async function sincronizar(cfg: ListaCfg, limite: number | null, dry: boolean): 
     p_lista: cfg.id,
     p_limite: limite ?? cfg.limite_por_rodada,
   })
-  if (error) return json({ error: 'falha ao selecionar', detail: error.message }, 500)
+  if (error) {
+    await registrar(cfg.id, 'sincronizar', {}, `falha ao selecionar: ${error.message}`)
+    return json({ error: 'falha ao selecionar', detail: error.message }, 500)
+  }
 
   const rows = (data ?? []) as LeadRow[]
   if (rows.length === 0) {
@@ -228,6 +263,7 @@ async function sincronizar(cfg: ListaCfg, limite: number | null, dry: boolean): 
         ultimo_resultado: { enviados: 0, motivo: 'campanha ja completa' },
       }).eq('id', cfg.id)
     }
+    if (!dry) await registrar(cfg.id, 'sincronizar', {}, undefined, { motivo: 'campanha ja completa' })
     return json({ ok: true, campanha: cfg.nome, enviados: 0, motivo: 'ninguem novo para injetar' })
   }
 
@@ -249,7 +285,10 @@ async function sincronizar(cfg: ListaCfg, limite: number | null, dry: boolean): 
   }
 
   const { listaId, criada, erro } = await resolverListaId(cfg)
-  if (!listaId) return json({ error: 'sem mailing list no 3C', detail: erro }, 502)
+  if (!listaId) {
+    await registrar(cfg.id, 'sincronizar', {}, `sem mailing list no 3C: ${erro ?? ''}`)
+    return json({ error: 'sem mailing list no 3C', detail: erro }, 502)
+  }
   if (criada || cfg.lista_id !== listaId) {
     await supabase.from('threec_mailing_listas').update({ lista_id: listaId }).eq('id', cfg.id)
   }
@@ -291,6 +330,8 @@ async function sincronizar(cfg: ListaCfg, limite: number | null, dry: boolean): 
   }
 
   if (aceitos.length === 0) {
+    await registrar(cfg.id, 'sincronizar', { enviados: mailing.length },
+      `3C recusou todos os lotes: ${falhas.slice(0, 2).join(' | ')}`)
     return json({ error: '3C recusou todos os lotes', campanha: cfg.nome, detail: falhas.slice(0, 3) }, 422)
   }
 
@@ -305,6 +346,8 @@ async function sincronizar(cfg: ListaCfg, limite: number | null, dry: boolean): 
   })
   if (eMarcar) {
     console.error('[threec-mailing-listas] ENVIOU MAS NAO MARCOU', eMarcar.message)
+    await registrar(cfg.id, 'sincronizar', { enviados: enviados.length },
+      `enviado ao 3C mas falhou ao marcar: ${eMarcar.message}`)
     return json({
       ok: false, campanha: cfg.nome, enviados: enviados.length, marcados: 0,
       alerta: 'enviado ao 3C mas falhou ao marcar — risco de duplicata no proximo tick',
@@ -323,6 +366,11 @@ async function sincronizar(cfg: ListaCfg, limite: number | null, dry: boolean): 
     ultimo_resultado: resultado,
     lista_id: listaId,
   }).eq('id', cfg.id)
+  await registrar(cfg.id, 'sincronizar', {
+    enviados: enviados.length,
+    aceitos: enviados.length - descartadosPeloTresC,
+    descartados: descartadosPeloTresC,
+  }, falhas.length ? falhas.slice(0, 3).join(' | ') : undefined, { lista_id: listaId })
 
   return json({ ok: falhas.length === 0, campanha: cfg.nome, lista_id: listaId, ...resultado })
 }
