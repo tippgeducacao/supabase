@@ -19,7 +19,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3';
 import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO } from '../crm-agente-sdr/prompts.ts';
 import { AGENTE_CAMPANHA_DIRETA } from '../crm-agente-sdr/prompts-campanha-direta.ts';
 import { carregarTools, chamarAgentePrincipal, chamarRouter, MODELO_AGENTE } from '../crm-agente-sdr/agente.ts';
-import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoNome, renderPrompt } from '../crm-agente-sdr/contexto.ts';
+import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoCurso, notaDoNome, renderPrompt } from '../crm-agente-sdr/contexto.ts';
 import { comPresenteEscola } from '../crm-agente-sdr/escolaGratuita.ts';
 import {
   decidirPrazoEstudante,
@@ -281,7 +281,7 @@ Deno.serve(async (req) => {
           const extras = (await toolsDe('agente_campanha_direta')).filter((t) => t?.name === 'atualizar_dados_lead');
           tools = [...tools, ...extras];
         }
-        return { agente: agenteTools, promptAgente, contextoTemporal: montarContextoTemporal() + notaDoNome(vars.nome), tools };
+        return { agente: agenteTools, promptAgente, contextoTemporal: montarContextoTemporal() + notaDoNome(vars.nome) + notaDoCurso(vars.curso_interesse_original), tools };
       },
       chamarPrincipal: chamarAgentePrincipal,
       humanizar: humanizarTexto,

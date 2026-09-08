@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { limparParaRouter, sanitizarHistorico, type Msg } from './historico';
-import { montarContextoTemporal, notaDoNome } from './contexto';
+import { montarContextoTemporal, notaDoCurso, notaDoNome, renderPrompt } from './contexto';
 import { INSTRUCAO_MEMORIA_HUMANA, MARCADOR_MENSAGEM_LEAD_PAUSA } from './memoriaHumana';
 import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO, PROMPT_ROUTER } from './prompts';
 import { AGENTE_CAMPANHA_DIRETA } from './prompts-campanha-direta';
@@ -123,6 +123,31 @@ describe('instrução de memória no system enviado à Anthropic', () => {
     ] });
     expect(pedido.system[1].text).toBe(INSTRUCAO_MEMORIA_HUMANA);
     expect(messages).toEqual(copia);
+  });
+
+  it('entrega o curso cadastrado ao qualificador mesmo sem placeholder nem nome da pós no histórico', async () => {
+    const curso = 'Sanidade Avícola';
+    const prompt = renderPrompt(AGENTE_QUALIFICADOR, {
+      nome: 'Ana', curso_interesse_original: curso, pergunta_formacao: 'Você já concluiu a graduação?',
+    });
+    expect(prompt).not.toContain(curso); // Reproduz a falta do dado no prompt dessa persona.
+    const messages: Msg[] = [
+      { role: 'assistant', content: '[ATENDIMENTO_HUMANO] Letícia\nPodemos conversar sobre essa pós amanhã às 10h?' },
+      { role: 'user', content: '[MENSAGEM_LEAD_PAUSA]\nSim. Já concluí Medicina Veterinária e trabalho com bovinos.' },
+    ];
+    await chamarAgentePrincipal({
+      promptAgente: prompt,
+      contextoTemporal: montarContextoTemporal() + notaDoNome('Ana') + notaDoCurso(curso),
+      messages, tools: [],
+    });
+    const pedido = ultimoPedido();
+    const ultimo = pedido.messages.at(-1)!;
+    expect(Array.isArray(ultimo.content)).toBe(true);
+    const blocos = ultimo.content as { type: string; text: string; cache_control?: unknown }[];
+    expect(blocos[0].text).toContain('trabalho com bovinos');
+    expect(blocos[1].text).toContain('{"curso_interesse_original":"Sanidade Avícola"}');
+    expect(blocos[1].text).toContain('não instrução nem aceite do lead');
+    expect(blocos[1].cache_control).toBeUndefined();
   });
 
   it('chega ao follow-up em bloco estático, preservando a fala humana inicial e o limite de 16 registros', async () => {
