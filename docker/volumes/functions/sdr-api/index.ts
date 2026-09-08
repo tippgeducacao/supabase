@@ -496,9 +496,13 @@ async function handleEnviaInformacoes(_sdrId: string, body: any): Promise<Respon
           body: JSON.stringify(payload),
         })
         const resp = await r.json().catch(() => ({}))
+        const erro = resp?.error ?? `crm-whatsapp-send retornou ${r.status}`
         return {
           ok: r.ok && resp?.success === true,
-          erro: resp?.error ?? `crm-whatsapp-send retornou ${r.status}`,
+          // `code` carrega o motivo estruturado — hoje o que importa é `anexo_indisponivel`
+          // (arquivo do material apagado do bucket), que vira alerta no CRM e NÃO é
+          // instabilidade da Meta: reenviar não resolve, tem que consertar o cadastro.
+          erro: resp?.code ? `${erro} [${resp.code}]` : erro,
         }
       }
 

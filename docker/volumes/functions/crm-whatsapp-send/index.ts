@@ -19,6 +19,17 @@ const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const META_GRAPH = "https://graph.facebook.com/v21.0";
 
 /**
+ * A NOSSA origem respondeu 4xx: o arquivo não existe mais (objeto apagado/renomeado no
+ * bucket, link quebrado). Distinto de qualquer outra falha de upload porque tem
+ * tratamento oposto — ver `resolverMediaId`.
+ */
+class OrigemMidiaIndisponivel extends Error {
+  constructor(readonly status: number, readonly url: string) {
+    super(`origem da mídia respondeu HTTP ${status}`);
+  }
+}
+
+/**
  * Sobe um arquivo de mídia pro endpoint /media da Meta e devolve o media_id.
  * É o que faz o WhatsApp renderizar áudio OGG/Opus como MENSAGEM DE VOZ (forma de
  * onda) em vez de "arquivo de áudio": enviar por `audio.id` (mídia carregada) ⇒ voz;
@@ -28,7 +39,10 @@ async function metaUploadMedia(
   phoneNumberId: string, accessToken: string, fileUrl: string, mime: string, filename: string,
 ): Promise<string> {
   const fileResp = await fetch(fileUrl);
-  if (!fileResp.ok) throw new Error(`download mídia ${fileResp.status}`);
+  if (!fileResp.ok) {
+    if (fileResp.status >= 400 && fileResp.status < 500) throw new OrigemMidiaIndisponivel(fileResp.status, fileUrl);
+    throw new Error(`download mídia ${fileResp.status}`);
+  }
   const bytes = new Uint8Array(await fileResp.arrayBuffer());
   const form = new FormData();
   form.append("messaging_product", "whatsapp");
@@ -59,11 +73,22 @@ async function metaUploadMedia(
  * Com media_id a Meta não baixa mais nada: 1 upload por (arquivo × número), reusado por
  * 25 dias (a Meta retém 30). Falhou o upload? devolve null e o chamador manda por link —
  * o comportamento de hoje, nunca pior.
+ *
+ * ⚠️ EXCEÇÃO — origem 4xx (`origemMorta`): aí o link também não vai funcionar, porque é o
+ * NOSSO arquivo que sumiu. Mandar assim mesmo é o pior dos mundos: a edge responde
+ * "enviado", a Meta falha ASSÍNCRONA com 131053 e o agente já disse ao lead "te mandei o
+ * cronograma". Foi o que aconteceu de 03 a 08/09/2026, quando 14 linhas do
+ * `crm_materiais_pos` ficaram apontando pra PDF apagado do bucket: 17 envios perdidos, o
+ * lead sem o material e ninguém sabendo. Nesse caso o chamador ABORTA o envio (422
+ * `anexo_indisponivel`) e registra alerta — quem pediu o PDF ouve "vou mandar em seguida",
+ * que é verdade, em vez de "já mandei", que não era.
  */
+type MidiaResolvida = { mediaId: string | null; origemMorta: number | null };
+
 async function resolverMediaId(
   admin: any, phoneNumberId: string, accessToken: string,
   fileUrl: string, mime: string, filename: string,
-): Promise<string | null> {
+): Promise<MidiaResolvida> {
   try {
     const { data: hit } = await admin
       .from("crm_whatsapp_media_cache")
@@ -72,7 +97,7 @@ async function resolverMediaId(
       .eq("phone_number_id", phoneNumberId)
       .gt("expira_em", new Date().toISOString())
       .maybeSingle();
-    if (hit?.media_id) return String(hit.media_id);
+    if (hit?.media_id) return { mediaId: String(hit.media_id), origemMorta: null };
 
     const mediaId = await metaUploadMedia(phoneNumberId, accessToken, fileUrl, mime, filename);
     // upsert: outra rodada em paralelo pode ter subido o mesmo arquivo (2 ids válidos, tanto faz)
@@ -85,11 +110,49 @@ async function resolverMediaId(
       criado_em: new Date().toISOString(),
       expira_em: new Date(Date.now() + 25 * 24 * 3600 * 1000).toISOString(),
     }, { onConflict: "url,phone_number_id" });
-    return mediaId;
+    return { mediaId, origemMorta: null };
   } catch (e) {
+    if (e instanceof OrigemMidiaIndisponivel) {
+      console.error(`[crm-whatsapp-send] arquivo do anexo NÃO EXISTE (HTTP ${e.status}): ${fileUrl}`);
+      return { mediaId: null, origemMorta: e.status };
+    }
     console.warn("[crm-whatsapp-send] media_id indisponível, usando link:", e instanceof Error ? e.message : e);
-    return null;
+    return { mediaId: null, origemMorta: null };
   }
+}
+
+/**
+ * Anexo apontando pra arquivo que não existe mais: aborta o envio e deixa o rastro onde o
+ * time olha — alerta de "Saúde da conta" (banner do CRM + aba) via a MESMA RPC idempotente
+ * do webhook. Idempotente por (tipo, referencia): o mesmo arquivo morto tentado 30x vira
+ * UM alerta, não 30.
+ */
+async function abortarPorAnexoMorto(
+  admin: any, waAccountId: string | null, fileUrl: string, filename: string, status: number,
+): Promise<Response> {
+  const nome = filename || fileUrl.split("/").pop() || fileUrl;
+  try {
+    await admin.rpc("crm_whatsapp_alerta_registrar", {
+      p_wa_account_id: waAccountId,
+      p_tipo: "anexo_indisponivel",
+      p_severidade: "critico",
+      p_titulo: `Arquivo do anexo não existe mais: ${nome}`,
+      p_descricao:
+        `A origem respondeu HTTP ${status} para ${fileUrl}. O envio foi ABORTADO (nada foi ` +
+        `entregue e ninguém prometeu ao lead). Se o material foi trocado com OUTRO nome, ` +
+        `atualize a linha do curso em crm_materiais_pos (ou o anexo do fluxo/automação).`,
+      p_evento: "anexo_indisponivel",
+      p_referencia: fileUrl,
+      p_dados: { url: fileUrl, filename: nome, http_status: status },
+    });
+  } catch (e) {
+    console.error("[crm-whatsapp-send] falha ao registrar alerta de anexo morto:", e instanceof Error ? e.message : e);
+  }
+  return json({
+    error: `o arquivo do anexo não existe mais (HTTP ${status}): ${nome}`,
+    code: "anexo_indisponivel",
+    anexo_url: fileUrl,
+  }, 422);
 }
 
 /** Invalida o cache quando a Meta recusa o id (expirado/removido) — o chamador refaz por link. */
@@ -667,7 +730,13 @@ Deno.serve(async (req) => {
           const nomeArq = String(header_media_filename ?? "").trim() || nomeDaUrl || extPadrao;
           headerMediaUrl = hdrUrl;
           headerMediaKey = key;
-          headerMediaId = await resolverMediaId(admin, phoneNumberId, accessToken, hdrUrl, mime, nomeArq);
+          const midiaHdr = await resolverMediaId(admin, phoneNumberId, accessToken, hdrUrl, mime, nomeArq);
+          // Cabeçalho apontando pra arquivo apagado: por `link` a Meta recusa igual (131053 /
+          // 132012) e o disparo inteiro sai "enviado" mentindo. Aborta e alerta.
+          if (midiaHdr.origemMorta) {
+            return await abortarPorAnexoMorto(admin, accountId, hdrUrl, nomeArq, midiaHdr.origemMorta);
+          }
+          headerMediaId = midiaHdr.mediaId;
           // ⚠️ `filename` é SÓ do document: mandar em image/video faz a Meta recusar o
           // parâmetro. Sem ele no document, o card chega como "Sem título".
           const midiaHeader: Record<string, unknown> = headerMediaId ? { id: headerMediaId } : { link: hdrUrl };
@@ -706,10 +775,14 @@ Deno.serve(async (req) => {
       // PDF/arquivo por URL pública (Storage do Supabase, Drive, site…). caption = conteudo (opcional).
       // Preferimos media_id (a Meta NÃO baixa a URL ⇒ imune ao 131053); link é o fallback.
       const caption = String(conteudo ?? "").trim();
-      mediaIdUsado = await resolverMediaId(
+      const midiaDoc = await resolverMediaId(
         admin, phoneNumberId, accessToken, docUrl,
         String(mime_type ?? "").trim() || "application/pdf", docFilename || "documento.pdf",
       );
+      if (midiaDoc.origemMorta) {
+        return await abortarPorAnexoMorto(admin, accountId, docUrl, docFilename, midiaDoc.origemMorta);
+      }
+      mediaIdUsado = midiaDoc.mediaId;
       waPayload = {
         messaging_product: "whatsapp",
         to,
@@ -724,10 +797,14 @@ Deno.serve(async (req) => {
       // Imagem INLINE (não vira "arquivo"): type=image + caption opcional. Meta aceita
       // jpeg/png por URL pública.
       const caption = String(conteudo ?? "").trim();
-      mediaIdUsado = await resolverMediaId(
+      const midiaImg = await resolverMediaId(
         admin, phoneNumberId, accessToken, docUrl,
         String(mime_type ?? "").trim() || "image/jpeg", docFilename || "imagem.jpg",
       );
+      if (midiaImg.origemMorta) {
+        return await abortarPorAnexoMorto(admin, accountId, docUrl, docFilename, midiaImg.origemMorta);
+      }
+      mediaIdUsado = midiaImg.mediaId;
       waPayload = {
         messaging_product: "whatsapp",
         to,
@@ -742,10 +819,14 @@ Deno.serve(async (req) => {
       // Meta aceita mp4/3gp por URL pública (codec H.264 + AAC). Sem branch próprio, o
       // vídeo era enviado como `document` e chegava como arquivo pra baixar.
       const caption = String(conteudo ?? "").trim();
-      mediaIdUsado = await resolverMediaId(
+      const midiaVid = await resolverMediaId(
         admin, phoneNumberId, accessToken, docUrl,
         String(mime_type ?? "").trim() || "video/mp4", docFilename || "video.mp4",
       );
+      if (midiaVid.origemMorta) {
+        return await abortarPorAnexoMorto(admin, accountId, docUrl, docFilename, midiaVid.origemMorta);
+      }
+      mediaIdUsado = midiaVid.mediaId;
       waPayload = {
         messaging_product: "whatsapp",
         to,
@@ -769,6 +850,10 @@ Deno.serve(async (req) => {
           const mediaId = await metaUploadMedia(phoneNumberId, accessToken, docUrl, "audio/ogg", docFilename || "audio.ogg");
           audioObj = { id: mediaId, voice: true };
         } catch (e) {
+          // Origem 4xx: o áudio não existe mais — por link a Meta falha do mesmo jeito.
+          if (e instanceof OrigemMidiaIndisponivel) {
+            return await abortarPorAnexoMorto(admin, accountId, docUrl, docFilename, e.status);
+          }
           console.warn("[crm-whatsapp-send] upload OGG /media falhou, usando link:", e instanceof Error ? e.message : e);
           audioObj = { link: docUrl, voice: true };
         }
@@ -788,9 +873,13 @@ Deno.serve(async (req) => {
       // acima de 100 KB, 91 falhas em 403 envios (a de 709 KB falhou 29 de 34 vezes).
       // O MESMO arquivo ora ia, ora não — é o download da Meta expirando, não a arte.
       // Foi o último tipo de mídia que ainda ia por link; agora nenhum vai.
-      mediaIdUsado = await resolverMediaId(
+      const midiaFig = await resolverMediaId(
         admin, phoneNumberId, accessToken, docUrl, "image/webp", docFilename || "sticker.webp",
       );
+      if (midiaFig.origemMorta) {
+        return await abortarPorAnexoMorto(admin, accountId, docUrl, docFilename, midiaFig.origemMorta);
+      }
+      mediaIdUsado = midiaFig.mediaId;
       waPayload = {
         messaging_product: "whatsapp",
         to,
