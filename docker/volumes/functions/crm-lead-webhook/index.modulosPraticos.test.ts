@@ -66,7 +66,7 @@ describe('dispatch autenticado do webhook de módulos no entrypoint real', () =>
     integracao.regras_importacao = { ignorar_testes: true };
     const resposta = await atender(requisicao(JSON.stringify({
       evento: 'inscricao.retroativa', inscricao_id: 'externa-teste',
-      contato: { nome: 'Inscrição de teste', telefone: '123' },
+      contato: { nome: 'Inscrição de teste', telefone: '+5513712837128', email: 'teste@example.com' },
     })));
     expect(resposta.status).toBe(422);
     expect(await resposta.json()).toMatchObject({ ok: false, erro: 'inscricao_ignorada', repetir: false });
@@ -103,6 +103,44 @@ describe('dispatch autenticado do webhook de módulos no entrypoint real', () =>
     expect(cliente.rpc).toHaveBeenCalledExactlyOnceWith('crm_modulos_praticos_receber', expect.objectContaining({ p_validar: evento === 'validar' }));
     expect(rede).not.toHaveBeenCalled();
   });
+
+  it.each(['inscricao.criada', 'validar'])('telefone inválido com e-mail válido chega normalizado à RPC sem ampliar exclusões para %s', async evento => {
+    integracao.regras_importacao = {
+      ignorar_testes: true, nomes: ['Pessoa Teste'], emails: ['pessoa@example.com'],
+      telefones: ['+5513712837128'], inscricoes_ids: ['externa-telefone'],
+    };
+    const status = evento === 'validar' ? 'validado' : 'criado';
+    cliente.rpc.mockResolvedValue({ data: { ok: true, status, inscricao_id: 'externa-telefone', telefone_invalido: true }, error: null });
+    const resposta = await atender(requisicao(JSON.stringify({
+      evento, inscricao_id: 'externa-telefone', modulo_codigo: 'modulo', inscrito_em: '2026-09-09T17:00:00Z',
+      contato: { nome: 'Pessoa Teste', email: 'Pessoa@Example.com', telefone: ' +5513712837128 ' },
+    })));
+    expect(resposta.status).toBe(200);
+    expect(await resposta.json()).toMatchObject({ ok: true, status, telefone_invalido: true });
+    expect(cliente.rpc).toHaveBeenCalledExactlyOnceWith('crm_modulos_praticos_receber', {
+      p_integracao_id: 'integracao-1', p_validar: evento === 'validar',
+      p_payload: {
+        evento, inscricao_id: 'externa-telefone', modulo_codigo: 'modulo', inscrito_em: '2026-09-09T17:00:00Z',
+        contato: { nome: 'Pessoa Teste', email: 'pessoa@example.com', telefone_original: '+5513712837128' },
+      },
+    });
+    expect(JSON.stringify(logs)).not.toContain('+5513712837128');
+    expect(JSON.stringify(logs)).not.toContain('pessoa@example.com');
+    expect(cliente.from.mock.calls.map(([tabela]) => tabela)).toEqual(['crm_webhook_integrations', 'crm_webhook_logs']);
+    expect(rede).not.toHaveBeenCalled();
+  });
+
+  it('campo interno telefone_original enviado por HTTP é recusado antes da RPC', async () => {
+    const resposta = await atender(requisicao(JSON.stringify({
+      evento: 'inscricao.criada', inscricao_id: 'externa-telefone', modulo_codigo: 'modulo', inscrito_em: '2026-09-09T17:00:00Z',
+      contato: { nome: 'Contato', email: 'contato@example.com', telefone_original: '+5513712837128' },
+    })));
+    expect(resposta.status).toBe(400);
+    expect(await resposta.json()).toMatchObject({ ok: false, erro: 'campo_nao_permitido', repetir: false });
+    expect(cliente.rpc).not.toHaveBeenCalled();
+    expect(rede).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['modulos_praticos', null], ['modulos_praticos', 'secret-incorreto'],
     ['padrao', null], ['padrao', 'secret-incorreto'],

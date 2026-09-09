@@ -9,6 +9,13 @@ export type PayloadModulosPraticos = { evento: 'catalogo' } | {
   inscrito_em: string;
   contato: { nome: string; telefone?: string; email?: string; cpf?: string };
 };
+type InscricaoModulosPraticos = Extract<PayloadModulosPraticos, { inscricao_id: string }>;
+/** Campo reservado à comunicação edge → RPC; nunca é aceito no corpo HTTP. */
+export type PayloadModulosPraticosNormalizado = { evento: 'catalogo' } | (
+  Omit<InscricaoModulosPraticos, 'contato'> & {
+    contato: InscricaoModulosPraticos['contato'] & { telefone_original?: string };
+  }
+);
 
 export interface ClienteModulosPraticos {
   rpc: (nome: string, argumentos: Objeto) => PromiseLike<{ data: unknown; error: unknown }>;
@@ -88,7 +95,7 @@ function normalizarCpf(valor: string): string {
 }
 
 /** Contrato estrito: não converte objetos/números em texto nem corta identificadores. */
-export function validarPayloadModulosPraticos(payload: unknown): PayloadModulosPraticos {
+export function validarPayloadModulosPraticos(payload: unknown): PayloadModulosPraticosNormalizado {
   if (!objeto(payload)) throw new ErroEntrada('payload_invalido', 'Envie um objeto JSON.');
   const evento = texto(payload.evento, 'evento', 30);
   if (!['inscricao.criada', 'inscricao.retroativa', 'catalogo', 'validar'].includes(evento ?? '')) {
@@ -104,20 +111,12 @@ export function validarPayloadModulosPraticos(payload: unknown): PayloadModulosP
   const inscritoEm = normalizarData(texto(payload.inscrito_em, 'inscrito_em', 40)!);
   if (!objeto(payload.contato)) throw new ErroEntrada('contato_invalido', 'contato deve ser um objeto.', 422);
   camposPermitidos(payload.contato, ['nome', 'telefone', 'email', 'cpf']);
-  const contato: Extract<PayloadModulosPraticos, { inscricao_id: string }>['contato'] = {
+  const contato: Extract<PayloadModulosPraticosNormalizado, { inscricao_id: string }>['contato'] = {
     nome: texto(payload.contato.nome, 'contato.nome', 200)!,
   };
   const telefone = texto(payload.contato.telefone, 'contato.telefone', 40, true);
   const email = texto(payload.contato.email, 'contato.email', 254, true);
   const cpf = texto(payload.contato.cpf, 'contato.cpf', 14, true);
-  if (telefone) {
-    // O sinal + preserva DDI estrangeiro, inclusive números com comprimento BR.
-    const classe = classificaTelefone(telefone);
-    if (!/^\+?[\d\s().-]+$/.test(telefone) || (classe !== 'br' && classe !== 'internacional')) {
-      throw new ErroEntrada('telefone_invalido', 'Telefone inválido. Informe DDD; para outro país, use + e o DDI.', 422);
-    }
-    contato.telefone = classe === 'br' ? canonicalBrClassificacao(telefone) : digitsTelefone(telefone);
-  }
   if (email) {
     const [local, dominio, extra] = email.split('@');
     const partesDominio = dominio?.split('.') ?? [];
@@ -129,6 +128,20 @@ export function validarPayloadModulosPraticos(payload: unknown): PayloadModulosP
     contato.email = email.toLowerCase();
   }
   if (cpf) contato.cpf = normalizarCpf(cpf);
+  if (telefone) {
+    // O sinal + preserva DDI estrangeiro, inclusive números com comprimento BR.
+    const classe = classificaTelefone(telefone);
+    if (!/^\+?[\d\s().-]+$/.test(telefone) || (classe !== 'br' && classe !== 'internacional')) {
+      if (!contato.email && !contato.cpf) {
+        throw new ErroEntrada('telefone_invalido', 'Telefone inválido. Informe DDD; para outro país, use + e o DDI.', 422);
+      }
+      // Mantém o dado digitado para cadastro/sinalização, mas o número impossível
+      // nunca identifica o lead. A RPC usa exclusivamente o e-mail/CPF válido.
+      contato.telefone_original = telefone;
+    } else {
+      contato.telefone = classe === 'br' ? canonicalBrClassificacao(telefone) : digitsTelefone(telefone);
+    }
+  }
   if (!contato.telefone && !contato.email && !contato.cpf) {
     throw new ErroEntrada('contato_sem_identificador', 'Informe telefone, e-mail ou CPF do contato.', 422);
   }
@@ -206,7 +219,7 @@ export async function processarWebhookModulosPraticos({ integracaoId, payload, c
       resposta = { statusHttp: 200, body: { ok: true, ...Object.fromEntries(
         campos.filter(campo => ['string', 'boolean', 'number'].includes(typeof data[campo]) || data[campo] === null)
           .map(campo => [campo, data[campo]]),
-      ) } };
+      ), ...(typeof data.telefone_invalido === 'boolean' ? { telefone_invalido: data.telefone_invalido } : {}) } };
     } else resposta = erroRpc(null);
   } catch (erro) {
     resposta = erro instanceof ErroEntrada ? falha(erro.codigo, erro.message, erro.statusHttp) : erroRpc(erro);

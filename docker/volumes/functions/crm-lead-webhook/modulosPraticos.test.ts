@@ -66,7 +66,79 @@ describe('contrato de inscrições em módulos práticos', () => {
     ['+39 331 234 5678', '393312345678'],
     ['+351 912 345 678', '351912345678'],
   ])('canonicaliza %s sem confundir DDD55 ou adicionar DDI brasileiro a estrangeiro', (telefone, esperado) => {
-    expect(validarPayloadModulosPraticos(inscricao({ contato: { nome: 'Teste', telefone } }))).toMatchObject({ contato: { telefone: esperado } });
+    const normalizado = validarPayloadModulosPraticos(inscricao({ contato: { nome: 'Teste', telefone } }));
+    expect(normalizado).toMatchObject({ contato: { telefone: esperado } });
+    expect(normalizado).not.toHaveProperty('contato.telefone_original');
+  });
+
+  it('preserva telefone impossível apenas no campo interno quando o contato tem e-mail válido', async () => {
+    const { rpc, registrarLog, executar } = dependencias();
+    const resposta = await executar(inscricao({ contato: { nome: 'Contato', telefone: ' +5513712837128 ', email: 'Contato@Example.com' } }));
+    expect(resposta.statusHttp).toBe(200);
+    expect(rpc).toHaveBeenCalledExactlyOnceWith('crm_modulos_praticos_receber', expect.objectContaining({
+      p_payload: expect.objectContaining({ contato: { nome: 'Contato', telefone_original: '+5513712837128', email: 'contato@example.com' } }),
+    }));
+    expect(JSON.stringify(registrarLog.mock.calls)).not.toContain('+5513712837128');
+    expect(resposta.body).not.toHaveProperty('telefone_original');
+  });
+
+  it('CPF válido também permite preservar telefone inválido, sem usá-lo como identificador', async () => {
+    const { rpc, executar } = dependencias();
+    const resposta = await executar(inscricao({ contato: { nome: 'Contato', telefone: '+5513712837128', cpf: '529.982.247-25' } }));
+    expect(resposta.statusHttp).toBe(200);
+    expect(rpc.mock.calls[0][1]).toMatchObject({ p_payload: { contato: { nome: 'Contato', telefone_original: '+5513712837128', cpf: '52998224725' } } });
+    expect(rpc.mock.calls[0][1]).not.toHaveProperty('p_payload.contato.telefone');
+  });
+
+  it('telefone impossível sem outro identificador continua sendo telefone_invalido terminal', async () => {
+    const { rpc, executar } = dependencias();
+    expect(await executar(inscricao({ contato: { nome: 'Contato', telefone: '+5513712837128' } })))
+      .toMatchObject({ statusHttp: 422, body: { ok: false, erro: 'telefone_invalido', repetir: false } });
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it.each(['ramal não informado', '+55+55 11 95087-6718', '123'])('formato inválido é preservado com identificador alternativo válido (%s)', async telefone => {
+    const { rpc, executar } = dependencias();
+    expect((await executar(inscricao({ contato: { nome: 'Contato', telefone, email: 'contato@example.com' } }))).statusHttp).toBe(200);
+    expect(rpc.mock.calls[0][1]).toMatchObject({ p_payload: { contato: { telefone_original: telefone } } });
+    expect(rpc.mock.calls[0][1]).not.toHaveProperty('p_payload.contato.telefone');
+  });
+
+  it.each([null, 5513712837128, {}, [], '', '   ', '1'.repeat(41), '+5513712837128\u0000', '+5513712837128\n'])('não relaxa tipo, preenchimento, limite ou controles do telefone mesmo com e-mail válido (%j)', async telefone => {
+    const { rpc, executar } = dependencias();
+    expect(await executar(inscricao({ contato: { nome: 'Contato', telefone, email: 'contato@example.com' } })))
+      .toMatchObject({ statusHttp: 400, body: { erro: 'campo_invalido', repetir: false } });
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { nome: 'Contato', telefone: '+5513712837128', email: 'invalido' },
+    { nome: 'Contato', telefone: '+5513712837128', cpf: '52998224724' },
+    { nome: 'Contato', telefone: '+5513712837128', email: 'invalido', cpf: '52998224725' },
+    { nome: 'Contato', telefone: '+5513712837128', email: 'contato@example.com', cpf: '52998224724' },
+  ])('e-mail/CPF informados continuam sujeitos à validação atual (%j)', async contato => {
+    const { rpc, executar } = dependencias();
+    expect((await executar(inscricao({ contato }))).statusHttp).toBe(422);
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { nome: 'Contato', email: 'contato@example.com', telefone_original: '+5513712837128' },
+    { nome: 'Contato', telefone: '46999999999', telefone_original: '+5513712837128' },
+  ])('remetente HTTP não pode fornecer o campo interno telefone_original (%j)', async contato => {
+    const { rpc, executar } = dependencias();
+    expect(await executar(inscricao({ contato }))).toMatchObject({ statusHttp: 400, body: { erro: 'campo_nao_permitido', repetir: false } });
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false, '+5513712837128'])('ACK expõe somente a flag booleana de telefone inválido (%j)', async telefone_invalido => {
+    const { rpc, executar } = dependencias();
+    rpc.mockResolvedValue({ data: { ok: true, status: 'existente', inscricao_id: 'matricula-externa-001', telefone_invalido, telefone_original: '+5513712837128' }, error: null });
+    const resposta = await executar();
+    expect(resposta.statusHttp).toBe(200);
+    expect(resposta.body).not.toHaveProperty('telefone_original');
+    if (typeof telefone_invalido === 'boolean') expect(resposta.body.telefone_invalido).toBe(telefone_invalido);
+    else expect(resposta.body).not.toHaveProperty('telefone_invalido');
   });
 
   it('CPF é opcional, preserva zeros e só normaliza um documento efetivamente informado', () => {
