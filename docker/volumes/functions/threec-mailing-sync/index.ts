@@ -297,10 +297,14 @@ async function handler(req: Request): Promise<Response> {
     identifier: montarIdentifier(r.nome, r.curso),
     areacode: r.telefone.substring(0, 2),
     phone: r.telefone,
-    nome: limpar(r.nome),
-    email: limpar(r.email),
-    formacao: humanizarFormacao(r.formacao),
-    curso: normalizarCurso(r.curso),
+    // O atendimento do 3C só lê os extras de `mailing.data`. Na raiz a API
+    // armazena o nome, mas ele não aparece na ligação (incidente de 09/09/2026).
+    data: {
+      nome: limpar(r.nome),
+      email: limpar(r.email),
+      formacao: humanizarFormacao(r.formacao),
+      curso: normalizarCurso(r.curso),
+    },
   }))
 
   console.log("[3c-mailing] payload montado:", mailing.length)
@@ -379,7 +383,7 @@ async function handler(req: Request): Promise<Response> {
     lista_id: listaId,
     enviados: mailing.length,
     marcados: marcados ?? 0,
-    com_curso: mailing.filter((m) => m.curso).length,
+    com_curso: mailing.filter((m) => m.data.curso).length,
     // quantos o 3C recusou por ja existirem na campanha (dedup dele, nao nosso)
     descartados_duplicata_campanha: descartadosPeloTresC,
   })

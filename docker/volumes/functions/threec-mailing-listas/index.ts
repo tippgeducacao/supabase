@@ -271,10 +271,14 @@ async function sincronizar(cfg: ListaCfg, limite: number | null, dry: boolean): 
     identifier: montarIdentifier(r.telefone),
     areacode: r.telefone.substring(0, 2),
     phone: r.telefone,
-    nome: limpar(r.nome),
-    email: limpar(r.email),
-    formacao: humanizarFormacao(r.formacao),
-    curso: limpar(r.curso),
+    // O atendimento do 3C só lê os extras de `mailing.data`. Na raiz a API
+    // armazena o nome, mas ele não aparece na ligação (incidente de 09/09/2026).
+    data: {
+      nome: limpar(r.nome),
+      email: limpar(r.email),
+      formacao: humanizarFormacao(r.formacao),
+      curso: limpar(r.curso),
+    },
   }))
 
   if (dry) {
