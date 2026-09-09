@@ -29,6 +29,7 @@ beforeEach(() => {
   vi.resetAllMocks()
   registro = ['campanha-teste', 'outra-campanha'].map(campanha_id => ({ campanha_id, canon: alvo.canon, removido: false }))
   fronteiras.rpc.mockImplementation(async (nome: string, args: Record<string, unknown>) => {
+    if (['threec_sdr_travar', 'threec_sdr_destravar'].includes(nome)) return { data: true, error: null }
     if (['threec_mailing_a_expurgar', 'threec_mailing_a_expurgar_lista'].includes(nome)) return { data: [alvo], error: null }
     if (nome === 'threec_mailing_rodada_registrar') return { data: null, error: null }
     if (nome === 'threec_mailing_marcar_removidos') {

@@ -13,13 +13,12 @@
 //   • `curso` virou COLUNA do mailing (antes ia grudado no identifier)
 //
 // A regua de QUEM entra vive na RPC `threec_mailing_selecionar` (fonte unica),
-// que le a lista `threec_mailing_exclusoes`. Esta function so formata, envia e
-// marca — e sabe DESFAZER (acao=expurgar).
+// que aplica os cinco vetos próprios da SDR por telefone. Esta function formata,
+// envia, confirma os lotes e remove quem passou a ser vetado (acao=expurgar).
 //
-// ⚠️ `public.leads` NAO e uma tabela so do comercial: candidato a vaga (webhooks
-// de contratacao), aluno importado pela carga do SIGA/EDUQ e inadimplente do
-// funil de cobranca nascem todos ali. Sem a lista de exclusao, todos eles caem
-// no discador de VENDAS — foi o chamado "LEADS 3C" de 31/08/2026.
+// Novo escopo específico autorizado em 09/09/2026: todo retroativo e lead novo,
+// excluindo B2B, aluno, arquivado, bloqueado e não-perturbe. As outras 21 campanhas
+// mantêm sua régua própria. A ação manter remove antes de alimentar a SDR.
 //
 // Chamada:
 //   POST /functions/v1/threec-mailing-sync            -> lista Quente, limite da config
@@ -27,8 +26,10 @@
 //   POST ?dry=1                                       -> so simula (nao envia, nao marca)
 //   POST ?acao=expurgar&dry=1                         -> quem esta na campanha e hoje e vetado
 //   POST ?acao=expurgar                               -> tira essa gente da campanha no 3C
+//   POST ?acao=manter                                 -> expurga e depois alimenta sob o mesmo lease
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0'
+import { atualizarBloqueios3C } from './bloqueios.ts'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -56,13 +57,13 @@ const THREEC_TOKEN =
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 
-// Header do mailing. ORDEM IMPORTA: e a mesma com que as listas foram criadas
-// no 3C. Mudou aqui -> tem que recriar as listas (o 3C fixa o header na criacao).
+// Header mantido por compatibilidade com a importação. Os campos que aparecem
+// ao atender precisam estar dentro de mailing.data; o header não substitui isso.
 const HEADER = ['identifier', 'areacode', 'phone', 'nome', 'email', 'formacao', 'curso'] as const
 
 // Teto do 3C por requisicao: "O campo Mailing deve ter no maximo 300 itens".
-// Confirmado ao vivo (422 com 800). O `limite_por_rodada` da config pode ser
-// maior — a function fatia sozinha.
+// Confirmado ao vivo (422 com 800). A rodada inteira é limitada a 300 para
+// terminar dentro do lease e permitir alternar entrada, expurgo e carga da Base.
 const MAX_POR_POST = 300
 
 interface LeadRow {
@@ -149,93 +150,167 @@ const supabase = createClient(SUPABASE_URL, SERVICE_ROLE, {
 // Cobranca.md): campo `phone` no SINGULAR, valor em ARRAY, resposta 204.
 //     DELETE /campaigns/{id}/mailing/delete   {"phone": ["44999998888"]}
 //
-// QUEM sai vem da RPC `threec_mailing_a_expurgar`, que le a MESMA lista de
-// exclusao da regua de entrada — mexeu na lista, o expurgo acompanha. Linha de
-// exclusao com `expurgar=false` (caso do [LEADS IMPORTADOS]) barra entrada nova
-// mas nao tira ninguem retroativamente.
+// A RPC de expurgo consulta os mesmos vetos por telefone da seleção SDR, inclusive
+// quando o status mudou em outro cadastro com o mesmo telefone canônico.
 const MAX_POR_DELETE = 100
+const TIMEOUT_3C_MS = 20_000
+const TIMEOUT_RODADA_MS = 120_000
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+interface ExpurgoRow { lead_id: string; canon: string; telefone: string; nome: string; motivo: string }
+interface ConfigSDR {
+  campanha_id: string; lista_quente_id: string; lista_base_id: string
+  ativo: boolean; limite_por_rodada: number
+}
+const limitarRodada = (valor: number) => Math.max(1, Math.min(MAX_POR_POST, Math.trunc(valor)))
 
-interface ExpurgoRow {
-  lead_id: string
-  canon: string
-  telefone: string
-  nome: string
-  motivo: string
+async function requisitar3C(url: string, init: RequestInit, signal?: AbortSignal): Promise<Response> {
+  if (signal?.aborted) throw new Error('prazo da rodada esgotado')
+  const controller = new AbortController()
+  const abortar = () => controller.abort()
+  signal?.addEventListener('abort', abortar, { once: true })
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_3C_MS)
+  try {
+    const resposta = await fetch(url, { ...init, signal: controller.signal })
+    // O prazo cobre também o corpo: receber cabeçalhos não encerra a requisição.
+    const corpo = await resposta.text()
+    return new Response([204, 205, 304].includes(resposta.status) ? null : corpo, {
+      status: resposta.status, headers: resposta.headers,
+    })
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', abortar)
+  }
 }
 
-async function expurgar(campanhaId: string, limite: number, dry: boolean): Promise<Response> {
+async function expurgar(campanhaId: string, limite: number, dry: boolean, signal?: AbortSignal): Promise<Response> {
   const { data, error } = await supabase.rpc('threec_mailing_a_expurgar', { p_limite: limite })
-  if (error) return json({ error: 'falha ao listar quem expurgar', detail: error.message }, 500)
-
-  const linhas = (data ?? []) as ExpurgoRow[]
+  if (error) return json({ ok: false, error: 'falha ao listar quem expurgar' }, 500)
+  const linhas = ((data ?? []) as ExpurgoRow[]).slice(0, limite)
   const porMotivo = linhas.reduce<Record<string, number>>((acc, l) => {
     acc[l.motivo] = (acc[l.motivo] ?? 0) + 1
     return acc
   }, {})
-
-  if (linhas.length === 0) return json({ ok: true, expurgados: 0, motivo: 'ninguem a expurgar' })
-  if (dry) {
-    return json({
-      ok: true, dry: true, total: linhas.length, por_motivo: porMotivo,
-      amostra: linhas.slice(0, 10).map((l) => ({ nome: l.nome, telefone: l.telefone, motivo: l.motivo })),
-    })
-  }
-
-  const removidos: string[] = [] // canons que o 3C confirmou ter tirado
-  const falhas: string[] = []
+  if (dry) return json({ ok: true, dry: true, total: linhas.length, por_motivo: porMotivo,
+    amostra: linhas.slice(0, 10).map((l) => ({ nome: l.nome, telefone: l.telefone, motivo: l.motivo })) })
+  let removidos = 0
+  let marcados = 0
   for (let ini = 0; ini < linhas.length; ini += MAX_POR_DELETE) {
     const fatia = linhas.slice(ini, ini + MAX_POR_DELETE)
-    const alvo = `${THREEC_BASE}/campaigns/${campanhaId}/mailing/delete?api_token=${THREEC_TOKEN}`
     let resp: Response
     try {
-      resp = await fetch(alvo, {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      resp = await requisitar3C(`${THREEC_BASE}/campaigns/${campanhaId}/mailing/delete?api_token=${THREEC_TOKEN}`, {
+        method: 'DELETE', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify({ phone: fatia.map((l) => l.telefone) }),
-      })
-    } catch (err) {
-      falhas.push(`lote ${ini / MAX_POR_DELETE}: ${String(err)}`)
-      continue
+      }, signal)
+    } catch {
+      return json({ ok: false, error: 'falha de transporte no expurgo', removidos_no_3c: removidos, marcados }, 502)
     }
-    if (resp.status >= 200 && resp.status < 300) {
-      for (const l of fatia) removidos.push(l.canon)
-    } else {
-      const corpo = await resp.text()
-      console.error('[threec-mailing-sync] 3C recusou o DELETE', { ini, status: resp.status, corpo: corpo.slice(0, 300) })
-      falhas.push(`lote ${ini / MAX_POR_DELETE}: HTTP ${resp.status} ${corpo.slice(0, 200)}`)
-    }
-  }
-
-  // So marca o que o 3C confirmou: se o DELETE falhou, a linha continua
-  // pendente e a proxima rodada tenta de novo.
-  let marcados = 0
-  if (removidos.length > 0) {
+    if (!resp.ok) return json({ ok: false, error: '3C recusou o expurgo', status_3c: resp.status,
+      removidos_no_3c: removidos, marcados }, 502)
+    removidos += fatia.length
+    // Confirma cada DELETE antes de continuar; a ação manter não alimenta se falhar.
     const { data: n, error: eMarcar } = await supabase.rpc('threec_mailing_marcar_removidos', {
-      p_canons: removidos,
-      p_motivo: 'expurgo: fora da regua do discador SDR',
-      p_campanha_id: campanhaId,
+      p_canons: fatia.map((l) => l.canon), p_motivo: 'expurgo: fora da regua do discador SDR', p_campanha_id: campanhaId,
     })
-    if (eMarcar) {
-      console.error('[threec-mailing-sync] REMOVEU MAS NAO MARCOU', eMarcar.message)
-      return json({ ok: false, removidos_no_3c: removidos.length, marcados: 0, alerta: 'removido no 3C mas falhou ao marcar no banco', detail: eMarcar.message }, 500)
-    }
-    marcados = (n as number) ?? 0
+    if (eMarcar || !Number.isInteger(n) || (n as number) < 0) return json({ ok: false,
+      alerta: 'removido no 3C mas falhou ao marcar no banco', removidos_no_3c: removidos, marcados }, 500)
+    marcados += n as number
   }
+  return json({ ok: true, total_candidatos: linhas.length, removidos_no_3c: removidos, marcados, por_motivo: porMotivo })
+}
 
-  return json({
-    ok: falhas.length === 0,
-    total_candidatos: linhas.length,
-    removidos_no_3c: removidos.length,
-    marcados,
-    por_motivo: porMotivo,
-    falhas: falhas.slice(0, 3),
+async function sincronizar(cfg: ConfigSDR, lista: string, limite: number, desde: string | null, dry: boolean, token: string, signal?: AbortSignal): Promise<Response> {
+  if (!cfg.ativo) return json({ ok: true, skip: 'pipeline pausado (threec_mailing_config.ativo=false)' })
+  const listaId = lista === 'base' ? cfg.lista_base_id : cfg.lista_quente_id
+  const { data: leads, error: eSel } = await supabase.rpc('threec_mailing_selecionar', {
+    p_limite: limite, p_desde: desde, p_ignorar_enviados: false,
   })
+  if (eSel) return json({ ok: false, error: 'falha ao selecionar leads' }, 500)
+  // Protege o teto da rodada mesmo se a RPC devolver mais que o limite solicitado.
+  const rows = ((leads ?? []) as LeadRow[]).slice(0, limite)
+  const mailing = rows.map((r) => ({
+    identifier: montarIdentifier(r.nome, r.curso), areacode: r.telefone.substring(0, 2), phone: r.telefone,
+    data: { nome: limpar(r.nome) || 'Lead', email: limpar(r.email),
+      formacao: humanizarFormacao(r.formacao), curso: normalizarCurso(r.curso) },
+  }))
+  if (dry) return json({ ok: true, dry: true, lista, lista_id: listaId, total: mailing.length, amostra: mailing.slice(0, 5) })
+  if (!rows.length) return json({ ok: true, lista, lista_id: listaId, enviados: 0, submetidos: 0, submetidos_confirmados: 0,
+    marcados: 0, importados: 0, imported_lines: 0, importados_agregados: 0, descartados_agregados: 0,
+    total_selecionado: 0, com_curso: 0, motivo: 'nenhum lead elegivel' })
+  let submetidos = 0
+  let marcados = 0
+  let importados: number | null = 0
+  const resumo = () => ({ enviados: submetidos, submetidos, submetidos_confirmados: submetidos, marcados,
+    importados, imported_lines: importados, importados_agregados: importados,
+    descartados_agregados: importados === null ? null : submetidos - importados, total_selecionado: rows.length })
+  for (let ini = 0; ini < mailing.length; ini += MAX_POR_POST) {
+    const fatia = mailing.slice(ini, ini + MAX_POR_POST)
+    const itens = rows.slice(ini, ini + MAX_POR_POST).map((r) => ({
+      lead_id: r.lead_id, canon: r.canon, telefone: r.telefone, curso: r.curso,
+    }))
+    // Persistir antes do HTTP impede repetição cega se o processo cair depois do POST.
+    if (signal?.aborted) return json({ ok: false, error: 'prazo da rodada esgotado antes do envio', ...resumo() }, 504)
+    const { data: loteId, error: eLote } = await supabase.rpc('threec_sdr_lote_iniciar', {
+      p_token: token, p_lista_id: String(listaId), p_itens: itens,
+    })
+    if (eLote || typeof loteId !== 'string' || !UUID.test(loteId)) return json({ ok: false,
+      error: 'não foi possível preparar lote durável', ...resumo(), retry_bloqueado: true }, 500)
+    let resp: Response
+    try {
+      resp = await requisitar3C(`${THREEC_BASE}/campaigns/${cfg.campanha_id}/lists/${listaId}/mailing?api_token=${THREEC_TOKEN}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ header: HEADER, mailing: fatia }),
+      }, signal)
+    } catch {
+      return json({ ok: false, alerta: 'resultado do envio desconhecido; reconciliar lote antes de repetir',
+        ...resumo(), lote_id: loteId, retry_bloqueado: true }, 502)
+    }
+    if (!resp.ok) {
+      // 408 e 5xx podem ocorrer após processamento: a pendência permanece durável.
+      const recusado = resp.status >= 400 && resp.status < 500 && resp.status !== 408
+      let liberado = false
+      if (recusado) {
+        const r = await supabase.rpc('threec_sdr_lote_recusar', {
+          p_token: token, p_lote_id: loteId, p_detalhe: `HTTP ${resp.status}`,
+        })
+        liberado = !r.error && r.data === true
+      }
+      return json({ ok: false, error: '3C não confirmou o envio', status_3c: resp.status,
+        ...resumo(), lote_id: loteId, retry_bloqueado: !liberado }, recusado ? 422 : 502)
+    }
+    submetidos += fatia.length
+    let contagem: number | null = null
+    try {
+      const body = await resp.json()
+      if (!body || typeof body !== 'object' || Array.isArray(body)
+        || (typeof body.status === 'number' && body.status >= 400)) throw new Error('resposta inválida')
+      if (body.imported_lines !== undefined && body.imported_lines !== null) {
+        if (!Number.isInteger(body.imported_lines) || body.imported_lines < 0 || body.imported_lines > fatia.length) {
+          throw new Error('contagem inválida')
+        }
+        contagem = body.imported_lines
+      }
+    } catch {
+      importados = null
+      return json({ ok: false, alerta: 'resposta de importação inválida; reconciliar lote antes de repetir',
+        ...resumo(), lote_id: loteId, retry_bloqueado: true }, 502)
+    }
+    importados = importados === null || contagem === null ? null : importados + contagem
+    // Confirma submissões e conclui o lote atomicamente, sem alegar aceite individual.
+    const { data: n, error: eMarcar } = await supabase.rpc('threec_sdr_lote_confirmar', {
+      p_token: token, p_lote_id: loteId, p_importados: contagem,
+    })
+    if (eMarcar || !Number.isInteger(n) || (n as number) < 0) return json({ ok: false,
+      alerta: 'enviado ao 3C mas falhou ao confirmar no banco; reconciliar lote antes de repetir',
+      ...resumo(), lote_id: loteId, retry_bloqueado: true }, 500)
+    marcados += n as number
+  }
+  return json({ ok: true, lista, lista_id: listaId, ...resumo(), com_curso: mailing.filter((m) => m.data.curso).length })
 }
 
 async function handler(req: Request): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders })
   if (req.method !== 'POST') return json({ error: 'Method not allowed' }, 405)
-
   // Gate: so service role (cron interno / operacao manual). Nunca anon.
   // Aceita as DUAS chaves: a do vault (_get_service_role_key) e a env do
   // container sao strings diferentes — comparar so com uma da 401 no cron.
@@ -253,150 +328,65 @@ async function handler(req: Request): Promise<Response> {
     }
     if (!vaultKey || auth !== vaultKey) return json({ error: 'forbidden' }, 403)
   }
-
-  console.log('[threec-mailing-sync] gate ok; token?', THREEC_TOKEN ? 'sim' : 'NAO')
   if (!THREEC_TOKEN) return json({ error: '3C_TOKEN_API nao configurado no edge-runtime' }, 500)
-
   const url = new URL(req.url)
   const acao = (url.searchParams.get('acao') ?? 'sincronizar').toLowerCase()
-  const qLista = (url.searchParams.get('lista') ?? 'quente').toLowerCase()
-  const qLimite = Number(url.searchParams.get('limite') ?? '') || null
-  const qDesde = url.searchParams.get('desde')
+  const lista = (url.searchParams.get('lista') ?? 'quente').toLowerCase()
+  const qLimite = url.searchParams.get('limite')
+  const desde = url.searchParams.get('desde')
   const dry = url.searchParams.get('dry') === '1'
-
-  // 1) Config
-  const { data: cfg, error: eCfg } = await supabase
-    .from('threec_mailing_config')
-    .select('campanha_id, lista_quente_id, lista_base_id, ativo, limite_por_rodada')
-    .maybeSingle()
-  if (eCfg || !cfg) return json({ error: 'config indisponivel', detail: eCfg?.message }, 500)
-
-  // 1b) EXPURGO — tira da campanha quem ja foi injetado mas hoje a regua veta.
-  //     Roda mesmo com o pipeline pausado: pausar a entrada nao tira ninguem
-  //     da fila do discador. Vem ANTES do gate de `ativo` de proposito.
-  if (acao === 'expurgar') return await expurgar(String(cfg.campanha_id), qLimite ?? 1000, dry)
-
-  if (!cfg.ativo) return json({ ok: true, skip: 'pipeline pausado (threec_mailing_config.ativo=false)' })
-
-  console.log("[3c-mailing] config ok", cfg.campanha_id, "ativo=", cfg.ativo)
-  const listaId = qLista === 'base' ? cfg.lista_base_id : cfg.lista_quente_id
-
-  // 2) Leads elegiveis (a regua vive na RPC)
-  const { data: leads, error: eSel } = await supabase.rpc('threec_mailing_selecionar', {
-    p_limite: qLimite ?? cfg.limite_por_rodada,
-    p_desde: qDesde ? new Date(qDesde).toISOString() : null,
-    p_ignorar_enviados: false,
-  })
-  if (eSel) return json({ error: 'falha ao selecionar leads', detail: eSel.message }, 500)
-
-  console.log("[3c-mailing] rpc ok; linhas=", (leads ?? []).length, "erro=", eSel ? eSel.message : "nenhum")
-  const rows = (leads ?? []) as LeadRow[]
-  if (rows.length === 0) return json({ ok: true, enviados: 0, motivo: 'nenhum lead elegivel' })
-
-  // 3) Payload do 3C
-  const mailing = rows.map((r) => ({
-    identifier: montarIdentifier(r.nome, r.curso),
-    areacode: r.telefone.substring(0, 2),
-    phone: r.telefone,
-    // O atendimento do 3C só lê os extras de `mailing.data`. Na raiz a API
-    // armazena o nome, mas ele não aparece na ligação (incidente de 09/09/2026).
-    data: {
-      nome: limpar(r.nome),
-      email: limpar(r.email),
-      formacao: humanizarFormacao(r.formacao),
-      curso: normalizarCurso(r.curso),
-    },
-  }))
-
-  console.log("[3c-mailing] payload montado:", mailing.length)
-  if (dry) {
-    return json({ ok: true, dry: true, lista: qLista, lista_id: listaId, total: mailing.length, amostra: mailing.slice(0, 5) })
+  if (!['sincronizar', 'expurgar', 'manter'].includes(acao) || !['quente', 'base'].includes(lista)) {
+    return json({ ok: false, error: 'ação ou lista inválida' }, 400)
   }
-
-  // 4) Envia ao 3C EM LOTES: a API recusa mais de 300 itens por POST
-  //    ("O campo Mailing deve ter no maximo 300 itens") — era por isso que o
-  //    n8n legado lia o buffer de 300 em 300.
-  const alvo = `${THREEC_BASE}/campaigns/${cfg.campanha_id}/lists/${listaId}/mailing?api_token=${THREEC_TOKEN}`
-  const aceitos: number[] = [] // indices de `rows` que o 3C aceitou
-  let descartadosPeloTresC = 0 // 2xx mas o 3C deduplicou contra a campanha
-  const falhas: string[] = []
-
-  for (let ini = 0; ini < mailing.length; ini += MAX_POR_POST) {
-    const fatia = mailing.slice(ini, ini + MAX_POR_POST)
-    let resp: Response
-    try {
-      resp = await fetch(alvo, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({ header: HEADER, mailing: fatia }),
-      })
-    } catch (err) {
-      // 422 e nunca 502/504: o Cloudflare engole 5xx da origem sem headers CORS.
-      falhas.push(`lote ${ini / MAX_POR_POST}: ${String(err)}`)
-      continue
-    }
-    const corpo = await resp.text()
-    if (resp.status >= 200 && resp.status < 300) {
-      // ⚠️ 2xx NAO significa "importou tudo": o 3C DEDUPLICA POR TELEFONE na
-      // CAMPANHA inteira (nao por lista) e descarta em silencio quem ja existe
-      // nela — apagar as listas NAO limpa essa base. A resposta traz
-      // `imported_lines` com o numero REAL de linhas aceitas.
-      try {
-        const j = JSON.parse(corpo)
-        const imp = typeof j?.imported_lines === 'number' ? j.imported_lines : fatia.length
-        if (imp < fatia.length) {
-          descartadosPeloTresC += fatia.length - imp
-          console.warn('[threec-mailing-sync] 3C descartou linhas (duplicata na campanha)', {
-            lote: ini / MAX_POR_POST, enviadas: fatia.length, importadas: imp,
-          })
-        }
-      } catch { /* corpo nao-JSON: segue o baile */ }
-      for (let k = ini; k < ini + fatia.length; k++) aceitos.push(k)
-    } else {
-      console.error('[threec-mailing-sync] 3C recusou lote', { ini, status: resp.status, corpo: corpo.slice(0, 300) })
-      falhas.push(`lote ${ini / MAX_POR_POST}: HTTP ${resp.status} ${corpo.slice(0, 200)}`)
-    }
+  if (qLimite !== null && (!qLimite.trim() || !Number.isFinite(Number(qLimite)))) return json({ ok: false, error: 'limite inválido' }, 400)
+  if (desde !== null && !Number.isFinite(Date.parse(desde))) return json({ ok: false, error: 'data inválida' }, 400)
+  const { data, error } = await supabase.from('threec_mailing_config')
+    .select('campanha_id, lista_quente_id, lista_base_id, ativo, limite_por_rodada').maybeSingle()
+  if (error || !data) return json({ ok: false, error: 'config indisponivel' }, 500)
+  const cfg = data as ConfigSDR
+  const limite = limitarRodada(qLimite === null ? Number(cfg.limite_por_rodada) || 300 : Number(qLimite))
+  const token = dry ? '' : crypto.randomUUID()
+  if (!dry) {
+    const lease = await supabase.rpc('threec_sdr_travar', { p_token: token, p_segundos: 180 })
+    if (lease.error) return json({ ok: false, error: 'falha ao adquirir trava SDR' }, 500)
+    if (lease.data !== true) return json({ ok: false, ocupado: true, error: 'SDR ocupada ou com lote pendente de reconciliação' }, 409)
   }
-
-  // Nenhum lote passou -> nao marca nada (o proximo tick tenta de novo)
-  if (aceitos.length === 0) {
-    return json({ error: '3C recusou todos os lotes', detail: falhas.slice(0, 3) }, 422)
-  }
-
-  // 5) Marca SO o que o 3C aceitou (idempotente por canon)
-  const itens = aceitos.map((k) => {
-    const r = rows[k]
-    return { lead_id: r.lead_id, canon: r.canon, telefone: r.telefone, curso: r.curso }
-  })
-  const { data: marcados, error: eMarcar } = await supabase.rpc('threec_mailing_marcar', {
-    p_itens: itens,
-    p_lista_id: String(listaId),
-  })
-  if (eMarcar) {
-    // Enviou mas nao marcou: o proximo tick reenviaria os mesmos. Loga alto.
-    console.error('[threec-mailing-sync] ENVIOU MAS NAO MARCOU', eMarcar.message)
-    return json({ ok: false, enviados: mailing.length, marcados: 0, alerta: 'enviado ao 3C mas falhou ao marcar — risco de duplicata no proximo tick', detail: eMarcar.message }, 500)
-  }
-
-  return json({
-    ok: true,
-    lista: qLista,
-    lista_id: listaId,
-    enviados: mailing.length,
-    marcados: marcados ?? 0,
-    com_curso: mailing.filter((m) => m.data.curso).length,
-    // quantos o 3C recusou por ja existirem na campanha (dedup dele, nao nosso)
-    descartados_duplicata_campanha: descartadosPeloTresC,
-  })
-}
-
-// Nunca devolver "Internal Server Error" pelado: sem corpo nao da para
-// diagnosticar (custou um ciclo de deploy aqui). Todo erro sai como JSON.
-Deno.serve(async (req) => {
+  const rodada = new AbortController()
+  const timerRodada = dry ? null : setTimeout(() => rodada.abort(), TIMEOUT_RODADA_MS)
   try {
-    return await handler(req)
-  } catch (err) {
-    console.error('[threec-mailing-sync] erro nao tratado', err)
-    return json({ error: 'erro interno', detail: String(err) }, 500)
+    if (acao === 'expurgar') return await expurgar(String(cfg.campanha_id), limite, dry, rodada.signal)
+    let bloqueios: Awaited<ReturnType<typeof atualizarBloqueios3C>> | null = null
+    let resultadoExpurgo: Record<string, unknown> | null = null
+    if (acao === 'manter') {
+      if (!dry) {
+        try {
+          bloqueios = await atualizarBloqueios3C({ supabase, base: THREEC_BASE, token: THREEC_TOKEN, signal: rodada.signal })
+        } catch {
+          return json({ ok: false, error: 'falha ao atualizar bloqueios do 3C; entrada suspensa' }, 502)
+        }
+      }
+      const resposta = await expurgar(String(cfg.campanha_id), limite, dry, rodada.signal)
+      resultadoExpurgo = await resposta.clone().json()
+      if (!resposta.ok || resultadoExpurgo?.ok !== true) return resposta
+    }
+    const resposta = await sincronizar(cfg, lista, limite, desde ? new Date(desde).toISOString() : null, dry, token, rodada.signal)
+    if (!resultadoExpurgo) return resposta
+    return json({ ...await resposta.json(), expurgo: resultadoExpurgo, bloqueios_3c: bloqueios }, resposta.status)
+  } finally {
+    if (timerRodada !== null) clearTimeout(timerRodada)
+    if (!dry) {
+      try {
+        const r = await supabase.rpc('threec_sdr_destravar', { p_token: token })
+        if (r.error || r.data !== true) console.error('[threec-mailing-sync] falha ao liberar lease; aguardar vencimento')
+      } catch {
+        console.error('[threec-mailing-sync] falha ao liberar lease; aguardar vencimento')
+      }
+    }
+  }
+}
+Deno.serve(async (req) => {
+  try { return await handler(req) } catch {
+    // Erros de transporte podem conter URL autenticada; nunca ecoar a exceção.
+    return json({ ok: false, error: 'erro interno no mailing SDR' }, 500)
   }
 })

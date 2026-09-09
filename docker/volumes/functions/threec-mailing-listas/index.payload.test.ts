@@ -47,6 +47,9 @@ beforeEach(() => {
   vi.spyOn(console, 'log').mockImplementation(() => {})
   vi.spyOn(console, 'warn').mockImplementation(() => {})
   fronteiras.rpc.mockImplementation(async (nome: string) => {
+    if (['threec_sdr_travar', 'threec_sdr_destravar'].includes(nome)) return { data: true, error: null }
+    if (nome === 'threec_sdr_lote_iniciar') return { data: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', error: null }
+    if (nome === 'threec_sdr_lote_confirmar') return { data: leads.length, error: null }
     if (['threec_mailing_selecionar_lista', 'threec_mailing_selecionar'].includes(nome)) {
       return { data: leads, error: null }
     }
@@ -103,7 +106,11 @@ describe.each(campanhas)('$funcao: dados visíveis no atendimento do 3C', ({ fun
     expect(corpo.mailing[1].data).toEqual({ nome: 'Bruno Lima', email: '', formacao: '', curso: '' })
 
     const resultado = await resposta.json()
-    expect(resultado).toMatchObject({ enviados: 2, marcados: 2, descartados_duplicata_campanha: 1 })
+    expect(resultado).toMatchObject({ enviados: 2, marcados: 2 })
+    if (funcao === 'threec-mailing-sync') {
+      expect(resultado).toMatchObject({ submetidos_confirmados: 2, imported_lines: 1, descartados_agregados: 1 })
+      expect(resultado).not.toHaveProperty('descartados_duplicata_campanha')
+    } else expect(resultado.descartados_duplicata_campanha).toBe(1)
     if (funcao === 'threec-mailing-sync') expect(resultado.com_curso).toBe(1)
   })
 
