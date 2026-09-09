@@ -20,6 +20,7 @@
 // número inexistente — sem isso, taxa de erro alta vira discussão sobre "base ruim".
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0'
+import { coletarSnapshotListas, type SnapshotListas } from './listasSnapshot.ts'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -51,7 +52,7 @@ const dia = (offsetDias = 0): string => {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(d)
 }
 
-interface Metricas {
+interface Metricas extends Partial<SnapshotListas> {
   campanha_id: string
   janela: 'hoje' | '30d'
   phones_total: number; phones_dialed: number; phones_completed: number
@@ -138,13 +139,28 @@ async function handler(req: Request): Promise<Response> {
   const falhas: string[] = []
 
   for (const l of campanhas.map((c) => ({ campanha_id: c.id, nome: c.nome }))) {
+    // Uma leitura do estoque por campanha, compartilhada entre as duas janelas.
+    // Falha não pode virar zero nem apagar o último snapshot confirmado no banco.
+    let snapshot: SnapshotListas | undefined
+    try {
+      snapshot = await coletarSnapshotListas(async (pagina) => {
+        const q = new URLSearchParams({ api_token: THREEC_TOKEN, per_page: '100', page: String(pagina) })
+        const r = await fetch(`${THREEC_BASE}/campaigns/${l.campanha_id}/lists?${q}`,
+          { headers: { Accept: 'application/json' } })
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        return r.json()
+      })
+    } catch {
+      // A exceção de fetch pode conter URL com api_token. O log guarda só a etapa.
+      falhas.push(`${l.campanha_id}/listas: falha ao atualizar o total de contatos`)
+    }
     for (const [janela, de, ate] of [
       ['hoje', hoje, hoje],
       ['30d', dia(30), hoje],
     ] as Array<['hoje' | '30d', string, string]>) {
       const r = await buscar(l.campanha_id, janela, de, ate)
       if ('erro' in r) falhas.push(r.erro)
-      else linhas.push({ ...r, campanha_nome: l.nome, automatica: automaticas.has(l.campanha_id) })
+      else linhas.push({ ...r, ...snapshot, campanha_nome: l.nome, automatica: automaticas.has(l.campanha_id) })
     }
   }
 
