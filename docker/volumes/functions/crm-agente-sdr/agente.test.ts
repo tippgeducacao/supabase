@@ -6,6 +6,7 @@ import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO, PROMPT_ROUTER } from './prompts'
 import { AGENTE_CAMPANHA_DIRETA } from './prompts-campanha-direta';
 import { AGENTE_RECONTATO } from './prompts-recontato';
 import { FOLLOWUP_SYSTEM } from './prompts-followup';
+import { montarContextoEntregaMateriais } from './entregaMateriais';
 
 // Exercita o request HTTP real das três rotas, com o transporte como única fronteira
 // de IA simulada. Nenhuma mensagem, tool, consulta ou escrita externa é executada.
@@ -97,6 +98,16 @@ describe('instrução de memória no system enviado à Anthropic', () => {
       { type: 'text', text: prompt },
       { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA, cache_control: { type: 'ephemeral' } },
     ]);
+    // A exceção já chegava no segundo bloco, mas perdia força porque a persona
+    // proibia reenvio no primeiro. Confere o pedido montado, nas quatro personas.
+    const instrucoes = pedido.system.map((bloco) => bloco.text).join('\n');
+    expect(instrucoes).not.toContain('**NÃO** reenvie');
+    expect(instrucoes).not.toContain('Diga que o material já está com ele');
+    expect(instrucoes).not.toContain('te mandei o cronograma completo aqui em cima');
+    expect(instrucoes).toContain('Se o lead pedir novamente');
+    expect(instrucoes).toContain('Não repita o mesmo material sem novo pedido ou falha');
+    expect(instrucoes).toContain('solicitação aceita não comprova entrega');
+    expect(instrucoes).toContain('Nunca contradiga o lead dizendo que recebeu');
     expect(pedido.messages[0].role).toBe('assistant');
     expect(JSON.stringify(pedido.messages[0])).toContain('[ATENDIMENTO_HUMANO] Letícia');
     expect(pedido.messages[1].role).toBe('user');
@@ -150,6 +161,38 @@ describe('instrução de memória no system enviado à Anthropic', () => {
     expect(blocos[1].cache_control).toBeUndefined();
   });
 
+  it('anexa a falha atual após o tool_result antigo em cache sem alterar a memória da conversa', async () => {
+    const messages: Msg[] = [
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'envio-antigo', name: 'envia_informacoes', input: { conteudo: 'cronograma' } }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'envio-antigo', content: 'Cronograma enviado com sucesso no WhatsApp do lead.' }] },
+    ];
+    const original = structuredClone(messages);
+    const contextoFalha = montarContextoEntregaMateriais([{
+      id: 'material-1', tipo: 'document', status_entrega: 'failed',
+      created_at: '2026-09-09T12:00:00Z', anexos: [{ filename: 'cronograma.pdf' }],
+    }]);
+    await chamarAgentePrincipal({
+      promptAgente: AGENTE_QUALIFICADOR, contextoTemporal: 'DATA SINTÉTICA',
+      contextoEntregaMateriais: contextoFalha, messages, tools: [],
+    });
+
+    const pedido = ultimoPedido();
+    const blocos = pedido.messages.at(-1)!.content as { type: string; text?: string; cache_control?: unknown }[];
+    expect(blocos[0]).toEqual({
+      type: 'tool_result', tool_use_id: 'envio-antigo',
+      content: 'Cronograma enviado com sucesso no WhatsApp do lead.', cache_control: { type: 'ephemeral' },
+    });
+    expect(blocos[1].text).toContain('DATA SINTÉTICA');
+    expect(blocos[2]).toEqual({ type: 'text', text: contextoFalha });
+    expect(blocos[2].text).toContain('"cronograma.pdf" | FALHOU');
+    expect(blocos[2].text).toContain('prevalece sobre confirmações antigas');
+    expect(blocos.slice(1).every((bloco) => bloco.cache_control === undefined)).toBe(true);
+    expect(pedido.system.some((bloco) => bloco.text.includes(contextoFalha))).toBe(false);
+    expect(messages).toEqual(original);
+    expect(JSON.stringify(messages)).not.toContain('ESTADO ATUAL DOS MATERIAIS');
+    expect(transporte).toHaveBeenCalledTimes(1); // Só a chamada de IA simulada, sem persistência externa.
+  });
+
   it('chega ao follow-up em bloco estático, preservando a fala humana inicial e o limite de 16 registros', async () => {
     const history: Msg[] = [
       { role: 'user', content: 'conteúdo antigo fora da janela' },
@@ -190,8 +233,9 @@ describe('contrato de autoria e continuidade no system', () => {
   it('mantém conteúdo de áudio pendente desconhecido, sem aprovação ou reenvio automático', () => {
     expect(INSTRUCAO_MEMORIA_HUMANA).toContain('Áudio sem transcrição concluída registra apenas o envio ou recebimento');
     expect(INSTRUCAO_MEMORIA_HUMANA).toContain('não suponha seu conteúdo');
-    expect(INSTRUCAO_MEMORIA_HUMANA).toContain('nem ofereça enviar de novo material já enviado');
-    expect(INSTRUCAO_MEMORIA_HUMANA).toContain('sem contradizê-lo só porque há registro de envio');
+    expect(INSTRUCAO_MEMORIA_HUMANA).toContain('nem envie novamente o mesmo material sem novo pedido ou falha');
+    expect(INSTRUCAO_MEMORIA_HUMANA).toContain('mesmo com envio anterior registrado por você ou por um atendente humano');
+    expect(INSTRUCAO_MEMORIA_HUMANA).toContain('sem repetir envios em loop');
     expect(INSTRUCAO_MEMORIA_HUMANA).toContain('Formação informada não é aprovação');
     expect(INSTRUCAO_MEMORIA_HUMANA).toContain('aprovação registrada para este lead e curso');
     expect(INSTRUCAO_MEMORIA_HUMANA).toContain('não autorizam reabrir atendimento pausado nem ignorar recusa');

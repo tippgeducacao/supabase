@@ -21,6 +21,7 @@ import { comContinuidadeWebchat } from './continuidadeWebchat.ts';
 import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoCurso, notaDoNome, renderPrompt } from './contexto.ts';
 import { atualizarAgenteComRatchet, atualizarLead, buscarLead, carregarHistorico, criarLead, excluirDadosLead, gravarMensagem, limparParaRouter, sanitizarHistorico } from './historico.ts';
 import { carregarTools, chamarAgentePrincipal, chamarRouter } from './agente.ts';
+import { carregarContextoEntregaMateriais } from './entregaMateriais.ts';
 import { type CtxConversa, executarTool, montarToolResults } from './tools.ts';
 import { prepararMensagem } from './midia.ts';
 import { persistirEntradasDoLote, registrarEntrada } from './historicoEntradaPausa.ts';
@@ -542,10 +543,15 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
 
   // Loop agêntico: igual ao n8n, o histórico é relido do banco a cada volta.
   for (let rodada = 0; rodada < MAX_RODADAS_TOOLS; rodada++) {
-    const messages = sanitizarHistorico(await carregarHistorico(supabase, remotejid));
+    const [historico, contextoEntregaMateriais] = await Promise.all([
+      carregarHistorico(supabase, remotejid),
+      carregarContextoEntregaMateriais(supabase, remotejid, ctx.waAccountId),
+    ]);
+    const messages = sanitizarHistorico(historico);
     const inicioLlm = Date.now();
     const resp = await chamarAgentePrincipal({
       promptAgente,
+      contextoEntregaMateriais,
       // Encerramento vence reação: a despedida é o que importa nessa volta.
       contextoTemporal: encerrouPorTool
         ? `${contextoEfetivo}\n\n${retornoPorFormatura ? INSTRUCAO_POS_RETORNO : INSTRUCAO_POS_PAUSA}`

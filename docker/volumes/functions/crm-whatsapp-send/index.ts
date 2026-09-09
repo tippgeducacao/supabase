@@ -1167,8 +1167,8 @@ Deno.serve(async (req) => {
     }
 
     // Documento enviado por HUMANO (SDR no chat) → semeia o histórico do agente com um
-    // marcador (role=assistant), pra IA saber que o material JÁ FOI enviado e não
-    // reenviar/prometer de novo quando despausarem (pedido 2026-07-03: "eles pausam pra
+    // marcador (role=assistant), pra IA saber que houve uma tentativa de envio e não
+    // duplicar sem necessidade quando despausarem (pedido 2026-07-03: "eles pausam pra
     // mandar o cronograma e a IA não fica sabendo"). Turnos assistant consecutivos são
     // FUNDIDOS pelos sanitizadores do agente (limparParaRouter/sanitizarHistorico), então
     // o marcador não quebra a alternância de roles da Claude API. Documento enviado pela
@@ -1182,7 +1182,7 @@ Deno.serve(async (req) => {
         remotejid: remoteJid,
         conversation_history: {
           role: "assistant",
-          content: `[${quem} enviou o documento "${nomeDoc}" ao lead pelo WhatsApp — material já entregue, não reenvie nem prometa enviar de novo]`,
+          content: `[ATENDIMENTO_HUMANO] ${quem} solicitou o envio do documento "${nomeDoc}" pelo WhatsApp. A solicitação foi aceita; a entrega ainda depende da confirmação do WhatsApp. Não duplique espontaneamente, mas reenvie se o lead informar que não recebeu, não consegue abrir ou pedir novamente.`,
         },
         timestamp: nowIso,
       });

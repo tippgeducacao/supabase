@@ -849,12 +849,15 @@ async function enviaInformacoes(supabase: any, input: any, ctx: CtxConversa, too
   const conteudo = input.conteudo || 'cronograma';
   const enviarCronograma = conteudo === 'cronograma' || conteudo === 'cronograma_e_valor';
   const incluirValor = conteudo === 'valor' || conteudo === 'cronograma_e_valor';
-  const sair = (texto: string) => ({ resultado: texto, id: toolUseId });
+  const sair = (texto: string, estado: Record<string, unknown> = {}) => ({ resultado: texto, id: toolUseId, ...estado });
+  const semPromessa = 'Não afirme envio ou entrega e não prometa mandar depois: não existe envio futuro agendado por esta tentativa. Reconheça que não foi possível confirmar o envio agora, sem expor o erro técnico. Um pedido explícito de novo envio deve ser atendido quando for possível, mesmo se houver uma tentativa anterior.';
 
   const cursoOp = await cursoDaOportunidade(supabase, ctx);
   const pos = String(input.curso_escolhido ?? '').trim() || cursoOp;
   if (!pos) {
-    return sair('Erro: curso_escolhido não informado e sem curso na oportunidade. Diga ao lead que vai enviar em seguida e conduza a conversa normalmente.');
+    return sair(`Curso não informado. Confirme qual material o lead quer. ${semPromessa}`, {
+      cronograma_enviado: false, cronograma_entregue: false, cronograma_status: 'falhou',
+    });
   }
 
   const chamar = async (p: string) => {
@@ -882,26 +885,52 @@ async function enviaInformacoes(supabase: any, input: any, ctx: CtxConversa, too
     ({ res, body, d } = await chamar(cursoOp));
   }
 
-  if (res.status < 200 || res.status >= 300) {
+  if (res.status < 200 || res.status >= 300 || body?.error || d.error) {
     const msg = d.error || body?.error || `HTTP ${res.status} no envia-informacoes`;
     const code = d.code || body?.code || '';
     if (code === 'cronograma_nao_cadastrado') {
-      return sair('Cronograma ainda não cadastrado para este curso. Diga ao lead que vai mandar o material em seguida e conduza a conversa normalmente.');
+      return sair(`Cronograma ainda não cadastrado para este curso. ${semPromessa}`, {
+        cronograma_enviado: false, cronograma_entregue: false, cronograma_status: 'falhou',
+      });
     }
     if (code === 'valor_nao_cadastrado') {
       return sair('Valor não cadastrado para este curso. Diga que essa informação é passada na reunião e reconduza pro agendamento.');
     }
     if (code === 'cronograma_ja_enviado') {
-      return sair('O cronograma já foi enviado anteriormente nesta conversa. NÃO reenvie nem chame a função de novo. Diga que o material já está com ele e siga a conversa.');
+      // Código legado: não é emitido pela API atual. Um envio anterior não prova
+      // recebimento e não revoga a autorização de um novo pedido do lead.
+      return sair(`Esta tentativa foi recusada pelo registro de um envio anterior; a entrega não foi comprovada. ${semPromessa}`, {
+        cronograma_enviado: false, cronograma_entregue: false, cronograma_status: 'falhou',
+      });
     }
-    return sair(`Erro ao enviar informações (${msg}${code ? ' / ' + code : ''}). Diga ao lead que vai enviar em seguida e siga a conversa.`);
+    return sair(`Não foi possível confirmar o envio (${msg}${code ? ' / ' + code : ''}). ${semPromessa}`, {
+      cronograma_enviado: false, cronograma_entregue: false, cronograma_status: 'falhou',
+    });
   }
 
   const partes: string[] = [];
+  let estado: Record<string, unknown> = {};
   if (enviarCronograma) {
-    partes.push(d.cronograma_enviado
-      ? 'Cronograma enviado com sucesso no WhatsApp do lead. Confirme em uma linha que enviou e reconduza a conversa pro agendamento.'
-      : 'Cronograma não pôde ser enviado. Diga que vai mandar em seguida e siga a conversa.');
+    const temReferencia = typeof d.cronograma_wa_message_id === 'string' && d.cronograma_wa_message_id.trim()
+      && (d.cronograma_wa_account_id || d.cronograma_wa_conexao_id);
+    const falhou = d.cronograma_status === 'falhou' || Boolean(d.cronograma_erro);
+    const entregue = Boolean(!falhou && temReferencia && ['delivered', 'read'].includes(d.cronograma_status));
+    const aceito = d.cronograma_enviado === true && !falhou;
+    estado = {
+      cronograma_enviado: aceito,
+      cronograma_entregue: entregue,
+      cronograma_status: entregue ? d.cronograma_status : falhou ? 'falhou' : 'pendente',
+      cronograma_wa_message_id: d.cronograma_wa_message_id ?? null,
+      cronograma_wa_account_id: d.cronograma_wa_account_id ?? null,
+      cronograma_wa_conexao_id: d.cronograma_wa_conexao_id ?? null,
+    };
+    if (entregue) {
+      partes.push('Há confirmação de entrega do cronograma no WhatsApp. Se o lead pedir novamente ou disser que não recebeu/não encontrou, atenda o novo pedido sem insistir que o material já está com ele.');
+    } else if (aceito) {
+      partes.push('Solicitação de envio do cronograma aceita, mas a entrega está PENDENTE de confirmação. Diga apenas que solicitou o envio; NÃO diga "entregue", "já recebeu" ou "o material já está com você". Se ele pedir novamente ou disser que não recebeu, não recuse por causa desta tentativa anterior.');
+    } else {
+      partes.push(`Envio do cronograma não confirmado${d.cronograma_erro ? ` (${d.cronograma_erro})` : ''}. ${semPromessa}`);
+    }
   }
   if (incluirValor) {
     if (d.valor_integral) {
@@ -916,7 +945,7 @@ async function enviaInformacoes(supabase: any, input: any, ctx: CtxConversa, too
       partes.push(`Matrícula (valor e link pra garantir a vaga direto no valor integral): ${matriculaTxt}. Ofereça pra quem preferir fechar agora, deixando claro que pelo link é o valor integral, sem condição. NUNCA diga ou insinue que o valor da matrícula pode ser reduzido ou negociado.`);
     }
   }
-  return sair(partes.join(' '));
+  return sair(partes.join(' '), estado);
 }
 
 // ── pausa_ia ────────────────────────────────────────────────────────────────
@@ -1184,6 +1213,12 @@ export async function executarTool(
   } catch (e) {
     // Erro vira tool_result legível — o agente contorna na conversa em vez de travar.
     console.error(`[crm-agente-sdr] tool ${name} falhou:`, e);
+    if (name === 'envia_informacoes') {
+      return {
+        id, cronograma_enviado: false, cronograma_entregue: false, cronograma_status: 'pendente',
+        resultado: 'Não foi possível confirmar o envio do material nesta tentativa. Não diga que enviou ou entregou e não prometa envio futuro: esta falha não agendou nova tentativa. Se o lead pedir de novo, o histórico anterior não impede atender o novo pedido.',
+      };
+    }
     /*
       ⚠️ "Conduza normalmente" é FAIL-OPEN, e para a checagem de elegibilidade isso é o pior
       default possível: a matriz cai (ela usa MODELO_MATRIZ, um modelo PRÓPRIO, que já ficou

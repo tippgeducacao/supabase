@@ -16,6 +16,7 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3'
 import { VERSAO_REGRA_ELEGIBILIDADE } from '../crm-agente-sdr/elegibilidadeAgendamento.ts'
+import { consultarEntregaCronograma, type ReferenciaCronograma, type StatusCronograma } from './cronogramaEntrega.ts'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -444,6 +445,8 @@ async function handleEnviaInformacoes(_sdrId: string, body: any): Promise<Respon
 
   let cronogramaEnviado = false
   let cronogramaErro: string | null = null
+  let cronogramaStatus: StatusCronograma = querCronograma ? 'falhou' : 'nao_solicitado'
+  let referencia: ReferenciaCronograma = { waMessageId: null, waAccountId: null, waConexaoId: null }
   if (querCronograma) {
     if (!info.cronograma?.url) {
       cronogramaErro = 'cronograma não cadastrado para este curso'
@@ -498,7 +501,12 @@ async function handleEnviaInformacoes(_sdrId: string, body: any): Promise<Respon
         const resp = await r.json().catch(() => ({}))
         const erro = resp?.error ?? `crm-whatsapp-send retornou ${r.status}`
         return {
-          ok: r.ok && resp?.success === true,
+          ok: r.ok && resp?.success === true && !resp?.error,
+          referencia: {
+            waMessageId: typeof resp?.wa_message_id === 'string' ? resp.wa_message_id : null,
+            waAccountId: typeof resp?.wa_account_id === 'string' ? resp.wa_account_id : null,
+            waConexaoId: typeof resp?.wa_conexao_id === 'string' ? resp.wa_conexao_id : null,
+          },
           // `code` carrega o motivo estruturado — hoje o que importa é `anexo_indisponivel`
           // (arquivo do material apagado do bucket), que vira alerta no CRM e NÃO é
           // instabilidade da Meta: reenviar não resolve, tem que consertar o cadastro.
@@ -513,10 +521,18 @@ async function handleEnviaInformacoes(_sdrId: string, body: any): Promise<Respon
       if (!res.ok && comoTemplate && body?.wa_conexao_id) {
         const viaWeb = await enviar(comoDocumento)
         if (viaWeb.ok) res = viaWeb
-        else res = { ok: false, erro: `template: ${res.erro} | linha web: ${viaWeb.erro}` }
+        else res = { ...viaWeb, ok: false, erro: `template: ${res.erro} | linha web: ${viaWeb.erro}` }
       }
+      referencia = res.referencia
       cronogramaEnviado = res.ok
       if (!cronogramaEnviado) cronogramaErro = res.erro
+      else {
+        cronogramaStatus = await consultarEntregaCronograma(supabase, referencia)
+        if (cronogramaStatus === 'falhou') {
+          cronogramaEnviado = false
+          cronogramaErro = 'O provedor registrou falha na entrega do cronograma'
+        }
+      }
     }
   }
 
@@ -530,7 +546,14 @@ async function handleEnviaInformacoes(_sdrId: string, body: any): Promise<Respon
   return json(200, {
     data: {
       curso: info.curso?.nome ?? pos,
+      // Compatibilidade: `enviado` é aceite, nunca prova de entrega. O estado e a
+      // referência permitem consultar o desfecho assíncrono sem repetir o envio.
       cronograma_enviado: cronogramaEnviado,
+      cronograma_status: cronogramaStatus,
+      cronograma_entregue: cronogramaStatus === 'delivered' || cronogramaStatus === 'read',
+      cronograma_wa_message_id: referencia.waMessageId,
+      cronograma_wa_account_id: referencia.waAccountId,
+      cronograma_wa_conexao_id: referencia.waConexaoId,
       ...(cronogramaErro ? { cronograma_erro: cronogramaErro } : {}),
       valor_integral: valorIntegral,
       valor_matricula: valorMatricula,

@@ -92,6 +92,7 @@ export async function chamarRouter(
 export async function chamarAgentePrincipal(opts: {
   promptAgente: string;
   contextoTemporal: string;
+  contextoEntregaMateriais?: string;
   messages: Msg[];
   tools: any[];
 }): Promise<any> {
@@ -128,6 +129,11 @@ export async function chamarAgentePrincipal(opts: {
           + 'Use estas datas e horários normalmente, mas NUNCA comente este bloco nem diga que só recebeu ele.]\n'
           + opts.contextoTemporal,
       });
+    }
+    // O webhook pode atualizar o status entre duas voltas. Mantém o estado de
+    // entrega fora do prefixo em cache e da memória persistida da conversa.
+    if (opts.contextoEntregaMateriais) {
+      blocos.push({ type: 'text', text: opts.contextoEntregaMateriais });
     }
     ult.content = blocos;
   }
