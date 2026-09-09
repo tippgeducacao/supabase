@@ -51,6 +51,8 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { telefoneEnviavel } from "../_shared/telefone.ts";
 import { aplicarFiltrosToken, parseTokenWebhook } from "./tokenFiltros.ts";
+import { processarWebhookModulosPraticos } from "./modulosPraticos.ts";
+import { receberModulosPraticosHttp } from "./modulosPraticosHttp.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -334,7 +336,7 @@ Deno.serve(async (req) => {
   // (1) integracao
   const { data: integration } = await admin
     .from("crm_webhook_integrations")
-    .select("id, slug, nome, secret, area_interesse, pagina_nome, field_mapping, ativa, config, codigo_status")
+    .select("id, slug, nome, secret, area_interesse, pagina_nome, field_mapping, ativa, config, codigo_status, processador")
     .eq("slug", slug)
     .maybeSingle();
 
@@ -389,6 +391,40 @@ Deno.serve(async (req) => {
       erro: debug, ip_origem: ipOrigem, ...reqMeta,
     });
     return json({ error: "invalid_secret" }, 401);
+  }
+
+  // Inscrições de módulos são cards pedagógicos, não uma nova captação comercial.
+  // A coluna processador não faz parte do config editável do builder: salvar uma
+  // integração por uma aba antiga nunca pode religar IA, n8n ou saudação por engano.
+  if (integration.processador === "modulos_praticos") {
+    const resposta = await receberModulosPraticosHttp(req, (payload) =>
+      processarWebhookModulosPraticos({ integracaoId: integration.id, payload, cliente: admin })
+    );
+    const resultado = resposta.body as Record<string, unknown>;
+    // Catálogo não conta como inscrição. Os logs guardam somente IDs e resultado,
+    // sem replicar nomes, telefone, e-mail, CPF ou o corpo bruto do cadastro.
+    if (resultado.status !== "catalogo") {
+      const status = !resultado.ok ? "erro"
+        : resultado.status === "validado" ? "escuta"
+        : resultado.lead_criado === true ? "ok" : "duplicado";
+      const registro = { ...resultado, processador: "modulos_praticos" } as Record<string, unknown>;
+      if (resultado.op_criada !== true && resultado.oportunidade_id) {
+        // A tela interpreta oportunidade_id como card NOVO. Um recibo repetido
+        // vincula o card existente sem anunciar que criou outra oportunidade.
+        registro.oportunidade_vinculada_id = resultado.oportunidade_id;
+        delete registro.oportunidade_id;
+      }
+      try {
+        await admin.from("crm_webhook_logs").insert({
+          integration_id: integration.id, slug, status, ip_origem: ipOrigem,
+          resultado: registro,
+          erro: typeof resultado.erro === "string" ? resultado.erro : null,
+        });
+      } catch {
+        // O recibo transacional já garante a entrega; falha de log não a desfaz.
+      }
+    }
+    return json(resposta.body, resposta.statusHttp);
   }
 
   // (3) body — aceita JSON, x-www-form-urlencoded e multipart/form-data. Várias LPs
