@@ -139,6 +139,7 @@ export function validarPayloadModulosPraticos(payload: unknown): PayloadModulosP
 }
 
 const ERROS_NEGOCIO: Record<string, { status: number; mensagem: string }> = {
+  inscricao_ignorada: { status: 422, mensagem: 'Inscrição excluída da integração por regra administrativa.' },
   integracao_inativa: { status: 403, mensagem: 'Esta integração está desativada.' },
   integracao_invalida: { status: 403, mensagem: 'A integração não está autorizada para módulos práticos.' },
   payload_invalido: { status: 400, mensagem: 'O corpo da inscrição é inválido.' },

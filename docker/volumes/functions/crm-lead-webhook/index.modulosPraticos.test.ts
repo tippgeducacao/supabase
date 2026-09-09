@@ -5,7 +5,7 @@ vi.mock('https://esm.sh/@supabase/supabase-js@2.49.4', () => ({ createClient: ()
 
 type Integracao = {
   id: string; slug: string; secret: string; ativa: boolean;
-  processador: string | null; config: Record<string, unknown>;
+  processador: string | null; config: Record<string, unknown>; regras_importacao?: Record<string, unknown>;
 };
 let atender: (req: Request) => Promise<Response>;
 let integracao: Integracao;
@@ -62,6 +62,30 @@ const requisicao = (body = JSON.stringify({ evento: 'catalogo' }), secret: strin
 );
 
 describe('dispatch autenticado do webhook de módulos no entrypoint real', () => {
+  it('ignora teste antes de validar telefone, sem RPC de gravação nem log de dados pessoais', async () => {
+    integracao.regras_importacao = { ignorar_testes: true };
+    const resposta = await atender(requisicao(JSON.stringify({
+      evento: 'inscricao.retroativa', inscricao_id: 'externa-teste',
+      contato: { nome: 'Inscrição de teste', telefone: '123' },
+    })));
+    expect(resposta.status).toBe(422);
+    expect(await resposta.json()).toMatchObject({ ok: false, erro: 'inscricao_ignorada', repetir: false });
+    expect(cliente.rpc).not.toHaveBeenCalled();
+    expect(JSON.stringify(logs)).not.toContain('Inscrição de teste');
+    expect(logs[0]).toMatchObject({ erro: 'inscricao_ignorada' });
+    expect(rede).not.toHaveBeenCalled();
+  });
+
+  it('ignora identidade administrativa configurada e mantém o catálogo disponível', async () => {
+    integracao.regras_importacao = { nomes: ['Pessoa Bloqueada'] };
+    const resposta = await atender(requisicao(JSON.stringify({
+      evento: 'inscricao.criada', contato: { nome: 'PESSOA-BLOQUEADA' },
+    })));
+    expect(resposta.status).toBe(422);
+    expect(cliente.rpc).not.toHaveBeenCalled();
+    const catalogo = await atender(requisicao());
+    expect(catalogo.status).toBe(200);
+  });
   it.each([
     ['modulos_praticos', null], ['modulos_praticos', 'secret-incorreto'],
     ['padrao', null], ['padrao', 'secret-incorreto'],

@@ -53,6 +53,7 @@ import { telefoneEnviavel } from "../_shared/telefone.ts";
 import { aplicarFiltrosToken, parseTokenWebhook } from "./tokenFiltros.ts";
 import { processarWebhookModulosPraticos } from "./modulosPraticos.ts";
 import { receberModulosPraticosHttp } from "./modulosPraticosHttp.ts";
+import { obterMotivoExclusaoModulosPraticos } from "./modulosPraticosExclusoes.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -336,7 +337,7 @@ Deno.serve(async (req) => {
   // (1) integracao
   const { data: integration } = await admin
     .from("crm_webhook_integrations")
-    .select("id, slug, nome, secret, area_interesse, pagina_nome, field_mapping, ativa, config, codigo_status, processador")
+    .select("id, slug, nome, secret, area_interesse, pagina_nome, field_mapping, ativa, config, codigo_status, processador, regras_importacao")
     .eq("slug", slug)
     .maybeSingle();
 
@@ -397,9 +398,17 @@ Deno.serve(async (req) => {
   // A coluna processador não faz parte do config editável do builder: salvar uma
   // integração por uma aba antiga nunca pode religar IA, n8n ou saudação por engano.
   if (integration.processador === "modulos_praticos") {
-    const resposta = await receberModulosPraticosHttp(req, (payload) =>
-      processarWebhookModulosPraticos({ integracaoId: integration.id, payload, cliente: admin })
-    );
+    const resposta = await receberModulosPraticosHttp(req, async (payload) => {
+      // A exclusão vem antes da validação: um teste com telefone fictício também
+      // precisa terminar como ignorado, sem gerar card ou tentativas automáticas.
+      if (obterMotivoExclusaoModulosPraticos(payload, integration.regras_importacao)) {
+        return { statusHttp: 422, body: {
+          ok: false, erro: "inscricao_ignorada",
+          mensagem: "Inscrição excluída da integração por regra administrativa.", repetir: false,
+        } };
+      }
+      return processarWebhookModulosPraticos({ integracaoId: integration.id, payload, cliente: admin });
+    });
     const resultado = resposta.body as Record<string, unknown>;
     // Catálogo não conta como inscrição. Os logs guardam somente IDs e resultado,
     // sem replicar nomes, telefone, e-mail, CPF ou o corpo bruto do cadastro.
