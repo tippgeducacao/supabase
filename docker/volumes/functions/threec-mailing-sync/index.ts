@@ -213,6 +213,7 @@ async function expurgar(campanhaId: string, limite: number, dry: boolean): Promi
     const { data: n, error: eMarcar } = await supabase.rpc('threec_mailing_marcar_removidos', {
       p_canons: removidos,
       p_motivo: 'expurgo: fora da regua do discador SDR',
+      p_campanha_id: campanhaId,
     })
     if (eMarcar) {
       console.error('[threec-mailing-sync] REMOVEU MAS NAO MARCOU', eMarcar.message)

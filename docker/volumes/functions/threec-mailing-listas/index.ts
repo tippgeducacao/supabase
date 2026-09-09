@@ -224,6 +224,7 @@ async function expurgar(cfg: ListaCfg, limite: number, dry: boolean): Promise<Re
     const { data: n, error: eMarcar } = await supabase.rpc('threec_mailing_marcar_removidos', {
       p_canons: removidos,
       p_motivo: `expurgo: fora da regua (${cfg.nome})`,
+      p_campanha_id: cfg.campanha_id,
     })
     if (eMarcar) {
       console.error('[threec-mailing-listas] REMOVEU MAS NAO MARCOU', eMarcar.message)
