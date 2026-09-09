@@ -79,12 +79,29 @@ describe('dispatch autenticado do webhook de módulos no entrypoint real', () =>
   it('ignora identidade administrativa configurada e mantém o catálogo disponível', async () => {
     integracao.regras_importacao = { nomes: ['Pessoa Bloqueada'] };
     const resposta = await atender(requisicao(JSON.stringify({
-      evento: 'inscricao.criada', contato: { nome: 'PESSOA-BLOQUEADA' },
+      evento: 'inscricao.retroativa', contato: { nome: 'PESSOA-BLOQUEADA' },
     })));
     expect(resposta.status).toBe(422);
     expect(cliente.rpc).not.toHaveBeenCalled();
     const catalogo = await atender(requisicao());
     expect(catalogo.status).toBe(200);
+  });
+
+  it.each(['inscricao.criada', 'validar'])('cadastro novo e simulação seguem a RPC mesmo coincidindo com todas as exclusões (%s)', async (evento) => {
+    integracao.regras_importacao = {
+      ignorar_testes: true, nomes: ['Pessoa Teste'], emails: ['teste@example.com'],
+      telefones: ['46999999999'], inscricoes_ids: ['externa-nova'],
+    };
+    const status = evento === 'validar' ? 'validado' : 'criado';
+    cliente.rpc.mockResolvedValue({ data: { ok: true, status, inscricao_id: 'externa-nova' }, error: null });
+    const resposta = await atender(requisicao(JSON.stringify({
+      evento, inscricao_id: 'externa-nova', modulo_codigo: 'modulo', inscrito_em: '2026-09-09T17:00:00Z',
+      contato: { nome: 'Pessoa Teste', email: 'teste@example.com', telefone: '46999999999' },
+    })));
+    expect(resposta.status).toBe(200);
+    expect(await resposta.json()).toMatchObject({ ok: true, status });
+    expect(cliente.rpc).toHaveBeenCalledExactlyOnceWith('crm_modulos_praticos_receber', expect.objectContaining({ p_validar: evento === 'validar' }));
+    expect(rede).not.toHaveBeenCalled();
   });
   it.each([
     ['modulos_praticos', null], ['modulos_praticos', 'secret-incorreto'],

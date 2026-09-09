@@ -59,13 +59,13 @@ function contemTokenDeTeste(valor: string | null): boolean {
 }
 
 /**
- * Filtro administrativo anterior à validação do contato. Não depende de telefone
+ * Filtro administrativo somente do retroativo, anterior à validação do contato. Não depende de telefone
  * válido para descartar uma inscrição de teste e não gera dados/efeitos colaterais.
  * As regras vêm da integração autenticada, nunca do corpo enviado pelo remetente.
  */
 export function obterMotivoExclusaoModulosPraticos(payload: unknown, regras: unknown): MotivoExclusaoModulosPraticos | null {
   if (!objeto(payload) || !objeto(regras)
-    || !['inscricao.criada', 'inscricao.retroativa', 'validar'].includes(texto(payload.evento) ?? '')) return null;
+    || texto(payload.evento) !== 'inscricao.retroativa') return null;
 
   if (presenteNaLista(texto(payload.inscricao_id), regras.inscricoes_ids, valor => valor)) return 'inscricao_bloqueada';
   const contato = objeto(payload.contato) ? payload.contato : {};

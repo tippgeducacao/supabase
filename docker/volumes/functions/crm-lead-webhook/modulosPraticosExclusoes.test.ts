@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { obterMotivoExclusaoModulosPraticos as motivo } from './modulosPraticosExclusoes.ts';
 
-const inscricao = (contato: unknown, evento = 'inscricao.criada') => ({ evento, inscricao_id: 'inscricao-1', contato });
+const inscricao = (contato: unknown, evento = 'inscricao.retroativa') => ({ evento, inscricao_id: 'inscricao-1', contato });
 
 describe('exclusões administrativas das inscrições de módulos práticos', () => {
   it('compara nome inteiro sem acentos ou separadores, sem bloquear apenas um prenome/sobrenome', () => {
@@ -71,12 +71,12 @@ describe('exclusões administrativas das inscrições de módulos práticos', ()
     }
   });
 
-  it('regras de exclusão valem para criada, retroativa e validar, nunca catálogo/outros eventos', () => {
-    for (const evento of ['inscricao.criada', 'inscricao.retroativa', 'validar']) {
-      expect(motivo(inscricao({ nome: 'Teste' }, evento), { ignorar_testes: true })).toBe('cadastro_de_teste');
-    }
-    for (const evento of ['catalogo', 'outro', '']) {
-      expect(motivo(inscricao({ nome: 'Teste' }, evento), { ignorar_testes: true, inscricoes_ids: ['inscricao-1'] })).toBeNull();
+  it('regras de exclusão valem somente para retroativa, incluindo listas explícitas', () => {
+    const contato = { nome: 'Teste', email: 'teste@example.com', telefone: '46999999999' };
+    const regras = { ignorar_testes: true, nomes: ['Teste'], emails: ['teste@example.com'], telefones: ['46999999999'], inscricoes_ids: ['inscricao-1'] };
+    expect(motivo(inscricao(contato, 'inscricao.retroativa'), regras)).toBe('inscricao_bloqueada');
+    for (const evento of ['inscricao.criada', 'validar', 'catalogo', 'outro', '']) {
+      expect(motivo(inscricao(contato, evento), regras), evento).toBeNull();
     }
   });
 
