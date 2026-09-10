@@ -25,6 +25,7 @@ import { type CtxConversa, executarTool, montarToolResults } from './tools.ts';
 import { carregarStatusMateriais } from './envioMateriais.ts';
 import { prepararMensagem } from './midia.ts';
 import { persistirEntradasDoLote, registrarEntrada } from './historicoEntradaPausa.ts';
+import { aguardarAudiosDoHistorico, contarAudiosPendentes } from './sincronizacaoAudio.ts';
 import { conversaTexto, enviarResposta, horariosInventados, humanizarTexto, removerRaciocinioVazado } from './saida.ts';
 import { contaDoLead } from './conta.ts';
 import { rodarEsteiraFollowup } from './followup.ts';
@@ -752,11 +753,25 @@ async function processarInbound(payload: any): Promise<void> {
       // processar; mensagens que chegarem durante a rodada entram na próxima.
       while (true) {
         const esperouMs = await aguardarSilencio(remotejid, delaySegundos, renovar);
+        const audio = await aguardarAudiosDoHistorico({
+          contar: () => contarAudiosPendentes(supabase, remotejid),
+          pausada: () => iaPausada(remotejid),
+          renovar,
+        });
+        if (audio.pendentes || audio.esperouMs >= 2000) {
+          telPrep.registrar('sincronizacao_audio', { estado: audio.estado, pendentes: audio.pendentes }, audio.esperouMs);
+        }
+        // Sem apagar o lote: ao liberar o lock, a drenagem de órfãos pode retomá-lo.
+        if (audio.estado === 'aguardando') break;
+        // Entradas novas durante a transcrição também precisam do debounce.
+        if (audio.estado === 'pronto' && audio.esperouMs >= 2000) {
+          await aguardarSilencio(remotejid, delaySegundos, renovar);
+        }
         const itens = await bufferDrenar(remotejid);
         if (!itens.length) break;
         // Pausou durante o debounce (45s)? Não gera nem responde esta leva — o lead
         // fica registrado no histórico mas a IA não fala (defesa em profundidade barata).
-        if (await iaPausada(remotejid)) {
+        if (audio.estado === 'pausado' || await iaPausada(remotejid)) {
           await persistirEntradasDoLote(supabase, remotejid, itens, true);
           criarTelemetria(supabase, remotejid).registrar('envio_abortado_pausa', {
             onde: 'pos_debounce', mensagens_preservadas: itens.length,

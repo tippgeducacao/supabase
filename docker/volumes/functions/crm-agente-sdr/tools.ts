@@ -198,9 +198,10 @@ async function consultaDisponibilidade(supabase: any, input: any, ctx: CtxConver
   try {
     const lead = await buscarLead(supabase, ctx.remotejid);
     if (lead && !String(lead.formacao_academica ?? '').trim()) {
-      avisoFormacao = '\n⚠️ A graduação deste lead ainda NÃO foi verificada. Ofereça os horários '
-        + 'como OPÇÕES e, se ele escolher um, NÃO responda como se estivesse fechado ("show, 10h30 então") '
-        + '— pergunte a graduação ANTES de confirmar qualquer horário, porque ela ainda pode reprovar.';
+      avisoFormacao = '\n⚠️ A graduação deste lead ainda NÃO foi verificada. Se ele já propôs ou escolheu '
+        + 'um dia e horário que apareceu disponível, preserve essa preferência e pergunte somente a formação/conclusão que falta, sem pedir outra escolha. '
+        + 'Se ainda não escolheu, apresente opções. NÃO responda como se estivesse fechado ("show, 10h30 então"): '
+        + 'a elegibilidade precisa ser verificada ANTES de confirmar a reunião.';
     }
   } catch (e) {
     console.log(`[crm-agente-sdr] aviso de formação na disponibilidade falhou (segue): ${(e as Error).message}`);

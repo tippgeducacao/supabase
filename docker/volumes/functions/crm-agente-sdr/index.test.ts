@@ -7,6 +7,7 @@ const fronteiras = vi.hoisted(() => ({
   pausaNoDebounce: false,
   executar: vi.fn(), tools: vi.fn(), gravar: vi.fn(), historico: vi.fn(),
   humanizar: vi.fn(), horarios: vi.fn(), conversa: vi.fn(),
+  sincronizarAudio: vi.fn(),
 }));
 vi.mock('https://esm.sh/@supabase/supabase-js@2.50.3', () => ({
   createClient: () => ({ from: fronteiras.from, rpc: fronteiras.rpc }),
@@ -23,6 +24,9 @@ vi.mock('./tools.ts', () => ({ executarTool: fronteiras.executar, montarToolResu
   type: 'tool_result', tool_use_id: o.id, content: JSON.stringify(o),
 })) }));
 vi.mock('./midia.ts', () => ({ prepararMensagem: fronteiras.prepararMensagem }));
+vi.mock('./sincronizacaoAudio.ts', () => ({
+  aguardarAudiosDoHistorico: fronteiras.sincronizarAudio, contarAudiosPendentes: vi.fn(),
+}));
 vi.mock('./saida.ts', () => ({
   enviarResposta: fronteiras.enviar, conversaTexto: fronteiras.conversa, horariosInventados: fronteiras.horarios,
   humanizarTexto: fronteiras.humanizar, removerRaciocinioVazado: (t: string) => t,
@@ -66,6 +70,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   fronteiras.buffer = [];
   fronteiras.pausaNoDebounce = false;
+  fronteiras.sincronizarAudio.mockResolvedValue({ estado: 'pronto', esperouMs: 0, pendentes: 0 });
   fronteiras.buscarLead.mockResolvedValue({ ...leadAtivo });
   fronteiras.prepararMensagem.mockResolvedValue({ mensagem: payload.conteudo });
   fronteiras.rpc.mockImplementation(async (nome: string) => {
@@ -83,6 +88,7 @@ beforeEach(() => {
     };
     if (tabela === 'cliente_ppg_leads_sdr') return {
       select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { pausa_ia: fronteiras.pausaNoDebounce }, error: null }) }) }),
+      update: () => ({ in: async () => ({ error: null }) }),
     };
     if (tabela === 'crm_agente_sdr_buffer') return {
       insert: fronteiras.bufferInserir.mockImplementation(async (linha: { payload: Record<string, unknown> }) => {
@@ -199,5 +205,73 @@ describe('loop HTTP do SDR: recuperação de material', () => {
     expect(fronteiras.chamarPrincipal.mock.calls[1][0].promptAgente).toContain('FALHA NO MATERIAL NÃO ENCERRA O ATENDIMENTO');
     expect(fronteiras.enviar).toHaveBeenCalledOnce();
     expect(fronteiras.enviar.mock.calls[0][1]).toBe('não estou conseguindo enviar o cronograma pelo WhatsApp agora. enquanto isso, podemos continuar com o agendamento?');
+  });
+});
+
+describe('sincronização de áudio na entrada HTTP', () => {
+  function adquirirLock() {
+    const anterior = fronteiras.rpc.getMockImplementation()!;
+    fronteiras.rpc.mockImplementation(async (nome: string, ...args: unknown[]) =>
+      nome === 'crm_agente_sdr_lock_claim' ? { data: true, error: null } : anterior(nome, ...args));
+  }
+  it('só lê a conversa para router e principal depois de a transcrição ficar pronta', async () => {
+    let transcrito = false;
+    fronteiras.buscarLead.mockResolvedValue({ ...leadAtivo, agente_atual: 'agente_validacao' });
+    fronteiras.sincronizarAudio.mockImplementation(async () => {
+      transcrito = true;
+      return { estado: 'pronto', esperouMs: 6000, pendentes: 0 };
+    });
+    fronteiras.rpc.mockImplementation(async (nome: string) => {
+      if (nome === 'crm_sdr_registrar_entrada') return { data: { estado: 'ativa', gravada: true }, error: null };
+      if (nome === 'crm_agente_sdr_lock_claim') return { data: true, error: null };
+      if (['crm_e_aluno_telefone', 'crm_esta_na_escola'].includes(nome)) return { data: false, error: null };
+      throw new Error('RPC inesperada no caso de áudio: ' + nome);
+    });
+    const mensagemAudio = { role: 'assistant', content: '[ATENDIMENTO_HUMANO] Atendente\n[Transcrição do áudio enviado pelo atendente]\nSobre seu interesse em Sanidade Avícola, qual sua graduação?' };
+    fronteiras.historico.mockImplementation(async () => {
+      expect(transcrito).toBe(true);
+      return [mensagemAudio, { role: 'user', content: 'A última vez que atuei na área técnica foi em 2016.' }];
+    });
+    fronteiras.chamarRouter.mockResolvedValue('agente_validacao');
+    fronteiras.tools.mockResolvedValue([]);
+    fronteiras.humanizar.mockImplementation((t: string) => t);
+    fronteiras.horarios.mockReturnValue([]);
+    fronteiras.conversa.mockReturnValue('');
+    const anterior = fronteiras.from.getMockImplementation()!;
+    fronteiras.from.mockImplementation((tabela: string) => {
+      if (tabela !== 'crm_whatsapp_messages') return anterior(tabela);
+      const q = { select: () => q, eq: () => q, in: () => q, order: () => q, limit: async () => ({ data: [], error: null }) };
+      return q;
+    });
+    fronteiras.chamarPrincipal.mockResolvedValue({ content: [{ type: 'text', text: 'E qual é sua graduação?' }] });
+    expect((await chamar({ wa_account_id: 'conta-sintetica' })).status).toBe(200);
+    expect(fronteiras.chamarRouter).toHaveBeenCalledOnce();
+    expect(JSON.stringify(fronteiras.chamarRouter.mock.calls[0][0])).toContain('Sanidade Avícola');
+    expect(JSON.stringify(fronteiras.chamarPrincipal.mock.calls[0][0].messages)).toContain('Sanidade Avícola');
+    expect(fronteiras.enviar).toHaveBeenCalledOnce();
+  });
+  it('prazo excedido preserva o buffer para o reconciliador e não chama o modelo', async () => {
+    adquirirLock();
+    fronteiras.sincronizarAudio.mockResolvedValue({ estado: 'aguardando', esperouMs: 30000, pendentes: 1 });
+    expect((await chamar()).status).toBe(200);
+    expect(fronteiras.buffer).toHaveLength(1);
+    expect(fronteiras.buffer[0].payload.mensagem).toBe(payload.conteudo);
+    expect(fronteiras.from).toHaveBeenCalledWith('crm_agente_sdr_lock');
+    semResposta();
+  });
+  it('erro de leitura preserva a entrada sem gerar resposta', async () => {
+    adquirirLock();
+    fronteiras.sincronizarAudio.mockRejectedValue(new Error('fila indisponível'));
+    expect((await chamar()).status).toBe(200);
+    expect(fronteiras.buffer).toHaveLength(1);
+    semResposta();
+  });
+  it('pausa durante a espera preserva a fala no histórico e esvazia o lote sem responder', async () => {
+    adquirirLock();
+    fronteiras.sincronizarAudio.mockResolvedValue({ estado: 'pausado', esperouMs: 2000, pendentes: 1 });
+    expect((await chamar()).status).toBe(200);
+    expect(fronteiras.buffer).toEqual([]);
+    expect(fronteiras.rpc).toHaveBeenCalledWith('crm_sdr_registrar_entrada', expect.objectContaining({ p_pausa_observada: true }));
+    semResposta();
   });
 });
