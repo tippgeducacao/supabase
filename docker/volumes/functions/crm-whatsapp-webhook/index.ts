@@ -505,6 +505,73 @@ async function relayToN8n(payload: Record<string, unknown>): Promise<void> {
   }
 }
 
+// ── Desvio: números que são do PEDAGÓGICO, não do CRM ────────────────────────
+// Lista pequena e que quase nunca muda (produção, podcast, o que estiver em migração),
+// consultada uma vez por instância e revalidada a cada minuto: sem cache, seria uma ida ao
+// banco por change, no caminho mais quente do sistema.
+const PED_NUMEROS_TTL_MS = 60_000;
+let pedNumerosCache: { em: number; ids: Set<string> } | null = null;
+
+async function ehNumeroDoPedagogico(admin: any, phoneNumberId: string): Promise<boolean> {
+  const agora = Date.now();
+  if (!pedNumerosCache || agora - pedNumerosCache.em > PED_NUMEROS_TTL_MS) {
+    try {
+      const { data, error } = await admin.rpc("ped_wa_numeros_do_pedagogico");
+      if (error) throw new Error(error.message);
+      pedNumerosCache = {
+        em: agora,
+        ids: new Set((data ?? []).map((r: any) => String(r.phone_number_id))),
+      };
+    } catch (e) {
+      // Falhou a consulta: mantém o cache anterior (se houver) em vez de tratar o número
+      // como do CRM — um desvio a menos abre card errado no SAC comercial e some com a
+      // resposta do professor.
+      console.log("[crm-whatsapp-webhook] ped_wa_numeros_do_pedagogico falhou:", e instanceof Error ? e.message : String(e));
+      if (!pedNumerosCache) return false;
+    }
+  }
+  return pedNumerosCache.ids.has(String(phoneNumberId));
+}
+
+/** Reenvia SÓ a mudança daquele número para o webhook do pedagógico. Reencaminhar o corpo
+ *  inteiro entregaria de quebra o tráfego dos outros números que vierem no mesmo lote. */
+async function encaminharAoPedagogico(
+  objeto: unknown,
+  entry: any,
+  change: any,
+  phoneNumberId: string,
+): Promise<void> {
+  if (!RELAY_BASE) {
+    console.error("[crm-whatsapp-webhook] SUPABASE_URL vazio — inbound do pedagógico PERDIDO:", phoneNumberId);
+    return;
+  }
+  const corpo = JSON.stringify({
+    object: objeto ?? "whatsapp_business_account",
+    entry: [{ id: entry?.id, changes: [change] }],
+  });
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 10000);
+  try {
+    const res = await fetch(`${RELAY_BASE}/functions/v1/whatsapp-webhook`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-encaminhado-por": "crm-whatsapp-webhook",
+        Authorization: `Bearer ${SERVICE_ROLE}`,
+      },
+      body: corpo,
+      signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      console.error(`[crm-whatsapp-webhook] whatsapp-webhook respondeu ${res.status} para ${phoneNumberId}`);
+    }
+  } catch (e) {
+    console.error("[crm-whatsapp-webhook] encaminhar ao pedagógico falhou:", e instanceof Error ? e.message : String(e));
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
@@ -627,6 +694,19 @@ Deno.serve(async (req) => {
 
         const phoneNumberId = value?.metadata?.phone_number_id;
         if (!phoneNumberId) continue;
+
+        // Número do PEDAGÓGICO → outro pipeline inteiro. Desde 10/09/2026 o número do
+        // pedagógico vive numa WABA do app "API Oficial CRM - BM 08" (o anterior foi banido
+        // pela Meta), e um app tem UMA URL de webhook: o inbound dele cai AQUI. Processar
+        // como CRM abriria card no SAC comercial e o "Confirmo" do professor nunca viraria
+        // status de convite. Encaminhamos o payload cru para `whatsapp-webhook`, que é quem
+        // sabe casar professor, convite e conversa. Mesmo desvio-por-número do agente de RH,
+        // e a lista vem do banco (ped_wa_numeros_do_pedagogico) — nunca de "existe em
+        // wa_accounts", que arrastaria junto o número do agente SDR.
+        if (await ehNumeroDoPedagogico(admin, phoneNumberId)) {
+          await encaminharAoPedagogico(payload?.object, entry, change, phoneNumberId);
+          continue;
+        }
 
         // Encontra a conta CRM pelo phone_number_id
         const { data: accountRows } = await admin

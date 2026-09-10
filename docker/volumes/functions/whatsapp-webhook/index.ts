@@ -112,6 +112,49 @@ Deno.serve(async (req) => {
     podcastAccessToken = acc?.access_token ?? null;
   } catch (_e) { /* conta do podcast ainda não cadastrada */ }
 
+  // Quando o podcast passa a dividir o número com a régua de aulas (plano de 10/09/2026,
+  // depois que os dois números antigos foram banidos), "é do podcast porque veio naquele
+  // número" deixa de existir — e o `continue` lá embaixo engoliria TODO o inbound de
+  // professor. Com número compartilhado, quem decide é o candidato: só é podcast quem tem
+  // convite de podcast em aberto e NENHUM convite de aula esperando resposta, porque
+  // confirmar aula é o que tem hora marcada.
+  let pedagogicoPhoneId: string | null = null;
+  try {
+    const { data: ped } = await supabase.rpc("get_wa_account_pedagogico");
+    const acc = Array.isArray(ped) ? ped[0] : ped;
+    pedagogicoPhoneId = acc?.phone_number_id ?? null;
+  } catch (_e) { /* segue com o roteamento por número */ }
+  const numeroCompartilhado = !!podcastPhoneId && podcastPhoneId === pedagogicoPhoneId;
+
+  /** Só com número compartilhado: o telefone tem candidato de podcast em aberto e nenhum
+   *  convite de aula aguardando resposta? */
+  async function ehRespostaDePodcast(from: string): Promise<boolean> {
+    try {
+      const { data: prof } = await supabase.rpc("ped_professor_por_whatsapp", { p_telefone: from });
+      const profRow = Array.isArray(prof) ? prof[0] : prof;
+      if (!profRow?.id) return false;
+
+      const { data: convitesAula } = await supabase
+        .from("ped_convites").select("id")
+        .eq("professor_atual_id", profRow.id)
+        .in("status", [
+          "fase1_titular_aguardando", "fase1b_reserva_aguardando",
+          "fase2_reconfirmacao_30d", "fase2_reconfirmacao_14d",
+          "fase2_reconfirmacao_7d", "fase2_lembrete_1d",
+        ]).limit(1);
+      if (convitesAula?.length) return false;
+
+      const { data: cands } = await supabase
+        .from("pod_convite_candidatos").select("id")
+        .eq("professor_id", profRow.id)
+        .in("status", ["na_fila", "convidando"]).limit(1);
+      return !!cands?.length;
+    } catch (e) {
+      console.log("[whatsapp-webhook] desempate podcast falhou:", String(e));
+      return false;
+    }
+  }
+
   let body: any = null;
   try {
     body = await req.json();
@@ -190,7 +233,17 @@ Deno.serve(async (req) => {
           // Número do PODCAST → só qualifica interesse (marca o candidato 'respondeu').
           // Fica DEPOIS dos status (acima): o `continue` aqui pula apenas o processamento
           // das MENSAGENS, não o dos status.
-          if (podcastPhoneId && value?.metadata?.phone_number_id === podcastPhoneId) {
+          // Com número compartilhado (ver `numeroCompartilhado` acima), o desempate é por
+          // candidato — e mensagem por mensagem, porque o mesmo número atende os dois.
+          const noNumeroDoPodcast = !!podcastPhoneId && value?.metadata?.phone_number_id === podcastPhoneId;
+          let ehPodcast = noNumeroDoPodcast && !numeroCompartilhado;
+          if (noNumeroDoPodcast && numeroCompartilhado) {
+            const remetentes = (Array.isArray(value?.messages) ? value.messages : [])
+              .map((m: any) => String(m?.from ?? "")).filter(Boolean);
+            ehPodcast = remetentes.length > 0
+              && (await Promise.all(remetentes.map(ehRespostaDePodcast))).every(Boolean);
+          }
+          if (ehPodcast) {
             try { await handlePodcastInbound(supabase, value, podcastWaAccountId, podcastAccessToken); } catch (e) {
               console.error("[whatsapp-webhook] podcast inbound erro", String(e));
             }
