@@ -49,6 +49,7 @@
 //   { ok:true, lead_id, segmento_aplicado, lead_oportunidade_id, oportunidade_id, duplicado_lote }
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
+import { CAMPOS_RASTREAMENTO, complementarPrimeiraAtribuicao, extrairRastreamento, limparValorRastreamento, podeComplementarAtribuicao } from "../_shared/utmCaptura.ts";
 import { telefoneEnviavel } from "../_shared/telefone.ts";
 import { aplicarFiltrosToken, parseTokenWebhook } from "./tokenFiltros.ts";
 import { processarWebhookModulosPraticos } from "./modulosPraticos.ts";
@@ -165,9 +166,9 @@ function pickByMapping(payload: any, mapping: Record<string, string>, wantedTarg
 
 // Página de captação = URL da LP. Toda LP manda a URL (GreatPages = chave "URL"); pegamos
 // AUTOMÁTICO, sem depender de mapeamento. Escaneia as chaves comuns (case-insensitive) e
-// devolve o 1º valor não-vazio. Origem/UTM não são capturadas aqui (decisão diretor
-// 2026-07-16: só a Página é automática; fonte/fonte_referencia ficam vazias).
-const URL_KEYS = ["url", "page_url", "pageurl", "page_uri", "pagina", "page", "landing_page", "lp"];
+// devolve o 1º valor não-vazio. As UTMs são resolvidas separadamente antes do INSERT,
+// preservando a prioridade dos valores explicitamente configurados na integração.
+const URL_KEYS = ["url", "page_url", "pageurl", "page_uri", "pagina", "page", "landing_url", "landing_page", "lp", "referer", "referrer"];
 function pickUrlAuto(dados: Record<string, unknown>): string | undefined {
   const lower: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(dados)) lower[k.toLowerCase()] = v;
@@ -315,7 +316,9 @@ Deno.serve(async (req) => {
   const queryParams: Record<string, string> = {};
   for (const [k, v] of url.searchParams.entries()) {
     if (k === "int" || SECRET_QUERY_KEYS.has(k.toLowerCase())) continue;
-    queryParams[k] = String(v).slice(0, 500);
+    // IDs de clique (inclusive em chaves personalizadas do mapeamento) podem superar
+    // 500 caracteres. Conservar até 4 KiB evita entregar ao mapper um ID já truncado.
+    queryParams[k] = String(v).slice(0, 4096);
   }
   const HEADER_DENYLIST = new Set([
     "host", "content-length", "content-type", "user-agent", "accept", "accept-encoding", "accept-language",
@@ -523,13 +526,19 @@ Deno.serve(async (req) => {
     try {
       const { data: jaProcessado } = await admin
         .from("crm_webhook_logs")
-        .select("id, criado_em")
+        .select("id, criado_em, resultado")
         .eq("integration_id", integration.id)
         .eq("payload->dados_completos->>id", idExterno)
         .in("status", ["ok", "duplicado"])
+        .order("criado_em", { ascending: true })
         .limit(1)
         .maybeSingle();
       if (jaProcessado) {
+        // Reenvio da mesma submissão conserva a atribuição já resolvida na primeira
+        // entrega. Reaproveita a consulta de idempotência, sem buscar o contato ou
+        // recalcular com uma configuração que pode ter mudado depois da chegada.
+        const rastreamentoAnterior = jaProcessado.resultado?.rastreamento;
+        const temRastreamentoAnterior = rastreamentoAnterior && typeof rastreamentoAnterior === "object" && !Array.isArray(rastreamentoAnterior);
         await admin.from("crm_webhook_logs").insert({
           integration_id: integration.id, slug, payload, status: "duplicado",
           erro: null, ip_origem: ipOrigem, ...reqMeta,
@@ -538,6 +547,7 @@ Deno.serve(async (req) => {
             id_externo: idExterno,
             chegada_anterior_em: jaProcessado.criado_em,
             chegada_anterior_log_id: jaProcessado.id,
+            ...(temRastreamentoAnterior ? { rastreamento: rastreamentoAnterior } : {}),
           },
         });
         const retornoReenvio = Array.isArray(config?.retorno) ? config.retorno : [];
@@ -715,7 +725,8 @@ Deno.serve(async (req) => {
   const inRegiao = campoFisico.regiao ?? null;
   // Página = URL da LP (auto). Mapeamento explícito lead.pagina_nome tem prioridade;
   // senão a URL do payload (pickUrlAuto). Preenchida fill-if-empty no lead novo E existente.
-  const inPagina = asString(pickByMapping(dados, mapping, "lead.pagina_nome") ?? pickUrlAuto(dados), 500);
+  const paginaRecebida = pickByMapping(dados, mapping, "lead.pagina_nome") ?? pickUrlAuto(dados);
+  const inPagina = asString(paginaRecebida, 500);
   // Fonte (leads.fonte) — opt-in via mapeamento `lead.fonte` (tipicamente um valor fixo na
   // query string da URL, ex.: formulário instantâneo do Meta que chega pelo n8n e precisa
   // continuar contando como "Formulário Direto" na Gestão de Leads). Sem mapeamento fica
@@ -735,19 +746,23 @@ Deno.serve(async (req) => {
     const v = asString(pickByMapping(dados, mapping, `lead.${c}`), 255);
     if (v) inMeta[c] = v;
   }
-  // UTMs em leads.utm_* — mapeáveis (lead.utm_*). No lead de LP elas são extraídas da URL
-  // pelo trigger compute_lead_fonte; o formulário instantâneo do Meta não tem URL, então
-  // aplicamos o MESMO proxy do webhook-leads: campanha/conjunto/anúncio viram
-  // utm_campaign/utm_term/utm_content (é o que liga esses leads ao Melhores Criativos).
-  // O proxy só age quando há meta_* mapeado ⇒ integração que não mapeia nada segue igual.
-  // gclid/fbclid entram no MESMO balde das UTMs (2026-07-31): as LPs Lovable passaram
-  // a persistir os dois em sessionStorage e mandá-los na query. São opt-in por
-  // mapeamento (lead.gclid / lead.fbclid) — integração que não mapeia segue idêntica.
-  const inUtm: Record<string, string> = {};
-  for (const c of ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "gclid", "fbclid"]) {
-    const v = asString(pickByMapping(dados, mapping, `lead.${c}`), 255);
-    if (v) inUtm[c] = v;
+  // 10/09/2026: campos de rastreio padronizados também são capturados do corpo/query
+  // e da URL, sem depender de configuração ou do trigger. Resolver salvar_utm ANTES
+  // do INSERT mantém a prioridade da configuração sobre o fallback automático da URL.
+  const utmMapeadas = Object.fromEntries(CAMPOS_RASTREAMENTO.map(c => [c, pickByMapping(dados, mapping, `lead.${c}`)]));
+  const utmDasAcoes: Record<string, string> = {};
+  const utmPreAplicadas = new Set<string>();
+  for (const acao of Array.isArray(config?.acoes?.itens) ? config.acoes.itens : []) {
+    if (acao?.tipo !== "salvar_utm") continue;
+    for (const c of CAMPOS_RASTREAMENTO) {
+      const valor = limparValorRastreamento(resolveWebhookVar(acao?.params?.[c], dados));
+      if (valor && !utmDasAcoes[c]) utmDasAcoes[c] = valor;
+    }
   }
+  const inUtm: Record<string, string> = extrairRastreamento({
+    campos: [utmMapeadas, utmDasAcoes, payload as Record<string, unknown>, queryParams],
+    urls: [paginaRecebida, pickUrlAuto(dados)],
+  });
   if (!inUtm.utm_campaign && inMeta.meta_campaign_name) inUtm.utm_campaign = inMeta.meta_campaign_name;
   if (!inUtm.utm_content  && inMeta.meta_ad_name)       inUtm.utm_content  = inMeta.meta_ad_name;
   if (!inUtm.utm_term     && inMeta.meta_adset_name)    inUtm.utm_term     = inMeta.meta_adset_name;
@@ -815,6 +830,10 @@ Deno.serve(async (req) => {
   } catch (e: any) {
     console.error("[crm-lead-webhook] criacaoAutomatica defaults erro:", e?.message);
   }
+
+  // A Página pode ser um token aninhado configurado somente na Criação Automática.
+  // Lê também essa URL completa antes de o trigger ou a deduplicação decidir a origem.
+  Object.assign(inUtm, extrairRastreamento({ campos: [inUtm], urls: [criacaoDefaults.pagina_nome] }));
 
   // Os meta_* que vieram da Criação Automática entram no MESMO balde do Mapeamento
   // (fill-if-empty) — assim todo ponto que já lê `inMeta` funciona sem mudança: INSERT do
@@ -910,7 +929,7 @@ Deno.serve(async (req) => {
     if (email) {
       const { data } = await admin
         .from("leads")
-        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, meta_campaign_id, meta_campaign_name, meta_adset_id, meta_adset_name, meta_ad_id, meta_ad_name, meta_form_id, meta_form_name, meta_platform, utm_source, utm_medium, utm_campaign, utm_content, utm_term, gclid, fbclid, arquivado, arquivado_em")
+        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, fonte_referencia, meta_campaign_id, meta_campaign_name, meta_adset_id, meta_adset_name, meta_ad_id, meta_ad_name, meta_form_id, meta_form_name, meta_platform, utm_source, utm_medium, utm_campaign, utm_content, utm_term, utm_id, gclid, fbclid, ttclid, arquivado, arquivado_em")
         .eq("email", email)
         .limit(1);
       existing = data?.[0] ?? null;
@@ -924,7 +943,7 @@ Deno.serve(async (req) => {
       if (canonId) {
         const { data } = await admin
           .from("leads")
-          .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, meta_campaign_id, meta_campaign_name, meta_adset_id, meta_adset_name, meta_ad_id, meta_ad_name, meta_form_id, meta_form_name, meta_platform, utm_source, utm_medium, utm_campaign, utm_content, utm_term, gclid, fbclid, arquivado, arquivado_em")
+          .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, fonte_referencia, meta_campaign_id, meta_campaign_name, meta_adset_id, meta_adset_name, meta_ad_id, meta_ad_name, meta_form_id, meta_form_name, meta_platform, utm_source, utm_medium, utm_campaign, utm_content, utm_term, utm_id, gclid, fbclid, ttclid, arquivado, arquivado_em")
           .eq("id", canonId as string)
           .maybeSingle();
         existing = data ?? null;
@@ -959,12 +978,16 @@ Deno.serve(async (req) => {
       if (!existing.area_interesse && (inArea ?? criacaoDefaults.area_interesse))     patch.area_interesse = (inArea ?? criacaoDefaults.area_interesse)!;
       if (!existing.tempo_formacao && (inTempo ?? criacaoDefaults.tempo_formacao))    patch.tempo_formacao = (inTempo ?? criacaoDefaults.tempo_formacao)!;
       if (!existing.regiao && (inRegiao ?? criacaoDefaults.regiao))               patch.regiao = (inRegiao ?? criacaoDefaults.regiao)!;
-      if (!existing.pagina_nome && (inPagina ?? criacaoDefaults.pagina_nome))     patch.pagina_nome = (inPagina ?? criacaoDefaults.pagina_nome)!;
-      if (!existing.fonte && (inFonte ?? criacaoDefaults.fonte))                  patch.fonte = (inFonte ?? criacaoDefaults.fonte)!;
-      for (const [c, v] of Object.entries(inMeta)) if (!existing[c])              patch[c] = v;
-      for (const [c, v] of Object.entries(inUtm))  if (!existing[c])              patch[c] = v;
+      const atribuicaoRecebida = { ...inMeta, ...inUtm };
+      if (podeComplementarAtribuicao(existing, atribuicaoRecebida)) {
+        if (!existing.pagina_nome && (inPagina ?? criacaoDefaults.pagina_nome)) patch.pagina_nome = (inPagina ?? criacaoDefaults.pagina_nome)!;
+        if (!existing.fonte && (inFonte ?? criacaoDefaults.fonte)) patch.fonte = (inFonte ?? criacaoDefaults.fonte)!;
+        for (const [c, v] of Object.entries(inMeta)) if (!existing[c]) patch[c] = v;
+      }
+      Object.assign(patch, complementarPrimeiraAtribuicao(existing, atribuicaoRecebida));
       if (Object.keys(patch).length) {
         await admin.from("leads").update(patch).eq("id", existing.id);
+        for (const [c, v] of Object.entries(utmDasAcoes)) if (patch[c] === v) utmPreAplicadas.add(c);
       }
     } else {
       const { data: novo, error: leadErr } = await admin
@@ -995,6 +1018,7 @@ Deno.serve(async (req) => {
         .single();
       if (leadErr || !novo) throw leadErr ?? new Error("lead insert sem retorno");
       leadId = novo.id;
+      for (const [c, v] of Object.entries(utmDasAcoes)) if (inUtm[c] === v) utmPreAplicadas.add(c);
     }
   } catch (e: any) {
     await admin.from("crm_webhook_logs").insert({
@@ -1033,11 +1057,22 @@ Deno.serve(async (req) => {
   }
 
   // (6) extras p/ lead_oportunidades
-  const utm_source   = asString(pickByMapping(dados, mapping, "lead_op.utm_source"), 200);
-  const utm_medium   = asString(pickByMapping(dados, mapping, "lead_op.utm_medium"), 200);
-  const utm_campaign = asString(pickByMapping(dados, mapping, "lead_op.utm_campaign"), 200);
+  // A captação guarda os sinais DESTA chegada, inclusive no recadastro de um contato
+  // com aquisição anterior em outro canal. A tabela possui estas três UTMs físicas.
+  const utm_source   = limparValorRastreamento(pickByMapping(dados, mapping, "lead_op.utm_source")) ?? inUtm.utm_source ?? null;
+  const utm_medium   = limparValorRastreamento(pickByMapping(dados, mapping, "lead_op.utm_medium")) ?? inUtm.utm_medium ?? null;
+  const utm_campaign = limparValorRastreamento(pickByMapping(dados, mapping, "lead_op.utm_campaign")) ?? inUtm.utm_campaign ?? null;
   const fonte        = asString(pickByMapping(dados, mapping, "lead_op.fonte"), 200);
   const profissao    = asString(pickByMapping(dados, mapping, "lead_op.profissao"), 200);
+  // Campos personalizados/aninhados não aparecem como utm_* no corpo cru. Guardar
+  // este snapshot permite classificar a chegada sem consultar a primeira aquisição
+  // do contato. A oportunidade pode ter atribuição explicitamente mapeada própria.
+  const rastreamentoChegada = {
+    ...inUtm,
+    ...(utm_source ? { utm_source } : {}),
+    ...(utm_medium ? { utm_medium } : {}),
+    ...(utm_campaign ? { utm_campaign } : {}),
+  };
 
   // (7) ANTI-RAJADA da saudacao por (telefone, curso, lote, INTEGRACAO) — guard ANTES
   // de criar a oportunidade. A saudacao e enviada pela ENGINE DE AUTOMACAO quando o
@@ -1554,40 +1589,41 @@ Deno.serve(async (req) => {
       } else if (a?.tipo === "salvar_utm" && leadId) {
         // "Salvar tags UTM" — ESTE é o lugar das UTMs no modelo do builder (espelha o
         // SprintHub: campos do contato na Criação Automática, UTM nas Ações Extras, e o
-        // Mapeamento de Entrada só lê o payload + marca o Identificador). Cada um dos 5
+        // Mapeamento de Entrada só lê o payload + marca o Identificador). Cada um dos
         // campos aceita `{webhook=Campo}` ou um valor FIXO (ex.: utm_medium = "form").
         // Token inexistente resolve para "" (resolveWebhookVar) ⇒ typo no config não grava
         // lixo, só não preenche.
         //
-        // ⚠️ FILL-IF-EMPTY, sempre: só escreve em coluna VAZIA. A primeira atribuição do
-        // lead é a que vale — recadastro por outra campanha NÃO reescreve a origem já
-        // registrada (mesma régua do `inUtm` no find-or-create). Nenhum lead existente com
-        // UTM é tocado, e não há backfill: vale só para quem chegar daqui pra frente.
+        // ⚠️ FILL-IF-EMPTY e mesma atribuição: recadastro por outra campanha não completa
+        // a origem antiga com campos do novo toque (mesma régua do find-or-create).
+        // A resolução antecipada evita a URL ganhar da configuração no trigger;
+        // a atividade continua sendo registrada aqui, junto das demais ações.
         //
         // A ação existia na UI (AcaoUtmModal) e no rótulo desde o builder, mas nunca foi
         // executada aqui — 106 integrações ativas a tinham configurada sem efeito.
         // gclid/fbclid entram aqui (mesma natureza: rastreio de campanha) — é o que
         // permite o Mapeamento de Entrada ficar só com o Identificador.
-        const UTM_ACAO_COLS = ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "gclid", "fbclid"] as const;
+        const UTM_ACAO_COLS = CAMPOS_RASTREAMENTO;
         const desejado: Record<string, string> = {};
         for (const c of UTM_ACAO_COLS) {
-          const v = asString(resolveWebhookVar((a?.params as any)?.[c], dados), 255);
+          const v = limparValorRastreamento(resolveWebhookVar((a?.params as any)?.[c], dados));
           if (v) desejado[c] = v;
         }
         if (Object.keys(desejado).length) {
           const { data: atual } = await admin
             .from("leads")
-            .select("utm_source, utm_medium, utm_campaign, utm_content, utm_term, gclid, fbclid")
+            .select("fonte, fonte_referencia, utm_source, utm_medium, utm_campaign, utm_content, utm_term, utm_id, gclid, fbclid, ttclid")
             .eq("id", leadId)
             .maybeSingle();
-          const patch: Record<string, string> = {};
-          for (const [c, v] of Object.entries(desejado)) {
-            if (!(atual as any)?.[c]) patch[c] = v; // não sobrescreve o que já existe
-          }
+          const patch = atual ? complementarPrimeiraAtribuicao(atual, { ...inUtm, ...desejado }) : {};
           if (Object.keys(patch).length) {
             await admin.from("leads").update(patch).eq("id", leadId);
+          }
+          const aplicadaAntes = Object.entries(desejado).some(([c, v]) => utmPreAplicadas.has(c) && inUtm[c] === v);
+          if (Object.keys(patch).length || aplicadaAntes) {
             acoesAplicadas.push("salvar_utm");
             await logAtividade(leadId, "acao_webhook", "Ação de Webhook Integrado executada", acaoChip("salvar_utm"));
+            for (const c of Object.keys(desejado)) utmPreAplicadas.delete(c);
           }
         }
       } else if (a?.tipo === "enviar_mensagem_whatsapp") {
@@ -1794,6 +1830,7 @@ Deno.serve(async (req) => {
       lead_oportunidade_id: leadOportunidadeId, oportunidade_id: oportunidadeId, duplicado,
       duplicado_lote: duplicadoLote, novo_lead_disparado: novoLeadDisparado, lote: lote ?? null,
       acoes_aplicadas: acoesAplicadas,
+      rastreamento: rastreamentoChegada,
       // observabilidade da normalização: null = título não resolvido (candidato a alias)
       curso_canonico: cursoCanonico,
       lead_arquivado_reativado: leadArquivadoReativado || undefined,

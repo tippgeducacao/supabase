@@ -2,6 +2,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { createLogger } from '../_shared/logger.ts'
+import { complementarPrimeiraAtribuicao, extrairRastreamento, podeComplementarAtribuicao } from '../_shared/utmCaptura.ts'
 
 const logger = createLogger('webhook-leads');
 
@@ -206,15 +207,18 @@ serve(async (req) => {
         else _pageOrigem = 'Sem identificação';
       }
 
+      const rastreamentoLog = extrairRastreamento({
+        campos: [body, Object.fromEntries(new URL(req.url).searchParams)], urls: [_pageUrl],
+      });
       const { data: logRow } = await supabase
         .from('lead_webhook_logs')
         .insert({
           pagina_url: _pageUrl,
           pagina_origem: _pageOrigem,
-          fonte_referencia: body.Referral_Source || body.utm_source || null,
-          utm_source: body.utm_source || null,
-          utm_medium: body.utm_medium || null,
-          utm_campaign: body.utm_campaign || null,
+          fonte_referencia: body.Referral_Source || rastreamentoLog.utm_source || null,
+          utm_source: rastreamentoLog.utm_source || null,
+          utm_medium: rastreamentoLog.utm_medium || null,
+          utm_campaign: rastreamentoLog.utm_campaign || null,
           ip_address: body.IP_do_usuario || req.headers.get('x-forwarded-for') || null,
           content_type: contentType,
           raw_body: rawBody?.substring(0, 50000) || null,
@@ -324,6 +328,13 @@ serve(async (req) => {
 
     // MAPEAMENTO APRIMORADO DOS DADOS DO LEAD
     console.log('🗂️ Iniciando mapeamento aprimorado dos dados...');
+
+    const pageUrl = clean(body.URL) || clean(body.url) || clean(body.page_url) ||
+      clean(body.landing_url) || clean(body.landing_page) || clean(body.referer) || clean(body.referrer) || '';
+    const rastreamento = extrairRastreamento({
+      campos: [body, Object.fromEntries(new URL(req.url).searchParams)],
+      urls: [pageUrl],
+    });
     
     const leadData = {
       // Nome - múltiplas variações possíveis (incluindo página /sueli e formulário direto Meta)
@@ -347,7 +358,7 @@ serve(async (req) => {
       // Fonte de referência - PRIORIDADE: Referral_Source -> utm_source limpo -> tipo_lead -> outros
       // Fallback final só usa "GreatPages" se nenhum outro sinal existir
       fonte_referencia: clean(body.Referral_Source) || 
-                       clean(body.utm_source, 'GreatPages') || 
+                       rastreamento.utm_source ||
                        body.source || body.origem || body.referrer || 
                        body.fonte || body.campaign_source || 
                        null,
@@ -374,11 +385,15 @@ serve(async (req) => {
       
       // UTM Parameters - com limpeza de placeholders. Para formulário direto Meta sem UTMs,
       // usamos campaign_name/adset_name/ad_name como proxy.
-      utm_source: clean(body.utm_source, 'GreatPages'),
-      utm_medium: clean(body.utm_medium, 'form'),
-      utm_campaign: clean(body.utm_campaign) || clean(body.campaign_name),
-      utm_content: clean(body.utm_content) || clean(body.ad_name),
-      utm_term: clean(body.utm_term) || clean(body.adset_name),
+      utm_source: rastreamento.utm_source ?? null,
+      utm_medium: rastreamento.utm_medium ?? null,
+      utm_campaign: rastreamento.utm_campaign || clean(body.campaign_name),
+      utm_content: rastreamento.utm_content || clean(body.ad_name),
+      utm_term: rastreamento.utm_term || clean(body.adset_name),
+      utm_id: rastreamento.utm_id ?? null,
+      ttclid: rastreamento.ttclid ?? null,
+      gclid: rastreamento.gclid ?? null,
+      fbclid: rastreamento.fbclid ?? null,
       
       // Informações técnicas
       ip_address: body.IP_do_usuario || body.ip || body.ip_address || body.client_ip || 
@@ -439,12 +454,9 @@ serve(async (req) => {
       } catch { return false; }
     };
 
-    const hasRealUtm =
-      !!clean(body.utm_source) || !!clean(body.utm_medium) ||
-      !!clean(body.utm_campaign) || !!clean(body.utm_content) ||
-      !!clean(body.utm_term) || !!clean(body.fbclid) || !!clean(body.gclid);
-
-    const pageUrl = body.URL || body.url || body.page_url || body.referer || '';
+    // URL/query/click IDs também são sinais reais. Antes só o corpo era consultado e
+    // uma landing TikTok com UTM apenas na URL ganhava Google/organic indevidamente.
+    const hasRealUtm = Object.keys(rastreamento).length > 0;
 
     if (isLovableLanding(pageUrl) && !hasRealUtm) {
       leadData.fonte_referencia = 'Google';
@@ -675,16 +687,22 @@ serve(async (req) => {
       if (leadData.area_interesse && !existingLead.area_interesse) updates.area_interesse = leadData.area_interesse;
       if (leadData.curso_interesse && !existingLead.curso_interesse) updates.curso_interesse = leadData.curso_interesse;
       if (leadData.regiao && !existingLead.regiao) updates.regiao = leadData.regiao;
-      // Metadados Meta: preencher se ainda vazio
-      if (leadData.meta_campaign_id && !existingLead.meta_campaign_id) updates.meta_campaign_id = leadData.meta_campaign_id;
-      if (leadData.meta_campaign_name && !existingLead.meta_campaign_name) updates.meta_campaign_name = leadData.meta_campaign_name;
-      if (leadData.meta_adset_id && !existingLead.meta_adset_id) updates.meta_adset_id = leadData.meta_adset_id;
-      if (leadData.meta_adset_name && !existingLead.meta_adset_name) updates.meta_adset_name = leadData.meta_adset_name;
-      if (leadData.meta_ad_id && !existingLead.meta_ad_id) updates.meta_ad_id = leadData.meta_ad_id;
-      if (leadData.meta_ad_name && !existingLead.meta_ad_name) updates.meta_ad_name = leadData.meta_ad_name;
-      if (leadData.meta_form_id && !existingLead.meta_form_id) updates.meta_form_id = leadData.meta_form_id;
-      if (leadData.meta_form_name && !existingLead.meta_form_name) updates.meta_form_name = leadData.meta_form_name;
-      if (leadData.meta_platform && !existingLead.meta_platform) updates.meta_platform = leadData.meta_platform;
+      // Atribuição é um conjunto: recadastro de outra campanha não deve completar
+      // UTMs ou metadados Meta do primeiro contato com dados do novo toque.
+      const mesmaAtribuicao = podeComplementarAtribuicao(existingLead, leadData);
+      Object.assign(updates, complementarPrimeiraAtribuicao(existingLead, leadData));
+      // Metadados Meta: preencher se ainda vazio e compatível com o primeiro toque.
+      if (mesmaAtribuicao) {
+        if (leadData.meta_campaign_id && !existingLead.meta_campaign_id) updates.meta_campaign_id = leadData.meta_campaign_id;
+        if (leadData.meta_campaign_name && !existingLead.meta_campaign_name) updates.meta_campaign_name = leadData.meta_campaign_name;
+        if (leadData.meta_adset_id && !existingLead.meta_adset_id) updates.meta_adset_id = leadData.meta_adset_id;
+        if (leadData.meta_adset_name && !existingLead.meta_adset_name) updates.meta_adset_name = leadData.meta_adset_name;
+        if (leadData.meta_ad_id && !existingLead.meta_ad_id) updates.meta_ad_id = leadData.meta_ad_id;
+        if (leadData.meta_ad_name && !existingLead.meta_ad_name) updates.meta_ad_name = leadData.meta_ad_name;
+        if (leadData.meta_form_id && !existingLead.meta_form_id) updates.meta_form_id = leadData.meta_form_id;
+        if (leadData.meta_form_name && !existingLead.meta_form_name) updates.meta_form_name = leadData.meta_form_name;
+        if (leadData.meta_platform && !existingLead.meta_platform) updates.meta_platform = leadData.meta_platform;
+      }
       
       if (Object.keys(updates).length > 0) {
         updates.updated_at = new Date().toISOString();
