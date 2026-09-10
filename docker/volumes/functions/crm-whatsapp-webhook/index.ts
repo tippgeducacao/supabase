@@ -55,9 +55,30 @@ const N8N_INBOUND_URL = ((Deno.env.get("CRM_N8N_INBOUND_URL") ?? "") !== "" && R
 // Administrativo PPG NÃO pode cair no João — o candidato receberia o qualificador
 // comercial tentando vender pós-graduação. Este é o ÚNICO ponto onde os dois se
 // encostam, e é um desvio por número, não uma mistura de código.
-const AGENTE_RH_WA_ACCOUNT_ID = Deno.env.get("AGENTE_RH_WA_ACCOUNT_ID")
-  ?? "31d9a4ff-9606-4018-a2fb-ffb0155e099b";
+// ⚠️ QUAL número é o do RH sai do BANCO, não daqui. Era um UUID escrito nesta linha, e
+// quando a BM travou e o RH ganhou um número novo (10/09/2026) o desvio continuou olhando
+// para a conta desativada: o inbound do candidato ia para o João, calado. Agora quem
+// responde é `rh_conta_meta()` — a conta ativa marcada com `agente_ia_persona = 'rh'` —
+// e trocar de número volta a ser um UPDATE. O env e o valor abaixo só seguram a queda
+// se a RPC falhar.
+const AGENTE_RH_CONTA_FALLBACK = Deno.env.get("AGENTE_RH_WA_ACCOUNT_ID")
+  ?? "db192b7f-5791-4387-b83e-c2c3395e7500";
 const AGENTE_RH_URL = RELAY_BASE ? `${RELAY_BASE}/functions/v1/crm-agente-rh` : "";
+
+// Cliente de módulo só para esta pergunta: o `admin` do handler nasce depois, e o relay
+// roda fora dele. 5 minutos de cache porque a resposta muda uma vez por troca de número.
+const rhLookup = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
+let contaRhCache = { id: AGENTE_RH_CONTA_FALLBACK, em: 0 };
+async function contaDoRh(): Promise<string> {
+  if (Date.now() - contaRhCache.em < 300_000) return contaRhCache.id;
+  try {
+    const { data } = await rhLookup.rpc("rh_conta_meta");
+    contaRhCache = { id: data ? String(data) : contaRhCache.id, em: Date.now() };
+  } catch (e) {
+    console.log("[crm-whatsapp-webhook] rh_conta_meta falhou, mantendo", contaRhCache.id, e);
+  }
+  return contaRhCache.id;
+}
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -485,7 +506,7 @@ function canonicalBrDigits(raw: string): string {
 // Awaited com timeout; em qualquer erro só loga — nunca derruba o webhook (Meta espera 200).
 async function relayToN8n(payload: Record<string, unknown>): Promise<void> {
   // Desvio por número: RH vai pro agente de RH, todo o resto segue pro João.
-  const ehRh = payload?.wa_account_id === AGENTE_RH_WA_ACCOUNT_ID;
+  const ehRh = payload?.wa_account_id === (await contaDoRh());
   const destino = ehRh ? AGENTE_RH_URL : N8N_INBOUND_URL;
   if (!destino) return;
   const ctrl = new AbortController();

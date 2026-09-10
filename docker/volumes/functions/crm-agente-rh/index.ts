@@ -64,7 +64,24 @@ const SEND_URL = `${SUPABASE_URL}/functions/v1/crm-whatsapp-send`;
 // ⚠️ Sonnet 5 recusa temperature≠default e budget_tokens (400). Nada de sampling aqui.
 const MODELO = Deno.env.get('AGENTE_RH_MODEL') ?? 'claude-sonnet-5';
 
-const CONTA_RH = Deno.env.get('AGENTE_RH_WA_ACCOUNT_ID') ?? '31d9a4ff-9606-4018-a2fb-ffb0155e099b';
+/**
+ * ⚠️ QUAL número é o do RH sai do BANCO (`rh_conta_meta()`): a conta ativa marcada com
+ * `agente_ia_persona = 'rh'`. Este UUID já esteve escrito aqui dentro, e quando o número
+ * foi trocado (10/09/2026, BM travada) o agente seguiu ouvindo uma conta desativada — sem
+ * erro em lugar nenhum, só silêncio. O env e o valor abaixo são o último recurso, para
+ * ele não emudecer se a RPC falhar; a resposta boa é lida a cada rodada.
+ */
+const CONTA_RH_FALLBACK = Deno.env.get('AGENTE_RH_WA_ACCOUNT_ID') ?? 'db192b7f-5791-4387-b83e-c2c3395e7500';
+let CONTA_RH = CONTA_RH_FALLBACK;
+async function resolverContaDoRh(): Promise<string> {
+  try {
+    const { data } = await supabase.rpc('rh_conta_meta');
+    if (data) CONTA_RH = String(data);
+  } catch (e) {
+    console.log('[crm-agente-rh] rh_conta_meta falhou, mantendo', CONTA_RH, e);
+  }
+  return CONTA_RH;
+}
 const FUNIL_RH = '27ab7e60-7cbc-432a-b852-52597bf277b4';
 /**
  * O que o agente faz depende do PAPEL da etapa, que vem do banco (`rh_etapas_papel`),
@@ -948,6 +965,7 @@ Deno.serve(async (req) => {
   // GATE 1 — número. Silencioso: mensagem de outro número não é problema, é rotina.
   // GATE 1 — canal. Aceita o número oficial da Meta OU a linha Web que o RH atende.
   const conexaoDoPayload = payload?.wa_conexao_id ? String(payload.wa_conexao_id) : null;
+  await resolverContaDoRh();
   const conexaoWeb = await conexaoWebDoRh(supabase);
   const ehCanalDoRh =
     payload?.wa_account_id === CONTA_RH ||
