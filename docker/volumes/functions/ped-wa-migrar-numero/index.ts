@@ -372,13 +372,80 @@ Deno.serve(async (req) => {
         descricao: "UUID da wa_account a ser usada no Pedagógico v2",
       }, { onConflict: "chave" });
 
+      // Aposenta o número que sai. Não é higiene: enquanto a conta antiga fica `is_active`,
+      // toda conversa que carimbou `metadata.wa_account_id` com ela continua tentando enviar
+      // por lá — e o `carregarConta` do `whatsapp-send-message` só cai no número padrão
+      // quando a conta NÃO está ativa. Quem troca de número troca porque o anterior não
+      // serve mais; `desativar_anterior: false` é a exceção, não a regra.
+      let anteriorDesativado = false;
+      if (anterior && anterior !== alvo.id && body?.desativar_anterior !== false) {
+        const { error: descErr } = await admin
+          .from("wa_accounts").update({ is_active: false }).eq("id", anterior);
+        anteriorDesativado = !descErr;
+      }
+
       await admin.from("ped_configuracoes").upsert({
         chave: "wa_migracao_historico",
-        valor: JSON.stringify({ em: new Date().toISOString(), de: anterior, para: alvo.id, por: user.id, templates: migrados }),
+        valor: JSON.stringify({ em: new Date().toISOString(), de: anterior, para: alvo.id, por: user.id, templates: migrados, anterior_desativado: anteriorDesativado }),
         descricao: "Ultima troca do numero do Pedagogico (tela Migracao de numero).",
       }, { onConflict: "chave" });
 
-      return json({ ok: true, numero_ativo: alvo.phone_number, templates_migrados: migrados, faltando });
+      return json({ ok: true, numero_ativo: alvo.phone_number, templates_migrados: migrados, anterior_desativado: anteriorDesativado, faltando });
+    }
+
+    // ── ativar_podcast ────────────────────────────────────────────────────────
+    // Fase 2: o convite de podcast passa a sair pelo mesmo número. Separado do `ativar` de
+    // propósito — o podcast é MARKETING, e jogar esse volume num número recém-nascido em
+    // TIER_250 na primeira semana é o caminho curto para o próximo ban. A partir daqui o
+    // `whatsapp-webhook` decide podcast × professor por candidato, não por número.
+    if (acao === "ativar_podcast") {
+      const { data: tplsPodcast } = await admin
+        .from("ped_wa_templates").select("id, nome").eq("ativo", true).like("nome", "podcast%");
+      const ids = (tplsPodcast ?? []).map((t: any) => t.id);
+
+      const { data: rastro } = await admin
+        .from("ped_wa_template_contas")
+        .select("template_id, status, meta_template_id")
+        .eq("wa_account_id", alvo.id).in("template_id", ids.length ? ids : ["00000000-0000-0000-0000-000000000000"]);
+      const porId = new Map((rastro ?? []).map((r: any) => [r.template_id, r]));
+
+      const faltando = (tplsPodcast ?? [])
+        .filter((t: any) => porId.get(t.id)?.status !== "aprovado")
+        .map((t: any) => ({ nome: t.nome, status: porId.get(t.id)?.status ?? "não existe" }));
+      if (faltando.length && body?.forcar !== true) {
+        return json({ ok: false, erro: `${faltando.length} template(s) de podcast ainda não aprovados no número novo`, faltando }, 409);
+      }
+
+      // Os 6 modelos declaram a conta DONA (é o que evita o 132001). Reapontar aqui é o que
+      // faz o SAC do podcast voltar a enviar: as ~64 conversas carimbadas com o número velho
+      // caem no padrão sozinhas assim que aquela conta deixa de estar ativa.
+      let repontados = 0;
+      for (const t of (tplsPodcast ?? [])) {
+        const r: any = porId.get(t.id);
+        if (!r?.meta_template_id) continue;
+        await admin.from("ped_wa_templates").update({
+          wa_account_id: alvo.id, meta_template_id: r.meta_template_id, status: r.status, erro_meta: null,
+        }).eq("id", t.id);
+        repontados++;
+      }
+
+      const { data: podRow } = await admin.rpc("get_wa_account_podcast");
+      const podAnterior = (Array.isArray(podRow) ? podRow[0] : podRow)?.id ?? null;
+
+      await admin.from("ped_configuracoes").upsert({
+        chave: "wa_account_id_podcast",
+        valor: alvo.id,
+        descricao: "Convite de podcast: id da conta em wa_accounts (número Podcast PPGVET). Vazio até cadastrar o token.",
+      }, { onConflict: "chave" });
+
+      let anteriorDesativado = false;
+      if (podAnterior && podAnterior !== alvo.id && body?.desativar_anterior !== false) {
+        const { error: descErr } = await admin
+          .from("wa_accounts").update({ is_active: false }).eq("id", podAnterior);
+        anteriorDesativado = !descErr;
+      }
+
+      return json({ ok: true, numero_ativo: alvo.phone_number, templates_repontados: repontados, anterior_desativado: anteriorDesativado, faltando });
     }
 
     return json({ erro: `ação desconhecida: ${acao}` }, 422);
