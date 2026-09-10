@@ -140,8 +140,48 @@ export async function parsearMensagem(
   };
 }
 
-/** Resumo curto para a coluna `snippet`, no espírito do que o Gmail devolve. */
+/**
+ * Resumo curto para a coluna `snippet`, no espírito do que o Gmail devolve.
+ *
+ * ⚠️ **Tirar as tags NÃO basta** — foi assim que a caixa IMAP passou meses gravando
+ * folha de estilo como resumo (618 conversas, relato do usuário em 2026-09-09:
+ * *"pq fica aparecendo #outlook padding e coisas de html e css no email ali?"*).
+ * `<p>` sai com `<[^>]+>`, mas o MIOLO do `<style>` no `<head>` fica, e vira o
+ * primeiro texto do e-mail: `#outlook a { padding:0; } body { margin:0…`.
+ *
+ * Só acontece no IMAP porque aqui o resumo é NOSSO: o Gmail devolve `msg.snippet`
+ * pronto. E só aparece em e-mail sem parte `text/plain` — justamente o formato do
+ * transacional e do marketing moderno, que é a maior parte de uma caixa de TI.
+ *
+ * A mesma limpeza existe no front, em `src/components/email/resumoEmail.ts`, para o
+ * que já está gravado — as duas precisam continuar concordando.
+ */
 export function resumo(texto: string, html: string, limite = 200): string {
-  const base = texto || html.replace(/<[^>]+>/g, " ");
-  return base.replace(/\s+/g, " ").trim().slice(0, limite);
+  const base = texto || textoDeHtml(html);
+  return base
+    // Enchimento invisível de pré-cabeçalho de newsletter: sem tirar, o resumo fica
+    // com 200 caracteres de nada visível. (O U+034F sai à parte porque dentro de uma
+    // classe de caracteres ele é um combinante solto e o lint barra.)
+    .replace(/[\u200B-\u200D\u2060\uFEFF\u00AD]/g, "")
+    .replace(/\u034F/g, "")
+    .replace(/\s+/g, " ").trim().slice(0, limite);
+}
+
+/**
+ * HTML de e-mail → texto legível.
+ *
+ * A ORDEM importa: comentário primeiro (o condicional `<!--[if mso]>` da Microsoft
+ * carrega uma folha de estilo inteira dentro), depois os blocos sem texto visível
+ * (`<style>`, `<script>`, `<head>`), e só então as tags soltas.
+ */
+function textoDeHtml(html: string): string {
+  if (!html) return "";
+  return html
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<(style|script|head)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ")
+    // Bloco sem fechamento (e-mail mal formado): sem isto o `<style>` órfão
+    // devolveria o resto do arquivo como se fosse texto.
+    .replace(/<(style|script)\b[^>]*>[\s\S]*$/i, " ")
+    .replace(/<!doctype[^>]*>/gi, " ")
+    .replace(/<[^>]*>/g, " ");
 }

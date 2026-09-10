@@ -115,6 +115,26 @@ describe("resumo", () => {
   it("corta no limite pedido", () => {
     expect(resumo("a".repeat(500), "", 10)).toHaveLength(10);
   });
+
+  it("não deixa o miolo do <style> virar resumo (bug do #outlook, 2026-09-09)", () => {
+    const html = `<!doctype html><html><head><meta charset="utf-8">
+      <style>#outlook a { padding:0; } body { margin:0;padding:0; }</style></head>
+      <body><p>Clique no botão abaixo para concluir o login.</p></body></html>`;
+    expect(resumo("", html)).toBe("Clique no botão abaixo para concluir o login.");
+  });
+
+  it("tira o comentário condicional da Microsoft com a folha de estilo dentro", () => {
+    const html = "<body><!--[if mso]><style>td { font-family:Arial; }</style><![endif]--><p>Olá</p></body>";
+    expect(resumo("", html)).toBe("Olá");
+  });
+
+  it("<style> sem fechamento não devolve o resto do arquivo", () => {
+    expect(resumo("", "<p>Antes</p><style>body { margin:0 }")).toBe("Antes");
+  });
+
+  it("some com o enchimento invisível do pré-cabeçalho de newsletter", () => {
+    expect(resumo("", "<p>Novidades\u200B \u034F \u200D \uFEFF da semana</p>")).toBe("Novidades da semana");
+  });
 });
 
 describe("cifra da senha", () => {
