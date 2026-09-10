@@ -36,16 +36,23 @@ async function conferirFiltro(mensagem: string, tipoEsperado: string) {
   const supabase = {
     rpc: vi.fn(async (nome: string, _params: Record<string, unknown>) => {
       if (nome !== 'match_ppg_voyage') throw new Error(`RPC não prevista: ${nome}`);
-      return { data: [{ metadata: { resposta: 'Resposta sintética recuperada.' }, similarity: 0.9 }], error: null };
+      return { data: [{ metadata: { tipo_objecao: tipoEsperado, resposta: 'Resposta sintética recuperada.' }, similarity: 0.9 }], error: null };
     }),
     from: vi.fn(() => { throw new Error('Este teste não autoriza acesso a tabelas'); }),
   };
   const resposta = await executarTool(supabase, {
     id: 'objecao-sintetica', name: 'consulta_objecoes',
-    input: { mensagem_lead: mensagem, tipo_objecao: 'pergunta_modalidade' },
+    // Modalidade agora consulta o catálogo estruturado. Canal mantém o ensaio
+    // da precedência financeira sobre uma categoria informada pelo modelo.
+    input: { mensagem_lead: mensagem, tipo_objecao: 'objecao_canal' },
   }, CONTEXTO);
 
-  expect(resposta.resposta_objecao).toBe('Resposta sintética recuperada.');
+  if (tipoEsperado === 'pergunta_condicao') {
+    expect(resposta.resposta_objecao).toContain('As condições comerciais são apresentadas');
+    expect(resposta.resposta_objecao).toContain('Não prometa');
+  } else {
+    expect(resposta.resposta_objecao).toBe('Resposta sintética recuperada.');
+  }
   expect(fronteiras.fetch).toHaveBeenCalledTimes(1);
   const [, opcoes] = fronteiras.fetch.mock.calls[0] as [string, RequestInit];
   expect(JSON.parse(String(opcoes.body))).toMatchObject({ input: [mensagem] });
@@ -71,8 +78,8 @@ describe('consulta_objecoes: negação explícita de dificuldade financeira', ()
     'Não tá caro demais',
     'Não estou sem dinheiro e não estou desempregado',
     'Não é que eu não consigo pagar; só prefiro mensagem',
-  ])('preserva pergunta_modalidade: %s', async (mensagem) => {
-    await conferirFiltro(mensagem, 'pergunta_modalidade');
+  ])('preserva a categoria informada: %s', async (mensagem) => {
+    await conferirFiltro(mensagem, 'objecao_canal');
   });
 });
 

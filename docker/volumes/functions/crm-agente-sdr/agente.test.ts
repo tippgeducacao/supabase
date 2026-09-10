@@ -59,6 +59,15 @@ beforeEach(() => {
 });
 
 describe('instrução de memória no system enviado à Anthropic', () => {
+  it('responde falha de catálogo sem deixar o modelo prometer um retorno inexistente', async () => {
+    const resposta = await chamarAgentePrincipal({ promptAgente: 'Prompt original', contextoTemporal: '', tools: [], messages: [
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'consulta', name: 'consulta_pos_disponiveis', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'consulta', content: JSON.stringify({ status: 'catalogo_indisponivel', consulta_realizada_com_sucesso: false }) }] },
+    ] });
+    expect(resposta.origem).toBe('falha_catalogo');
+    expect(resposta.content).toEqual([{ type: 'text', text: 'Não consegui confirmar essas informações agora. Prefiro verificar antes de te passar algo incorreto.' }]);
+    expect(transporte).not.toHaveBeenCalled();
+  });
   it('chega ao router, com roles originais, sem tratar pergunta do vendedor como resposta', async () => {
     const entrada = limparParaRouter(memoria);
     expect(await chamarRouter(entrada)).toBe('agente_qualificador');

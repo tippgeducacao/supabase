@@ -5,6 +5,8 @@
 import { PROMPT_ROUTER } from './prompts.ts';
 import type { Msg } from './historico.ts';
 import { INSTRUCAO_MEMORIA_HUMANA } from './memoriaHumana.ts';
+import { descreverToolsSdr } from './descricoesTools.ts';
+import { respostaParaFalhaCatalogo } from './falhaCatalogo.ts';
 
 const ANTHROPIC_KEY = Deno.env.get('AGENTE_SDR_ANTHROPIC_KEY') ?? Deno.env.get('ANTHROPIC_API_KEY') ?? '';
 // Override por env se um dia mudar. ⚠️ Sonnet 5: budget_tokens e temperature≠default
@@ -96,6 +98,11 @@ export async function chamarAgentePrincipal(opts: {
   messages: Msg[];
   tools: any[];
 }): Promise<any> {
+  const falhaCatalogo = respostaParaFalhaCatalogo(opts.messages);
+  if (falhaCatalogo) return {
+    content: [{ type: 'text', text: falhaCatalogo }], stop_reason: 'end_turn',
+    origem: 'falha_catalogo', usage: { input_tokens: 0, output_tokens: 0 },
+  };
   const system: any[] = [
     { type: 'text', text: opts.promptAgente },
     { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA, cache_control: { type: 'ephemeral' } },
@@ -161,5 +168,5 @@ export async function carregarTools(supabase: any, agente: string): Promise<any[
     .eq('agente', agente)
     .order('id');
   if (error) throw new Error(`carregarTools: ${error.message}`);
-  return (data ?? []).map((r: any) => r.tool).filter(Boolean);
+  return descreverToolsSdr((data ?? []).map((r: any) => r.tool).filter(Boolean));
 }

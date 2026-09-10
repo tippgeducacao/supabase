@@ -23,6 +23,7 @@ import { atualizarLead, buscarLead } from './historico.ts';
 import { chamarAnthropic } from './agente.ts';
 import { temDorFinanceira } from './objecaoFinanceira.ts';
 import { montarRetornoInformacoes } from './envioMateriais.ts';
+import { consultarCatalogo } from './catalogoCursos.ts';
 import {
   type ContextoElegibilidade, iniciarAvaliacao, finalizarAvaliacao, consultarAprovacao,
   recusaElegibilidade, VERSAO_REGRA_ELEGIBILIDADE,
@@ -734,7 +735,7 @@ async function avaliarCompatibilidade(supabase: any, input: any, ctx: CtxConvers
 // Aqui: retry curto no 429/5xx + fallback GUIADO que proíbe inventar característica/quebra.
 // Categorias que EXISTEM em rag_ppg_voyage.metadata.tipo_objecao (75 linhas, 12
 // clusters de 6). O modelo às vezes inventa rótulo fora dessa lista — rótulo
-// desconhecido vira filtro vazio (top-1 global), nunca busca que volta seca.
+// desconhecido não autoriza buscar globalmente: vizinhança não prova pertinência.
 const TIPOS_OBJECAO = new Set([
   'objecao_adiamento', 'objecao_canal', 'objecao_desconfianca', 'objecao_duvida',
   'objecao_tempo', 'objecao_terceiro', 'pergunta_condicao', 'pergunta_conteudo',
@@ -771,6 +772,18 @@ function filtroDaObjecao(input: any): Record<string, string> {
 
 async function consultaObjecoes(supabase: any, input: any, toolUseId: string) {
   try {
+    const filtro = filtroDaObjecao(input);
+    // Modalidade e existência são fatos por curso. A base legada dizia que a
+    // maioria das pós tem semi, contrariando a regra comercial de 10/09/2026.
+    if (filtro.tipo_objecao === 'pergunta_modalidade') {
+      return { ...await consultarCatalogo(supabase, String(input.curso_consulta ?? input.curso_escolhido ?? '')), id: toolUseId };
+    }
+    if (['pergunta_preco', 'pergunta_conteudo', 'pergunta_duracao'].includes(filtro.tipo_objecao)) {
+      return { resposta_objecao: 'CONSULTAR_MATERIAL', id: toolUseId,
+        instrucao: 'Valide a pós em consulta_pos_disponiveis se ainda não foi validada. Atenda à dúvida com envia_informacoes: valor para preço integral, cronograma para grade/conteúdo/duração. Use somente os dados e status retornados; enviar um PDF não comprova entrega e não autoriza inventar o conteúdo dele. Se o dado solicitado não vier no retorno, diga que precisa confirmar, sem estimar.' };
+    }
+    if (!filtro.tipo_objecao) return { resposta_objecao: 'CONFIANCA_BAIXA', id: toolUseId,
+      instrucao: 'Categoria de objeção desconhecida. Não invente argumento nem dados do curso. Esclareça a dúvida ou consulte a ferramenta factual apropriada.' };
     let vRes: Response | null = null;
     for (let tentativa = 1; tentativa <= 3; tentativa++) {
       vRes = await fetch('https://api.voyageai.com/v1/embeddings', {
@@ -795,27 +808,29 @@ async function consultaObjecoes(supabase: any, input: any, toolUseId: string) {
     const embedding = vJson.data?.[0]?.embedding;
     if (!embedding) throw new Error('Voyage não retornou embedding');
 
-    const filtro = filtroDaObjecao(input);
-    let { data, error } = await supabase.rpc('match_ppg_voyage', {
+    const { data, error } = await supabase.rpc('match_ppg_voyage', {
       query_embedding: `[${embedding.join(',')}]`,
       match_count: 1,
       filter: filtro,
     });
     if (error) throw new Error(`match_ppg_voyage: ${error.message}`);
-    // Categoria sem linha na base (ou filtro que não casou): cai no top-1 global,
-    // que é o comportamento antigo — filtrar nunca pode devolver VAZIO.
-    if (Object.keys(filtro).length && !data?.length) {
-      ({ data, error } = await supabase.rpc('match_ppg_voyage', {
-        query_embedding: `[${embedding.join(',')}]`,
-        match_count: 1,
-        filter: {},
-      }));
-      if (error) throw new Error(`match_ppg_voyage (fallback): ${error.message}`);
-    }
-
-    // top-1 dentro da categoria — retriever burro, mas não mais CEGO.
-    const resposta = data?.[0]?.metadata?.resposta;
-    return { resposta_objecao: resposta || 'CONFIANCA_BAIXA', id: toolUseId };
+    // Sem resposta da categoria não buscar top-1 global: devolver modalidade
+    // para dificuldade financeira já causou respostas completamente fora do assunto.
+    const metadata = data?.[0]?.metadata;
+    const resposta = metadata?.tipo_objecao === filtro.tipo_objecao ? metadata?.resposta : null;
+    // Referências antigas destes dois clusters misturavam argumento com carga
+    // horária universal, julgamento de dedicação e urgência de lote. Mesmo a
+    // recuperação correta reproduzia esses erros. A revisão só é usada DEPOIS
+    // de recuperar a categoria certa; indisponibilidade continua sendo falha.
+    const referenciasRevisadas: Record<string, string> = {
+      objecao_tempo: 'Reconheça a rotina e a falta de tempo informadas, sem minimizar. A referência desta base para a conversa com o monitor é cerca de 10 minutos; não transforme isso em 15, 20 ou outra duração. Pergunte se existe um período viável para conversar; não prometa atendimento fora dos horários disponíveis, não julgue dedicação, não compare reunião com estudar e não invente carga horária da pós. Se ele realmente não puder agora, combine um retorno conforme o prazo que ele escolher.',
+      pergunta_condicao: 'As condições comerciais são apresentadas na conversa com o monitor. Se o lead relatou dificuldade financeira, acolha isso antes do convite. Não prometa que a condição cabe no orçamento, que foi criada para quem está sem dinheiro, ou que há bolsa/desconto específico. Não invente prazo de lote ou urgência. Pergunte se ele quer conhecer as condições; só depois do aceite consulte disponibilidade.',
+    };
+    return { resposta_objecao: resposta ? (referenciasRevisadas[filtro.tipo_objecao] ?? resposta) : 'CONFIANCA_BAIXA', id: toolUseId,
+      limites_da_resposta: 'O texto recuperado é uma referência de abordagem, não uma confirmação dos fatos de todos os cursos. Nunca generalize 2 a 3 horas por semana, 12 a 18 meses, número de módulos, modalidades ou encontros. Não afirme estatísticas de alunos, polos, processo seletivo, prazo de lote ou urgência sem confirmação específica. Não use "reservar 10 minutos é um bom sinal" nem julgue dedicação pela disponibilidade para a reunião. Acolha falta de tempo/dinheiro; não diga que a reunião resolve horas de conversa e não garanta que a condição caberá no orçamento. Se pedir prazo para analisar, siga o fluxo de combinar retorno, sem trocar isso por mais pressão para agendar.',
+      instrucao: resposta
+        ? 'Use somente o argumento pertinente à objeção atual. Esta base genérica não confirma existência, modalidade ou conteúdo de uma pós; para esses fatos use catálogo/material do curso escolhido. Não invente valores ou condições. Nenhum horário foi consultado nesta ferramenta: não cite 16h, 16h30 ou qualquer horário concreto antes de consulta_disponibilidade retornar aquela opção. Convite para conversar não é agendamento confirmado.'
+        : 'Não há argumento confirmado para esta objeção. Acolha sem fabricar uma quebra nem usar resposta de outro assunto. Consulte catálogo/material se houver uma dúvida factual.' };
   } catch (e) {
     // Fallback próprio (NÃO deixar cair no catch genérico "conduza normalmente"):
     // sem a base, o modelo NÃO pode fabricar argumento de venda.
@@ -1038,49 +1053,22 @@ async function temporizadorProximaTurma(supabase: any, input: any, ctx: CtxConve
 // nas outras tools) e MATERIALIZA em cliente_ppg_leads_sdr.curso_interesse_original
 // (prompts e esteiras de follow-up passam a usar o curso novo sozinhos).
 async function consultaPosDisponiveis(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
-  const sair = (texto: string) => ({ resultado: texto, id: toolUseId });
-
-  const { data: cursos, error } = await supabase
-    .from('cursos')
-    .select('nome')
-    .eq('ativo', true)
-    .eq('modalidade', 'Pós-Graduação')
-    .order('nome');
-  if (error) return sair(`Erro ao listar as pós (${error.message}). Tente de novo; se persistir, siga a conversa sem citar o erro.`);
-  const lista = ((cursos ?? []) as { nome: string }[]).map((c) => `- ${c.nome}`).join('\n');
-
-  const alvo = String(input?.trocar_para ?? '').trim();
-  if (!alvo) {
-    return sair(
-      `Pós-graduações ATIVAS da PPG:\n${lista}\n` +
-      `Ao falar com o lead, cite só as relevantes pro contexto (máx. 3-4) e NUNCA use os prefixos "PÓS |"/"MBA |" — fale o nome natural.`,
-    );
+  const consulta = String(input?.curso_consulta ?? '').trim();
+  const troca = String(input?.trocar_para ?? '').trim();
+  if (consulta && troca) return { status: 'entrada_ambigua', id: toolUseId,
+    instrucao: 'Use curso_consulta para uma dúvida OU trocar_para para escolha explícita; nunca ambos.' };
+  const resultado = await consultarCatalogo(supabase, consulta || troca);
+  if (!troca || resultado.status !== 'curso_confirmado' || !('curso' in resultado) || !resultado.curso) {
+    return { ...resultado, id: toolUseId };
   }
-
-  const { data: resolved, error: eR } = await supabase.rpc('fn_sdr_api_resolver_pos_graduacao', { p_valor: alvo });
-  const cursoId = (resolved as any)?.id ?? null;
-  const nomeOficial = String((resolved as any)?.nome ?? '').trim();
-  if (eR || !cursoId) {
-    return sair(
-      `Não achei uma pós correspondente a "${alvo}". Catálogo ativo:\n${lista}\n` +
-      `Confirme com o lead qual dessas ele quer (cite as 2-3 mais próximas, sem os prefixos) e chame de novo com o nome escolhido.`,
-    );
-  }
-
-  // Nome natural pra conversa/registro (sem "PÓS |"; "MBA |" vira "MBA ").
-  const nomeConversa = nomeOficial.replace(/^p[oó]s\s*\|\s*/i, '').replace(/^mba\s*\|\s*/i, 'MBA ').trim();
   try {
-    // O harness consulta o catálogo real, mas a troca acadêmica fica na sessão
-    // simulada: não deve invalidar ou gravar a elegibilidade de nenhum cadastro.
-    if (!ctx.modoTeste) await atualizarLead(supabase, ctx.remotejid, { curso_interesse_original: nomeConversa });
-  } catch (e) {
-    console.error(`[crm-agente-sdr] consulta_pos: atualizar interesse falhou (segue): ${(e as Error).message}`);
+    if (!ctx.modoTeste) await atualizarLead(supabase, ctx.remotejid, { curso_interesse_original: resultado.curso.nome });
+  } catch {
+    return { ...resultado, status: 'erro_atualizar_interesse', id: toolUseId,
+      instrucao: 'A pós existe, mas não foi possível registrar a troca. Não diga que atualizou o cadastro; tente novamente antes de seguir usando o novo interesse.' };
   }
-  return sair(
-    `Interesse do lead ATUALIZADO para: ${nomeConversa} (nome oficial: ${nomeOficial}). ` +
-    `Daqui em diante use "${nomeConversa}" como curso_escolhido em TODAS as chamadas (consulta_disponibilidade, envia_informacoes, verificar_compatibilidade_curso). ` +
-    `Pode enviar o cronograma/valor dessa pós normalmente se o lead pedir. Confirme a troca pro lead de forma natural e siga o fluxo.`,
-  );
+  return { ...resultado, status: 'interesse_atualizado', simulado: !!ctx.modoTeste, id: toolUseId,
+    instrucao: resultado.instrucao + ` Interesse ${ctx.modoTeste ? 'simulado' : 'registrado'}: ${resultado.curso.nome}. Use este nome nas ferramentas do curso e siga a qualificação/agendamento; envie informações se solicitado.` };
 }
 
 // ── atualizar_dados_lead (persona campanha_direta) ──────────────────────────
