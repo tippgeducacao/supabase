@@ -24,6 +24,7 @@ import { FOLLOWUP_SYSTEM } from './prompts-followup.ts';
 import { chamarAnthropic, MODELO_AGENTE } from './agente.ts';
 import { extrairPrimeiroNome, montarContextoTemporal } from './contexto.ts';
 import { INSTRUCAO_MEMORIA_HUMANA } from './memoriaHumana.ts';
+import { carregarStatusMateriais } from './envioMateriais.ts';
 import {
   atualizarLead,
   buscarLead,
@@ -279,6 +280,7 @@ export async function gerarFollowup(
   stage: number,
   tel: Telemetria,
   history: Msg[],
+  contextoMateriais = '',
 ): Promise<{ message: string; final_answer: string }> {
   const remotejid = lead.remotejid;
   const tentativaAtual = contarTentativas(history) + 1;
@@ -290,7 +292,7 @@ export async function gerarFollowup(
   // vão no bloco INFORMAÇÕES DA TENTATIVA (última mensagem) — o system fica ESTÁTICO.
   const nomeCtx = nome || '(ausente no cadastro; use apenas autoidentificação explícita do lead no histórico)';
   const cursoCtx = curso || '(ausente no cadastro; use apenas curso explicitamente escolhido pelo lead no histórico)';
-  const contextoTemporal = montarContextoTemporal();
+  const contextoTemporal = montarContextoTemporal() + contextoMateriais;
   const messages = montarMensagensFollowup(history, tentativaAtual, nomeCtx, cursoCtx);
 
   const inicio = Date.now();
@@ -375,7 +377,10 @@ async function processarFollowupLead(supabase: any, leadSel: any, stageSel: numb
       return false;
     }
 
-    const { message, final_answer } = await gerarFollowup(supabase, lead, stage, tel, history);
+    const telefone = String(remotejid).split('@')[0];
+    const contaLead = await contaDoLead(supabase, telefone, { direcao: 'inbound' });
+    const contextoMateriais = await carregarStatusMateriais(supabase, { telefone, waAccountId: contaLead });
+    const { message, final_answer } = await gerarFollowup(supabase, lead, stage, tel, history, contextoMateriais);
     if (!message) {
       // Modelo julgou que não cabe follow agora: consome o toque pra não reavaliar todo tick.
       await atualizarLead(supabase, remotejid, { follow_up: followUpDoStage(stage) });
@@ -387,8 +392,6 @@ async function processarFollowupLead(supabase: any, leadSel: any, stageSel: numb
     // número onde a janela de 24h do lead está aberta = o do último INBOUND dele
     // (a janela da Meta é por número×lead). null (lead sem inbound rastreável) →
     // conta ativa, comportamento antigo.
-    const telefone = String(remotejid).split('@')[0];
-    const contaLead = await contaDoLead(supabase, telefone, { direcao: 'inbound' });
     const ctx: CtxConversa = {
       remotejid,
       telefone,

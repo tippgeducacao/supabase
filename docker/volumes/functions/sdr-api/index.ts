@@ -16,7 +16,9 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3'
 import { VERSAO_REGRA_ELEGIBILIDADE } from '../crm-agente-sdr/elegibilidadeAgendamento.ts'
-import { consultarEntregaCronograma, type ReferenciaCronograma, type StatusCronograma } from './cronogramaEntrega.ts'
+import { interpretarEnvioMaterial, resultadoMaterial, type ResultadoMaterial } from '../_shared/resultadoEnvioMaterial.ts'
+import { agendarReenvioMaterial, cancelarReenvioMaterial } from '../_shared/reenvioMaterial.ts'
+import { consultarEntregaCronograma, type ReferenciaCronograma } from './cronogramaEntrega.ts'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -443,15 +445,14 @@ async function handleEnviaInformacoes(_sdrId: string, body: any): Promise<Respon
   if (error) return json(500, { error: error.message })
   if (!info?.success) return json(statusForCode(info?.code), { error: info?.error, code: info?.code })
 
-  let cronogramaEnviado = false
-  let cronogramaErro: string | null = null
-  let cronogramaStatus: StatusCronograma = querCronograma ? 'falhou' : 'nao_solicitado'
+  let envio: ResultadoMaterial = resultadoMaterial('nao_solicitado')
   let referencia: ReferenciaCronograma = { waMessageId: null, waAccountId: null, waConexaoId: null }
   if (querCronograma) {
     if (!info.cronograma?.url) {
-      cronogramaErro = 'cronograma não cadastrado para este curso'
+      const cronogramaErro = 'cronograma não cadastrado para este curso'
+      envio = resultadoMaterial('falhou', null, cronogramaErro, 'cronograma_nao_cadastrado')
       if (conteudo === 'cronograma') {
-        return json(404, { error: cronogramaErro, code: 'cronograma_nao_cadastrado' })
+        return json(404, { error: cronogramaErro, code: 'cronograma_nao_cadastrado', data: envio })
       }
     } else {
       const base = {
@@ -493,46 +494,52 @@ async function handleEnviaInformacoes(_sdrId: string, body: any): Promise<Respon
       } : null
 
       const enviar = async (payload: Record<string, unknown>) => {
-        const r = await fetch(`${SUPABASE_URL}/functions/v1/crm-whatsapp-send`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${SERVICE_ROLE}` },
-          body: JSON.stringify(payload),
-        })
-        const resp = await r.json().catch(() => ({}))
-        const erro = resp?.error ?? `crm-whatsapp-send retornou ${r.status}`
-        return {
-          ok: r.ok && resp?.success === true && !resp?.error,
-          referencia: {
-            waMessageId: typeof resp?.wa_message_id === 'string' ? resp.wa_message_id : null,
+        try {
+          const r = await fetch(`${SUPABASE_URL}/functions/v1/crm-whatsapp-send`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${SERVICE_ROLE}` },
+            body: JSON.stringify(payload),
+          })
+          const resp = await r.json().catch(() => ({}))
+          const resultado = interpretarEnvioMaterial(r.ok, resp, r.status)
+          referencia = {
+            waMessageId: resultado.wa_message_id,
             waAccountId: typeof resp?.wa_account_id === 'string' ? resp.wa_account_id : null,
             waConexaoId: typeof resp?.wa_conexao_id === 'string' ? resp.wa_conexao_id : null,
-          },
-          // `code` carrega o motivo estruturado — hoje o que importa é `anexo_indisponivel`
-          // (arquivo do material apagado do bucket), que vira alerta no CRM e NÃO é
-          // instabilidade da Meta: reenviar não resolve, tem que consertar o cadastro.
-          erro: resp?.code ? `${erro} [${resp.code}]` : erro,
+          }
+          if (!resultado.cronograma_enviado) return resultado
+          // Preserva a checagem publicada em 09/09: entrega precisa do receipt da
+          // mesma mensagem/conta no CRM, nunca de um campo otimista do ACK.
+          const entrega = await consultarEntregaCronograma(supabase, referencia)
+          if (entrega === 'falhou') return resultadoMaterial('falhou', resultado.wa_message_id,
+            'O provedor registrou falha na entrega do cronograma', 'falha_entrega')
+          return resultadoMaterial(entrega === 'delivered' ? 'entregue' : entrega === 'read' ? 'lido' : 'aceito', resultado.wa_message_id)
+        } catch {
+          // Sem resposta não sabemos se o provedor aceitou. Não disparar fallback
+          // automaticamente: ele poderia entregar o mesmo material duas vezes.
+          return resultadoMaterial('desconhecido', null, 'Não foi possível confirmar o envio.', 'envio_sem_confirmacao')
         }
       }
 
+      const documentoReenvio = { ...base, anexo_url: info.cronograma.url, filename: info.cronograma.nome_arquivo || undefined }
+      // Só o SDR de WhatsApp solicita recuperação automática. Webchat/template e
+      // linhas Web mantêm seu transporte; não convertemos um template em texto livre.
+      const reagendar = body?.reagendar_em_falha === true && !comoTemplate && !body?.wa_conexao_id && Boolean(base.wa_account_id)
+      if (reagendar) {
+        try { await cancelarReenvioMaterial(supabase, documentoReenvio) }
+        catch { return json(503, { data: resultadoMaterial('desconhecido', null, 'Não foi possível verificar a tentativa pendente.', 'fila_indisponivel') }) }
+      }
       let res = await enviar(comoTemplate ?? comoDocumento)
       // Plano B: template falhou (não aprovado no número, upload recusado, número
       // restrito) e o chamador ofereceu uma linha Web. Melhor entregar por ela do que
       // não entregar — o lead pediu o material.
-      if (!res.ok && comoTemplate && body?.wa_conexao_id) {
+      if (res.cronograma_status === 'falhou' && comoTemplate && body?.wa_conexao_id) {
         const viaWeb = await enviar(comoDocumento)
-        if (viaWeb.ok) res = viaWeb
-        else res = { ...viaWeb, ok: false, erro: `template: ${res.erro} | linha web: ${viaWeb.erro}` }
+        res = viaWeb.cronograma_status === 'falhou'
+          ? { ...viaWeb, cronograma_erro: `template: ${res.cronograma_erro} | linha web: ${viaWeb.cronograma_erro}` }
+          : viaWeb
       }
-      referencia = res.referencia
-      cronogramaEnviado = res.ok
-      if (!cronogramaEnviado) cronogramaErro = res.erro
-      else {
-        cronogramaStatus = await consultarEntregaCronograma(supabase, referencia)
-        if (cronogramaStatus === 'falhou') {
-          cronogramaEnviado = false
-          cronogramaErro = 'O provedor registrou falha na entrega do cronograma'
-        }
-      }
+      envio = reagendar ? await agendarReenvioMaterial(supabase, documentoReenvio, res) : res
     }
   }
 
@@ -546,15 +553,15 @@ async function handleEnviaInformacoes(_sdrId: string, body: any): Promise<Respon
   return json(200, {
     data: {
       curso: info.curso?.nome ?? pos,
-      // Compatibilidade: `enviado` é aceite, nunca prova de entrega. O estado e a
-      // referência permitem consultar o desfecho assíncrono sem repetir o envio.
-      cronograma_enviado: cronogramaEnviado,
-      cronograma_status: cronogramaStatus,
-      cronograma_entregue: cronogramaStatus === 'delivered' || cronogramaStatus === 'read',
+      ...envio,
+      // O gateway REST conserva os nomes/estados publicados. A tool normaliza o
+      // contrato internamente e também entende o resultado desconhecido novo.
+      cronograma_status: envio.cronograma_status === 'aceito' ? 'pendente'
+        : envio.cronograma_status === 'entregue' ? 'delivered' : envio.cronograma_status === 'lido' ? 'read' : envio.cronograma_status,
+      cronograma_entregue: ['entregue', 'lido'].includes(envio.cronograma_status),
       cronograma_wa_message_id: referencia.waMessageId,
       cronograma_wa_account_id: referencia.waAccountId,
       cronograma_wa_conexao_id: referencia.waConexaoId,
-      ...(cronogramaErro ? { cronograma_erro: cronogramaErro } : {}),
       valor_integral: valorIntegral,
       valor_matricula: valorMatricula,
     },

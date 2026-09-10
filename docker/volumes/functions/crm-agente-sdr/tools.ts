@@ -22,6 +22,7 @@ import {
 import { atualizarLead, buscarLead } from './historico.ts';
 import { chamarAnthropic } from './agente.ts';
 import { temDorFinanceira } from './objecaoFinanceira.ts';
+import { montarRetornoInformacoes } from './envioMateriais.ts';
 import {
   type ContextoElegibilidade, iniciarAvaliacao, finalizarAvaliacao, consultarAprovacao,
   recusaElegibilidade, VERSAO_REGRA_ELEGIBILIDADE,
@@ -50,6 +51,8 @@ export type CtxConversa = ContextoElegibilidade & {
   // usuário 2026-08-07: "webchat pode agendar aleatório, foco no WhatsApp, que é o canal
   // maior"). Ausente = whatsapp (o crm-agente-sdr não precisa declarar).
   canal?: 'whatsapp' | 'webchat';
+  /** Cache só desta rodada: um novo pedido do lead recebe um contexto novo. */
+  enviosMateriais?: Map<string, Record<string, unknown>>;
 };
 
 function sdrApi(path: string, init: RequestInit = {}): Promise<Response> {
@@ -847,17 +850,11 @@ async function cursoDaOportunidade(supabase: any, ctx: CtxConversa): Promise<str
 
 async function enviaInformacoes(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
   const conteudo = input.conteudo || 'cronograma';
-  const enviarCronograma = conteudo === 'cronograma' || conteudo === 'cronograma_e_valor';
-  const incluirValor = conteudo === 'valor' || conteudo === 'cronograma_e_valor';
-  const sair = (texto: string, estado: Record<string, unknown> = {}) => ({ resultado: texto, id: toolUseId, ...estado });
-  const semPromessa = 'Não afirme envio ou entrega e não prometa mandar depois: não existe envio futuro agendado por esta tentativa. Reconheça que não foi possível confirmar o envio agora, sem expor o erro técnico. Um pedido explícito de novo envio deve ser atendido quando for possível, mesmo se houver uma tentativa anterior.';
 
   const cursoOp = await cursoDaOportunidade(supabase, ctx);
   const pos = String(input.curso_escolhido ?? '').trim() || cursoOp;
   if (!pos) {
-    return sair(`Curso não informado. Confirme qual material o lead quer. ${semPromessa}`, {
-      cronograma_enviado: false, cronograma_entregue: false, cronograma_status: 'falhou',
-    });
+    return montarRetornoInformacoes(false, { error: 'Curso não informado nem encontrado na oportunidade.', code: 'pos_obrigatoria' }, conteudo, toolUseId);
   }
 
   const chamar = async (p: string) => {
@@ -871,6 +868,7 @@ async function enviaInformacoes(supabase: any, input: any, ctx: CtxConversa, too
         wa_account_id: ctx.waAccountId,
         lead_id: ctx.leadId,
         oportunidade_id: ctx.oportunidadeId,
+        reagendar_em_falha: ctx.canal !== 'webchat',
       }),
     });
     let b: any;
@@ -885,67 +883,7 @@ async function enviaInformacoes(supabase: any, input: any, ctx: CtxConversa, too
     ({ res, body, d } = await chamar(cursoOp));
   }
 
-  if (res.status < 200 || res.status >= 300 || body?.error || d.error) {
-    const msg = d.error || body?.error || `HTTP ${res.status} no envia-informacoes`;
-    const code = d.code || body?.code || '';
-    if (code === 'cronograma_nao_cadastrado') {
-      return sair(`Cronograma ainda não cadastrado para este curso. ${semPromessa}`, {
-        cronograma_enviado: false, cronograma_entregue: false, cronograma_status: 'falhou',
-      });
-    }
-    if (code === 'valor_nao_cadastrado') {
-      return sair('Valor não cadastrado para este curso. Diga que essa informação é passada na reunião e reconduza pro agendamento.');
-    }
-    if (code === 'cronograma_ja_enviado') {
-      // Código legado: não é emitido pela API atual. Um envio anterior não prova
-      // recebimento e não revoga a autorização de um novo pedido do lead.
-      return sair(`Esta tentativa foi recusada pelo registro de um envio anterior; a entrega não foi comprovada. ${semPromessa}`, {
-        cronograma_enviado: false, cronograma_entregue: false, cronograma_status: 'falhou',
-      });
-    }
-    return sair(`Não foi possível confirmar o envio (${msg}${code ? ' / ' + code : ''}). ${semPromessa}`, {
-      cronograma_enviado: false, cronograma_entregue: false, cronograma_status: 'falhou',
-    });
-  }
-
-  const partes: string[] = [];
-  let estado: Record<string, unknown> = {};
-  if (enviarCronograma) {
-    const temReferencia = typeof d.cronograma_wa_message_id === 'string' && d.cronograma_wa_message_id.trim()
-      && (d.cronograma_wa_account_id || d.cronograma_wa_conexao_id);
-    const falhou = d.cronograma_status === 'falhou' || Boolean(d.cronograma_erro);
-    const entregue = Boolean(!falhou && temReferencia && ['delivered', 'read'].includes(d.cronograma_status));
-    const aceito = d.cronograma_enviado === true && !falhou;
-    estado = {
-      cronograma_enviado: aceito,
-      cronograma_entregue: entregue,
-      cronograma_status: entregue ? d.cronograma_status : falhou ? 'falhou' : 'pendente',
-      cronograma_wa_message_id: d.cronograma_wa_message_id ?? null,
-      cronograma_wa_account_id: d.cronograma_wa_account_id ?? null,
-      cronograma_wa_conexao_id: d.cronograma_wa_conexao_id ?? null,
-    };
-    if (entregue) {
-      partes.push('Há confirmação de entrega do cronograma no WhatsApp. Se o lead pedir novamente ou disser que não recebeu/não encontrou, atenda o novo pedido sem insistir que o material já está com ele.');
-    } else if (aceito) {
-      partes.push('Solicitação de envio do cronograma aceita, mas a entrega está PENDENTE de confirmação. Diga apenas que solicitou o envio; NÃO diga "entregue", "já recebeu" ou "o material já está com você". Se ele pedir novamente ou disser que não recebeu, não recuse por causa desta tentativa anterior.');
-    } else {
-      partes.push(`Envio do cronograma não confirmado${d.cronograma_erro ? ` (${d.cronograma_erro})` : ''}. ${semPromessa}`);
-    }
-  }
-  if (incluirValor) {
-    if (d.valor_integral) {
-      partes.push(`Valor integral da pós: ${d.valor_integral}, sem nenhuma condição aplicada. Informe exatamente este valor e lembre que a condição especial liberada hoje, com valor mais em conta e parcelamento mais leve, é apresentada na conversa com o monitor.`);
-    } else {
-      partes.push('Valor não cadastrado. Diga que essa informação é passada na reunião.');
-    }
-    const valorMatricula = d.valor_matricula || null;
-    const linkMatricula = d.link_matricula || null;
-    if (valorMatricula || linkMatricula) {
-      const matriculaTxt = [valorMatricula, linkMatricula].filter(Boolean).join(' ');
-      partes.push(`Matrícula (valor e link pra garantir a vaga direto no valor integral): ${matriculaTxt}. Ofereça pra quem preferir fechar agora, deixando claro que pelo link é o valor integral, sem condição. NUNCA diga ou insinue que o valor da matrícula pode ser reduzido ou negociado.`);
-    }
-  }
-  return sair(partes.join(' '), estado);
+  return montarRetornoInformacoes(res.ok, body, conteudo, toolUseId);
 }
 
 // ── pausa_ia ────────────────────────────────────────────────────────────────
@@ -1202,7 +1140,26 @@ export async function executarTool(
       case 'remarcar_agendamento': return await remarcarAgendamento(supabase, input, ctx, id);
       case 'verificar_compatibilidade_curso': return await verificarCompatibilidade(supabase, input, ctx, id);
       case 'consulta_objecoes': return await consultaObjecoes(supabase, input, id);
-      case 'envia_informacoes': return await enviaInformacoes(supabase, input, ctx, id);
+      case 'envia_informacoes': {
+        if (input?.conteudo === 'valor') return await enviaInformacoes(supabase, input, ctx, id);
+        const chave = String(input?.curso_escolhido ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+        ctx.enviosMateriais ??= new Map();
+        const anterior = ctx.enviosMateriais.get(chave);
+        if (anterior) return {
+          ...anterior, id, reutilizado_nesta_rodada: true,
+          resultado: `${anterior.resultado} Esta tentativa já ocorreu nesta rodada. Não houve novo envio. Se precisa apenas do preço, consulte conteudo="valor".`,
+        };
+        let retorno: Record<string, unknown>;
+        try { retorno = await enviaInformacoes(supabase, input ?? {}, ctx, id); }
+        catch {
+          retorno = montarRetornoInformacoes(true, { data: {
+            cronograma_status: 'desconhecido', cronograma_enviado: false,
+            cronograma_erro: 'Sem resposta da integração de envio.', cronograma_codigo: 'envio_sem_confirmacao',
+          } }, input?.conteudo ?? 'cronograma', id);
+        }
+        ctx.enviosMateriais.set(chave, retorno);
+        return retorno;
+      }
       case 'pausa_ia': return await pausaIa(supabase, input, ctx, id);
       case 'agendar_retorno': return await agendarRetorno(supabase, input, ctx, id);
       case 'temporizador_proxima_turma': return await temporizadorProximaTurma(supabase, input, ctx, id);

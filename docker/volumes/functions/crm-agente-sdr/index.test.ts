@@ -5,6 +5,8 @@ const fronteiras = vi.hoisted(() => ({
   prepararMensagem: vi.fn(), chamarPrincipal: vi.fn(), chamarRouter: vi.fn(), enviar: vi.fn(),
   registrar: vi.fn(), bufferInserir: vi.fn(), buffer: [] as { id: number; payload: Record<string, unknown> }[],
   pausaNoDebounce: false,
+  executar: vi.fn(), tools: vi.fn(), gravar: vi.fn(), historico: vi.fn(),
+  humanizar: vi.fn(), horarios: vi.fn(), conversa: vi.fn(),
 }));
 vi.mock('https://esm.sh/@supabase/supabase-js@2.50.3', () => ({
   createClient: () => ({ from: fronteiras.from, rpc: fronteiras.rpc }),
@@ -12,15 +14,18 @@ vi.mock('https://esm.sh/@supabase/supabase-js@2.50.3', () => ({
 vi.mock('./historico.ts', async (original) => ({
   ...await original<typeof import('./historico')>(),
   buscarLead: fronteiras.buscarLead, criarLead: fronteiras.criarLead, atualizarLead: fronteiras.atualizarLead,
+  carregarHistorico: fronteiras.historico, gravarMensagem: fronteiras.gravar,
 }));
 vi.mock('./agente.ts', () => ({
-  carregarTools: vi.fn(), chamarAgentePrincipal: fronteiras.chamarPrincipal, chamarRouter: fronteiras.chamarRouter,
+  carregarTools: fronteiras.tools, chamarAgentePrincipal: fronteiras.chamarPrincipal, chamarRouter: fronteiras.chamarRouter,
 }));
-vi.mock('./tools.ts', () => ({ executarTool: vi.fn(), montarToolResults: vi.fn() }));
+vi.mock('./tools.ts', () => ({ executarTool: fronteiras.executar, montarToolResults: (outputs: { id: string }[]) => outputs.map((o) => ({
+  type: 'tool_result', tool_use_id: o.id, content: JSON.stringify(o),
+})) }));
 vi.mock('./midia.ts', () => ({ prepararMensagem: fronteiras.prepararMensagem }));
 vi.mock('./saida.ts', () => ({
-  enviarResposta: fronteiras.enviar, conversaTexto: vi.fn(), horariosInventados: vi.fn(),
-  humanizarTexto: vi.fn(), removerRaciocinioVazado: vi.fn(),
+  enviarResposta: fronteiras.enviar, conversaTexto: fronteiras.conversa, horariosInventados: fronteiras.horarios,
+  humanizarTexto: fronteiras.humanizar, removerRaciocinioVazado: (t: string) => t,
 }));
 vi.mock('./followup.ts', () => ({ rodarEsteiraFollowup: vi.fn() }));
 vi.mock('./followup-template.ts', () => ({ rodarEsteiraFollowupTemplate: vi.fn() }));
@@ -145,5 +150,54 @@ describe('entrada HTTP: memória da pausa antes de mídia, buffer e LLM', () => 
     expect(await resposta.json()).toEqual({ error: 'historico_entrada_indisponivel' });
     expect(fronteiras.prepararMensagem).not.toHaveBeenCalled();
     semResposta();
+  });
+});
+
+describe('loop HTTP do SDR: recuperação de material', () => {
+  it('relê a falha assíncrona e envia a pergunta para continuar, sem pausar', async () => {
+    fronteiras.buscarLead.mockResolvedValue({ ...leadAtivo, modo_recontato: true, nome: 'Ana', curso_interesse_original: 'Curso de teste' });
+    fronteiras.historico.mockResolvedValue([{ role: 'user', content: 'Não recebi o cronograma. Pode reenviar?' }]);
+    fronteiras.tools.mockResolvedValue([]);
+    fronteiras.humanizar.mockImplementation((t: string) => t);
+    fronteiras.horarios.mockReturnValue([]);
+    fronteiras.conversa.mockReturnValue('');
+    fronteiras.rpc.mockImplementation(async (nome: string) => {
+      if (nome === 'crm_sdr_registrar_entrada') return { data: { estado: 'ativa', gravada: true }, error: null };
+      if (nome === 'crm_agente_sdr_lock_claim') return { data: true, error: null };
+      if (['crm_e_aluno_telefone', 'crm_esta_na_escola', 'crm_agente_sdr_lock_renovar'].includes(nome)) return { data: false, error: null };
+      throw new Error(`RPC inesperada: ${nome}`);
+    });
+    let status = 'sent';
+    const anterior = fronteiras.from.getMockImplementation()!;
+    fronteiras.from.mockImplementation((tabela: string) => {
+      if (tabela !== 'crm_whatsapp_messages') return anterior(tabela);
+      const query = {
+        select: () => query, eq: () => query, in: () => query, order: () => query,
+        limit: async () => ({ data: [{ wa_message_id: 'wamid.material', tipo: 'document', status_entrega: status,
+          anexos: [{ filename: 'cronograma.pdf' }], erro: status === 'failed' ? { errors: [{ code: 131053 }] } : null }], error: null }),
+      };
+      return query;
+    });
+    fronteiras.chamarPrincipal
+      .mockResolvedValueOnce({ content: [{ type: 'tool_use', id: 'envio-1', name: 'envia_informacoes', input: { curso_escolhido: 'Curso de teste', conteudo: 'cronograma' } }] })
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: 'não estou conseguindo enviar o cronograma pelo WhatsApp agora. enquanto isso, podemos continuar com o agendamento?' }] });
+    fronteiras.executar.mockImplementation(async (_banco, tool, ctx) => {
+      if (tool.name === 'envia_informacoes') {
+        status = 'failed';
+        const retorno = { id: tool.id, cronograma_status: 'falhou', cronograma_enviado: false, resultado: 'Falha do arquivo' };
+        ctx.enviosMateriais = new Map([['curso', retorno]]);
+        return retorno;
+      }
+      return { id: tool.id, status: 'pausado' };
+    });
+    const resp = await chamar({ wa_account_id: 'conta-sintetica', agente_ia_persona: 'recontato' });
+    expect(resp.status).toBe(200);
+    expect(fronteiras.chamarPrincipal).toHaveBeenCalledTimes(2);
+    expect(fronteiras.chamarPrincipal.mock.calls[0][0].contextoEntregaMateriais).toContain('"status":"aceito"');
+    expect(fronteiras.chamarPrincipal.mock.calls[1][0].contextoEntregaMateriais).toContain('"status":"falhou"');
+    expect(fronteiras.executar).toHaveBeenCalledTimes(1);
+    expect(fronteiras.chamarPrincipal.mock.calls[1][0].promptAgente).toContain('FALHA NO MATERIAL NÃO ENCERRA O ATENDIMENTO');
+    expect(fronteiras.enviar).toHaveBeenCalledOnce();
+    expect(fronteiras.enviar.mock.calls[0][1]).toBe('não estou conseguindo enviar o cronograma pelo WhatsApp agora. enquanto isso, podemos continuar com o agendamento?');
   });
 });

@@ -16,6 +16,9 @@
 // e a mídia vem por aqui) — é o que garante que o vídeo chegue DEPOIS do texto, já que o
 // pg_net dispara as requisições em paralelo, sem ordem.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
+import { AUTOR_REENVIO_MATERIAL, LIMITE_REENVIO_MS, proximaTentativaMaterial } from '../_shared/reenvioMaterial.ts';
+import { interpretarEnvioMaterial } from '../_shared/resultadoEnvioMaterial.ts';
+import { phoneVariants } from '../crm-whatsapp-send/telefoneConversa.ts';
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -51,6 +54,8 @@ type Agendada = {
   anexo_url: string | null;
   filename: string | null;
   mime_type: string | null;
+  criado_por_nome?: string | null;
+  criado_em?: string;
 };
 
 // Tipo Meta da mídia: do mime_type e, na falta dele, da extensão do arquivo.
@@ -138,6 +143,38 @@ async function processarUma(
   };
 
   try {
+    const reenvioSdr = row.criado_por_nome === AUTOR_REENVIO_MATERIAL && row.tipo_mensagem === 'midia';
+    if (reenvioSdr) {
+      // Fila de material não é follow-up comercial: continua após um agendamento,
+      // mas nunca após pausa, opt-out, arquivamento ou temporizador do contato.
+      if (!row.wa_account_id || row.wa_conexao_id) return await falhar('Conta do reenvio indisponível.');
+      const idadeFila = Date.now() - Date.parse(row.criado_em ?? '');
+      if (!Number.isFinite(idadeFila) || idadeFila >= LIMITE_REENVIO_MS) return await falhar('Prazo das tentativas de reenvio encerrado.');
+      const cancelar = async (motivo: string) => {
+        await admin.from('crm_mensagens_agendadas').update({ status: 'cancelado', erro_detalhe: motivo }).eq('id', row.id);
+        return 'cancelado';
+      };
+      const { data: leads, error: erroLead } = await admin.from('cliente_ppg_leads_sdr')
+        .select('pausa_ia,nao_perturbe').in('remotejid', phoneVariants(row.telefone).map((t) => `${t}@s.whatsapp.net`));
+      if (erroLead || !leads?.length) return await falhar('Não foi possível validar o contato para o reenvio.');
+      if (leads.some((l: { pausa_ia: boolean; nao_perturbe: boolean }) => l.pausa_ia || l.nao_perturbe)) return await cancelar('Contato pausado ou opt-out.');
+      const { data: flags, error: erroFlags } = await admin.rpc('crm_lead_flags_por_telefone', { p_telefone: row.telefone });
+      if (erroFlags) return await falhar('Não foi possível validar bloqueios do contato.');
+      const estado = Array.isArray(flags) ? flags[0] : flags;
+      if (estado?.arquivado || estado?.timer_ativo) return await cancelar('Contato arquivado ou com temporizador.');
+      // Janela da CONTA que vai enviar, não de outra linha que recebeu o lead.
+      const { data: ultima, error: erroJanela } = await admin.from('crm_whatsapp_messages')
+        .select('created_at').eq('wa_account_id', row.wa_account_id).in('telefone', phoneVariants(row.telefone))
+        .eq('direcao', 'inbound').order('created_at', { ascending: false }).limit(1).maybeSingle();
+      const idade = Date.now() - Date.parse(ultima?.created_at ?? '');
+      if (erroJanela || !Number.isFinite(idade) || idade >= 24 * 3600_000) return await falhar('Janela de WhatsApp fechada ou sem confirmação.');
+      const { data: outroEnvio, error: erroOutro } = await admin.from('crm_whatsapp_messages')
+        .select('id').eq('wa_account_id', row.wa_account_id).in('telefone', phoneVariants(row.telefone))
+        .eq('direcao', 'outbound').eq('tipo', 'document').contains('anexos', [{ url: row.anexo_url }])
+        .gte('created_at', row.criado_em).in('status_entrega', ['sent', 'delivered', 'read']).limit(1).maybeSingle();
+      if (erroOutro) return await falhar('Não foi possível conferir outro envio do material.');
+      if (outroEnvio) return await cancelar('O material já teve outro envio aceito após entrar na fila.');
+    }
     // Monta o corpo para a crm-whatsapp-send conforme o tipo
     const sendBody: Record<string, unknown> = {
       mensagem_agendada_id: row.id,
@@ -184,6 +221,17 @@ async function processarUma(
     });
     const resp = await r.json().catch(() => ({} as Record<string, unknown>));
     console.log("[crm-agendadas-dispatch] <-", row.id, r.status, JSON.stringify(resp));
+
+    if (reenvioSdr) {
+      const resultado = interpretarEnvioMaterial(r.ok, resp, r.status);
+      if (!resultado.cronograma_enviado) {
+        const proxima = proximaTentativaMaterial(resultado, row.criado_em ?? '');
+        if (!proxima) return await falhar(resultado.cronograma_erro ?? 'Envio sem confirmação.');
+        await admin.from('crm_mensagens_agendadas').update({ status: 'agendado', enviar_em: proxima,
+          erro_detalhe: 'Envio recusado; nova tentativa registrada.' }).eq('id', row.id);
+        return 'reagendado';
+      }
+    }
 
     // crm-whatsapp-send pode pular o envio (trava de frequência de template 1/24h)
     if ((resp as any)?.skipped) {

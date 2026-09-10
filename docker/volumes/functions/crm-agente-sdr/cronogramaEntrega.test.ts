@@ -28,19 +28,19 @@ function responder(data: Record<string, unknown>, status = 200) {
 function chamar(conteudo = 'cronograma') {
   return executarTool(supabase, {
     id: 'tool-teste', name: 'envia_informacoes', input: { curso_escolhido: 'Sanidade Avícola', conteudo },
-  }, contexto);
+  }, { ...contexto });
 }
 function semEntregaOuPromessa(resposta: Record<string, unknown>) {
   expect(resposta.cronograma_entregue).toBe(false);
-  expect(resposta.resultado).not.toContain('Há confirmação de entrega');
+  expect(resposta.resultado).not.toContain('registrou a entrega');
   expect(resposta.resultado).not.toMatch(/Diga (?:ao lead )?que vai (?:enviar|mandar)|material já está com ele e siga/i);
 }
 
 describe('tool envia_informacoes: fala proporcional à evidência', () => {
   it('o booleano legado true significa aceite pendente, não entregue', async () => {
     const resposta = await chamar();
-    expect(resposta).toMatchObject({ cronograma_enviado: true, cronograma_status: 'pendente' });
-    expect(resposta.resultado).toContain('PENDENTE');
+    expect(resposta).toMatchObject({ cronograma_enviado: true, cronograma_status: 'aceito' });
+    expect(resposta.resultado).toContain('entrega ainda NÃO está confirmada');
     semEntregaOuPromessa(resposta);
   });
 
@@ -48,9 +48,9 @@ describe('tool envia_informacoes: fala proporcional à evidência', () => {
     responder({ cronograma_enviado: true, cronograma_status: status,
       cronograma_wa_message_id: 'wamid-teste', cronograma_wa_account_id: 'conta-teste' });
     const resposta = await chamar();
-    expect(resposta).toMatchObject({ cronograma_entregue: true, cronograma_status: status, cronograma_wa_message_id: 'wamid-teste' });
-    expect(resposta.resultado).toContain('Há confirmação de entrega');
-    expect(resposta.resultado).toContain('atenda o novo pedido');
+    expect(resposta).toMatchObject({ cronograma_entregue: true, cronograma_status: status === 'read' ? 'lido' : 'entregue', cronograma_wa_message_id: 'wamid-teste' });
+    expect(resposta.resultado).toContain('registrou a entrega');
+    expect(resposta.resultado).toContain('reenvie pela ferramenta');
   });
 
   it('não aceita delivered sem referência rastreável', async () => {
@@ -74,7 +74,7 @@ describe('tool envia_informacoes: fala proporcional à evidência', () => {
     responder(data, 422);
     const resposta = await chamar();
     expect(resposta.cronograma_status).toBe('falhou');
-    expect(resposta.resultado).toContain('pedido explícito de novo envio');
+    expect(resposta.resultado).toContain('podemos continuar com o agendamento?');
     semEntregaOuPromessa(resposta);
   });
 
@@ -87,7 +87,7 @@ describe('tool envia_informacoes: fala proporcional à evidência', () => {
     mocks.fetch.mockRejectedValue(new Error('Conexão interrompida'));
     const resposta = await chamar();
     semEntregaOuPromessa(resposta);
-    expect(resposta.resultado).toContain('não agendou nova tentativa');
+    expect(resposta.resultado).toContain('Não prometa reenvio automático');
   });
 
   it('novo pedido pode executar novo envio mesmo após entrega confirmada', async () => {
@@ -104,7 +104,7 @@ describe('tool envia_informacoes: fala proporcional à evidência', () => {
     responder({ cronograma_enviado: true, valor_integral: '1000,00' });
     const resposta = await chamar('valor');
     expect(resposta.resultado).toContain('1000,00');
-    expect(resposta.cronograma_enviado).toBeUndefined();
+    expect(resposta.cronograma_enviado).toBe(false);
     expect(resposta.resultado).not.toContain('Cronograma');
   });
 });

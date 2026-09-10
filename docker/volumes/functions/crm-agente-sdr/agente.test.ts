@@ -104,10 +104,10 @@ describe('instrução de memória no system enviado à Anthropic', () => {
     expect(instrucoes).not.toContain('**NÃO** reenvie');
     expect(instrucoes).not.toContain('Diga que o material já está com ele');
     expect(instrucoes).not.toContain('te mandei o cronograma completo aqui em cima');
-    expect(instrucoes).toContain('Se o lead pedir novamente');
-    expect(instrucoes).toContain('Não repita o mesmo material sem novo pedido ou falha');
-    expect(instrucoes).toContain('solicitação aceita não comprova entrega');
-    expect(instrucoes).toContain('Nunca contradiga o lead dizendo que recebeu');
+    expect(instrucoes).toContain('Quando o lead pedir novamente');
+    expect(instrucoes).toContain('Não reenvie espontaneamente nem repita chamadas na mesma rodada');
+    expect(instrucoes).toContain('aceito significa apenas aceito pelo WhatsApp');
+    expect(instrucoes).toContain('Nunca contradiga o lead dizendo que já recebeu');
     expect(pedido.messages[0].role).toBe('assistant');
     expect(JSON.stringify(pedido.messages[0])).toContain('[ATENDIMENTO_HUMANO] Letícia');
     expect(pedido.messages[1].role).toBe('user');
@@ -220,6 +220,13 @@ describe('instrução de memória no system enviado à Anthropic', () => {
 });
 
 describe('contrato de autoria e continuidade no system', () => {
+  it('follow-up recebe a falha atual do material sem substituir o histórico', async () => {
+    const estado = '\nSTATUS ATUAL DOS MATERIAIS: cronograma.pdf falhou, código 131053';
+    const tel = { rodadaId: 'teste-status-material', registrar: vi.fn() };
+    await gerarFollowup({}, { remotejid: 'sintetico', nome: 'Ana', curso_interesse_original: 'Curso' }, 1, tel, memoria, estado);
+    expect(ultimoPedido().system[2].text).toContain(estado);
+    expect(JSON.stringify(ultimoPedido().messages)).toContain('Documento enviado: cronograma.pdf');
+  });
   it('separa perguntas do vendedor de dados explícitos do lead recebidos durante a pausa', () => {
     expect(INSTRUCAO_MEMORIA_HUMANA).toContain(`${MARCADOR_MENSAGEM_LEAD_PAUSA} com role=user são mensagens reais do lead`);
     expect(INSTRUCAO_MEMORIA_HUMANA).toContain('O nome do autor é do vendedor, não do lead');
@@ -233,9 +240,9 @@ describe('contrato de autoria e continuidade no system', () => {
   it('mantém conteúdo de áudio pendente desconhecido, sem aprovação ou reenvio automático', () => {
     expect(INSTRUCAO_MEMORIA_HUMANA).toContain('Áudio sem transcrição concluída registra apenas o envio ou recebimento');
     expect(INSTRUCAO_MEMORIA_HUMANA).toContain('não suponha seu conteúdo');
-    expect(INSTRUCAO_MEMORIA_HUMANA).toContain('nem envie novamente o mesmo material sem novo pedido ou falha');
-    expect(INSTRUCAO_MEMORIA_HUMANA).toContain('mesmo com envio anterior registrado por você ou por um atendente humano');
-    expect(INSTRUCAO_MEMORIA_HUMANA).toContain('sem repetir envios em loop');
+    expect(INSTRUCAO_MEMORIA_HUMANA).toContain('nem ofereça enviar de novo material já enviado sem necessidade');
+    expect(INSTRUCAO_MEMORIA_HUMANA).toContain('o pedido de ajuda permite novo envio pela ferramenta apropriada');
+    expect(INSTRUCAO_MEMORIA_HUMANA).toContain('Não pause nem encaminhe ao humano apenas por erro de envio');
     expect(INSTRUCAO_MEMORIA_HUMANA).toContain('Formação informada não é aprovação');
     expect(INSTRUCAO_MEMORIA_HUMANA).toContain('aprovação registrada para este lead e curso');
     expect(INSTRUCAO_MEMORIA_HUMANA).toContain('não autorizam reabrir atendimento pausado nem ignorar recusa');

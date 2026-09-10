@@ -89,7 +89,7 @@ describe('envia-informacoes: aceite e entrega do cronograma', () => {
   it.each(['sem referência', 'erro de leitura'])('mantém pendente quando há %s, sem reenviar', async (caso) => {
     if (caso === 'sem referência') mocks.fetch.mockImplementation(async () => Response.json({ success: true }))
     else mocks.erroMensagem = { message: 'Indisponível' }
-    expect(await resultado()).toMatchObject({ cronograma_enviado: true, cronograma_status: 'pendente', cronograma_entregue: false })
+    expect(await resultado()).toMatchObject({ cronograma_enviado: caso !== 'sem referência', cronograma_status: caso === 'sem referência' ? 'desconhecido' : 'pendente', cronograma_entregue: false })
     expect(mocks.fetch).toHaveBeenCalledTimes(1)
   })
 

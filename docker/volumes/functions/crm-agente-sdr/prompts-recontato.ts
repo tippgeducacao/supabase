@@ -1,3 +1,4 @@
+import { INSTRUCAO_ENVIO_MATERIAIS } from "./envioMateriais.ts";
 import { INSTRUCAO_ELEGIBILIDADE } from "./instrucaoElegibilidade.ts";
 
 // Persona AGENTE_RECONTATO — o mesmo João, agora reengajando NO-SHOW (lead que tinha
@@ -75,7 +76,7 @@ export const AGENTE_RECONTATO = [
   "",
   "## Cronograma em PDF",
   "",
-  "Se o lead pedir cronograma, grade, conteúdo, ementa, datas das aulas ou \"me manda mais informações\", chame `envia_informacoes` com `conteudo` = \"cronograma\". A função solicita o envio do PDF no WhatsApp. Responda conforme o status retornado: solicitação aceita ainda não comprova entrega; se houver falha, reconheça que o material não foi enviado. Não afirme que o arquivo está \"aqui em cima\" nem que o lead recebeu. Quando houver pedido de reenvio ou dificuldade de recebimento ou acesso, aguarde o lead confirmar que conseguiu abrir antes de retomar o agendamento. Não descreva o conteúdo do PDF. Antes de enviar cronograma, confira o curso e o histórico. Não repita o mesmo material sem novo pedido ou falha. Se o lead pedir novamente, disser que não recebeu, não encontrou ou não consegue abrir, chame `envia_informacoes` para uma nova tentativa, mesmo com envio anterior registrado por você ou por um atendente humano. Um `tool_result` antigo não comprova recebimento atual. Nunca insista que ele recebeu nem diga que basta procurar acima na conversa. Responda conforme o status atual da ferramenta; se houver falha, reconheça o problema sem prometer envio posterior não providenciado. Depois da nova tentativa, aguarde a confirmação de acesso do lead antes de retomar o agendamento. Se a tentativa falhar ou o arquivo estiver indisponível, encaminhe para ajuda humana pela ferramenta apropriada, sem reenviar em loop. Se precisar só do preço, use `conteudo` = \"valor\".",
+  "Se o lead pedir cronograma, grade, conteúdo, ementa, datas das aulas ou \"me manda mais informações\", chame `envia_informacoes` com `conteudo` = \"cronograma\". Responda conforme cronograma_status, sem confirmar entrega pelo aceite. Novo pedido ou dificuldade para receber/abrir permite reenvio mesmo com registro antigo. Aguarde confirmação de acesso antes de retomar a conversa. Se o envio falhar ou ficar sem confirmação, pergunte se pode seguir com o agendamento enquanto isso e aguarde o aceite, conforme ENVIO E REENVIO DE MATERIAIS. Não descreva o conteúdo do PDF.",
   "",
   "## Quando o lead pergunta preço",
   "",
@@ -176,6 +177,7 @@ export const AGENTE_RECONTATO = [
   "Agendamentos para janeiro, fevereiro, março etc. são do ano de 2026, a menos que o lead diga outro ano. Ajuste a data antes de chamar a função.",
   "",
   INSTRUCAO_ELEGIBILIDADE,
+  INSTRUCAO_ENVIO_MATERIAIS,
 ].join("\n");
 
 // Monta o bloco "CONTEXTO DA REUNIÃO ANTERIOR" a partir do dossiê materializado em

@@ -1182,7 +1182,7 @@ Deno.serve(async (req) => {
         remotejid: remoteJid,
         conversation_history: {
           role: "assistant",
-          content: `[ATENDIMENTO_HUMANO] ${quem} solicitou o envio do documento "${nomeDoc}" pelo WhatsApp. A solicitação foi aceita; a entrega ainda depende da confirmação do WhatsApp. Não duplique espontaneamente, mas reenvie se o lead informar que não recebeu, não consegue abrir ou pedir novamente.`,
+          content: `[ATENDIMENTO_HUMANO] ${quem} solicitou o envio do documento "${nomeDoc}" pelo WhatsApp. Id: ${waMsgId ?? 'indisponível'}. Aceite não comprova entrega nem abertura. Consulte o status atual; novo pedido ou dificuldade de acesso permite reenvio.`,
         },
         timestamp: nowIso,
       });

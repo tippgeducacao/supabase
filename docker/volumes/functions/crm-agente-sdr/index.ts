@@ -21,8 +21,8 @@ import { comContinuidadeWebchat } from './continuidadeWebchat.ts';
 import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoCurso, notaDoNome, renderPrompt } from './contexto.ts';
 import { atualizarAgenteComRatchet, atualizarLead, buscarLead, carregarHistorico, criarLead, excluirDadosLead, gravarMensagem, limparParaRouter, sanitizarHistorico } from './historico.ts';
 import { carregarTools, chamarAgentePrincipal, chamarRouter } from './agente.ts';
-import { carregarContextoEntregaMateriais } from './entregaMateriais.ts';
 import { type CtxConversa, executarTool, montarToolResults } from './tools.ts';
+import { carregarStatusMateriais } from './envioMateriais.ts';
 import { prepararMensagem } from './midia.ts';
 import { persistirEntradasDoLote, registrarEntrada } from './historicoEntradaPausa.ts';
 import { conversaTexto, enviarResposta, horariosInventados, humanizarTexto, removerRaciocinioVazado } from './saida.ts';
@@ -545,19 +545,21 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   for (let rodada = 0; rodada < MAX_RODADAS_TOOLS; rodada++) {
     const [historico, contextoEntregaMateriais] = await Promise.all([
       carregarHistorico(supabase, remotejid),
-      carregarContextoEntregaMateriais(supabase, remotejid, ctx.waAccountId),
+      carregarStatusMateriais(supabase, ctx),
     ]);
     const messages = sanitizarHistorico(historico);
+    const contextoComMateriais = contextoEfetivo;
+    const instrucaoEncerramento = retornoPorFormatura ? INSTRUCAO_POS_RETORNO : INSTRUCAO_POS_PAUSA;
     const inicioLlm = Date.now();
     const resp = await chamarAgentePrincipal({
       promptAgente,
       contextoEntregaMateriais,
       // Encerramento vence reação: a despedida é o que importa nessa volta.
       contextoTemporal: encerrouPorTool
-        ? `${contextoEfetivo}\n\n${retornoPorFormatura ? INSTRUCAO_POS_RETORNO : INSTRUCAO_POS_PAUSA}`
+        ? `${contextoComMateriais}\n\n${instrucaoEncerramento}`
         : levaSoReacao
-          ? `${contextoEfetivo}\n\n${INSTRUCAO_REACAO}`
-          : contextoEfetivo,
+          ? `${contextoComMateriais}\n\n${INSTRUCAO_REACAO}`
+          : contextoComMateriais,
       messages,
       tools,
     });
