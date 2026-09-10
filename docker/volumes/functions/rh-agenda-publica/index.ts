@@ -4,9 +4,12 @@ import { corsHeaders } from '../_shared/cors.ts';
 /**
  * A agenda de entrevistas, aberta ao CANDIDATO.
  *
- * O RH manda um link só; quem abre digita o WhatsApp, vê os horários que a casa liberou e
- * escolhe um. Existe porque o agendamento pela conversa do agente não escala: os
+ * O RH manda um link só; quem abre digita o NOME COMPLETO, vê os horários que a casa
+ * liberou e escolhe um. Existe porque o agendamento pela conversa do agente não escala: os
  * convocados do PS 01/2026 chegam todos no mesmo dia.
+ *
+ * Era por telefone até 10/09 e travava gente demais — número trocado, dois chips, inscrição
+ * feita com o telefone de outra pessoa. O nome é o que o candidato lê no PDF do resultado.
  *
  * Por que uma edge, e não RPC direto do navegador: `anon` não pode ter nada aqui. Uma RPC
  * aberta que aceita telefone e devolve nome vira um jeito de descobrir quem se candidatou,
@@ -49,23 +52,29 @@ Deno.serve(async (req) => {
   try {
     const body = await req.json().catch(() => ({}));
     const acao = String(body?.acao ?? 'carregar');
-    const whatsapp = String(body?.whatsapp ?? '');
-    const digitos = whatsapp.replace(/\D/g, '');
+    const nome = String(body?.nome ?? '').trim();
 
-    if (digitos.length < 10) {
-      return json({ ok: false, motivo: 'telefone_curto' });
+    // Nome e sobrenome, no mínimo: com uma palavra só, meia dúzia de "Maria" casaria com a
+    // primeira que aparecesse na lista.
+    if (nome.replace(/\s+/g, ' ').split(' ').filter(Boolean).length < 2) {
+      return json({ ok: false, motivo: 'nome_incompleto' });
     }
 
     const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
 
-    const { data: achado, error: erroCandidato } = await admin.rpc('rh_agenda_publica_candidato', {
-      p_whatsapp: digitos,
+    const { data: achado, error: erroCandidato } = await admin.rpc('rh_agenda_publica_por_nome', {
+      p_nome: nome,
     });
     if (erroCandidato) throw erroCandidato;
 
     const candidato = Array.isArray(achado) ? achado[0] : achado;
-    // Mesma resposta para "número não existe" e "existe mas não foi convocado": a diferença
-    // entre as duas contaria, a quem tentasse, quem passou de etapa.
+
+    // Homônimo não vira chute: marcar a entrevista no card errado é pior que não marcar.
+    if ((candidato?.achados ?? 0) > 1) {
+      return json({ ok: false, motivo: 'ambiguo' });
+    }
+    // Mesma resposta para "não existe" e "existe mas não foi convocado": a diferença entre
+    // as duas contaria, a quem tentasse, quem passou de etapa.
     if (!candidato?.oportunidade_id) {
       return json({ ok: false, motivo: 'nao_encontrado' });
     }
@@ -75,7 +84,26 @@ Deno.serve(async (req) => {
       p_dias: DIAS_NA_TELA,
     });
     if (erroHorarios) throw erroHorarios;
-    const livres = (livresRaw ?? []) as Horario[];
+
+    // A janela da RODADA. Sem ela a página oferecia 129 horários — três semanas inteiras,
+    // incluindo dias que não são de entrevista. O agente continua vendo a agenda toda.
+    const { data: janela } = await admin
+      .from('rh_entrevista_config')
+      .select('agenda_publica_de, agenda_publica_ate')
+      .eq('id', true)
+      .maybeSingle();
+    const de = janela?.agenda_publica_de ? `${janela.agenda_publica_de}T00:00:00-03:00` : null;
+    // `ate` é inclusive: o dia inteiro conta, então a comparação é com o começo do dia seguinte.
+    const ate = janela?.agenda_publica_ate
+      ? new Date(`${janela.agenda_publica_ate}T00:00:00-03:00`).getTime() + 24 * 60 * 60 * 1000
+      : null;
+
+    const livres = ((livresRaw ?? []) as Horario[]).filter((h) => {
+      const t = new Date(h.inicio).getTime();
+      if (de && t < new Date(de).getTime()) return false;
+      if (ate && t >= ate) return false;
+      return true;
+    });
 
     const jaMarcada = candidato.entrevista_inicio
       ? {
@@ -102,8 +130,8 @@ Deno.serve(async (req) => {
     const inicio = String(body?.inicio ?? '');
     const slot = livres.find((h) => h.inicio === inicio);
     if (!slot) {
-      // Some da lista quem foi pego enquanto a página estava aberta. É o caso comum quando
-      // a turma toda recebe o link na mesma hora.
+      // Some da lista quem foi pego enquanto a página estava aberta, e o que caiu fora da
+      // janela da rodada. É o caso comum quando a turma toda recebe o link na mesma hora.
       return json({ ok: false, motivo: 'horario_indisponivel' });
     }
 
