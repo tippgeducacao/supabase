@@ -208,9 +208,16 @@ describe("fábrica de provedor", () => {
   it("com EMAIL_PROVIDER=smtp, TODO remetente cai no SMTP (override de desenvolvimento)", () => {
     // Sem este override o modo dev seria inalcançável: `provider` é NOT NULL com
     // default 'gmail', então nenhum remetente jamais fica "sem provedor declarado".
-    const fake = { nome: "smtp" as const, send: async () => ({ providerMessageId: "x" }) };
-    expect(obterProvedor({ doRemetente: "ses", instancias: { smtp: fake } })).toBe(fake);
-    expect(provedorEfetivo("ses")).toBe("smtp");
+    const g = globalThis as { Deno?: { env: { get(k: string): string | undefined } } };
+    const anterior = g.Deno;
+    g.Deno = { env: { get: (k) => (k === "EMAIL_PROVIDER" ? "smtp" : undefined) } };
+    try {
+      const fake = { nome: "smtp" as const, send: async () => ({ providerMessageId: "x" }) };
+      expect(obterProvedor({ doRemetente: "ses", instancias: { smtp: fake } })).toBe(fake);
+      expect(provedorEfetivo("ses")).toBe("smtp");
+    } finally {
+      g.Deno = anterior;
+    }
   });
 
   it("com EMAIL_PROVIDER=ses, o remetente manda", () => {
@@ -227,10 +234,7 @@ describe("fábrica de provedor", () => {
   });
 
   it("provedor que a fábrica não conhece cai no padrão do ambiente, não estoura", () => {
-    // O Resend foi removido em 2026-09-08 e a coluna `provider` ganhou CHECK
-    // ('gmail','ses'), então um valor estranho só chega aqui por bug ou dado antigo.
-    // Cair no padrão é melhor que derrubar o envio: o `email-send` já falha com nome
-    // quando o provedor real recusa.
+    // A camada de envio valida o cadastro antes de chamar a fábrica.
     const g = globalThis as { Deno?: { env: { get(k: string): string | undefined } } };
     const anterior = g.Deno;
     g.Deno = { env: { get: (k) => (k === "EMAIL_PROVIDER" ? "ses" : undefined) } };

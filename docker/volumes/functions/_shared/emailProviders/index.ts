@@ -10,12 +10,14 @@
 import type { EmailProvider } from "./types.ts";
 import { SesProvider } from "./ses.ts";
 import { SmtpProvider } from "./smtp.ts";
+import { ResendProvider } from "./resend.ts";
 
 export * from "./types.ts";
 export { SesProvider } from "./ses.ts";
 export { SmtpProvider } from "./smtp.ts";
+export { ResendProvider } from "./resend.ts";
 
-export type NomeProvedor = "smtp" | "ses";
+export type NomeProvedor = "smtp" | "ses" | "resend";
 
 function lerEnv(chave: string): string | undefined {
   const g = globalThis as { Deno?: { env: { get(k: string): string | undefined } } };
@@ -25,7 +27,7 @@ function lerEnv(chave: string): string | undefined {
 /** Padrão do ambiente. `smtp` de propósito: nada de produção sai sem configuração explícita. */
 export function provedorPadrao(): NomeProvedor {
   const v = (lerEnv("EMAIL_PROVIDER") ?? "smtp").toLowerCase();
-  return v === "ses" ? v : "smtp";
+  return v === "ses" || v === "resend" ? v : "smtp";
 }
 
 /** Rate limit do provedor, em mensagens por segundo. SES começa em 14/s na maioria das contas. */
@@ -55,9 +57,11 @@ export interface OpcoesFabrica {
  * rodar o fluxo inteiro contra um SMTP local sem tocar em nenhum dado.
  */
 export function provedorEfetivo(doRemetente?: string | null): NomeProvedor {
-  if (provedorPadrao() === "smtp") return "smtp";
+  // Só a configuração EXPLÍCITA ativa SMTP: ausência de variável não pode desviar
+  // um remetente Resend/SES cadastrado para um servidor de desenvolvimento.
+  if (lerEnv("EMAIL_PROVIDER")?.toLowerCase() === "smtp") return "smtp";
   const n = (doRemetente ?? "") as NomeProvedor;
-  return n === "ses" || n === "smtp" ? n : provedorPadrao();
+  return n === "ses" || n === "resend" || n === "smtp" ? n : provedorPadrao();
 }
 
 /** Devolve o provedor a usar. */
@@ -68,6 +72,8 @@ export function obterProvedor(opcoes: OpcoesFabrica = {}): EmailProvider {
   if (injetado) return injetado;
 
   switch (nome) {
+    case "resend":
+      return new ResendProvider();
     case "ses":
       return new SesProvider();
     case "smtp":

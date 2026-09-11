@@ -2,12 +2,21 @@
  * Checagem de supressão — fecha o critério de aceite 3: enviar para um endereço
  * suprimido é bloqueado.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { FakeSupabase } from "../../../tests/helpers/fakeSupabase.ts";
 import { buscarSupressao, buscarSupressoes, normalizarEmail, supressaoSeAplica } from "./supressao.ts";
 
 const banco = (emails: Array<{ email: string; motivo: string }> = []) =>
   new FakeSupabase({ email_supressoes: { linhas: emails, unicas: ["email"] } });
+
+const bancoIndisponivel = () => {
+  const erro = { data: null, error: { message: "Erro interno com dado que não deve sair" } };
+  const consulta = {
+    select: vi.fn().mockReturnThis(), eq: vi.fn().mockReturnThis(),
+    maybeSingle: vi.fn().mockResolvedValue(erro), in: vi.fn().mockResolvedValue(erro),
+  };
+  return { from: vi.fn().mockReturnValue(consulta) };
+};
 
 describe("a quem a supressão se aplica", () => {
   it("vale para todo disparo por API (resend/ses)", () => {
@@ -28,6 +37,10 @@ describe("a quem a supressão se aplica", () => {
 });
 
 describe("critério 3 — endereço suprimido é bloqueado", () => {
+  it("interrompe em falha de consulta, sem considerar o destinatário liberado", async () => {
+    await expect(buscarSupressao(bancoIndisponivel(), "bloqueado@example.invalid"))
+      .rejects.toThrow("Não foi possível consultar os bloqueios de e-mail. O envio foi interrompido.");
+  });
   it("encontra o endereço e devolve o motivo", async () => {
     const db = banco([{ email: "bounce@exemplo.com", motivo: "bounce" }]);
     const r = await buscarSupressao(db, "bounce@exemplo.com");
@@ -54,6 +67,10 @@ describe("critério 3 — endereço suprimido é bloqueado", () => {
 });
 
 describe("checagem em lote", () => {
+  it("interrompe o lote em falha de consulta em vez de liberar todos", async () => {
+    await expect(buscarSupressoes(bancoIndisponivel(), ["bloqueado@example.invalid"]))
+      .rejects.toThrow("Não foi possível consultar os bloqueios de e-mail. O lote foi interrompido.");
+  });
   it("devolve só os bloqueados, normalizados", async () => {
     const db = banco([
       { email: "a@x.com", motivo: "bounce" },

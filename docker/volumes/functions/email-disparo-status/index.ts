@@ -8,10 +8,14 @@
 // A régua é o que está CADASTRADO em `email_remetentes`, não uma constante no código:
 //   - sem remetente de disparo → não há provedor a checar, e é isso que a tela diz;
 //   - remetente SES  → confere credencial AWS + identidades verificadas;
+//   - remetente Resend → domínios dos remetentes ativos + assinatura do webhook;
 //
 // Gate: admin/diretor (expõe estado de configuração da conta).
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { listarIdentidadesSes, temCredenciaisSes } from "../_shared/emailProviders/ses.ts";
+import { baseStatusDisparo, verificarStatusResend, type StatusDisparo } from "./statusResend.ts";
+
+export type { StatusDisparo } from "./statusResend.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -21,22 +25,6 @@ const corsHeaders = {
 
 const json = (c: unknown, s = 200) =>
   new Response(JSON.stringify(c), { status: s, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-
-export interface StatusDisparo {
-  /** Verde só quando dá para enviar de verdade. */
-  ok: boolean;
-  /** 'ses' | null (nenhum remetente de disparo cadastrado). */
-  provider: string | null;
-  credencialConfigurada: boolean;
-  apiRespondeu: boolean;
-  dominiosVerificados: number;
-  dominiosPendentes: number;
-  modoSeco: boolean;
-  /** Frase pronta para a tela — evita cada front inventar a sua. */
-  mensagem: string;
-  detalhe?: string;
-  comoResolver?: string;
-}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
@@ -58,19 +46,24 @@ Deno.serve(async (req) => {
     ]);
     if (!ehAdmin && !ehDiretor) return json({ error: "sem permissão" }, 403);
 
-    const base: StatusDisparo = {
-      ok: false, provider: null, credencialConfigurada: false, apiRespondeu: false,
-      dominiosVerificados: 0, dominiosPendentes: 0, modoSeco: false, mensagem: "",
-    };
+    const pedido = req.method === "POST" ? await req.json().catch(() => ({})) : {};
+    const escolhido = pedido?.provider;
+    if (escolhido != null && escolhido !== "ses" && escolhido !== "resend") {
+      return json({ error: "Provedor de disparo inválido." }, 400);
+    }
+    const base: StatusDisparo = baseStatusDisparo(null);
 
     // Quem manda é o cadastro. Ativo primeiro: um remetente desativado não envia.
-    const { data: remetentes } = await supabase
+    const { data: remetentes, error: remetentesErro } = await supabase
       .from("email_remetentes")
-      .select("provider, ativo")
-      .eq("provider", "ses")
+      .select("provider, ativo, email_completo")
+      .in("provider", ["ses", "resend"])
       .order("ativo", { ascending: false });
+    if (remetentesErro) return json({ error: "Não foi possível consultar os remetentes de disparo." }, 500);
 
-    const emUso = (remetentes ?? []).find((r) => r.ativo)?.provider
+    const emUso = escolhido
+      ?? (remetentes ?? []).find((r) => r.ativo && r.provider === "resend")?.provider
+      ?? (remetentes ?? []).find((r) => r.ativo)?.provider
       ?? (remetentes ?? [])[0]?.provider
       ?? null;
 
@@ -78,11 +71,20 @@ Deno.serve(async (req) => {
       return json({
         ...base,
         mensagem: "Nenhum remetente de disparo cadastrado — nada é enviado por campanha ainda.",
-        comoResolver: "Em Remetentes, crie um remetente e escolha Amazon SES.",
+        comoResolver: "Em Remetentes, crie um remetente e escolha Resend ou Amazon SES.",
       });
     }
 
     base.provider = emUso;
+
+    if (emUso === "resend") {
+      return json(await verificarStatusResend({
+        remetentes: remetentes ?? [],
+        apiKey: Deno.env.get("RESEND_API_KEY"),
+        webhookSecret: Deno.env.get("RESEND_WEBHOOK_SECRET"),
+        modoSeco: Deno.env.get("RESEND_DRY_RUN")?.toLowerCase() === "true",
+      }));
+    }
 
     // ── Amazon SES ────────────────────────────────────────────────────────────
     if (emUso === "ses") {
@@ -125,17 +127,13 @@ Deno.serve(async (req) => {
       });
     }
 
-    // Nenhum outro provedor de disparo existe: o Resend foi removido do sistema em
-    // 2026-09-08. Se `emUso` não for 'ses', o cadastro tem um provider que ninguém
-    // consegue usar — dizer isso é melhor que devolver um verde falso.
     return json({
       ...base,
-      mensagem: `Remetente cadastrado com provedor "${emUso}", que este sistema não envia mais.`,
-      comoResolver: "Em Remetentes, edite o remetente e escolha Amazon SES.",
+      mensagem: "O provedor do remetente não está disponível para disparos.",
+      comoResolver: "Em Remetentes, escolha Resend ou Amazon SES.",
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    console.error("email-disparo-status", msg);
-    return json({ error: msg }, 500);
+    console.error("email-disparo-status: falha ao consultar configuração");
+    return json({ error: "Não foi possível consultar a configuração de disparos." }, 500);
   }
 });

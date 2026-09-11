@@ -1,18 +1,20 @@
 // Edge Function: email-send
-// Renderiza template, checa idempotência e envia por UM DE DOIS MOTORES, escolhido
+// Renderiza template, checa idempotência e envia pelo motor escolhido
 // pelo `provider` do remetente (email_remetentes.provider):
 //
 //   gmail  -> Gmail API com OAuth do Workspace (calendar_integrations). E-mail 1:1:
 //             a resposta do aluno cai na caixa e o enviado aparece na thread.
 //   ses    -> Amazon SES. Disparo em massa/automação: métrica de entrega real,
 //             bounce/spam pelo SNS e domínio próprio.
+//   resend -> Resend. Disparo em massa/automação com eventos assinados e domínio próprio.
 //
 // A separação é de propósito: bounce de campanha não pode queimar a reputação do
 // domínio que manda o e-mail de aprovação de TCC. Ver docs/E-mail e Caixas.md.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { formatarFrom, linkDescadastro, tagSegura } from "../_shared/envioComum.ts";
-import { ErroEnvio, obterProvedor } from "../_shared/emailProviders/index.ts";
+import { ErroEnvio, obterProvedor, provedorEfetivo } from "../_shared/emailProviders/index.ts";
 import { buscarSupressao, supressaoSeAplica } from "../_shared/supressao.ts";
+import { respostaEnvioExistente } from "./idempotencia.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -159,7 +161,7 @@ Deno.serve(async (req) => {
     if (payload.idempotencia_key) {
       let dupQuery = supabaseAdmin
         .from("emails_enviados")
-        .select("id, status")
+        .select("id, status, provider, provider_message_id")
         .eq("idempotencia_key", payload.idempotencia_key);
       if (payload.idempotencia_janela_min && payload.idempotencia_janela_min > 0) {
         const desde = new Date(Date.now() - payload.idempotencia_janela_min * 60_000).toISOString();
@@ -170,8 +172,9 @@ Deno.serve(async (req) => {
         .limit(1)
         .maybeSingle();
       if (existente) {
-        return new Response(JSON.stringify({ ok: true, duplicado: true, id: existente.id }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        const duplicado = respostaEnvioExistente(existente);
+        return new Response(JSON.stringify(duplicado.corpo), {
+          status: duplicado.status, headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
     }
@@ -181,7 +184,7 @@ Deno.serve(async (req) => {
     let corpoHtml = payload.corpo_html ?? "";
     let corpoTexto = payload.corpo_texto ?? null;
     let remetenteId = payload.remetente_id ?? null;
-    let templateId = payload.template_id ?? null;
+    const templateId = payload.template_id ?? null;
 
     if (templateId) {
       const { data: tpl, error: tplErr } = await supabaseAdmin
@@ -215,11 +218,26 @@ Deno.serve(async (req) => {
         status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
-    const provider: "gmail" | "ses" = rem.provider === "ses" ? "ses" : "gmail";
+    if (!["gmail", "ses", "resend"].includes(rem.provider)) {
+      return new Response(JSON.stringify({ error: "Provedor do remetente inválido." }), {
+        status: 412, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+    const provider = rem.provider as "gmail" | "ses" | "resend";
     const caixaEmail = rem.gmail_caixa_email ?? rem.email_completo;
     const fromName = rem.nome_remetente;
     const replyTo = rem.reply_to_email;
     const ehCampanha = payload.contexto_tipo === "campanha";
+
+    // SMTP explícito é o circuito local de desenvolvimento e não usa a conta Resend.
+    if (provider === "resend" && provedorEfetivo(provider) !== "smtp" && (!Deno.env.get("RESEND_API_KEY")?.trim()
+      || !Deno.env.get("RESEND_WEBHOOK_SECRET")?.trim()
+      || Deno.env.get("RESEND_DRY_RUN")?.toLowerCase() === "true")) {
+      return new Response(JSON.stringify({
+        error: "O Resend ainda não está pronto para enviar. Confira a chave, a assinatura dos eventos e o modo de simulação em Testar conexão.",
+        codigo: "resend_configuracao_pendente",
+      }), { status: 412, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
 
     // Supressão: quem deu bounce duro/spam/descadastro não recebe mais DISPARO.
     // Não vale para o 1:1 do Gmail (funil TCC) — lá a Secretaria decide reenviar.
@@ -312,7 +330,7 @@ Deno.serve(async (req) => {
       //  (b) REENVIO legítimo de etapa enviada FORA da janela: grava NOVO registro com
       //      chave de-colidida (preserva o histórico e entrega o e-mail).
       let dupCheck = supabaseAdmin
-        .from("emails_enviados").select("id")
+        .from("emails_enviados").select("id, status, provider, provider_message_id")
         .eq("idempotencia_key", payload.idempotencia_key);
       if (payload.idempotencia_janela_min && payload.idempotencia_janela_min > 0) {
         const desde = new Date(Date.now() - payload.idempotencia_janela_min * 60_000).toISOString();
@@ -321,8 +339,9 @@ Deno.serve(async (req) => {
       const { data: recente } = await dupCheck
         .order("criado_em", { ascending: false }).limit(1).maybeSingle();
       if (recente) {
-        return new Response(JSON.stringify({ ok: true, duplicado: true, id: recente.id }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        const duplicado = respostaEnvioExistente(recente);
+        return new Response(JSON.stringify(duplicado.corpo), {
+          status: duplicado.status, headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
       const retry = await supabaseAdmin
@@ -378,12 +397,16 @@ Deno.serve(async (req) => {
           corpoHtml = `${corpoHtml}\n${rodape}`;
         }
       }
+      // Quem lê somente texto também precisa conseguir sair da lista.
+      if (corpoTexto != null) {
+        corpoTexto = /\{\{\s*descadastro_url\s*\}\}/.test(corpoTexto)
+          ? corpoTexto.replace(/\{\{\s*descadastro_url\s*\}\}/g, urlDescadastro)
+          : `${corpoTexto}\n\nDescadastrar: ${urlDescadastro}`;
+      }
     }
 
-    // --- Motor SES (e SMTP) --------------------------------------------------------
-    // Passa pela mesma abstração EmailProvider; o SMTP entra por aqui quando o
-    // remetente não declara provedor e EMAIL_PROVIDER=smtp (caminho de desenvolvimento).
-    if (provider === "ses") {
+    // --- Motores de disparo (Resend/SES; SMTP só com override explícito em dev) ---
+    if (provider === "ses" || provider === "resend") {
       const cabecalhos: Record<string, string> = {};
       if (urlDescadastro) {
         cabecalhos["List-Unsubscribe"] = `<${urlDescadastro}>`;
@@ -409,6 +432,9 @@ Deno.serve(async (req) => {
             { name: "log_id", value: tagSegura(log.id) },
             ...(payload.contexto_tipo ? [{ name: "contexto", value: tagSegura(payload.contexto_tipo) }] : []),
           ],
+          // O log já existe antes da chamada. A chave não muda se o provedor
+          // precisar reconhecer a mesma requisição e respeita a janela do funil.
+          idempotencyKey: `email-send/${log.id}`,
           // Conjunto de configuração separado por tipo: sem ele o SES não publica os
           // eventos de bounce/complaint no SNS, e a supressão nunca é alimentada.
           configurationSet: ehCampanha
@@ -416,25 +442,32 @@ Deno.serve(async (req) => {
             : Deno.env.get("SES_CONFIGURATION_SET_TX"),
         });
 
-        await supabaseAdmin.from("emails_enviados").update({
-          status: "enviado",
+        const { error: metadadosErro } = await supabaseAdmin.from("emails_enviados").update({
           corpo_html_render: corpoHtml,
+          corpo_texto_render: corpoTexto,
           provider_message_id: providerMessageId,
           enviado_em: new Date().toISOString(),
         }).eq("id", log.id);
+        // O webhook pode confirmar entrega antes de o POST de envio retornar.
+        // Nunca rebaixar entregue/bounce/complaint para apenas enviado.
+        const { error: statusErro } = await supabaseAdmin.from("emails_enviados").update({
+          status: "enviado",
+        }).eq("id", log.id).eq("status", "enfileirado");
+        if (metadadosErro || statusErro) console.error("email-send: envio aceito, persistência pendente", log.id);
 
         return new Response(JSON.stringify({
-          ok: true, log_id: log.id, provider: "ses", provider_message_id: providerMessageId,
+          ok: true, log_id: log.id, provider, provider_message_id: providerMessageId,
+          ...(metadadosErro || statusErro ? { persistencia_pendente: true } : {}),
         }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
       } catch (e) {
-        const erro = e instanceof ErroEnvio ? e : new ErroEnvio(String(e));
+        const erro = e instanceof ErroEnvio ? e : new ErroEnvio("Não foi possível confirmar o envio. Confira o log antes de reenviar.", { repetivel: false });
         await supabaseAdmin.from("emails_enviados").update({
           status: "falhou", erro_msg: `${erro.codigo ?? "erro"}: ${erro.message}`.slice(0, 500),
-        }).eq("id", log.id);
+        }).eq("id", log.id).eq("status", "enfileirado");
 
         // Preserva o 429 para o dispatcher pausar a campanha em vez de insistir.
         return new Response(JSON.stringify({
-          error: "SES falhou", details: erro.message, codigo: erro.codigo,
+          error: `${provider === "resend" ? "Resend" : "SES"} falhou`, details: erro.message, codigo: erro.codigo,
           log_id: log.id, rate_limited: erro.rateLimited,
         }), {
           status: erro.rateLimited ? 429 : 502,

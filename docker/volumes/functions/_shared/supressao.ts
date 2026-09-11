@@ -38,11 +38,14 @@ export async function buscarSupressao(
   supabase: ClienteSupabase,
   email: string,
 ): Promise<Suprimido | null> {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("email_supressoes")
     .select("email, motivo")
     .eq("email", normalizarEmail(email))
     .maybeSingle();
+  // Falha na consulta não significa lista vazia. Principalmente na troca de
+  // provedor, continuar aqui poderia reenviar a quem já pediu descadastro.
+  if (error) throw new Error("Não foi possível consultar os bloqueios de e-mail. O envio foi interrompido.");
   return (data as Suprimido | null) ?? null;
 }
 
@@ -57,10 +60,11 @@ export async function buscarSupressoes(
   const alvos = [...new Set(emails.map(normalizarEmail))].filter(Boolean);
   if (alvos.length === 0) return new Set();
 
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("email_supressoes")
     .select("email")
     .in("email", alvos);
+  if (error) throw new Error("Não foi possível consultar os bloqueios de e-mail. O lote foi interrompido.");
 
   return new Set(((data ?? []) as Array<{ email: string }>).map((s) => normalizarEmail(s.email)));
 }
