@@ -284,7 +284,7 @@ const TOOL_DADOS = {
       cidade: { type: 'string', description: 'Cidade onde a pessoa mora hoje.' },
       conhece_alguem: { type: 'string', description: 'Quem ela conhece que trabalha ou trabalhou na PPG. "não" se não conhece.' },
       habilidades: { type: 'string', description: 'As 3 principais habilidades, separadas por vírgula.' },
-      mudanca: { type: 'string', description: 'Só quando mora fora de Ampére: se teria disponibilidade de mudança.' },
+      mudanca: { type: 'string', description: 'Só quando mora fora de Ampére: se teria disponibilidade de se mudar para Ampére ou de vir até a empresa todos os dias. Registre qual dos dois caminhos, com as palavras da pessoa.' },
     },
     additionalProperties: false,
   },
@@ -597,6 +597,15 @@ async function processar(payload: any, profundidade = 0) {
   // enquanto eu pensava, e precisa ser lida antes de eu considerar a conversa parada.
   const turnoIniciadoEm = new Date().toISOString();
 
+  // Até onde este turno LEU a conversa. É ele, e não o início do turno, que diz o que
+  // "chegou no meio": o turno dorme o BUFFER antes de ler, e o que chega nesse intervalo
+  // entra na resposta. Medindo pelo início, a mesma mensagem era lida E retomada — em
+  // 10/09/2026 o Eduardo mandou "santa izabel do oeste" e "paraná" com 3,5 s de
+  // diferença, a primeira resposta já tinha os dois, e a retomada reprocessou o "paraná":
+  // obrigado a falar sem nada novo, o modelo repetiu a própria pergunta com outras
+  // palavras. Vale o início só se o turno sair antes de ler (aí não viu nada mesmo).
+  let conversaLidaAte = turnoIniciadoEm;
+
   const ehFollowup = payload?.motivo === 'followup';
 
   try {
@@ -664,6 +673,14 @@ async function processar(payload: any, profundidade = 0) {
       .filter((m: any) => (m.conteudo ?? '').trim() && so8(m.telefone) === fone8)
       .reverse()
       .slice(-MAX_HISTORICO);
+
+    // A mensagem mais nova que o modelo vai ler. Pelo relógio do BANCO, e não do servidor
+    // da edge: é a mesma régua do `created_at` que a retomada compara lá embaixo.
+    const ultimaLida = (msgs ?? []).reduce(
+      (max: string, m: any) => (m.created_at && m.created_at > max ? m.created_at : max),
+      '',
+    );
+    if (ultimaLida) conversaLidaAte = ultimaLida;
 
     // GATE 4 — janela: só respondemos quem escreveu nas últimas 24h.
     const ultimoInbound = [...conversa].reverse().find((m: any) => m.direcao === 'inbound');
@@ -981,7 +998,7 @@ async function processar(payload: any, profundidade = 0) {
     .or(filtroDeCanal(conexaoWeb))
     .eq('direcao', 'inbound')
     .ilike('telefone', `%${fone8}`)
-    .gt('created_at', turnoIniciadoEm)
+    .gt('created_at', conversaLidaAte)
     .order('created_at', { ascending: true })
     .limit(5);
 
