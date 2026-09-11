@@ -18,6 +18,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { corsHeaders } from "../_shared/cors.ts";
 import { getWaProvider } from "../_shared/waProviders.ts";
+import { atualizarStatusWaConexao } from "../_shared/waConexaoStatus.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -122,9 +123,7 @@ Deno.serve(async (req) => {
             qrcode = c.qrcode ?? null;
             paircode = c.paircode ?? null;
             status = c.status;
-            await admin.from("wa_conexoes").update({
-              qrcode, paircode, status_conexao: status, ultimo_status_em: new Date().toISOString(),
-            }).eq("id", conexaoId);
+            await atualizarStatusWaConexao(admin, conexaoId, status, { qrcode, paircode });
           } catch (e) {
             console.error("[wa-uazapi-admin] connect falhou:", e instanceof Error ? e.message : String(e));
           }
@@ -138,10 +137,9 @@ Deno.serve(async (req) => {
         const t = await tokenDe(conexaoId);
         if (!t) return json({ error: "conexão não encontrada" }, 404);
         const c = await provider.connect(t.server, t.token);
-        await admin.from("wa_conexoes").update({
+        await atualizarStatusWaConexao(admin, conexaoId, c.status, {
           qrcode: c.qrcode ?? null, paircode: c.paircode ?? null,
-          status_conexao: c.status, ultimo_status_em: new Date().toISOString(),
-        }).eq("id", conexaoId);
+        });
         return json({ ok: true, conexao_id: conexaoId, qrcode: c.qrcode ?? null, paircode: c.paircode ?? null, status: c.status });
       }
 
@@ -151,12 +149,7 @@ Deno.serve(async (req) => {
         const t = await tokenDe(conexaoId);
         if (!t) return json({ error: "conexão não encontrada" }, 404);
         const s = await provider.status(t.server, t.token);
-        const patch: Record<string, unknown> = {
-          status_conexao: s.status, ultimo_status_em: new Date().toISOString(),
-        };
-        if (s.numero) patch.numero = s.numero;
-        if (s.status === "conectado") { patch.qrcode = null; patch.paircode = null; }
-        await admin.from("wa_conexoes").update(patch).eq("id", conexaoId);
+        await atualizarStatusWaConexao(admin, conexaoId, s.status, s.numero ? { numero: s.numero } : {});
         return json({ ok: true, conexao_id: conexaoId, status: s.status, numero: s.numero ?? null });
       }
 
@@ -166,9 +159,7 @@ Deno.serve(async (req) => {
         const t = await tokenDe(conexaoId);
         if (!t) return json({ error: "conexão não encontrada" }, 404);
         await provider.disconnect(t.server, t.token);
-        await admin.from("wa_conexoes").update({
-          status_conexao: "desconectado", ultimo_status_em: new Date().toISOString(),
-        }).eq("id", conexaoId);
+        await atualizarStatusWaConexao(admin, conexaoId, "desconectado");
         return json({ ok: true, conexao_id: conexaoId, status: "desconectado" });
       }
 

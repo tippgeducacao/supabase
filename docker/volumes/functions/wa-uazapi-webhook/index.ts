@@ -14,6 +14,7 @@
 // ----------------------------------------------------------------------------
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { getWaProvider } from "../_shared/waProviders.ts";
+import { atualizarStatusWaConexao } from "../_shared/waConexaoStatus.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -146,13 +147,10 @@ Deno.serve(async (req) => {
   try {
     // ── connection: atualiza o status da linha ────────────────────────────────
     if (parsed.connection) {
-      const patch: Record<string, unknown> = {
-        status_conexao: parsed.connection.status,
-        ultimo_status_em: new Date().toISOString(),
-      };
-      if (parsed.connection.numero) patch.numero = parsed.connection.numero;
-      if (parsed.connection.status === "conectado") { patch.qrcode = null; patch.paircode = null; }
-      await admin.from("wa_conexoes").update(patch).eq("id", conexaoId);
+      await atualizarStatusWaConexao(
+        admin, conexaoId, parsed.connection.status,
+        parsed.connection.numero ? { numero: parsed.connection.numero } : {},
+      );
       console.log(`[wa-uazapi-webhook] conexao ${conexaoId} -> ${parsed.connection.status}`);
       return json({ ok: true, connection: parsed.connection.status });
     }

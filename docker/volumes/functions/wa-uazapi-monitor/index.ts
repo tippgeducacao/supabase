@@ -10,6 +10,7 @@
 // crons do projeto). Não recebe dados sensíveis no corpo.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { getWaProvider } from "../_shared/waProviders.ts";
+import { atualizarStatusWaConexao } from "../_shared/waConexaoStatus.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -32,7 +33,7 @@ Deno.serve(async (req) => {
   // Linhas ativas + token (service_role lê o segredo)
   const { data: conexoes, error } = await admin
     .from("wa_conexoes")
-    .select("id, provider, server_url, status_conexao, wa_conexoes_secrets(token)")
+    .select("id, provider, server_url, wa_conexoes_secrets(token)")
     .eq("ativo", true);
   if (error) return json({ error: error.message }, 500);
 
@@ -44,13 +45,10 @@ Deno.serve(async (req) => {
       const provider = getWaProvider(c.provider);
       const s = await provider.status(c.server_url, token);
       checadas++;
-      if (s.status !== c.status_conexao) {
+      const mudouStatus = await atualizarStatusWaConexao(admin, c.id, s.status, s.numero ? { numero: s.numero } : {});
+      if (mudouStatus) {
         mudancas++;
         if (s.status === "desconectado") caiu++;
-        const patch: Record<string, unknown> = { status_conexao: s.status, ultimo_status_em: new Date().toISOString() };
-        if (s.numero) patch.numero = s.numero;
-        if (s.status === "conectado") { patch.qrcode = null; patch.paircode = null; }
-        await admin.from("wa_conexoes").update(patch).eq("id", c.id);
       }
     } catch (e) {
       console.log(`[wa-uazapi-monitor] status falhou p/ ${c.id}:`, e instanceof Error ? e.message : String(e));
