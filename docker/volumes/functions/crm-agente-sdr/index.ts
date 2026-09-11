@@ -12,6 +12,7 @@
 
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3';
+import { pausaVigente } from './pausa.ts';
 import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO } from './prompts.ts';
 import { AGENTE_RECONTATO, montarDossieRecontato } from './prompts-recontato.ts';
 import { AGENTE_CAMPANHA_DIRETA } from './prompts-campanha-direta.ts';
@@ -130,18 +131,19 @@ async function lockSoltar(remotejid: string): Promise<void> {
 // UMA vez, na chegada do inbound; mas entre a chegada e o envio passam o debounce
 // (agente_sdr_delay_segundos, hoje 45s) + a geração do LLM + o dribble de chunks —
 // uma janela de até ~2min em que o atendente pode pausar a IA. Sem este recheck, a
-// mensagem "em voo" saía mesmo depois da pausa (era a queixa dos SDRs). Lê só o flag.
+// mensagem "em voo" saía mesmo depois da pausa (era a queixa dos SDRs). Lê o flag e o
+// prazo (pausa_ia_ate): pausa de 10 min vencida conta como IA ligada sem esperar o cron.
 async function iaPausada(remotejid: string): Promise<boolean> {
   const { data, error } = await supabase
     .from('cliente_ppg_leads_sdr')
-    .select('pausa_ia')
+    .select('pausa_ia, pausa_ia_ate')
     .eq('remotejid', remotejid)
     .maybeSingle();
   if (error) {
     console.error(`[crm-agente-sdr] iaPausada ${remotejid}: ${error.message}`);
     return false; // em erro de leitura, não bloqueia (mantém o comportamento atual)
   }
-  return data?.pausa_ia === true;
+  return pausaVigente(data);
 }
 
 // Raciocínio simulado em <thinking>…</thinking> DENTRO do bloco de texto não pode
@@ -920,7 +922,7 @@ Deno.serve(async (req) => {
   if (lead) {
     try {
       const memoria = await registrarEntrada(supabase, payload.remotejid, { msg_id: payload.id }, {
-        pausaObservada: lead.pausa_ia === true,
+        pausaObservada: pausaVigente(lead),
       });
       if (memoria.estado === 'contato_invalido') return json({ ok: true, skip: 'origem_contato_invalido' });
       if (memoria.estado === 'pausa') return json({ ok: true, skip: 'mensagem_recebida_em_pausa' });
@@ -943,7 +945,7 @@ Deno.serve(async (req) => {
     }
     if (!lead || lead.iniciar_atendimento !== true) return json({ ok: true, skip: 'sem_iniciar_atendimento' });
   }
-  if (lead.pausa_ia === true) return json({ ok: true, skip: 'pausa_ia' });
+  if (pausaVigente(lead)) return json({ ok: true, skip: 'pausa_ia' });
 
   // Já é ALUNO? A IA não fala com aluno — pausa (uma vez) e o humano assume. Nas próximas
   // mensagens dele o guard de pausa_ia acima já corta, então isto roda no máximo 1×.
