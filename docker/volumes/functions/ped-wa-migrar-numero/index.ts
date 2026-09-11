@@ -501,8 +501,8 @@ Deno.serve(async (req) => {
       // Unificação (decisão de 11/09: o podcast vai para ESTE número). Sem isto, entre este
       // clique e o `ativar_podcast` o podcast seguia no número antigo — banido, mas ATIVO. A
       // Meta devolve 200 num número banido: o motor contava o toque como entregue e, no 3º,
-      // marcava o convidado 'silenciou' + 'convidar em 6 meses'. Foi assim que ~20 convidados
-      // da onda de 31/08 ficaram bloqueados até 03/2027 por mensagens que ninguém recebeu.
+      // marcava o convidado 'silenciou' + 'convidar em 6 meses'. Em 04/09 isso silenciou 15
+      // convidados cujos toques de WhatsApp não chegaram (14 tinham recebido o e-mail).
       // Desativado, o `pod-convite-dispatch` para em "sem conta" ANTES de tocar em qualquer
       // candidato, e o `ativar_podcast` depois grava a conta nova.
       let podcastAntigoDesativado = false;
