@@ -214,9 +214,22 @@ Deno.serve(async (req) => {
           }),
         });
 
+        // Lida SEMPRE: é dela que sai o id do evento. Sem ele anotado na entrevista, a trava
+        // "tendo evento, não crie outro" nunca dispara e trocar para online duplica o evento.
+        const j = await res.json().catch(() => null);
+        const idEvento = typeof j?.event?.id === 'string' ? j.event.id : '';
+        if (idEvento) {
+          await admin.rpc('rh_entrevista_anotar_evento', {
+            p_oportunidade_id: candidato.oportunidade_id,
+            p_google_event_id: idEvento,
+          });
+        }
+
         if (pedirMeet) {
-          const j = await res.json().catch(() => null);
-          const meet = typeof j?.meetLink === 'string' ? j.meetLink.trim() : '';
+          // A sala vem em `event.meetLink`. Até 11/09/2026 lia-se `meetLink` na raiz, onde a
+          // resposta nunca teve nada: sete candidatos agendaram e nenhum recebeu a sala.
+          const bruto = j?.event?.meetLink ?? j?.meetLink;
+          const meet = typeof bruto === 'string' ? bruto.trim() : '';
           if (meet) {
             // Sem gravar aqui, o lembrete de 24h sai dizendo que o link vem depois e a sala
             // fica só dentro do Google.
