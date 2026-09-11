@@ -65,6 +65,7 @@ describe('espera pela escolha de quando retomar o contato', () => {
 
   it.each([
     'tranquilo, quando posso te chamar?',
+    'Entendi, Yara. As vagas com essa condição especial são limitadas. Qual o melhor horário pra eu te chamar novamente por aqui?',
     'qual é o melhor dia e horário pra eu te chamar por aqui?',
     'que horário fica melhor pra eu te chamar pelo WhatsApp?',
     'quando podemos retomar nossa conversa por aqui?',
