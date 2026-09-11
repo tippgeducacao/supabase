@@ -14,8 +14,15 @@ import { corsHeaders } from '../_shared/cors.ts';
  * Por que uma edge, e não RPC direto do navegador: `anon` não pode ter nada aqui. Uma RPC
  * aberta que aceita telefone e devolve nome vira um jeito de descobrir quem se candidatou,
  * digitando números. Aqui a página não fala com o banco em momento nenhum — fala com esta
- * função, que usa service_role e só devolve o primeiro nome de quem realmente tem card em
- * etapa liberada.
+ * função, que usa service_role e só devolve o primeiro nome de quem realmente tem card aberto
+ * no funil de RH.
+ *
+ * Quem agenda (desde 11/09/2026): TODO card aberto do funil, menos as etapas de
+ * `rh_agenda_publica_fora` (desqualificados, contratados, admissão, menor de idade, monitores
+ * não convocados). E cada um vê a SUA agenda, que quem decide é o banco
+ * (`rh_entrevista_horarios_do_candidato`): o monitor convocado vê a rodada do PS 01/2026; o
+ * candidato comum vê as faixas padrão, nos próximos 3 dias com horário, nunca nos dias da
+ * rodada — aqueles horários foram abertos só para os monitores.
  *
  * Marcar é `rh_entrevista_marcar`, a MESMA do agente e do botão do card: a trava contra
  * dois candidatos no mesmo horário é o índice único de `rh_entrevistas`, e ler "está
@@ -43,8 +50,12 @@ function json(body: unknown, status = 200) {
   });
 }
 
-/** Quantos dias de agenda a página mostra. Cobre a semana de entrevistas com folga. */
-const DIAS_NA_TELA = 21;
+/**
+ * Quantos dias o candidato comum vê: os próximos 3 que TÊM horário livre (decisão do Rafael,
+ * 11/09). Dia sem vaga não conta, senão quem abrisse o link numa segunda da rodada não veria
+ * nada. Três semanas na tela eram 129 horários, e ninguém escolhia.
+ */
+const DIAS_COM_HORARIO = 3;
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
@@ -73,37 +84,21 @@ Deno.serve(async (req) => {
     if ((candidato?.achados ?? 0) > 1) {
       return json({ ok: false, motivo: 'ambiguo' });
     }
-    // Mesma resposta para "não existe" e "existe mas não foi convocado": a diferença entre
-    // as duas contaria, a quem tentasse, quem passou de etapa.
+    // Mesma resposta para "não existe" e "existe mas está fora" (desqualificado, contratado,
+    // monitor não convocado): a diferença entre as duas contaria, a quem tentasse, quem saiu
+    // do processo.
     if (!candidato?.oportunidade_id) {
       return json({ ok: false, motivo: 'nao_encontrado' });
     }
 
-    const { data: livresRaw, error: erroHorarios } = await admin.rpc('rh_entrevista_horarios_livres', {
-      p_qtd: 500,
-      p_dias: DIAS_NA_TELA,
+    // A agenda DESTE candidato: rodada para o monitor convocado, faixas padrão para os demais.
+    // A regra mora no banco, que é o mesmo lugar onde `rh_entrevista_marcar` a confere.
+    const { data: livresRaw, error: erroHorarios } = await admin.rpc('rh_entrevista_horarios_do_candidato', {
+      p_oportunidade_id: candidato.oportunidade_id,
+      p_dias_com_horario: DIAS_COM_HORARIO,
     });
     if (erroHorarios) throw erroHorarios;
-
-    // A janela da RODADA. Sem ela a página oferecia 129 horários — três semanas inteiras,
-    // incluindo dias que não são de entrevista. O agente continua vendo a agenda toda.
-    const { data: janela } = await admin
-      .from('rh_entrevista_config')
-      .select('agenda_publica_de, agenda_publica_ate')
-      .eq('id', true)
-      .maybeSingle();
-    const de = janela?.agenda_publica_de ? `${janela.agenda_publica_de}T00:00:00-03:00` : null;
-    // `ate` é inclusive: o dia inteiro conta, então a comparação é com o começo do dia seguinte.
-    const ate = janela?.agenda_publica_ate
-      ? new Date(`${janela.agenda_publica_ate}T00:00:00-03:00`).getTime() + 24 * 60 * 60 * 1000
-      : null;
-
-    const livres = ((livresRaw ?? []) as Horario[]).filter((h) => {
-      const t = new Date(h.inicio).getTime();
-      if (de && t < new Date(de).getTime()) return false;
-      if (ate && t >= ate) return false;
-      return true;
-    });
+    const livres = (livresRaw ?? []) as Horario[];
 
     const jaMarcada = candidato.entrevista_inicio
       ? {
@@ -130,8 +125,8 @@ Deno.serve(async (req) => {
     const inicio = String(body?.inicio ?? '');
     const slot = livres.find((h) => h.inicio === inicio);
     if (!slot) {
-      // Some da lista quem foi pego enquanto a página estava aberta, e o que caiu fora da
-      // janela da rodada. É o caso comum quando a turma toda recebe o link na mesma hora.
+      // Some da lista quem foi pego enquanto a página estava aberta, e o que não é da agenda
+      // desta pessoa. É o caso comum quando a turma toda recebe o link na mesma hora.
       return json({ ok: false, motivo: 'horario_indisponivel' });
     }
 
