@@ -64,6 +64,11 @@ const N8N_INBOUND_URL = ((Deno.env.get("CRM_N8N_INBOUND_URL") ?? "") !== "" && R
 const AGENTE_RH_CONTA_FALLBACK = Deno.env.get("AGENTE_RH_WA_ACCOUNT_ID")
   ?? "db192b7f-5791-4387-b83e-c2c3395e7500";
 const AGENTE_RH_URL = RELAY_BASE ? `${RELAY_BASE}/functions/v1/crm-agente-rh` : "";
+// Assistente pedagógico do Suporte ao Aluno: mesma ideia do RH, número próprio e agente
+// próprio. Aqui o desvio é pela PERSONA da conta que recebeu ('aluno'), lida a cada inbound
+// junto com `agente_ia_ativo`; o relay inteiro nem roda sem a IA ligada no número. Ver
+// supabase/functions/crm-agente-aluno.
+const AGENTE_ALUNO_URL = RELAY_BASE ? `${RELAY_BASE}/functions/v1/crm-agente-aluno` : "";
 
 // Cliente de módulo só para esta pergunta: o `admin` do handler nasce depois, e o relay
 // roda fora dele. 5 minutos de cache porque a resposta muda uma vez por troca de número.
@@ -505,10 +510,15 @@ function canonicalBrDigits(raw: string): string {
 // Repassa a mensagem inbound normalizada pro n8n (buffer + roteador do agente SDR).
 // Awaited com timeout; em qualquer erro só loga — nunca derruba o webhook (Meta espera 200).
 async function relayToN8n(payload: Record<string, unknown>): Promise<void> {
-  // Desvio por número: RH vai pro agente de RH, todo o resto segue pro João.
+  // Desvio por número: RH vai pro agente de RH, aluno pro assistente pedagógico, todo o resto
+  // segue pro João.
   const ehRh = payload?.wa_account_id === (await contaDoRh());
-  const destino = ehRh ? AGENTE_RH_URL : N8N_INBOUND_URL;
+  // ⚠️ Persona 'aluno' NUNCA cai no João: o SDR trata persona que não conhece como
+  // 'qualificador' e venderia pós para quem já é aluno. Sem a URL do assistente, não repassa.
+  const ehAluno = !ehRh && payload?.agente_ia_persona === "aluno";
+  const destino = ehRh ? AGENTE_RH_URL : ehAluno ? AGENTE_ALUNO_URL : N8N_INBOUND_URL;
   if (!destino) return;
+  const rotulo = ehRh ? "RH" : ehAluno ? "aluno" : "n8n";
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 10000);
   try {
@@ -518,9 +528,9 @@ async function relayToN8n(payload: Record<string, unknown>): Promise<void> {
       body: JSON.stringify(payload),
       signal: ctrl.signal,
     });
-    if (!res.ok) console.log(`[crm-whatsapp-webhook] relay ${ehRh ? "RH" : "n8n"} respondeu ${res.status}`);
+    if (!res.ok) console.log(`[crm-whatsapp-webhook] relay ${rotulo} respondeu ${res.status}`);
   } catch (e) {
-    console.log(`[crm-whatsapp-webhook] relay ${ehRh ? "RH" : "n8n"} falhou:`, e instanceof Error ? e.message : String(e));
+    console.log(`[crm-whatsapp-webhook] relay ${rotulo} falhou:`, e instanceof Error ? e.message : String(e));
   } finally {
     clearTimeout(timer);
   }
@@ -1232,7 +1242,9 @@ Deno.serve(async (req) => {
                 profile_name: profileName,
                 telefone: phoneDigits,
                 wa_account_id: accountId,
-                // Persona do agente neste número: 'recontato' (no-show) | 'qualificador'.
+                // Persona do agente neste número: 'recontato' (no-show) | 'qualificador' |
+                // 'campanha_direta' | 'rh' | 'aluno'. É ela que o relayToN8n usa para desviar
+                // o 'aluno' do João; o default só vale para conta sem persona gravada.
                 agente_ia_persona: accountRows?.[0]?.agente_ia_persona ?? 'qualificador',
                 lead_id: leadId,
                 oportunidade_id: oportunidadeId,

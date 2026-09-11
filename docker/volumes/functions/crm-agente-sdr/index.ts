@@ -28,7 +28,7 @@ import { prepararMensagem } from './midia.ts';
 import { persistirEntradasDoLote, registrarEntrada } from './historicoEntradaPausa.ts';
 import { aguardarAudiosDoHistorico, contarAudiosPendentes } from './sincronizacaoAudio.ts';
 import { conversaTexto, enviarResposta, horariosInventados, humanizarTexto, removerRaciocinioVazado } from './saida.ts';
-import { contaDoLead } from './conta.ts';
+import { contaDoLead, personaDaConta } from './conta.ts';
 import { rodarEsteiraFollowup } from './followup.ts';
 import { rodarEsteiraFollowupTemplate } from './followup-template.ts';
 import { criarTelemetria, resumir, type Telemetria } from './eventos.ts';
@@ -41,6 +41,9 @@ const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 const TOKEN = Deno.env.get('AGENTE_SDR_TOKEN') ?? '';
 const LOCK_TTL_SEGUNDOS = 240; // mesmo TTL do lock Redis do n8n
 const MAX_RODADAS_TOOLS = 8;   // trava de segurança (o n8n não limitava)
+// Números que têm agente próprio: o João nunca responde por eles, venha a mensagem de onde vier
+// (relay, reconciliador, drenagem de buffer). 'aluno' = assistente pedagógico; 'rh' = agente de RH.
+const PERSONAS_DE_OUTRO_AGENTE = new Set(['aluno', 'rh']);
 
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE);
 
@@ -888,6 +891,17 @@ Deno.serve(async (req) => {
 
   // Guards de entrada (mesma ordem do n8n).
   if (payload?.direcao !== 'inbound' || payload?.from_me === true) return json({ ok: true, skip: 'nao_inbound' });
+  // Persona do assistente pedagógico (Suporte ao Aluno): quem atende é o crm-agente-aluno.
+  // Sem esta tranca, a persona que o SDR não conhece cairia no 'qualificador' mais abaixo e o
+  // João venderia pós para quem já é aluno. O webhook já desvia; isto é a segunda tranca.
+  if (payload?.agente_ia_persona === 'aluno') return json({ ok: true, skip: 'persona_de_outro_agente' });
+  // A persona do payload só existe no relay do webhook, que já desvia. O reconciliador reinjeta
+  // SEM ela (só com o wa_account_id), e é aí que o João responderia pela 3250 ou pela linha do
+  // RH se a allowlist dele (20260911233300) não estiver aplicada. Então quem manda é a persona
+  // gravada na CONTA. Leitura que falha não barra (a conta fica sem persona): o João não para.
+  if (PERSONAS_DE_OUTRO_AGENTE.has((await personaDaConta(supabase, payload?.wa_account_id)) ?? '')) {
+    return json({ ok: true, skip: 'persona_de_outro_agente' });
+  }
   if (!payload?.remotejid || !payload?.telefone) return json({ error: 'remotejid/telefone obrigatórios' }, 400);
 
   // Comando de reset usado nos testes (/excluirdados): apaga lead + mensagens.

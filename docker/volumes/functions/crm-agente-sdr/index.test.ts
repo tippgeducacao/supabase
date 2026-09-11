@@ -149,6 +149,39 @@ describe('entrada HTTP: memória da pausa antes de mídia, buffer e LLM', () => 
     semResposta();
   });
 
+  it('persona do assistente pedagógico (aluno) nunca vira João, nem como qualificador', async () => {
+    const resposta = await chamar({ agente_ia_persona: 'aluno', wa_account_id: 'conta-do-suporte-ao-aluno' });
+    expect(resposta.status).toBe(200);
+    expect(await resposta.json()).toEqual({ ok: true, skip: 'persona_de_outro_agente' });
+    expect(fronteiras.rpc).not.toHaveBeenCalled();
+    expect(fronteiras.buscarLead).not.toHaveBeenCalled();
+    expect(fronteiras.bufferInserir).not.toHaveBeenCalled();
+    semResposta();
+  });
+
+  it('reinjeção SEM persona pela conta do aluno ou do RH também não vira João (a persona vem da conta)', async () => {
+    // O reconciliador manda só o wa_account_id: a persona do payload não existe nesse caminho.
+    const base = fronteiras.from.getMockImplementation()!;
+    fronteiras.from.mockImplementation((tabela: string) => tabela === 'crm_whatsapp_accounts'
+      ? { select: async () => ({ data: [
+        { id: 'conta-3250', agente_ia_persona: 'aluno' },
+        { id: 'conta-rh', agente_ia_persona: 'rh' },
+        { id: 'conta-joao', agente_ia_persona: 'qualificador' },
+      ], error: null }) }
+      : base(tabela));
+    for (const conta of ['conta-3250', 'conta-rh']) {
+      const resposta = await chamar({ wa_account_id: conta, reconciliado: true });
+      expect(await resposta.json()).toEqual({ ok: true, skip: 'persona_de_outro_agente' });
+    }
+    expect(fronteiras.rpc).not.toHaveBeenCalled();
+    expect(fronteiras.buscarLead).not.toHaveBeenCalled();
+    expect(fronteiras.bufferInserir).not.toHaveBeenCalled();
+    semResposta();
+    // A conta comercial segue o caminho normal (chega na memória de entrada).
+    await chamar({ wa_account_id: 'conta-joao', reconciliado: true });
+    expect(fronteiras.buscarLead).toHaveBeenCalled();
+  });
+
   it('falha fechada antes da mídia se a memória não puder confirmar a origem', async () => {
     fronteiras.rpc.mockResolvedValue({ data: null, error: { message: 'RPC sintética indisponível' } });
     const resposta = await chamar();

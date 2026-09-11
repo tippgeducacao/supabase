@@ -47,6 +47,16 @@ async function personasContas(supabase: any): Promise<Map<string, string | null>
 }
 
 /**
+ * Persona gravada NA CONTA (null = conta sem persona ou desconhecida). É a fonte que vale na
+ * entrada do agente: o POST do reconciliador (laços 1 e 2) chega só com o wa_account_id, sem
+ * `agente_ia_persona`, então a persona do payload não protege justamente a reinjeção.
+ */
+export async function personaDaConta(supabase: any, id: unknown): Promise<string | null> {
+  if (!id) return null;
+  return (await personasContas(supabase)).get(String(id)) ?? null;
+}
+
+/**
  * Conta Meta "do lead": a da mensagem mais recente dele em crm_whatsapp_messages
  * cuja conta tem persona QUALIFICADORA (persona 'recontato' é pulada — ver topo).
  *
@@ -90,6 +100,9 @@ export async function contaDoLead(
     // número da persona de no-show: nunca INICIA contato por ele (cadência);
     // respondendo conversa (incluirRecontato) ele vale — o lead escreveu lá.
     if (!opts?.incluirRecontato && personas.get(id) === 'recontato') continue;
+    // Linha do Suporte ao Aluno (persona 'aluno'): o João nunca fala por ela, nem
+    // respondendo. Quem atende lá é o assistente pedagógico (crm-agente-aluno).
+    if (personas.get(id) === 'aluno') continue;
     return id;
   }
   return null;
