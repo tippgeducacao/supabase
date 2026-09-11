@@ -40,6 +40,8 @@
 //        INCLUSIVE p/ o lead IDENTIFICADO (que so ganha card por esta acao).
 //   (9.5) Ações Extras: modificar_segmentos / definir_responsavel / atualizar_lead
 //         (SOBRESCREVE lead.* e campo:<alias> físico/EAV; resolve {webhook=Campo}).
+//   (9.6) enviar_email: usa template/remetente configurados e contato persistido após
+//         as edições anteriores, com reserva durável por integração/ação/destinatário.
 //   (12) Mapeamento de Retorno: shape custom da resposta + codigo_status.
 //   Permissões: NÃO afetam o intake (é controle de acesso de UI).
 //   NÃO suportados ainda no edge: add_tag/remove_tag (legado),
@@ -55,6 +57,7 @@ import { aplicarFiltrosToken, parseTokenWebhook } from "./tokenFiltros.ts";
 import { processarWebhookModulosPraticos } from "./modulosPraticos.ts";
 import { receberModulosPraticosHttp } from "./modulosPraticosHttp.ts";
 import { obterMotivoExclusaoModulosPraticos } from "./modulosPraticosExclusoes.ts";
+import { executarAcaoEmail, type ResultadoAcaoEmail } from "./acaoEmail.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -274,6 +277,7 @@ const ACAO_LABELS: Record<string, string> = {
   definir_responsavel_contato: "Definir responsável do contato",
   criar_oportunidade:  "Criar oportunidade",
   enviar_mensagem_whatsapp: "Enviar template WhatsApp",
+  enviar_email:       "Enviar e-mail",
   add_segmento:        "Adicionar a um segmento",
   remove_segmento:     "Remover de um segmento",
 };
@@ -1475,6 +1479,63 @@ Deno.serve(async (req) => {
     );
   }
   const acaoChip = (tipo: string) => `${integration.nome ?? slug} - ${ACAO_LABELS[tipo] ?? tipo}`;
+  // O envio respeita a ordem das ações e relê o contato salvo neste ponto.
+  // Webhooks sem enviar_email não consultam modelos nem mudam o retorno.
+  const acoesEmail = acoesItens.filter((a: unknown) => a && typeof a === "object" && "tipo" in a && a.tipo === "enviar_email");
+  const acoesEmailResultados: ResultadoAcaoEmail[] = [];
+  const integracaoEmailId = integration.id;
+  async function executarEmailIntegracao(acao: { id?: unknown; params?: unknown }) {
+    const resultadoEmail = await executarAcaoEmail({
+      integrationId: integracaoEmailId, acao, leadId, dados,
+    }, {
+      carregarLead: async (id) => {
+        const { data, error } = await admin.from("leads")
+          .select("id, nome, email, whatsapp, curso_interesse").eq("id", id).maybeSingle();
+        if (error) throw error;
+        return data;
+      },
+      carregarTemplate: async (id) => {
+        const { data, error } = await admin.from("email_templates")
+          .select("id, ativo, assunto, corpo_html, corpo_texto, uso").eq("id", id).maybeSingle();
+        if (error) throw error;
+        return data;
+      },
+      carregarRemetente: async (id) => {
+        const { data, error } = await admin.from("email_remetentes")
+          .select("id, ativo, provider, dominio_verificado").eq("id", id).maybeSingle();
+        if (error) throw error;
+        return data;
+      },
+      reservar: async (reserva) => {
+        const { error } = await admin.from("crm_webhook_email_envios").insert(reserva).select("chave").single();
+        if (error?.code === "23505") return false;
+        if (error) throw error;
+        return true;
+      },
+      finalizar: async (chave, resultado) => {
+        const { error } = await admin.from("crm_webhook_email_envios").update({
+          status: resultado.status, log_id: resultado.log_id ?? null,
+          motivo: resultado.motivo ?? null, atualizado_em: new Date().toISOString(),
+        }).eq("chave", chave).select("chave").single();
+        if (error) throw error;
+      },
+      enviar: async (body) => {
+        const resposta = await fetch(`${SUPABASE_URL}/functions/v1/email-send`, {
+          method: "POST", redirect: "error", signal: AbortSignal.timeout(45_000),
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${SERVICE_ROLE}` },
+          body: JSON.stringify(body),
+        });
+        return { ok: resposta.ok, status: resposta.status, corpo: await resposta.json().catch(() => null) };
+      },
+      resolverVariavel: resolveWebhookVar,
+    });
+    acoesEmailResultados.push(resultadoEmail);
+    if (resultadoEmail.status === "enviado") {
+      acoesAplicadas.push("enviar_email");
+      await logAtividade(leadId, "acao_webhook", "E-mail da integração enviado", acaoChip("enviar_email"));
+    }
+  }
+
   for (const a of acoesExtras) {
     try {
       if (a?.tipo === "modificar_segmentos" && leadId) {
@@ -1673,6 +1734,8 @@ Deno.serve(async (req) => {
           }
         }
         if (pc.ativar_ia !== false) acaoAtivarIa = true;
+      } else if (a?.tipo === "enviar_email") {
+        await executarEmailIntegracao(a);
       }
     } catch (e: any) {
       console.error("[crm-lead-webhook] acao extra falhou:", a?.tipo, e?.message);
@@ -1830,6 +1893,7 @@ Deno.serve(async (req) => {
       lead_oportunidade_id: leadOportunidadeId, oportunidade_id: oportunidadeId, duplicado,
       duplicado_lote: duplicadoLote, novo_lead_disparado: novoLeadDisparado, lote: lote ?? null,
       acoes_aplicadas: acoesAplicadas,
+      ...(acoesEmail.length ? { acoes_email_resultados: acoesEmailResultados } : {}),
       rastreamento: rastreamentoChegada,
       // observabilidade da normalização: null = título não resolvido (candidato a alias)
       curso_canonico: cursoCanonico,
@@ -1899,5 +1963,6 @@ Deno.serve(async (req) => {
     duplicado_lote: duplicadoLote,
     novo_lead_disparado: novoLeadDisparado,
     acoes_aplicadas: acoesAplicadas,
+    ...(acoesEmail.length ? { acoes_email_resultados: acoesEmailResultados } : {}),
   }, statusResp);
 });

@@ -15,6 +15,7 @@ import { formatarFrom, linkDescadastro, tagSegura } from "../_shared/envioComum.
 import { ErroEnvio, obterProvedor, provedorEfetivo } from "../_shared/emailProviders/index.ts";
 import { buscarSupressao, supressaoSeAplica } from "../_shared/supressao.ts";
 import { respostaEnvioExistente } from "./idempotencia.ts";
+import { emailEhMarketing, renderizarEmailWebhook } from "./renderizacaoWebhook.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -185,6 +186,7 @@ Deno.serve(async (req) => {
     let corpoTexto = payload.corpo_texto ?? null;
     let remetenteId = payload.remetente_id ?? null;
     const templateId = payload.template_id ?? null;
+    let usoModelo: string | null = null;
 
     if (templateId) {
       const { data: tpl, error: tplErr } = await supabaseAdmin
@@ -198,12 +200,29 @@ Deno.serve(async (req) => {
       corpoHtml = tpl.corpo_html;
       corpoTexto = tpl.corpo_texto;
       remetenteId = remetenteId ?? tpl.remetente_id;
+      usoModelo = tpl.uso ?? null;
+      if (payload.contexto_tipo === "webhook" && !tpl.ativo) {
+        return new Response(JSON.stringify({ error: "Modelo de e-mail inativo." }), {
+          status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
     }
 
     const vars = payload.variaveis ?? {};
-    assunto = renderTemplate(assunto, vars);
-    corpoHtml = renderTemplate(corpoHtml, vars);
-    if (corpoTexto) corpoTexto = renderTemplate(corpoTexto, vars);
+    if (payload.contexto_tipo === "webhook") {
+      try {
+        if (!templateId) throw new Error("Modelo de e-mail obrigatório para webhook.");
+        ({ assunto, corpoHtml, corpoTexto } = renderizarEmailWebhook({ assunto, corpoHtml, corpoTexto, variaveis: vars }));
+      } catch {
+        return new Response(JSON.stringify({ error: "Confira o conteúdo e as variáveis do modelo de e-mail.", codigo: "modelo_webhook_invalido" }), {
+          status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+    } else {
+      assunto = renderTemplate(assunto, vars);
+      corpoHtml = renderTemplate(corpoHtml, vars);
+      if (corpoTexto) corpoTexto = renderTemplate(corpoTexto, vars);
+    }
 
     // Resolve remetente -> caixa Gmail
     if (!remetenteId) {
@@ -227,7 +246,12 @@ Deno.serve(async (req) => {
     const caixaEmail = rem.gmail_caixa_email ?? rem.email_completo;
     const fromName = rem.nome_remetente;
     const replyTo = rem.reply_to_email;
-    const ehCampanha = payload.contexto_tipo === "campanha";
+    const ehCampanha = emailEhMarketing(payload.contexto_tipo, usoModelo);
+    if (payload.contexto_tipo === "webhook" && (!rem.ativo || provider === "gmail" || !rem.dominio_verificado)) {
+      return new Response(JSON.stringify({ error: "Selecione um remetente de disparo ativo e verificado." }), {
+        status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
 
     // SMTP explícito é o circuito local de desenvolvimento e não usa a conta Resend.
     if (provider === "resend" && provedorEfetivo(provider) !== "smtp" && (!Deno.env.get("RESEND_API_KEY")?.trim()
@@ -377,13 +401,13 @@ Deno.serve(async (req) => {
     const urlDescadastro = provider !== "gmail"
       ? await linkDescadastro(supabaseUrl, payload.destinatario_email)
       : null;
-    if (urlDescadastro && ehCampanha) {
+    if (urlDescadastro && (ehCampanha || payload.contexto_tipo === "webhook")) {
       // O link só existe depois de resolvido o remetente, então a variável
       // {{descadastro_url}} é substituída aqui, num segundo passe.
       const usaVariavel = /\{\{\s*descadastro_url\s*\}\}/.test(corpoHtml);
       if (usaVariavel) {
         corpoHtml = corpoHtml.replace(/\{\{\s*descadastro_url\s*\}\}/g, urlDescadastro);
-      } else {
+      } else if (ehCampanha) {
         // Se o template não posiciona o link, pendura um rodapé discreto —
         // disparo de massa sem descadastro visível é o caminho curto pro spam.
         const rodape =
@@ -401,7 +425,7 @@ Deno.serve(async (req) => {
       if (corpoTexto != null) {
         corpoTexto = /\{\{\s*descadastro_url\s*\}\}/.test(corpoTexto)
           ? corpoTexto.replace(/\{\{\s*descadastro_url\s*\}\}/g, urlDescadastro)
-          : `${corpoTexto}\n\nDescadastrar: ${urlDescadastro}`;
+          : ehCampanha ? `${corpoTexto}\n\nDescadastrar: ${urlDescadastro}` : corpoTexto;
       }
     }
 
