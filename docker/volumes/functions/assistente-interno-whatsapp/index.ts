@@ -12,6 +12,7 @@ import {
 import { carregarLinha, enviarTexto, baixarImagem, baixarAudioBytes, baixarVideoBytes, baixarDocumento, type LinhaWa } from "./wa.ts";
 import { transcreverBytes } from "./transcrever.ts";
 import { enfileirarTranscricao, enfileirarReuniaoAudio, processarTranscricoes } from "./transcricao.ts";
+import { processarAgendaEntrevistas } from "./entrevistas.ts";
 import { pensar } from "./brain.ts";
 
 // Áudio maior que isto = REUNIÃO → pipeline Gemini em background (Whisper tem teto ~25MB).
@@ -37,12 +38,16 @@ Deno.serve(async (req) => {
   const url = new URL(req.url);
   const admin = makeAdmin();
 
-  // Worker do cron: processa 1 job da fila de transcrição de reunião (gated pelo segredo do config).
-  if (url.searchParams.get("cron") === "transcricao") {
+  // Crons (gated pelo segredo do config): transcricao = 1 job da fila de reunião;
+  // entrevistas = resumo das 8h + aviso 30 min antes das entrevistas do RH.
+  const cron = url.searchParams.get("cron");
+  if (cron === "transcricao" || cron === "entrevistas") {
     const { data: cfg } = await admin.from("assistente_config").select("cron_secret").eq("id", 1).maybeSingle();
     if (!cfg?.cron_secret || req.headers.get("x-assist-cron") !== cfg.cron_secret) return json({ error: "não autorizado" }, 401);
-    try { return json({ ok: true, ...(await processarTranscricoes(admin)) }); }
-    catch (e) { return json({ ok: false, erro: String(e) }); }
+    try {
+      const r = cron === "entrevistas" ? await processarAgendaEntrevistas(admin) : await processarTranscricoes(admin);
+      return json({ ok: true, ...r });
+    } catch (e) { return json({ ok: false, erro: String(e) }); }
   }
 
   // Provisionamento da linha (quando o chip do Gustavo chegar). Gated por segredo.
@@ -50,7 +55,7 @@ Deno.serve(async (req) => {
 
   // ⚠️ BUMPE esta string a cada deploy: é o ÚNICO jeito de confirmar, de fora, que a versão
   // nova já está servindo (o edge-runtime serve o worker antigo por ~1 min após o push).
-  if (req.method === "GET") return new Response("assistente-interno ok · build 20260911a", { headers: cors });
+  if (req.method === "GET") return new Response("assistente-interno ok · build 20260911b", { headers: cors });
 
   // Autenticação do webhook (anti-spoofing): se ASSIST_WEBHOOK_SECRET estiver setado, exige ?k igual.
   // O número declarado no payload NÃO é autenticação (quem POSTa controla msg.fromDigits).
