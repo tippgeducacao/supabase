@@ -144,10 +144,18 @@ Deno.serve(async (req) => {
         ]).limit(1);
       if (convitesAula?.length) return false;
 
+      // Candidato de podcast EM ABERTO — o ciclo inteiro, não só o convite. O agendamento
+      // (`podcast_agenda_1/2/3`, a fase em que o convidado combina a data) é enviado com o
+      // candidato em `respondeu` (pod-convite-dispatch exige esse status), e depois vem o
+      // `confirmou`. Olhando só `na_fila`/`convidando`, toda resposta de agendamento caía no
+      // fluxo de professor, fora da conversa do podcast. Não entram: `aguardando_aprovacao`
+      // (ainda não foi contatado) e os encerrados (recusou, silenciou, removido, descartado).
+      // O handler do podcast só mexe no status de quem está em na_fila/convidando, então
+      // incluir respondeu/confirmou aqui muda o ROTEAMENTO, não o status de ninguém.
       const { data: cands } = await supabase
         .from("pod_convite_candidatos").select("id")
         .eq("professor_id", profRow.id)
-        .in("status", ["na_fila", "convidando"]).limit(1);
+        .in("status", ["na_fila", "convidando", "respondeu", "confirmou"]).limit(1);
       return !!cands?.length;
     } catch (e) {
       console.log("[whatsapp-webhook] desempate podcast falhou:", String(e));
