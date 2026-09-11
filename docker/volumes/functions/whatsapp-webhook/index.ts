@@ -126,39 +126,103 @@ Deno.serve(async (req) => {
   } catch (_e) { /* segue com o roteamento por número */ }
   const numeroCompartilhado = !!podcastPhoneId && podcastPhoneId === pedagogicoPhoneId;
 
-  /** Só com número compartilhado: o telefone tem candidato de podcast em aberto e nenhum
-   *  convite de aula aguardando resposta? */
-  async function ehRespostaDePodcast(from: string): Promise<boolean> {
+  // Convites de AULA que esperam resposta do professor — o que faz uma mensagem dele ser da
+  // régua de aulas e não do podcast.
+  const CONVITE_AULA_AGUARDANDO = [
+    "fase1_titular_aguardando", "fase1b_reserva_aguardando",
+    "fase2_reconfirmacao_30d", "fase2_reconfirmacao_14d",
+    "fase2_reconfirmacao_7d", "fase2_lembrete_1d",
+  ];
+  // O professor/convidado já resolvido no desempate, por telefone. O handler do podcast
+  // consulta o MESMO telefone de novo, e quando essa 2ª consulta falhava (502 esporádico do
+  // proxy) ele dava `continue` antes de gravar: a resposta sumia — nem conversa, nem SAC.
+  const profPorTelefone = new Map<string, any>();
+
+  /** Só com número compartilhado: esta mensagem é do podcast?
+   *  - não é convidado com candidato em aberto → professor (caminho rápido);
+   *  - é convidado e NÃO tem aula esperando resposta → podcast;
+   *  - é as duas coisas → decide pela CONVERSA, não por "aula sempre ganha". Aula ganhando
+   *    sempre mandava a resposta de agendamento de quem também dá aula (caso real: uma
+   *    professora com 5 aulas até novembro e o podcast em agendamento) para a thread de aula,
+   *    e o link "abrir no SAC" da tela de podcast quebrava.
+   *  Na falha de consulta, devolve false: o fluxo de professor grava sempre. */
+  async function ehRespostaDePodcast(msg: any): Promise<boolean> {
+    const from = String(msg?.from ?? "");
+    if (!from) return false;
     try {
-      const { data: prof } = await supabase.rpc("ped_professor_por_whatsapp", { p_telefone: from });
+      let prof: any = null, profErr: any = null;
+      for (let t = 0; t < 2; t++) {
+        ({ data: prof, error: profErr } = await supabase.rpc("ped_professor_por_whatsapp", { p_telefone: from }));
+        if (!profErr) break;
+      }
+      if (profErr) throw new Error(`ped_professor_por_whatsapp: ${profErr.message}`);
       const profRow = Array.isArray(prof) ? prof[0] : prof;
       if (!profRow?.id) return false;
-
-      const { data: convitesAula } = await supabase
-        .from("ped_convites").select("id")
-        .eq("professor_atual_id", profRow.id)
-        .in("status", [
-          "fase1_titular_aguardando", "fase1b_reserva_aguardando",
-          "fase2_reconfirmacao_30d", "fase2_reconfirmacao_14d",
-          "fase2_reconfirmacao_7d", "fase2_lembrete_1d",
-        ]).limit(1);
-      if (convitesAula?.length) return false;
+      profPorTelefone.set(from, profRow);
 
       // Candidato de podcast EM ABERTO — o ciclo inteiro, não só o convite. O agendamento
-      // (`podcast_agenda_1/2/3`, a fase em que o convidado combina a data) é enviado com o
-      // candidato em `respondeu` (pod-convite-dispatch exige esse status), e depois vem o
-      // `confirmou`. Olhando só `na_fila`/`convidando`, toda resposta de agendamento caía no
-      // fluxo de professor, fora da conversa do podcast. Não entram: `aguardando_aprovacao`
-      // (ainda não foi contatado) e os encerrados (recusou, silenciou, removido, descartado).
-      // O handler do podcast só mexe no status de quem está em na_fila/convidando, então
-      // incluir respondeu/confirmou aqui muda o ROTEAMENTO, não o status de ninguém.
-      const { data: cands } = await supabase
+      // (`podcast_agenda_1/2/3`) é enviado com o candidato em `respondeu`, e depois vem o
+      // `confirmou`. Não entram `aguardando_aprovacao` (ainda não foi contatado) nem os
+      // encerrados. O handler do podcast só altera quem está em na_fila/convidando, então
+      // isto muda o ROTEAMENTO, não o status de ninguém.
+      const { data: cands, error: candErr } = await supabase
         .from("pod_convite_candidatos").select("id")
         .eq("professor_id", profRow.id)
         .in("status", ["na_fila", "convidando", "respondeu", "confirmou"]).limit(1);
-      return !!cands?.length;
+      if (candErr) throw new Error(`pod_convite_candidatos: ${candErr.message}`);
+      if (!cands?.length) return false;
+
+      const { data: aula, error: aulaErr } = await supabase
+        .from("ped_convites").select("id")
+        .eq("professor_atual_id", profRow.id)
+        .in("status", CONVITE_AULA_AGUARDANDO).limit(1);
+      if (aulaErr) throw new Error(`ped_convites: ${aulaErr.message}`);
+      if (!aula?.length) return true;
+
+      // É as duas coisas. (1) Citou uma mensagem — resposta deslizando, ou CLIQUE EM BOTÃO,
+      // que a Meta entrega com o context.id da mensagem original: segue a conversa dela.
+      const citado = msg?.context?.id;
+      if (citado) {
+        const { data: mc } = await supabase
+          .from("ped_conversas_mensagens").select("conversa_id")
+          .eq("wa_message_id", String(citado)).limit(1);
+        const convId = mc?.[0]?.conversa_id;
+        if (convId) {
+          const { data: conv } = await supabase
+            .from("ped_conversas_avulsas").select("metadata").eq("id", convId).maybeSingle();
+          return conv?.metadata?.origem === "podcast_convite";
+        }
+      }
+
+      // (2) Sem citação: quem falou por último com essa pessoa. A thread do podcast é achada
+      // do mesmo jeito que `_shared/podcastSac.ts` a acha — as mensagens dela NÃO gravam
+      // `professor_id` (0 de 239 medidas em 11/09), então não dá para achar por ele.
+      const { data: ultAula } = await supabase
+        .from("ped_convites").select("ultima_mensagem_enviada_em")
+        .eq("professor_atual_id", profRow.id)
+        .in("status", CONVITE_AULA_AGUARDANDO)
+        .not("ultima_mensagem_enviada_em", "is", null)
+        .order("ultima_mensagem_enviada_em", { ascending: false }).limit(1);
+      const tAula = ultAula?.[0]?.ultima_mensagem_enviada_em ? Date.parse(ultAula[0].ultima_mensagem_enviada_em) : 0;
+
+      const { data: threads } = await supabase
+        .from("ped_conversas_avulsas").select("id")
+        .contains("professores_alvo", [profRow.id])
+        .filter("metadata->>origem", "eq", "podcast_convite");
+      let tPod = 0;
+      if (threads?.length) {
+        const { data: ultPod } = await supabase
+          .from("ped_conversas_mensagens").select("created_at")
+          .in("conversa_id", threads.map((t: any) => t.id))
+          .eq("direcao", "outbound")
+          .order("created_at", { ascending: false }).limit(1);
+        tPod = ultPod?.[0]?.created_at ? Date.parse(ultPod[0].created_at) : 0;
+      }
+      return tPod > tAula;
     } catch (e) {
-      console.log("[whatsapp-webhook] desempate podcast falhou:", String(e));
+      // Falha → professor, que é o fluxo que sempre grava. Como ERRO, com o telefone: o
+      // desvio tem que deixar rastro, senão um convidado some da conversa dele sem sinal.
+      console.error("[whatsapp-webhook] desempate podcast×professor falhou — indo para o fluxo de professor:", from, String(e));
       return false;
     }
   }
@@ -244,21 +308,28 @@ Deno.serve(async (req) => {
           // Com número compartilhado (ver `numeroCompartilhado` acima), o desempate é por
           // candidato — e mensagem por mensagem, porque o mesmo número atende os dois.
           const noNumeroDoPodcast = !!podcastPhoneId && value?.metadata?.phone_number_id === podcastPhoneId;
-          let ehPodcast = noNumeroDoPodcast && !numeroCompartilhado;
-          if (noNumeroDoPodcast && numeroCompartilhado) {
-            const remetentes = (Array.isArray(value?.messages) ? value.messages : [])
-              .map((m: any) => String(m?.from ?? "")).filter(Boolean);
-            ehPodcast = remetentes.length > 0
-              && (await Promise.all(remetentes.map(ehRespostaDePodcast))).every(Boolean);
+          const todas = Array.isArray(value?.messages) ? value.messages : [];
+          let podMsgs: any[] = [];
+          let profMsgs: any[] = todas;
+          if (noNumeroDoPodcast && !numeroCompartilhado) {
+            podMsgs = todas; profMsgs = [];
+          } else if (noNumeroDoPodcast && numeroCompartilhado) {
+            // Mensagem por mensagem: um lote com um convidado e um professor não pode mandar
+            // os dois para o mesmo lado (o `.every` de antes mandava o lote inteiro).
+            const eh = await Promise.all(todas.map(ehRespostaDePodcast));
+            podMsgs = todas.filter((_: any, i: number) => eh[i]);
+            profMsgs = todas.filter((_: any, i: number) => !eh[i]);
           }
-          if (ehPodcast) {
-            try { await handlePodcastInbound(supabase, value, podcastWaAccountId, podcastAccessToken); } catch (e) {
+          if (podMsgs.length) {
+            try {
+              await handlePodcastInbound(supabase, { ...value, messages: podMsgs }, podcastWaAccountId, podcastAccessToken, profPorTelefone);
+            } catch (e) {
               console.error("[whatsapp-webhook] podcast inbound erro", String(e));
             }
-            continue;
           }
+          if (!profMsgs.length) continue;
 
-          const messages = Array.isArray(value?.messages) ? value.messages : [];
+          const messages = profMsgs;
           for (const msg of messages) {
             try {
               const from: string = msg?.from || "";
@@ -548,6 +619,7 @@ async function handlePodcastInbound(
   value: any,
   podcastWaAccountId: string | null,
   podcastAccessToken: string | null,
+  profPorTelefone?: Map<string, any>,
 ) {
   const messages = Array.isArray(value?.messages) ? value.messages : [];
   for (const msg of messages) {
@@ -591,9 +663,14 @@ async function handlePodcastInbound(
       resposta = `⚠️ Mensagem não suportada${msg?.type ? ` (${msg.type})` : ""}`;
     }
 
-    // match do convidado por telefone (variantes ±9º dígito)
-    const { data: prof } = await supabase.rpc("ped_professor_por_whatsapp", { p_telefone: from });
-    const profRow = Array.isArray(prof) ? prof[0] : prof;
+    // match do convidado por telefone (variantes ±9º dígito). Com número compartilhado o
+    // desempate já resolveu este telefone — reusar evita a 2ª consulta, cuja falha
+    // descartava a mensagem.
+    let profRow: any = profPorTelefone?.get(from) ?? null;
+    if (!profRow) {
+      const { data: prof } = await supabase.rpc("ped_professor_por_whatsapp", { p_telefone: from });
+      profRow = Array.isArray(prof) ? prof[0] : prof;
+    }
     if (!profRow?.id) {
       console.log("[whatsapp-webhook] podcast: convidado não encontrado p/", from);
       continue;

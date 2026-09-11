@@ -498,13 +498,31 @@ Deno.serve(async (req) => {
         anteriorDesativado = !descErr;
       }
 
+      // Unificação (decisão de 11/09: o podcast vai para ESTE número). Sem isto, entre este
+      // clique e o `ativar_podcast` o podcast seguia no número antigo — banido, mas ATIVO. A
+      // Meta devolve 200 num número banido: o motor contava o toque como entregue e, no 3º,
+      // marcava o convidado 'silenciou' + 'convidar em 6 meses'. Foi assim que ~20 convidados
+      // da onda de 31/08 ficaram bloqueados até 03/2027 por mensagens que ninguém recebeu.
+      // Desativado, o `pod-convite-dispatch` para em "sem conta" ANTES de tocar em qualquer
+      // candidato, e o `ativar_podcast` depois grava a conta nova.
+      let podcastAntigoDesativado = false;
+      if (body?.unificar_podcast === true) {
+        const { data: cfgPod } = await admin
+          .from("ped_configuracoes").select("valor").eq("chave", "wa_account_id_podcast").maybeSingle();
+        const podAtual = (cfgPod?.valor as string | null) || null;
+        if (podAtual && podAtual !== alvo.id) {
+          const { error: pErr } = await admin.from("wa_accounts").update({ is_active: false }).eq("id", podAtual);
+          podcastAntigoDesativado = !pErr;
+        }
+      }
+
       await admin.from("ped_configuracoes").upsert({
         chave: "wa_migracao_historico",
         valor: JSON.stringify({ em: new Date().toISOString(), de: anterior, para: alvo.id, por: user.id, templates: migrados, anterior_desativado: anteriorDesativado, reverter: body?.reverter === true }),
         descricao: "Ultima troca do numero do Pedagogico (tela Migracao de numero).",
       }, { onConflict: "chave" });
 
-      return json({ ok: true, numero_ativo: alvo.phone_number, templates_migrados: migrados, anterior_desativado: anteriorDesativado, faltando });
+      return json({ ok: true, numero_ativo: alvo.phone_number, templates_migrados: migrados, anterior_desativado: anteriorDesativado, podcast_antigo_desativado: podcastAntigoDesativado, faltando });
     }
 
     // ── ativar_podcast ────────────────────────────────────────────────────────
@@ -538,6 +556,29 @@ Deno.serve(async (req) => {
         return json({ ok: false, erro: `${faltando.length} template(s) de podcast ainda não aprovados no número novo`, faltando }, 409);
       }
 
+      // Conta do podcast ANTES da troca — lida da config, não da RPC: se o `ativar` já
+      // desativou o número velho (unificar_podcast), a RPC (que exige is_active) volta vazia.
+      const { data: cfgPod } = await admin
+        .from("ped_configuracoes").select("valor").eq("chave", "wa_account_id_podcast").maybeSingle();
+      const podAnterior = (cfgPod?.valor as string | null) || null;
+
+      // ESTE upsert É a virada do podcast, e vem PRIMEIRO — igual ao `ativar`. Antes ele vinha
+      // por último e sem conferir erro: se falhasse, os modelos já estavam repontados, a conta
+      // velha já desativada, a config apontando para uma conta inativa e a tela dizendo "Podcast
+      // agora sai por ...". Resultado: pod-convite-dispatch sem conta (nem WhatsApp nem e-mail)
+      // e o webhook sem saber qual é o número do podcast.
+      const { error: viradaErr } = await admin.from("ped_configuracoes").upsert({
+        chave: "wa_account_id_podcast",
+        valor: alvo.id,
+        descricao: "Convite de podcast: id da conta em wa_accounts (número Podcast PPGVET). Vazio até cadastrar o token.",
+      }, { onConflict: "chave" });
+      if (viradaErr) {
+        return json({
+          ok: false,
+          erro: `o podcast NÃO foi trocado (a gravação da configuração falhou: ${viradaErr.message}). Nada mudou — clique de novo.`,
+        }, 500);
+      }
+
       // Os 6 modelos declaram a conta DONA (é o que evita o 132001). Reapontar aqui é o que
       // faz o SAC do podcast voltar a enviar: as ~64 conversas carimbadas com o número velho
       // caem no padrão sozinhas assim que aquela conta deixa de estar ativa.
@@ -550,15 +591,6 @@ Deno.serve(async (req) => {
         }).eq("id", t.id);
         repontados++;
       }
-
-      const { data: podRow } = await admin.rpc("get_wa_account_podcast");
-      const podAnterior = (Array.isArray(podRow) ? podRow[0] : podRow)?.id ?? null;
-
-      await admin.from("ped_configuracoes").upsert({
-        chave: "wa_account_id_podcast",
-        valor: alvo.id,
-        descricao: "Convite de podcast: id da conta em wa_accounts (número Podcast PPGVET). Vazio até cadastrar o token.",
-      }, { onConflict: "chave" });
 
       let anteriorDesativado = false;
       if (podAnterior && podAnterior !== alvo.id && body?.desativar_anterior !== false) {

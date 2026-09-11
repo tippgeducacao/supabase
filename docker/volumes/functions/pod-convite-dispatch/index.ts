@@ -51,9 +51,12 @@ function formatPhone(raw?: string | null): string | null {
 function htmlEscape(s: string): string {
   return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
-// Número do PODCAST (nosso) p/ montar o link wa.me: só dígitos (aceita "+55 46 ...", "554699101299").
+// Número do PODCAST (nosso) p/ montar o link wa.me. Passa pelo `formatPhone` (acima) e não só
+// tira o que não é dígito: número brasileiro gravado SEM o 55 virava outro país. Caso real
+// (11/09/2026): o número unificado estava como "46 9 9927-0638" → wa.me/46999270638 → "+46",
+// Suécia — todo e-mail de podcast mandaria o convidado chamar um número sueco.
 function waDigits(raw?: string | null): string {
-  return String(raw ?? "").replace(/\D/g, "");
+  return formatPhone(raw) ?? "";
 }
 // Exibição amigável do nosso número: +55 (DD) NNNNN-NNNN / +55 (DD) NNNN-NNNN.
 function formatWaDisplay(digits: string): string {
