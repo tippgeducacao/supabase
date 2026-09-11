@@ -47,7 +47,7 @@ export const SAMPLES: Record<string, string> = {
   link_sala_aula: "https://meet.google.com/abc-defg-hij",
 };
 
-const SAMPLES_URL: Record<string, string> = {
+export const SAMPLES_URL: Record<string, string> = {
   "pos_graduacao.link_sala_meet_slug": "abc-defg-hij",
 };
 

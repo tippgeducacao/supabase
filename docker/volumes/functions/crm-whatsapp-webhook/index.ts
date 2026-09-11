@@ -547,8 +547,27 @@ async function ehNumeroDoPedagogico(admin: any, phoneNumberId: string): Promise<
       // Falhou a consulta: mantém o cache anterior (se houver) em vez de tratar o número
       // como do CRM — um desvio a menos abre card errado no SAC comercial e some com a
       // resposta do professor.
-      console.log("[crm-whatsapp-webhook] ped_wa_numeros_do_pedagogico falhou:", e instanceof Error ? e.message : String(e));
-      if (!pedNumerosCache) return false;
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!pedNumerosCache) {
+        // Isolate frio + RPC falhando é o único caminho em que um "Confirmo" de professor
+        // vira card do SAC comercial. Uma segunda tentativa cobre o transitório (o proxy
+        // do banco devolve 502 esporádico), e o que sobrar sai como ERRO no log — não como
+        // uma linha de debug que ninguém lê.
+        try {
+          const { data, error } = await admin.rpc("ped_wa_numeros_do_pedagogico");
+          if (error) throw new Error(error.message);
+          pedNumerosCache = { em: agora, ids: new Set((data ?? []).map((r: any) => String(r.phone_number_id))) };
+        } catch (e2) {
+          console.error(
+            "[crm-whatsapp-webhook] ped_wa_numeros_do_pedagogico falhou 2x e não há cache — " +
+            "inbound do PEDAGÓGICO será tratado como CRM neste evento:",
+            msg, e2 instanceof Error ? e2.message : String(e2),
+          );
+          return false;
+        }
+      } else {
+        console.log("[crm-whatsapp-webhook] ped_wa_numeros_do_pedagogico falhou, usando cache anterior:", msg);
+      }
     }
   }
   return pedNumerosCache.ids.has(String(phoneNumberId));
