@@ -399,7 +399,7 @@ const TOOL_PROFESSOR = {
     'Use quando a pessoa quer ser PROFESSOR, dar aula, palestrar ou oferecer conteúdo, ' +
     'em vez de se candidatar a uma vaga administrativa ou comercial. Chame SÓ DEPOIS de ' +
     'ter pedido o Currículo Lattes atualizado e a área em que ela quer dar aula, e de ela ' +
-    'ter respondido — mandando o Lattes, ou dizendo que não tem ou não consegue mandar agora. ' +
+    'ter respondido: mandando o Lattes, ou dizendo que não tem ou não consegue mandar agora. ' +
     'Depois de chamar isto, o assunto está encerrado: o card vai para a Triagem e o RH assume.',
   input_schema: {
     type: 'object',
