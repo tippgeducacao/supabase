@@ -131,7 +131,7 @@ Deno.serve(async (req) => {
   }
 });
 
-async function processarUma(
+export async function processarUma(
   admin: ReturnType<typeof createClient>,
   row: Agendada,
 ): Promise<string> {
@@ -211,6 +211,20 @@ async function processarUma(
       const texto = String(row.conteudo ?? "").trim();
       if (!texto) return await falhar("Conteúdo vazio");
       sendBody.conteudo = texto;
+    }
+
+    // O contato pode ter sido arquivado/temporizado depois do claim do lote.
+    // Revalida cada automação imediatamente antes do envio; erro na consulta
+    // interrompe o disparo. Agendamentos humanos e respostas transacionais
+    // preservam a política própria, sem ganhar uma restrição de prospecção.
+    if (row.automacao_id) {
+      const { data: protecao, error: erroProtecao } = await admin.rpc("crm_agendada_validar_envio", {
+        p_mensagem_id: row.id,
+      });
+      if (erroProtecao || typeof protecao?.permitido !== "boolean") {
+        return await falhar("Não foi possível validar as proteções do contato antes do envio.");
+      }
+      if (!protecao.permitido) return "cancelado";
     }
 
     console.log("[crm-agendadas-dispatch] ->", row.id, JSON.stringify(sendBody));
