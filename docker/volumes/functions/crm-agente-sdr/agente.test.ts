@@ -7,6 +7,7 @@ import { AGENTE_CAMPANHA_DIRETA } from './prompts-campanha-direta';
 import { AGENTE_RECONTATO } from './prompts-recontato';
 import { FOLLOWUP_SYSTEM } from './prompts-followup';
 import { montarContextoEntregaMateriais } from './entregaMateriais';
+import { INSTRUCAO_DISPONIBILIDADE_CONTATO } from './disponibilidadeContato';
 
 // Exercita o request HTTP real das três rotas, com o transporte como única fronteira
 // de IA simulada. Nenhuma mensagem, tool, consulta ou escrita externa é executada.
@@ -74,7 +75,8 @@ describe('instrução de memória no system enviado à Anthropic', () => {
     const pedido = ultimoPedido();
     expect(pedido.system).toEqual([
       { type: 'text', text: PROMPT_ROUTER },
-      { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA, cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA },
+      { type: 'text', text: INSTRUCAO_DISPONIBILIDADE_CONTATO, cache_control: { type: 'ephemeral' } },
     ]);
     expect(pedido.messages).toEqual(entrada);
     expect(pedido.messages[1]).toEqual(memoria[0]);
@@ -105,7 +107,8 @@ describe('instrução de memória no system enviado à Anthropic', () => {
     const pedido = ultimoPedido();
     expect(pedido.system).toEqual([
       { type: 'text', text: prompt },
-      { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA, cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA },
+      { type: 'text', text: INSTRUCAO_DISPONIBILIDADE_CONTATO, cache_control: { type: 'ephemeral' } },
     ]);
     // A exceção já chegava no segundo bloco, mas perdia força porque a persona
     // proibia reenvio no primeiro. Confere o pedido montado, nas quatro personas.

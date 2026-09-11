@@ -249,6 +249,35 @@ export function retencaoPendente(history: Msg[]): boolean {
   return false;
 }
 
+// 11/09/2026: após uma ausência, perguntar quando podemos chamar cria uma
+// espera por resposta, não uma oportunidade de cutucar 15 minutos depois. O
+// silêncio vale para as duas gerações da janela aberta (clássica e SPIN), sem
+// pausar a IA, desligar a cadência ou consumir o toque. A resposta real do lead
+// libera a avaliação normal. Meet e retorno com data já combinada são outros fluxos.
+export function retornoPendente(history: Msg[]): boolean {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const mensagem = history[i];
+    const texto = blocosParaTexto(mensagem.content).trim();
+    if (mensagem.role === 'user') {
+      if (texto.startsWith('[CORRECAO_INTERNA_AUTO_IGNORE]') || texto === INICIO_HISTORICO_HUMANO) continue;
+      if (ehMensagemRealDoLead(mensagem)) return false;
+      continue;
+    }
+    // Tools sem texto não são uma nova fala do atendente. Uma fala posterior
+    // substitui a pergunta antiga, mesmo que não contenha outra pergunta.
+    if (!texto) continue;
+    const normalizado = texto.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+    const perguntas = normalizado.match(/[^.!?\n]*\?/g) ?? [];
+    return perguntas.some((pergunta) => {
+      if (/\b(?:meet|reuniao|monitor|agendar|agendamento|videochamada|ligacao)\b/.test(pergunta)) return false;
+      const prazo = /\b(?:quando|que (?:dia|hora|horario|periodo)|qual (?:e )?(?:o )?(?:melhor )?(?:dia|hora|horario|periodo))\b/;
+      const contato = /\b(?:te (?:chamar|chamo|retornar)|entrar em contato|retomar(?:mos)? (?:(?:a|nossa|essa) conversa(?: por aqui)?|(?:por aqui|pelo whatsapp)))\b/;
+      return prazo.test(pergunta) && contato.test(pergunta);
+    });
+  }
+  return false;
+}
+
 // Parser do JSON {steps, final_answer, message} (port de "Processa Resposta do Claude").
 function parseResposta(resp: any): { message: string; final_answer: string } {
   const content = resp?.content ?? [];
@@ -369,6 +398,10 @@ export async function processarFollowupLead(supabase: any, leadSel: any, stageSe
     if (retencaoPendente(history)) {
       await atualizarLead(supabase, remotejid, { followup_ativado: false });
       tel.registrar('followup_pulado', { motivo: 'retencao_pendente', stage, esteiras: 'desligadas' });
+      return false;
+    }
+    if (retornoPendente(history)) {
+      tel.registrar('followup_pulado', { motivo: 'retorno_pendente', stage });
       return false;
     }
 

@@ -5,6 +5,7 @@
 import { PROMPT_ROUTER } from './prompts.ts';
 import type { Msg } from './historico.ts';
 import { INSTRUCAO_MEMORIA_HUMANA } from './memoriaHumana.ts';
+import { INSTRUCAO_DISPONIBILIDADE_CONTATO } from './disponibilidadeContato.ts';
 import { descreverToolsSdr } from './descricoesTools.ts';
 import { respostaParaFalhaCatalogo } from './falhaCatalogo.ts';
 
@@ -53,7 +54,8 @@ export async function chamarRouter(
     // TODOS os leads: todo inbound roteado paga 0,1x nessa parte.
     system: [
       { type: 'text', text: PROMPT_ROUTER },
-      { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA, cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA },
+      { type: 'text', text: INSTRUCAO_DISPONIBILIDADE_CONTATO, cache_control: { type: 'ephemeral' } },
     ],
     messages: historicoLimpo,
     tools: [{
@@ -105,7 +107,8 @@ export async function chamarAgentePrincipal(opts: {
   };
   const system: any[] = [
     { type: 'text', text: opts.promptAgente },
-    { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA, cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA },
+    { type: 'text', text: INSTRUCAO_DISPONIBILIDADE_CONTATO, cache_control: { type: 'ephemeral' } },
   ];
 
   const tools = opts.tools.length
