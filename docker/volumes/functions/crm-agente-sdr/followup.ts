@@ -21,6 +21,7 @@
 
 // deno-lint-ignore-file no-explicit-any
 import { FOLLOWUP_SYSTEM } from './prompts-followup.ts';
+import { gerarFollowupSpin, reservarAbordagemSpin } from './spinFollowup.ts';
 import { chamarAnthropic, MODELO_AGENTE } from './agente.ts';
 import { extrairPrimeiroNome, montarContextoTemporal } from './contexto.ts';
 import { INSTRUCAO_MEMORIA_HUMANA } from './memoriaHumana.ts';
@@ -119,11 +120,12 @@ async function lockSoltar(supabase: any, remotejid: string): Promise<void> {
 
 // Lead acabou de mandar mensagem? Então deixa o inbound cuidar — não interrompe.
 async function bufferTemMensagem(supabase: any, remotejid: string): Promise<boolean> {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('crm_agente_sdr_buffer')
     .select('id')
     .eq('remotejid', remotejid)
     .limit(1);
+  if (error) throw new Error('Não foi possível verificar o buffer antes do follow-up');
   return (data?.length ?? 0) > 0;
 }
 
@@ -132,22 +134,15 @@ async function bufferTemMensagem(supabase: any, remotejid: string): Promise<bool
 // pra a régua CADENCIA_MIN viver num lugar só. timestamp_mensagem é texto ISO-Z
 // (gravado por new Date().toISOString()), então a comparação lexicográfica
 // equivale à cronológica.
-async function selecionarCandidatos(supabase: any): Promise<any[]> {
+export async function selecionarCandidatos(supabase: any): Promise<any[]> {
   const agora = Date.now();
   const maisNovoQue = new Date(agora - JANELA_ABERTA_MIN * 60_000).toISOString();   // < 24h
   const maisVelhoQue = new Date(agora - CADENCIA_MIN[0] * 60_000).toISOString();    // >= 15min
-  const { data, error } = await supabase
-    .from('cliente_ppg_leads_sdr')
-    .select('remotejid, nome, curso_interesse_original, formacao_academica, follow_up, timestamp_mensagem, pausa_ia, atendimento_finalizado, followup_ativado, iniciar_atendimento, modo_recontato')
-    .eq('followup_ativado', true)
-    .eq('iniciar_atendimento', true)
-    .not('modo_recontato', 'is', true) // lead em recontato (no-show) NÃO recebe follow-up de lead novo
-    .or('pausa_ia.is.null,pausa_ia.eq.false')
-    .or('atendimento_finalizado.is.null,atendimento_finalizado.eq.false')
-    .gt('timestamp_mensagem', maisNovoQue)
-    .lt('timestamp_mensagem', maisVelhoQue)
-    .order('timestamp_mensagem', { ascending: true })
-    .limit(300);
+  // O consumidor já respeita o CRM V2. A mesma exclusão precisa acontecer
+  // antes do limite, senão dez contatos bloqueados monopolizam a varredura.
+  const { data, error } = await supabase.rpc('crm_sdr_followup_candidatos', {
+    p_mais_novo_que: maisNovoQue, p_mais_velho_que: maisVelhoQue, p_limite: 300,
+  });
   if (error) throw new Error(`selecionarCandidatos: ${error.message}`);
   return data ?? [];
 }
@@ -332,7 +327,7 @@ export async function gerarFollowup(
 }
 
 // ── processa um lead (sob lock, com revalidação fresca) ─────────────────────
-async function processarFollowupLead(supabase: any, leadSel: any, stageSel: number): Promise<boolean> {
+export async function processarFollowupLead(supabase: any, leadSel: any, stageSel: number): Promise<boolean> {
   const remotejid = leadSel.remotejid;
   if (!(await lockClaim(supabase, remotejid))) return false; // inbound em andamento, pula
   const tel = criarTelemetria(supabase, remotejid);
@@ -380,12 +375,37 @@ async function processarFollowupLead(supabase: any, leadSel: any, stageSel: numb
     const telefone = String(remotejid).split('@')[0];
     const contaLead = await contaDoLead(supabase, telefone, { direcao: 'inbound' });
     const contextoMateriais = await carregarStatusMateriais(supabase, { telefone, waAccountId: contaLead });
-    const { message, final_answer } = await gerarFollowup(supabase, lead, stage, tel, history, contextoMateriais);
+    const spin = await gerarFollowupSpin(supabase, lead, history, contextoMateriais, tel);
+    const { message, final_answer } = spin.ativo
+      ? spin : await gerarFollowup(supabase, lead, stage, tel, history, contextoMateriais);
+    // Classificar e gerar leva tempo: uma resposta, pausa ou reunião no intervalo
+    // cancela esta retomada. Não consumir o toque da conversa que acabou de reabrir.
+    const interrompido = async () => {
+      const atual = await buscarLead(supabase, remotejid);
+      return !atual || atual.pausa_ia === true || atual.agendado === true
+        || atual.atendimento_finalizado === true || atual.iniciar_atendimento !== true
+        || atual.followup_ativado !== true || atual.modo_recontato === true
+        || Date.parse(atual.timestamp_mensagem ?? '') !== ts
+        || await bufferTemMensagem(supabase, remotejid);
+    };
+    if (await interrompido()) {
+      tel.registrar('followup_pulado', { motivo: 'estado_mudou_durante_geracao', stage });
+      return false;
+    }
     if (!message) {
-      // Modelo julgou que não cabe follow agora: consome o toque pra não reavaliar todo tick.
+      // Revalida também o silêncio: não avançar a régua de uma conversa que
+      // recebeu resposta enquanto o classificador estava trabalhando.
       await atualizarLead(supabase, remotejid, { follow_up: followUpDoStage(stage) });
       tel.registrar('followup_pulado', { motivo: 'mensagem_vazia', stage, final_answer });
       return false;
+    }
+    if (spin.ativo) {
+      const cfg = await supabase.from('crm_sdr_spin_config').select('ativo').eq('id', 1).maybeSingle();
+      if (cfg.error || cfg.data?.ativo !== true) return false;
+      if (!(await reservarAbordagemSpin(supabase, remotejid, spin))) {
+        tel.registrar('followup_pulado', { motivo: 'abordagem_ja_reservada_ou_memoria_indisponivel', stage });
+        return false;
+      }
     }
 
     // Com 2+ números qualificadores em produção, o texto livre TEM que sair pelo
@@ -406,10 +426,23 @@ async function processarFollowupLead(supabase: any, leadSel: any, stageSel: numb
     // Marcador no histórico (conta a tentativa; o agente principal ignora).
     await gravarMensagem(supabase, remotejid, { role: 'user', content: MARCADOR_FOLLOWUP });
     // Envia pelo MESMO pipeline (fraciona + delay + crm-whatsapp-send).
-    await enviarResposta(ctx, message, lockRenovar(supabase, remotejid), tel);
+    let partesAceitas = 0;
+    const telemetriaEnvio: Telemetria = { ...tel, registrar(tipo, dados, duracao, erro) {
+      if (tipo === 'chunk_enviado' && dados?.ok === true) partesAceitas++;
+      tel.registrar(tipo, dados, duracao, erro);
+    } };
+    await enviarResposta(ctx, message, lockRenovar(supabase, remotejid), telemetriaEnvio, interrompido);
+    if (spin.meta?.abordagem_id) {
+      await supabase.from('crm_sdr_spin_memoria').update({ estado: partesAceitas ? 'enviado' : 'falhou' })
+        .eq('remotejid', remotejid).eq('curso_slug', spin.meta.curso_slug).eq('abordagem_id', spin.meta.abordagem_id);
+    }
+    if (!partesAceitas) {
+      tel.registrar('followup_pulado', { motivo: 'nenhuma_parte_aceita', stage, spin: spin.meta });
+      return false;
+    }
     // Fala do follow no histórico (pro próximo toque detectar o estilo usado).
     await gravarMensagem(supabase, remotejid, { role: 'assistant', content: [{ type: 'text', text: message }] });
-    tel.registrar('followup_enviado', { stage, final_answer, conta: contaLead, message: resumir(message, 300) });
+    tel.registrar('followup_enviado', { stage, final_answer, conta: contaLead, message: resumir(message, 300), spin: spin.meta });
     return true;
   } catch (e) {
     tel.registrar('erro', { onde: 'processarFollowupLead', remotejid }, undefined, (e as Error).message);
