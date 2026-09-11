@@ -94,6 +94,19 @@ describe("email-send integrado ao Resend", () => {
     expect(insercoes).toBe(0);
   });
 
+  it("usa o domínio de e-mail no pixel e descadastro da campanha sem trocar o cliente Supabase", async () => {
+    env.EMAIL_PUBLIC_URL = "https://email.exemplo.com/";
+    expect((await atender(requisicao())).status).toBe(200);
+    const enviado = JSON.parse(fetcher.mock.calls[0][1]!.body as string);
+    expect(enviado.html).toContain('src="https://email.exemplo.com/functions/v1/email-track-open?id=log-1"');
+    expect(enviado.html).toContain('href="https://email.exemplo.com/functions/v1/email-descadastro?');
+    expect(enviado.text).toContain("Descadastrar: https://email.exemplo.com/functions/v1/email-descadastro?");
+    expect(enviado.headers["List-Unsubscribe"]).toMatch(/^<https:\/\/email\.exemplo\.com\/functions\/v1\/email-descadastro\?/);
+    expect(enviado.headers["List-Unsubscribe-Post"]).toBe("List-Unsubscribe=One-Click");
+    expect(enviado.html).not.toContain("https://api.exemplo.com/");
+    expect(ambiente.criarCliente).toHaveBeenLastCalledWith("http://kong:8000", "service-teste");
+  });
+
   it("preserva entrega confirmada pelo webhook que chega antes da resposta do POST", async () => {
     fetcher.mockImplementation(async () => {
       log.status = "entregue";

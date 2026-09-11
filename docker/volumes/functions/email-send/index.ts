@@ -12,6 +12,7 @@
 // domínio que manda o e-mail de aprovação de TCC. Ver docs/E-mail e Caixas.md.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { formatarFrom, linkDescadastro, tagSegura } from "../_shared/envioComum.ts";
+import { urlPublicaEmail } from "../_shared/urlPublicaEmail.ts";
 import { ErroEnvio, obterProvedor, provedorEfetivo } from "../_shared/emailProviders/index.ts";
 import { buscarSupressao, supressaoSeAplica } from "../_shared/supressao.ts";
 import { respostaEnvioExistente } from "./idempotencia.ts";
@@ -386,10 +387,8 @@ Deno.serve(async (req) => {
     // ⚠️ Tem que ser a URL PÚBLICA: no self-hosted, SUPABASE_URL é http://kong:8000,
     // que nenhum cliente de e-mail alcança — o pixel apontou pra lá por muito tempo
     // e por isso NENHUMA abertura foi registrada. Mesmo motivo vale pro descadastro.
-    const supabaseUrl = Deno.env.get("SUPABASE_PUBLIC_URL") ||
-      Deno.env.get("PUBLIC_SUPABASE_URL") ||
-      Deno.env.get("SUPABASE_URL")!;
-    const pixelTag = `<img src="${supabaseUrl}/functions/v1/email-track-open?id=${log.id}" width="1" height="1" alt="" style="display:none" />`;
+    const basePublicaEmail = urlPublicaEmail((chave) => Deno.env.get(chave));
+    const pixelTag = `<img src="${basePublicaEmail}/functions/v1/email-track-open?id=${log.id}" width="1" height="1" alt="" style="display:none" />`;
     if (/<\/body>/i.test(corpoHtml)) {
       corpoHtml = corpoHtml.replace(/<\/body>/i, `${pixelTag}</body>`);
     } else {
@@ -399,7 +398,7 @@ Deno.serve(async (req) => {
     // Descadastro: obrigatório em disparo de massa (Gmail/Yahoo exigem one-click
     // de quem manda volume) e é o que alimenta a lista de supressão.
     const urlDescadastro = provider !== "gmail"
-      ? await linkDescadastro(supabaseUrl, payload.destinatario_email)
+      ? await linkDescadastro(basePublicaEmail, payload.destinatario_email)
       : null;
     if (urlDescadastro && (ehCampanha || payload.contexto_tipo === "webhook")) {
       // O link só existe depois de resolvido o remetente, então a variável

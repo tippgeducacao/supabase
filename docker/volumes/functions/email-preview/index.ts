@@ -12,6 +12,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { compilarDocumento } from "../_shared/emailBuilder/compile.ts";
 import type { DocumentoEmail } from "../_shared/emailBuilder/types.ts";
 import { linkDescadastro } from "../_shared/envioComum.ts";
+import { urlPublicaEmail } from "../_shared/urlPublicaEmail.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -86,9 +87,7 @@ Deno.serve(async (req) => {
       return json({ error: "sem documento para compilar (envie `documento` ou um email_id com conteudo_json)" }, 400);
     }
 
-    const publica = Deno.env.get("SUPABASE_PUBLIC_URL") ||
-      Deno.env.get("PUBLIC_SUPABASE_URL") ||
-      Deno.env.get("SUPABASE_URL")!;
+    const publica = urlPublicaEmail((chave) => Deno.env.get(chave));
 
     const dados = { ...CONTATO_EXEMPLO, ...(contato ?? {}) };
     const destino = String((dados as { contato?: { email?: string } }).contato?.email ?? "exemplo@exemplo.com");
