@@ -1,11 +1,11 @@
 // crm-transcrever-audio
-// Transcreve um áudio do chat comercial sob demanda (botão do atendente) via OpenAI.
-// PROPOSITALMENTE OpenAI (não Gemini): a transcrição do agente João usa Gemini, e
-// transcrever no chat com Gemini disputaria o MESMO rate limit do agente — então aqui
-// usamos OpenAI pra isolar a carga. Resultado é cacheado em sac_mensagens.transcricao.
+// OpenAI primeiro; Gemini cobre falha, limite, timeout ou transcrição vazia.
+// O mesmo caminho atende botão do SAC e memória humana do SDR, sem enviar mensagens.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { acessoWorkerAutorizado, processarHistoricoSdr } from "./historicoSdr.ts";
 import { codigoErroSeguro, transcreverAudio } from "./transcricao.ts";
+import { resolverGemini } from './configuracao.ts';
+import { criarTelemetria } from '../crm-agente-sdr/eventos.ts';
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -30,9 +30,15 @@ Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "método não permitido" }, 405);
 
   const admin = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
-  const transcrever = (url: string, mime: string | null) => transcreverAudio(url, mime, {
-    chave: OPENAI_KEY, modelo: MODELO,
-  });
+  let configuracao: ReturnType<typeof resolverGemini> | undefined;
+  const transcrever = async (url: string, mime: string | null) => {
+    // Só resolve a chave depois da autorização e quando não há cache de texto.
+    configuracao ??= resolverGemini(admin, nome => Deno.env.get(nome));
+    const gemini = await configuracao;
+    const tel = criarTelemetria(admin, 'crm-transcrever-audio');
+    return transcreverAudio(url, mime, { chave: OPENAI_KEY, modelo: MODELO, gemini,
+      registrar: evento => tel.registrar('transcricao_audio_' + evento.fase, evento) });
+  };
 
   if (new URL(req.url).searchParams.get("mode") === "historico-sdr") {
     try {
