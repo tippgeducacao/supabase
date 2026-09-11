@@ -23,6 +23,8 @@ export type EntradaSimulacao = {
   mocks: Record<string, unknown>;
   agente_override: string;
   sem_presente_escola: boolean;
+  /** A pessoa JÁ tem a tag da Escola: o prompt leva o aviso (NOTA_JA_ESTA_NA_ESCOLA) no lugar do convite. */
+  esta_na_escola: boolean;
   prompt_extra: string;
 };
 
@@ -43,7 +45,7 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
   if (!Number.isInteger(stage) || Number(stage) < 1 || Number(stage) > 7) throw new Error('followup_stage deve ser inteiro de 1 a 7');
   if (modo === 'followup') {
     if (!historico.length || mensagens.length) throw new Error('followup exige histórico inicial e nenhuma nova mensagem');
-    if (body.usar_router || body.agente_override || body.prompt_extra || body.sem_presente_escola) {
+    if (body.usar_router || body.agente_override || body.prompt_extra || body.sem_presente_escola || body.esta_na_escola) {
       throw new Error('followup não aceita router, override ou alteração de prompt');
     }
   }
@@ -60,7 +62,7 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
     if (Object.keys(m).some((k) => k !== 'role' && k !== 'content')) throw new Error('histórico aceita somente role e content');
     return { role: m.role, content: texto(m.content, 'content', true) };
   });
-  for (const campo of ['usar_router', 'sem_presente_escola']) {
+  for (const campo of ['usar_router', 'sem_presente_escola', 'esta_na_escola']) {
     if (body[campo] !== undefined && typeof body[campo] !== 'boolean') throw new Error(`${campo} deve ser booleano`);
   }
   if (body.agente_atual != null && body.agente_atual !== 'agente_validacao' && body.agente_atual !== 'agente_qualificador') {
@@ -81,6 +83,7 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
     mocks: (body.mocks as Record<string, unknown>) ?? {},
     agente_override: texto(body.agente_override, 'agente_override').trim(),
     sem_presente_escola: body.sem_presente_escola === true,
+    esta_na_escola: body.esta_na_escola === true,
     prompt_extra: texto(body.prompt_extra, 'prompt_extra').trim(),
   };
 }

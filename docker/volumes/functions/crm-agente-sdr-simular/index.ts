@@ -20,7 +20,7 @@ import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO } from '../crm-agente-sdr/prompts
 import { AGENTE_CAMPANHA_DIRETA } from '../crm-agente-sdr/prompts-campanha-direta.ts';
 import { carregarTools, chamarAgentePrincipal, chamarRouter, MODELO_AGENTE } from '../crm-agente-sdr/agente.ts';
 import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoCurso, notaDoNome, renderPrompt } from '../crm-agente-sdr/contexto.ts';
-import { comPresenteEscola } from '../crm-agente-sdr/escolaGratuita.ts';
+import { comBlocoDaEscola, comPresenteEscola } from '../crm-agente-sdr/escolaGratuita.ts';
 import {
   decidirPrazoEstudante,
   instrucaoPerguntarConclusao,
@@ -273,7 +273,10 @@ Deno.serve(async (req) => {
           pergunta_formacao: montarPerguntaFormacao(encontrarFormacao(estado.formacao)),
         };
         let promptAgente = renderPrompt(promptBase, vars);
-        if (!entrada.sem_presente_escola) promptAgente = comPresenteEscola(promptAgente);
+        // Mesma escolha da produção (index.ts → comBlocoDaEscola): quem já está na Escola
+        // recebe o aviso, não o convite. Sem isto o caso Leandro (2026-09-11) não é testável.
+        if (entrada.esta_na_escola) promptAgente = comBlocoDaEscola(promptAgente, true);
+        else if (!entrada.sem_presente_escola) promptAgente = comPresenteEscola(promptAgente);
         if (entrada.prompt_extra) promptAgente += `\n\n${entrada.prompt_extra}`;
         const agenteTools = entrada.agente_override || agente;
         let tools = await toolsDe(agenteTools);

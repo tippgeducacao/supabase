@@ -18,6 +18,7 @@ describe('contrato textual de simulação com histórico', () => {
     const entrada = validarEntradaSimulacao({ mensagens: ['Olá'] });
     expect(entrada.persona).toBe('campanha_direta');
     expect(entrada.usar_router).toBe(false);
+    expect(entrada.esta_na_escola).toBe(false);
     expect(entrada.historico_inicial).toEqual([]);
   });
 
