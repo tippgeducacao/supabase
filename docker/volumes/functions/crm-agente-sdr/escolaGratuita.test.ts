@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  comLinkPedido,
   comPresenteNaDespedida,
   jaTemOPresente,
   LINK_ESCOLA_GRATUITA,
   mereceOPresente,
+  pediuLinkDaEscola,
 } from './escolaGratuita';
 
 const pausa = (motivo: string, tipo?: string) => ({
@@ -96,5 +98,65 @@ describe('anexar o presente à despedida', () => {
     expect(jaTemOPresente(null)).toBe(false);
     expect(jaTemOPresente('')).toBe(false);
     expect(jaTemOPresente(`vai aqui ${LINK_ESCOLA_GRATUITA} ó`)).toBe(true);
+  });
+});
+
+// Caso Leandro (10/09/2026): já estava na Escola, pediu "Me manda o link" duas vezes e o
+// João respondeu que o acesso "continuava ativo" — sem o endereço. Quem pede recebe.
+describe('quem pede o link da Escola recebe o link', () => {
+  it('reconhece o pedido de quem já está na Escola, mesmo sem citar a Escola', () => {
+    for (const m of [
+      'Me manda o link',
+      'me manda o link de novo',
+      'pode mandar o acesso?',
+      'perdi o acesso',
+      'não acho onde entrar na escola',
+      'qual o site mesmo?',
+      'cadê o link',
+      'tem o link aí?',
+      'me dá o link',
+    ]) {
+      expect(pediuLinkDaEscola(m, true), m).toBe(true);
+    }
+  });
+
+  it('sem contexto da Escola, só reconhece quando a mensagem cita a Escola', () => {
+    expect(pediuLinkDaEscola('me manda o link', false)).toBe(false);
+    expect(pediuLinkDaEscola('me manda o link da escola de especialização', false)).toBe(true);
+    expect(pediuLinkDaEscola('manda o link dos cursos gratuitos', false)).toBe(true);
+  });
+
+  // "link" de reunião é do fluxo de agendamento, não da Escola.
+  it('NÃO confunde com o link da reunião', () => {
+    expect(pediuLinkDaEscola('me manda o link da reunião', true)).toBe(false);
+    expect(pediuLinkDaEscola('manda o link do meet', true)).toBe(false);
+    expect(pediuLinkDaEscola('qual o link da call?', true)).toBe(false);
+  });
+
+  it('conversa normal fica quieta', () => {
+    expect(pediuLinkDaEscola('Sim', true)).toBe(false);
+    expect(pediuLinkDaEscola('Consigo assistir ainda?', true)).toBe(false);
+    expect(pediuLinkDaEscola('quero saber o valor da pós', true)).toBe(false);
+    expect(pediuLinkDaEscola('', true)).toBe(false);
+    expect(pediuLinkDaEscola(null, true)).toBe(false);
+  });
+
+  it('acrescenta o endereço à resposta do modelo, sem trocar o texto', () => {
+    const r = comLinkPedido('esse acesso é o mesmo de antes, é só entrar com seu cadastro.', 'Me manda o link', true);
+    expect(r.anexou).toBe(true);
+    expect(r.texto).toBe(`esse acesso é o mesmo de antes, é só entrar com seu cadastro.\n${LINK_ESCOLA_GRATUITA}`);
+  });
+
+  it('não duplica quando o modelo já mandou o link', () => {
+    const texto = `aqui: ${LINK_ESCOLA_GRATUITA}`;
+    const r = comLinkPedido(texto, 'Me manda o link', true);
+    expect(r.anexou).toBe(false);
+    expect(r.texto).toBe(texto);
+  });
+
+  it('não mexe quando ninguém pediu', () => {
+    const r = comLinkPedido('beleza.', 'Sim', true);
+    expect(r.anexou).toBe(false);
+    expect(r.texto).toBe('beleza.');
   });
 });

@@ -16,7 +16,7 @@ import { pausaVigente } from './pausa.ts';
 import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO } from './prompts.ts';
 import { AGENTE_RECONTATO, montarDossieRecontato } from './prompts-recontato.ts';
 import { AGENTE_CAMPANHA_DIRETA } from './prompts-campanha-direta.ts';
-import { comBlocoDaEscola, comPresenteNaDespedida, LINK_ESCOLA_GRATUITA } from './escolaGratuita.ts';
+import { comBlocoDaEscola, comLinkPedido, comPresenteNaDespedida, jaTemOPresente, LINK_ESCOLA_GRATUITA } from './escolaGratuita.ts';
 import type { Encerramento } from './encerramento.ts';
 import { comContinuidadeWebchat } from './continuidadeWebchat.ts';
 import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoCurso, notaDoNome, renderPrompt } from './contexto.ts';
@@ -717,7 +717,14 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
         // sem texto junto, então o loop dá mais uma volta só pra escrever o adeus.
         const comPresente = comPresenteNaDespedida(texto, encerramento, conversaTexto(messages), estaNaEscola);
         if (comPresente.anexou) tel.registrar('presente_escola_anexado', { onde: 'despedida_pos_pausa' });
-        await enviarResposta(ctx, comPresente.texto, renovar, tel, pausouPorTool ? undefined : () => iaPausada(remotejid));
+        // Quem PEDE o link da Escola recebe o link (caso Leandro, 2026-09-11): o bloco de
+        // quem já está dentro proibia mandar, e o modelo respondia "continua ativo" sem o
+        // endereço. O prompt abriu a exceção; aqui é a garantia. Só acrescenta.
+        const comLink = comLinkPedido(
+          comPresente.texto, conteudo, estaNaEscola || jaTemOPresente(conversaTexto(messages)),
+        );
+        if (comLink.anexou) tel.registrar('link_escola_reenviado', { pedido: resumir(conteudo, 200) });
+        await enviarResposta(ctx, comLink.texto, renovar, tel, pausouPorTool ? undefined : () => iaPausada(remotejid));
       }
     }
     tel.registrar('rodada_fim', { voltas_llm: rodada + 1, respondeu: Boolean(texto) }, Date.now() - inicioRodada);

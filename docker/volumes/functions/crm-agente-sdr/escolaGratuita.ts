@@ -38,7 +38,12 @@ export const BLOCO_ESCOLA_GRATUITA = [
   '',
   '**NÃO mande** quando: a reunião foi marcada (aí a conversa não acabou), o lead já é aluno'
     + ' nosso, ele informou que pagou a matrícula, ou você já mandou esse convite nesta conversa'
-    + ' — é UMA vez só.',
+    + ' — a OFERTA é UMA vez só.',
+  '',
+  '✅ Exceção que vale sempre: se a pessoa PEDIR o link ("me manda o link", "perdi o acesso",'
+    + ' "qual o site?", "não acho onde entrar"), mande o endereço de novo NA HORA, na própria'
+    + ' resposta, mesmo que já tenha mandado antes. Pedido não é oferta: quem pede quer o link,'
+    + ' não uma explicação de que ele continua ativo.',
   '',
   'Modelo (adapte ao seu tom de sempre; o LINK é literal e não muda):',
   '',
@@ -147,12 +152,20 @@ export const NOTA_JA_ESTA_NA_ESCOLA = [
   '',
   'Ela já se cadastrou na Escola de Especialização e já recebeu o link de acesso.',
   '',
-  '⛔ **NÃO ofereça a biblioteca gratuita, não mande o link e não a apresente como novidade** —'
-    + ' nem na despedida, nem no meio da conversa. Oferecer acesso a quem já tem é o jeito mais'
-    + ' rápido de mostrar que você não sabe com quem está falando.',
+  '⛔ **NÃO ofereça a biblioteca gratuita nem a apresente como novidade** — nem na despedida,'
+    + ' nem no meio da conversa. Oferecer acesso a quem já tem é o jeito mais rápido de mostrar'
+    + ' que você não sabe com quem está falando.',
   '',
-  'Se ELA puxar o assunto do conteúdo gratuito, fale com naturalidade de quem sabe que ela já'
-    + ' está lá dentro ("aproveita que já tá tudo liberado aí"). A conversa segue sendo sobre a pós.',
+  '✅ Mas se ELA PEDIR o link ou o acesso ("me manda o link", "perdi o acesso", "qual o site?",'
+    + ' "não acho onde entrar", "me manda de novo"), mande o endereço NA HORA, na própria'
+    + ' resposta, sem pedir confirmação e sem dizer só que "continua ativo" ou que "já mandei'
+    + ` antes": ${LINK_ESCOLA_GRATUITA} — ela entra com o cadastro que já tem. Quem pede quer o`
+    + ' link, não uma explicação. (Caso Leandro, 10/09/2026: pediu duas vezes, o agente respondeu'
+    + ' que o acesso "continuava ativo" e não mandou; uma atendente teve que colar o link.)',
+  '',
+  'Se ELA puxar o assunto do conteúdo gratuito sem pedir o link, fale com naturalidade de quem'
+    + ' sabe que ela já está lá dentro ("aproveita que já tá tudo liberado aí"). A conversa segue'
+    + ' sendo sobre a pós.',
 ].join('\n');
 
 /** Apensa ao prompt o bloco certo: o convite, ou o aviso de que ela já está dentro. */
@@ -160,4 +173,57 @@ export function comBlocoDaEscola(promptRenderizado: string, jaEstaNaEscola: bool
   return jaEstaNaEscola
     ? `${promptRenderizado}\n${NOTA_JA_ESTA_NA_ESCOLA}`
     : comPresenteEscola(promptRenderizado);
+}
+
+// ── PEDIU O LINK? O LINK SAI, EM CÓDIGO (2026-09-11, caso Leandro) ────────────────
+// A pessoa já estava na Escola, escreveu "Me manda o link" e o João respondeu "esse acesso
+// já é o mesmo que te mandei antes, o link continua ativo" — obedecendo ao ⛔ do bloco acima,
+// que até então proibia mandar o link a quem já tem acesso SEM abrir exceção pro pedido. Uma
+// atendente teve que colar o endereço na mão. O prompt agora abre a exceção; esta guarda
+// GARANTE (mesmo princípio do presente na despedida: o que vale sempre não depende de o
+// modelo lembrar). Ela só ACRESCENTA o endereço ao que o modelo escreveu, nunca troca texto.
+//
+// Quando dispara — as duas condições juntas:
+//   1. a mensagem do lead pede link/acesso/site/endereço (verbo de pedir + "link", ou
+//      ⚠️ depois do verbo vai lookahead de espaço/pontuação, não : em JS \w é ASCII e
+//      "cadê "/"me dá " não formam fronteira de palavra;
+//      "perdi/não acho o acesso", ou "qual o site/link", ou "link de novo");
+//   2. o pedido é sobre a ESCOLA: ou a mensagem cita escola/biblioteca/curso gratuito, ou o
+//      contexto já é da Escola (a pessoa tem a tag, ou o link já apareceu nesta conversa).
+// Não dispara quando a mensagem fala de reunião/meet/call/ligação — aí o "link" pedido é o
+// da reunião, e esse quem manda é o fluxo de agendamento.
+
+const RE_PEDE_LINK =
+  /\b(manda|mande|envia|envie|passa|passe|reenvia|reenvie|encaminha|encaminhe|tem|teria|pode mandar|consegue mandar|me d[aá]|preciso d[oe]|quero)(?=[\s,.!?:;]|$)[^\n]{0,40}\b(link|acesso|site|endere[çc]o|p[aá]gina)\b/i;
+const RE_PERDEU_ACESSO =
+  /\b(perdi|n[ãa]o (acho|encontro|consigo (achar|encontrar|entrar|acessar)|tenho mais)|cad[êe]|onde (t[áa]|est[áa]|fica|entro|acesso))(?=[\s,.!?:;]|$)[^\n]{0,40}\b(link|acesso|site|endere[çc]o|p[aá]gina|escola|biblioteca|curso)/i;
+const RE_QUAL_LINK = /\bqual\b[^\n]{0,20}\b(link|site|endere[çc]o|p[aá]gina)\b/i;
+const RE_LINK_DE_NOVO = /\b(link|acesso)\b[^\n]{0,20}\b(de novo|novamente|outra vez)\b/i;
+const RE_ASSUNTO_ESCOLA = /escola|biblioteca|gratuit|curso livre|cursos livres|especializa/i;
+const RE_ASSUNTO_REUNIAO = /reuni[ãa]o|meet|\bcall\b|liga[çc][ãa]o|videochamada|\bzoom\b/i;
+
+/**
+ * O lead está pedindo o link da Escola?
+ * `contextoEscola` = a pessoa tem a tag da Escola OU o link já apareceu nesta conversa —
+ * sem isso, "me manda o link" sozinho é ambíguo demais e a guarda fica quieta.
+ */
+export function pediuLinkDaEscola(mensagemDoLead: string | null | undefined, contextoEscola: boolean): boolean {
+  const m = String(mensagemDoLead ?? '').trim();
+  if (!m) return false;
+  if (RE_ASSUNTO_REUNIAO.test(m)) return false;
+  const pede = RE_PEDE_LINK.test(m) || RE_PERDEU_ACESSO.test(m) || RE_QUAL_LINK.test(m) || RE_LINK_DE_NOVO.test(m);
+  if (!pede) return false;
+  return RE_ASSUNTO_ESCOLA.test(m) || contextoEscola;
+}
+
+/** Garante o endereço na resposta a quem pediu. Só acrescenta; se o modelo já pôs, nada muda. */
+export function comLinkPedido(
+  texto: string,
+  mensagemDoLead: string | null | undefined,
+  contextoEscola: boolean,
+): { texto: string; anexou: boolean } {
+  if (!pediuLinkDaEscola(mensagemDoLead, contextoEscola)) return { texto, anexou: false };
+  if (jaTemOPresente(texto)) return { texto, anexou: false };
+  const base = texto.trimEnd();
+  return { texto: base ? `${base}\n${LINK_ESCOLA_GRATUITA}` : LINK_ESCOLA_GRATUITA, anexou: true };
 }
