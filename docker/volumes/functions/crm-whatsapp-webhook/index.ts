@@ -735,18 +735,21 @@ Deno.serve(async (req) => {
         const phoneNumberId = value?.metadata?.phone_number_id;
         if (!phoneNumberId) continue;
 
-        // Número do PEDAGÓGICO → outro pipeline inteiro. Desde 10/09/2026 o número do
-        // pedagógico vive numa WABA do app "API Oficial CRM - BM 08" (o anterior foi banido
-        // pela Meta), e um app tem UMA URL de webhook: o inbound dele cai AQUI. Processar
-        // como CRM abriria card no SAC comercial e o "Confirmo" do professor nunca viraria
-        // status de convite. Encaminhamos o payload cru para `whatsapp-webhook`, que é quem
-        // sabe casar professor, convite e conversa. Mesmo desvio-por-número do agente de RH,
-        // e a lista vem do banco (ped_wa_numeros_do_pedagogico) — nunca de "existe em
+        // Número do PEDAGÓGICO → grava AQUI e TAMBÉM vai para o pipeline do pedagógico.
+        // Desde 10/09/2026 o número do pedagógico vive numa WABA do app "API Oficial CRM -
+        // BM 08" (o anterior foi banido pela Meta), e um app tem UMA URL de webhook: o
+        // inbound dele cai aqui. O `whatsapp-webhook` é quem casa professor, convite e botão
+        // — sem ele o "Confirmo" nunca vira status de convite —, e recebe só este change.
+        // A lista vem do banco (ped_wa_numeros_do_pedagogico) — nunca de "existe em
         // wa_accounts", que arrastaria junto o número do agente SDR.
-        if (await ehNumeroDoPedagogico(admin, phoneNumberId)) {
-          await encaminharAoPedagogico(payload?.object, entry, change, phoneNumberId);
-          continue;
-        }
+        //
+        // Desde 11/09/2026 a CONVERSA desse número mora no CRM: o SAC do pedagógico passou a
+        // ser o funil "SAC - Pedagógico" do SAC 2.0 (que declara o número). Então o change
+        // segue o caminho normal — crm_whatsapp_messages → espelho → card no funil, status
+        // de entrega, janela de 24h do composer — e só DEPOIS é encaminhado. Gravado antes,
+        // o espelho antigo do pedagógico (`sac_mirror_from_ped_msg`) acha o wamid no CRM e
+        // não cria uma 2ª cópia no SAC que saiu do ar. Ver docs/Pedagógico.md → SAC.
+        const doPedagogico = await ehNumeroDoPedagogico(admin, phoneNumberId);
 
         // Encontra a conta CRM pelo phone_number_id
         const { data: accountRows } = await admin
@@ -759,8 +762,16 @@ Deno.serve(async (req) => {
         const accountId = accountRows?.[0]?.id;
         // Só os números marcados como "agente IA" repassam o inbound pro crm-agente-sdr.
         // Os demais (Monitor, pedagógico, etc.) são atendimento humano — a IA NÃO responde.
-        const accountIaAtivo = accountRows?.[0]?.agente_ia_ativo === true;
+        // O do pedagógico NUNCA, nem com a flag ligada por engano: resposta de professor a
+        // convite de aula não pode virar rodada do João.
+        const accountIaAtivo = accountRows?.[0]?.agente_ia_ativo === true && !doPedagogico;
         if (!accountId) {
+          // Número do pedagógico sem conta no CRM (os antigos, fora da BM 08): segue só
+          // para o pipeline dele, como sempre foi.
+          if (doPedagogico) {
+            await encaminharAoPedagogico(payload?.object, entry, change, phoneNumberId);
+            continue;
+          }
           console.warn("[crm-whatsapp-webhook] phone_number_id não encontrado no CRM:", phoneNumberId);
           continue;
         }
@@ -1085,6 +1096,15 @@ Deno.serve(async (req) => {
             }
             if (retryBenigno) {
               console.log("[crm-whatsapp-webhook] msg duplicada (retry meta), ignorada:", msgId);
+            } else if (doPedagogico) {
+              // Número do pedagógico NÃO pede reentrega à Meta: o reenvio repetiria o
+              // encaminhamento, e o `whatsapp-webhook` não deduplica por wamid — o mesmo
+              // botão viraria dois eventos de convite. A mensagem segue salva no pipeline
+              // do pedagógico; aqui fica o erro no log.
+              console.error(
+                `[crm-whatsapp-webhook] FALHA AO GRAVAR INBOUND (pedagógico) de ${from} ` +
+                `(wamid=${msgId}, code=${code}): ${insertErr.message} — sem card no SAC do CRM`,
+              );
             } else {
               falhasPersistencia++;
               console.error(
@@ -1254,6 +1274,12 @@ Deno.serve(async (req) => {
           } else {
             processedStatuses++;
           }
+        }
+
+        // Só agora o pipeline do pedagógico — com a mensagem já gravada aqui (ver o
+        // comentário do `doPedagogico`, lá em cima).
+        if (doPedagogico) {
+          await encaminharAoPedagogico(payload?.object, entry, change, phoneNumberId);
         }
       }
     }
