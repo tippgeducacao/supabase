@@ -5,6 +5,13 @@
 // access_token JÁ salvo na conta (crm_whatsapp_accounts), então o usuário não precisa
 // mexer em token/curl: só informa o PIN na tela de Contas.
 //
+// Número JÁ registrado (status CONNECTED na CLOUD_API — típico de número que veio de
+// outro provedor, ex.: SprintHub via Tech Provider): o registro é por NÚMERO, não por
+// app, então NÃO se chama /register de novo — com o PIN antigo desconhecido isso só
+// devolve (#133005) "PIN Mismatch". Nesse caso a função troca o PIN por
+// POST /{phone_number_id} {pin} (não exige o PIN anterior nem o chip) e devolve
+// `ja_registrado: true`. Caso real: "Grupo PPG Educação (3250)", 2026-09-10.
+//
 // Gate: admin/diretor (gestão de contas WhatsApp).
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { corsHeaders } from "../_shared/cors.ts";
@@ -61,10 +68,51 @@ Deno.serve(async (req) => {
     return json({ error: `conta WhatsApp incompleta: ${waErr?.message ?? "sem phone_number_id/token"}` }, 500);
   }
 
+  const authHeaders = { Authorization: `Bearer ${wa.access_token}`, "Content-Type": "application/json" };
+
+  // Já registrado? (leitura é leniente — funciona mesmo sem atribuição na WABA.)
+  const estado = await fetch(
+    `${META_GRAPH}/${wa.phone_number_id}?fields=status,platform_type,is_pin_enabled`,
+    { headers: authHeaders },
+  ).then((x) => x.json()).catch(() => null);
+  const jaRegistrado = estado?.status === "CONNECTED" && estado?.platform_type === "CLOUD_API";
+  console.log(`[crm-whatsapp-register] phone=${wa.phone_number_id} estado:`, JSON.stringify(estado ?? null));
+
+  if (jaRegistrado) {
+    // Troca o PIN (2FA) sem exigir o anterior. Se falhar, o número CONTINUA registrado —
+    // o erro aqui é só sobre o PIN.
+    const rp = await fetch(`${META_GRAPH}/${wa.phone_number_id}`, {
+      method: "POST", headers: authHeaders, body: JSON.stringify({ pin }),
+    });
+    const rpJson = await rp.json().catch(() => ({}));
+    if (!rp.ok || (rpJson as any)?.error) {
+      const e = (rpJson as any)?.error;
+      return json({
+        error: e?.error_user_msg || e?.message || `Meta ${rp.status}`,
+        meta_code: e?.code ?? null,
+        meta_subcode: e?.error_subcode ?? null,
+        ja_registrado: true,
+        hint:
+          "O número JÁ está registrado na Cloud API (não precisa registrar de novo) — só a troca do PIN " +
+          "falhou. Alternativa: WhatsApp Manager → Números de telefone → Configurações → Verificação em " +
+          "duas etapas → Alterar PIN (não exige o PIN antigo nem o chip). Depois clique Conectar webhook.",
+      }, 422);
+    }
+    return json({
+      ok: true,
+      success: true,
+      ja_registrado: true,
+      pin_alterado: true,
+      mensagem:
+        "Este número já estava registrado na Cloud API (veio registrado de outro provedor). " +
+        "Não registrei de novo — só defini este PIN como o novo 2FA dele. Agora clique Conectar webhook.",
+    });
+  }
+
   // Registra na Meta. Só phone_number_id + token — o waba_id da conta NÃO entra aqui.
   const r = await fetch(`${META_GRAPH}/${wa.phone_number_id}/register`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${wa.access_token}`, "Content-Type": "application/json" },
+    headers: authHeaders,
     body: JSON.stringify({ messaging_product: "whatsapp", pin }),
   });
   const resp = await r.json().catch(() => ({}));
@@ -84,8 +132,14 @@ Deno.serve(async (req) => {
         `WABA deste número. No Business Manager: Configurações do negócio → Usuários → Usuários do sistema → ` +
         `esse usuário → Adicionar ativos → Contas do WhatsApp → marque a WABA com controle total. ` +
         `Depois clique Registrar de novo e, em seguida, Conectar webhook.`;
-    } else if (e?.code === 100 || e?.code === 133005) {
-      hint = "Pode ser PIN antigo (2FA) — desative a Verificação em duas etapas do número no WhatsApp Manager e tente outro PIN.";
+    } else if (e?.code === 133005) {
+      hint =
+        "O PIN não bate com a verificação em duas etapas já definida no número (se ele veio de outro " +
+        "provedor, o PIN foi definido lá). Troque o PIN no WhatsApp Manager → Números de telefone → " +
+        "Configurações → Verificação em duas etapas → Alterar PIN (não exige o PIN antigo nem o chip) e " +
+        "clique Registrar de novo com o PIN novo.";
+    } else if (e?.code === 100) {
+      hint = "Pode ser PIN antigo (2FA) — troque o PIN do número no WhatsApp Manager (Verificação em duas etapas → Alterar PIN) e tente de novo.";
     } else if (e?.code === 133010) {
       hint = "Número ainda não verificado — verifique (OTP) antes de registrar.";
     }
