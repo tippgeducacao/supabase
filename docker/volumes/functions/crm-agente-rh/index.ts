@@ -494,26 +494,73 @@ async function gravarDados(leadId: string, dados: Record<string, string>): Promi
   return gravados;
 }
 
+/**
+ * Quanto o agente espera antes de responder, em segundos.
+ *
+ * Ele lia, pensava e respondia em três segundos — e três segundos é a assinatura de um robô.
+ * Na conversa da Eduarda (10/09) as respostas saíram 18:12, 18:13, 18:14, uma atrás da outra,
+ * sem um segundo de hesitação. Decisão do Rafael no mesmo dia: esperar de 2 a 3 minutos, com
+ * variação, para a conversa ter o ritmo de alguém que estava fazendo outra coisa.
+ *
+ * O sorteio é de 120 a 165 s. O envio em si sai pela fila (`crm_mensagens_agendadas`), que é
+ * varrida de minuto em minuto, então o tempo REAL na conversa fica entre 2 e ~3min45 — o
+ * piso de dois minutos é garantido, o teto é o preço de a fila ter granularidade de minuto.
+ */
+/** Assinatura das respostas do agente na fila — é por ela que uma resposta nova substitui a pendente. */
+const AUTOR_AGENTE_RH = 'Agente de RH';
+const ESPERA_MIN_S = 120;
+const ESPERA_MAX_S = 165;
+const esperaSorteada = () =>
+  ESPERA_MIN_S + Math.floor(Math.random() * (ESPERA_MAX_S - ESPERA_MIN_S + 1));
+
+/**
+ * A resposta é ENFILEIRADA, não enviada na hora.
+ *
+ * Dormir dentro da função seria mais simples e é justamente o que não se pode fazer: o
+ * worker do edge runtime pode ser reciclado no meio da espera e a resposta sumiria sem
+ * deixar rastro — o modo de falha que este funil já pagou caro duas vezes. Na fila, ela é
+ * uma linha no banco: se o processo morrer, o `crm-agendadas-dispatch` entrega mesmo assim.
+ */
 async function enviar(
   telefone: string,
   texto: string,
   leadId: string | null,
   opId: string | null,
   conexaoId: string | null,
-) {
-  const res = await fetch(SEND_URL, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${SERVICE_ROLE}`, 'Content-Type': 'application/json' },
-    // Responde POR ONDE a pessoa escreveu. O `crm-whatsapp-send` já roteia por conexão
-    // quando recebe `wa_conexao_id`; mandar os dois faria ele preferir a conta e a
-    // resposta sairia pelo número travado.
-    body: JSON.stringify(
-      conexaoId
-        ? { telefone, tipo: 'text', conteudo: texto, wa_conexao_id: conexaoId, lead_id: leadId, oportunidade_id: opId }
-        : { telefone, tipo: 'text', conteudo: texto, wa_account_id: CONTA_RH, lead_id: leadId, oportunidade_id: opId },
-    ),
+): Promise<number> {
+  const espera = esperaSorteada();
+  const quando = new Date(Date.now() + espera * 1000).toISOString();
+
+  // ⚠️ A espera abre uma janela que não existia: se a pessoa escreve de novo antes da resposta
+  // sair, este turno novo não enxerga a resposta anterior (ela ainda está na fila, não no
+  // histórico) e escreveria OUTRA — duas respostas parecidas, uma atrás da outra. Quem lê as
+  // duas mensagens e responde uma vez só é o comportamento de gente, então a resposta que ainda
+  // não saiu é substituída por esta, que já considerou tudo o que a pessoa mandou.
+  if (opId) {
+    await supabase.from('crm_mensagens_agendadas')
+      .update({ status: 'cancelado', erro_detalhe: 'Substituída por uma resposta mais nova do agente de RH.' })
+      .eq('oportunidade_id', opId)
+      .eq('criado_por_nome', AUTOR_AGENTE_RH)
+      .eq('status', 'agendado');
+  }
+
+  // Responde POR ONDE a pessoa escreveu: a conexão Web quando veio dela, senão a conta da
+  // Meta. Preencher os dois faria o dispatch preferir a conta e a resposta sairia pelo
+  // número errado.
+  const { error } = await supabase.from('crm_mensagens_agendadas').insert({
+    criado_por_nome: AUTOR_AGENTE_RH,
+    wa_account_id: conexaoId ? null : CONTA_RH,
+    wa_conexao_id: conexaoId,
+    lead_id: leadId,
+    oportunidade_id: opId,
+    telefone,
+    tipo_mensagem: 'texto',
+    conteudo: texto,
+    enviar_em: quando,
+    status: 'agendado',
   });
-  if (!res.ok) throw new Error(`crm-whatsapp-send HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  if (error) throw new Error(`fila crm_mensagens_agendadas: ${error.message}`);
+  return espera;
 }
 
 async function processar(payload: any, profundidade = 0) {
@@ -905,10 +952,13 @@ async function processar(payload: any, profundidade = 0) {
       return;
     }
 
-    await enviar(telefone, resposta, leadId, card.oportunidade_id, conexaoId);
+    const esperaS = await enviar(telefone, resposta, leadId, card.oportunidade_id, conexaoId);
     await evento(ehFollowup ? 'followup_enviado' : 'respondido', {
       telefone, lead_id: leadId, oportunidade_id: card.oportunidade_id, etapa,
       campos: dadosGravados, rodadas: rodada, tamanho: resposta.length,
+      // Quanto esta resposta esperou. Sem isto, "respondido" às 18:12 com a mensagem
+      // chegando 18:15 parece atraso de sistema, e não a espera de propósito.
+      espera_s: esperaS,
     });
   } catch (e) {
     await evento('erro', { telefone, motivo: e instanceof Error ? e.message : String(e) });
