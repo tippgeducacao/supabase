@@ -50,7 +50,7 @@ Deno.serve(async (req) => {
 
   // ⚠️ BUMPE esta string a cada deploy: é o ÚNICO jeito de confirmar, de fora, que a versão
   // nova já está servindo (o edge-runtime serve o worker antigo por ~1 min após o push).
-  if (req.method === "GET") return new Response("assistente-interno ok · build 20260803b", { headers: cors });
+  if (req.method === "GET") return new Response("assistente-interno ok · build 20260911a", { headers: cors });
 
   // Autenticação do webhook (anti-spoofing): se ASSIST_WEBHOOK_SECRET estiver setado, exige ?k igual.
   // O número declarado no payload NÃO é autenticação (quem POSTa controla msg.fromDigits).
@@ -126,13 +126,15 @@ async function processarMensagem(admin: any, linha: LinhaWa | null, msg: any) {
           "🎙️ Recebi seu áudio de reunião! Já tô transcrevendo — te mando a *transcrição completa* e na sequência a *ata executiva* com decisões, pendências e o checklist por pessoa. Reunião de 1h chega em ~5 min.\n\n👥 *Quem participou da reunião?* Me responde aqui com os nomes (ex.: \"eu e a Adriane\") que a ata já sai com os participantes certos — sem isso eu NÃO chuto nome, deixo em aberto pra você completar.");
         return;
       }
-      texto = await transcreverBytes(bytes, mime);
+      texto = await transcreverBytes(admin, bytes, mime);
       tipo = "audio";
       await atualizarConteudoInbound(admin, claim.id, texto, "audio");
     } catch (e) {
       await tel(admin, c, rodada, "erro_transcricao", null, null, String(e));
+      // O motivo curto vai junto: só os 2 donos falam com o bot, e sem ele a próxima falha é cega
+      // (em 11/09 a telemetria estava inacessível e o chat só dizia "tive um problema").
       await enviar(admin, linha, msg.fromDigits, c,
-        "Tive um problema pra processar esse áudio agora 😕. Pode reenviar? (Áudio de reunião grande TAMBÉM funciona — é só tentar de novo; ou me manda por texto.)");
+        `Tive um problema pra processar esse áudio agora 😕. Pode reenviar? (Áudio de reunião grande TAMBÉM funciona — é só tentar de novo; ou me manda por texto.)\n\n_Motivo técnico: ${String((e as Error)?.message ?? e).slice(0, 160)}_`);
       return;
     }
   } else if (msg.tipo === "video") {

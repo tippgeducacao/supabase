@@ -17,7 +17,7 @@
 // (ata cortada + loop "Doenças do Sistema..."); verbatim de 1h numa chamada só passa de 290s;
 // flash degenera na SÍNTESE mesmo com thinkingBudget (por isso ata = Opus/pro, nunca flash).
 import { carregarLinha, enviarTexto, enviarDocumento, type LinhaWa } from "./wa.ts";
-import { extDeMime } from "./transcrever.ts";
+import { extDeMime, googleKey } from "./transcrever.ts";
 import { gerarPdf } from "./documento.ts";
 import { logMensagem } from "./db.ts";
 import { chamarOpus, getAnthropicKey } from "./anthropic.ts";
@@ -608,13 +608,7 @@ async function entregar(admin: any, linha: LinhaWa | null, job: any, resultado: 
 }
 
 // ── Gemini File API ──────────────────────────────────────────────────────────
-async function googleKey(admin: any): Promise<string | null> {
-  const env = Deno.env.get("ASSIST_GEMINI_KEY") || Deno.env.get("GOOGLE_API_KEY");
-  if (env) return env;
-  const { data } = await admin.from("ai_api_keys").select("api_key")
-    .eq("provider", "google").eq("is_active", true).limit(1).maybeSingle();
-  return data?.api_key ?? null;
-}
+// (googleKey mora em transcrever.ts — o áudio curto também usa o Gemini como reserva do Whisper.)
 
 /** Gera o texto a partir de um arquivo JÁ enviado ao Gemini (passo 2 do worker). */
 async function gerarComGemini(
