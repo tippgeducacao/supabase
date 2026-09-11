@@ -387,20 +387,34 @@ async function criarEventoEntrevista(
 // Nem toda mensagem pede resposta. "Perfeito", "obrigada", um 🙏: responder a isso é o que
 // faz o agente parecer um robô ansioso, e foi assim que ele mandou "até segunda" numa
 // segunda-feira só para não deixar a última palavra com a candidata.
-// Quem escreve querendo DAR AULA não está na esteira de vagas. Pedir currículo, cidade e
-// "3 habilidades" dessa pessoa é constrangedor e não serve para nada: quem decide isso é o
-// RH olhando o caso. Movido para a Triagem, o agente fica mudo por conta própria, porque
-// a etapa não tem papel.
+// Quem escreve querendo DAR AULA não está na esteira de vagas. Pedir cidade e "3
+// habilidades" dessa pessoa é constrangedor e não serve para nada. O que serve é o Lattes
+// e a área, e é isso que se pede — ANTES de chamar esta ferramenta, porque ela move o card
+// para a Triagem e lá o agente fica mudo (a etapa não tem papel): o Lattes que chegasse
+// depois ficaria só na conversa, sem ninguém para gravar. Da Triagem, quem leva o card para
+// o funil de professores é o atendente, à mão (decisão do Rafael, 11/09/2026).
 const TOOL_PROFESSOR = {
   name: 'encaminhar_para_triagem',
   description:
     'Use quando a pessoa quer ser PROFESSOR, dar aula, palestrar ou oferecer conteúdo, ' +
-    'em vez de se candidatar a uma vaga administrativa ou comercial. NÃO peça currículo ' +
-    'nem faça as perguntas do cadastro nesse caso. Depois de chamar isto, o assunto está ' +
-    'encerrado: o RH assume.',
+    'em vez de se candidatar a uma vaga administrativa ou comercial. Chame SÓ DEPOIS de ' +
+    'ter pedido o Currículo Lattes atualizado e a área em que ela quer dar aula, e de ela ' +
+    'ter respondido — mandando o Lattes, ou dizendo que não tem ou não consegue mandar agora. ' +
+    'Depois de chamar isto, o assunto está encerrado: o card vai para a Triagem e o RH assume.',
   input_schema: {
     type: 'object',
-    properties: { motivo: { type: 'string', description: 'Em poucas palavras, o que a pessoa quer.' } },
+    properties: {
+      motivo: { type: 'string', description: 'Em poucas palavras, o que a pessoa quer.' },
+      lattes: {
+        type: 'string',
+        description: 'O link do Currículo Lattes, exatamente como a pessoa mandou. Se ela mandou o ' +
+          'Lattes em arquivo, escreva "PDF enviado na conversa". Deixe vazio se ela não mandou.',
+      },
+      area_docencia: {
+        type: 'string',
+        description: 'Em qual área ou tema ela quer dar aula, com as palavras dela. Vazio se não disse.',
+      },
+    },
     required: ['motivo'],
     additionalProperties: false,
   },
@@ -467,6 +481,9 @@ const CAMPO_POR_CHAVE: Record<string, string> = {
   conhece_alguem: '_rh_conhece_alguem',
   habilidades: '_rh_habilidades',
   mudanca: '_rh_mudanca',
+  // Só de quem quer DAR AULA, gravados pelo encaminhar_para_triagem.
+  lattes: '_rh_lattes',
+  area_docencia: '_rh_area_docencia',
 };
 
 async function gravarDados(leadId: string, dados: Record<string, string>): Promise<string[]> {
@@ -847,6 +864,13 @@ async function processar(payload: any, profundidade = 0) {
             continue;
           }
           if (u.name === 'encaminhar_para_triagem') {
+            // Grava ANTES de mover: na Triagem o card sai do alcance do agente, e o que não
+            // estiver no campo a essa altura só existe na conversa.
+            const gravadosProf = await gravarDados(leadId, {
+              lattes: String(u.input?.lattes ?? ''),
+              area_docencia: String(u.input?.area_docencia ?? ''),
+            });
+            dadosGravados = [...dadosGravados, ...gravadosProf];
             await supabase.rpc('rh_encaminhar_para_triagem', {
               p_oportunidade_id: card.oportunidade_id,
               p_motivo: u.input?.motivo ?? null,
@@ -854,6 +878,7 @@ async function processar(payload: any, profundidade = 0) {
             await evento('encaminhado:professor', {
               telefone, lead_id: leadId, oportunidade_id: card.oportunidade_id,
               motivo: u.input?.motivo ?? null,
+              campos: gravadosProf,
             });
             results.push({
               type: 'tool_result', tool_use_id: u.id,
