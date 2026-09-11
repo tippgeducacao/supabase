@@ -154,6 +154,23 @@ describe('quem pede o link da Escola recebe o link', () => {
     expect(r.texto).toBe(texto);
   });
 
+  // Harness 11/09: com horários recém-oferecidos, o modelo leu "me manda o link" como link
+  // do Meet. A resposta dele desempata: fala de horário e não de acesso ⇒ não é a Escola.
+  it('NÃO anexa quando a resposta do modelo trata o pedido como link da reunião', () => {
+    const r = comLinkPedido('esse link só sai depois que a gente fechar um horário certinho, leandro', 'Me manda o link', true);
+    expect(r.anexou).toBe(false);
+  });
+
+  // Caso Leandro real: a resposta fala do ACESSO (e também de horário) ⇒ é a Escola, anexa.
+  it('anexa quando a resposta fala do acesso, mesmo citando horário junto', () => {
+    const r = comLinkPedido(
+      'esse acesso já é o mesmo que te mandei antes, o link continua ativo. amanhã consigo às 9h ou 10h, algum fica bom?',
+      'Me manda o link', true,
+    );
+    expect(r.anexou).toBe(true);
+    expect(r.texto).toContain(LINK_ESCOLA_GRATUITA);
+  });
+
   it('não mexe quando ninguém pediu', () => {
     const r = comLinkPedido('beleza.', 'Sim', true);
     expect(r.anexou).toBe(false);

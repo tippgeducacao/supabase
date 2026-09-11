@@ -216,6 +216,13 @@ export function pediuLinkDaEscola(mensagemDoLead: string | null | undefined, con
   return RE_ASSUNTO_ESCOLA.test(m) || contextoEscola;
 }
 
+// A RESPOSTA do modelo desempata o "me manda o link" ambíguo (medido no harness, 11/09):
+// com horários recém-oferecidos, o João leu o pedido como link do MEET ("esse link só sai
+// depois que a gente fechar um horário") — e aí grudar o endereço da Escola seria errado.
+// Se a resposta fala de reunião/horário e NÃO fala de acesso/escola, o pedido era do Meet.
+const RE_RESPOSTA_ESCOLA = /acesso|escola|biblioteca|cadastro|cursos? gratuit/i;
+const RE_RESPOSTA_REUNIAO = /reuni[ãa]o|meet|call|hor[áa]rio|encaixe|agendar|fechar um/i;
+
 /** Garante o endereço na resposta a quem pediu. Só acrescenta; se o modelo já pôs, nada muda. */
 export function comLinkPedido(
   texto: string,
@@ -224,6 +231,7 @@ export function comLinkPedido(
 ): { texto: string; anexou: boolean } {
   if (!pediuLinkDaEscola(mensagemDoLead, contextoEscola)) return { texto, anexou: false };
   if (jaTemOPresente(texto)) return { texto, anexou: false };
+  if (!RE_RESPOSTA_ESCOLA.test(texto) && RE_RESPOSTA_REUNIAO.test(texto)) return { texto, anexou: false };
   const base = texto.trimEnd();
   return { texto: base ? `${base}\n${LINK_ESCOLA_GRATUITA}` : LINK_ESCOLA_GRATUITA, anexou: true };
 }
