@@ -114,6 +114,22 @@ describe('integração do repertório no gerador', () => {
 });
 
 describe('contratos de contexto e saída', () => {
+  it('não usa exploração SPIN para uma pendência de horário', async () => {
+    const gerar = modelo('horario', curso.slug, 'vc já parou para pensar como uma zoonose pode afetar a saúde pública?');
+    const r = await gerarFollowupSpin(banco(), lead, [], '', tel(), { modelo: gerar });
+    expect(r.message).toBe(''); expect(r.final_answer).toContain('fora_da_pendencia_horario');
+    expect(gerar.mock.calls[1][0].system[0].text).toContain('Na fase horario, pergunte somente disponibilidade');
+  });
+  it.each([
+    'só para confirmar, a pós que vc tem interesse é a de qualidade de alimentos?',
+    'consegue responder sobre seu interesse, graduação e área de atuação?',
+  ])('bloqueia reconfirmação de interesse e checklist antigo: %s', message => {
+    expect(validarMensagemSpin(message, [], 'confirmacao').message).toBe('');
+  });
+  it('preserva perguntas de horário e de um dado de agendamento', () => {
+    expect(validarMensagemSpin('qual período funciona melhor para a conversa?', [], 'horario').message).not.toBe('');
+    expect(validarMensagemSpin('qual é seu email para o convite?', [], 'confirmacao').message).not.toBe('');
+  });
   it('retira raciocínio e mantém autoria humana, resposta e resultado de tool', () => {
     expect(JSON.stringify(memoriaSpin([
       { role: 'assistant', content: '[ATENDIMENTO_HUMANO] Qual sua graduação?' },
