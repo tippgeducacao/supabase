@@ -4,8 +4,8 @@
 // `agente_ia_persona = 'aluno'` e `agente_ia_ativo = true`, e conversa com o aluno que está
 // na integração dos 15 dias (funil ONBORDING / Experiência do Aluno). Não move card, não
 // dispara régua: quem faz isso são as automações do funil. Este aqui só conversa, registra o
-// que o aluno respondeu (grupo da turma, preferência de ligação) e passa para a equipe o que
-// não é com ele.
+// que o aluno respondeu (grupo da turma, preferência de ligação, e desde 11/09 a meta pessoal
+// com a pós e como conheceu a gente) e passa para a equipe o que não é com ele.
 //
 // INDEPENDENTE DE PROPÓSITO (decisão do Rafael): não importa uma linha de `crm-agente-sdr`
 // (o João) nem de `crm-agente-rh`. Prompt, telemetria, trava e tabelas são só dele. O que é
@@ -19,8 +19,11 @@
 //   4. ETAPA    só etapa com papel em `onb_etapas_papel` (as D+). Saídas do funil são humano.
 //   5. TESTE    enquanto `onb_agente_config.teste_telefones` tiver número, só eles; lista vazia
 //               só vale com `liberado_para_todos` (nasce false: produção é UPDATE explícito).
-//   6. HORÁRIO  8h às 21h em Ampére. Fora disso, o tick das 8h retoma.
-//   7. JANELA   só respondendo a quem escreveu nas últimas 24h. Nunca inicia conversa.
+//   6. HORÁRIO  segunda a sexta das 8h às 21h, sábado até meio-dia e domingo fechado, em
+//               Ampére e pela config. Fora disso, o tick da manhã retoma no próximo dia aberto.
+//   7. JANELA   só respondendo a quem escreveu nas últimas 24h. Nunca inicia conversa. A
+//               retomada da manhã que chega tarde demais (fim de semana) vira passagem, não
+//               silêncio: fora das 24h a Meta recusa texto livre, e quem responde é a equipe.
 //   8. HUMANO   se a última mensagem nossa foi de uma pessoa, ele cala.
 //   9. PASSAGEM se já passou a conversa para a equipe e ninguém respondeu ainda, ele cala.
 //
@@ -40,6 +43,8 @@ import {
   ASSUNTOS_TRANSFERENCIA,
   assuntoValido,
   canonDdd8,
+  CATEGORIAS_COMO_CONHECEU,
+  CATEGORIAS_META_PESSOAL,
   type ContextoAluno,
   dentroDoHorario,
   descreverParaModelo,
@@ -50,9 +55,14 @@ import {
   linhaDaAula,
   mesmoTelefone,
   montarContexto,
+  parametrosDoPerfil,
+  perfilDoContexto,
+  type PerguntaDoPerfil,
+  PERGUNTAS_DO_PERFIL,
   sanearParaModelo,
   temPalavraProibida,
   ultimos8,
+  vetoDaPerguntaDoPerfil,
 } from './regras.ts';
 
 declare const EdgeRuntime: { waitUntil?: (p: Promise<unknown>) => void } | undefined;
@@ -115,23 +125,59 @@ type Config = {
   modelo: string | null;
   horario_inicio: string | null;
   horario_fim: string | null;
+  horario_fim_sabado: string | null;
+  atende_domingo: boolean | null;
   teste_telefones: string[] | null;
   liberado_para_todos: boolean | null;
   tcc_site_url: string | null;
   mentoria_tcc_quando: string | null;
   mentoria_tcc_url: string | null;
+  /** Se as colunas do horário da semana existem no banco (a 20260912120000 foi aplicada). */
+  temHorarioDaSemana: boolean;
 };
+
+const COLUNAS_CONFIG =
+  'modelo, horario_inicio, horario_fim, teste_telefones, liberado_para_todos, tcc_site_url, mentoria_tcc_quando, mentoria_tcc_url';
+/** O horário da semana (20260912120000): sábado até meio-dia e o liga/desliga do domingo. */
+const COLUNAS_SEMANA = 'horario_fim_sabado, atende_domingo';
 
 /** Configuração editável sem deploy. Sem ela o assistente não fala (fail-closed). */
 async function lerConfig(): Promise<Config | null> {
   const { data, error } = await supabase
     .from('onb_agente_config')
-    .select('modelo, horario_inicio, horario_fim, teste_telefones, liberado_para_todos, tcc_site_url, mentoria_tcc_quando, mentoria_tcc_url')
+    .select(`${COLUNAS_CONFIG}, ${COLUNAS_SEMANA}`)
     .eq('id', true)
     .maybeSingle();
-  if (error || !data) return null;
-  return data as Config;
+  if (!error && data) return { ...(data as Record<string, unknown>), temHorarioDaSemana: true } as Config;
+  // A edge sobe sozinha no push e a migration é aplicada à mão: enquanto as colunas do horário
+  // da semana não existirem, o PostgREST recusa o SELECT inteiro e o assistente ficaria mudo
+  // com todo mundo. Então a leitura antiga vale, e a marca diz que o banco ainda é o de antes.
+  const { data: semSemana, error: erroVelho } = await supabase
+    .from('onb_agente_config')
+    .select(COLUNAS_CONFIG)
+    .eq('id', true)
+    .maybeSingle();
+  if (erroVelho || !semSemana) return null;
+  console.log('[crm-agente-aluno] onb_agente_config sem o horário da semana, usando a janela única:', error?.message ?? '');
+  return {
+    ...(semSemana as Record<string, unknown>),
+    horario_fim_sabado: null, atende_domingo: null, temHorarioDaSemana: false,
+  } as Config;
 }
+
+/**
+ * O horário de atendimento do jeito que as réguas leem.
+ *
+ * ⚠️ Sem as colunas da 20260912120000 no banco, vale a JANELA ÚNICA de antes, todo dia, e não a
+ * reserva de sábado/domingo. O par disto é o `onb_agente_manha_tick`: enquanto a migration não
+ * for aplicada, o tick vivo é o da 20260911233400, que olha só as últimas 12 horas e não conhece
+ * dia da semana. Se a edge adiasse sábado à tarde e domingo com o tick velho no ar, a mensagem
+ * seria adiada para uma retomada que nunca chega (segunda de manhã está a 41 h) e o aluno ficaria
+ * sem resposta nenhuma. A ausência das colunas é o sinal de que o tick também é o antigo.
+ */
+const horarioDaConfig = (c: Config) => (c.temHorarioDaSemana
+  ? { inicio: c.horario_inicio, fim: c.horario_fim, fimSabado: c.horario_fim_sabado, atendeDomingo: c.atende_domingo }
+  : { inicio: c.horario_inicio, fim: c.horario_fim, fimSabado: c.horario_fim, atendeDomingo: true });
 
 async function chaveDoBanco(): Promise<string> {
   const { data } = await supabase
@@ -209,15 +255,18 @@ const TOOL_QUIETO = {
 const TOOL_PASSAR = {
   name: 'passar_para_atendente',
   description:
-    'Use sempre que a conversa precisar de uma pessoa da equipe: dinheiro em qualquer forma; ' +
-    'cancelar, trancar, desistir ou trocar de curso; prazo; declaração ou documento oficial; ' +
-    'reclamação; algo que depende da situação dele na plataforma; documento que ele mandou por ' +
-    'aqui; ligação ou videochamada; TCC com pendência; turma que você não sabe; grupo da turma sem ' +
-    'link; pedido para falar com uma pessoa ou com o pedagógico; quem não quer mais receber ' +
-    'mensagens; áudio; e qualquer coisa que você não saiba. Chamar isto registra a passagem e ' +
-    'deixa a conversa marcada para a equipe, que responde neste mesmo número. Depois, escreva no ' +
-    'máximo uma frase curta dizendo que vai confirmar e já retorna, sem falar em encaminhar para ' +
-    'setor nenhum.',
+    'Use sempre que a conversa precisar de uma pessoa da equipe: dinheiro em qualquer forma, ' +
+    'inclusive condição de pagamento; cancelar, trancar, desistir ou trocar de curso; outro ' +
+    'curso nosso, inclusive quando ele quiser comprar; prazo; declaração ou documento oficial; ' +
+    'crítica, sugestão, feedback ou reclamação; contestação de regra nossa ou bate-boca sobre a ' +
+    'vida acadêmica dele; algo que depende da situação dele na plataforma; documento que ele ' +
+    'mandou por aqui; ligação ou videochamada; TCC com pendência; turma que você não sabe; grupo ' +
+    'da turma sem link; pedido para falar com uma pessoa ou com o pedagógico; quem não quer mais ' +
+    'receber mensagens; áudio, que não chega até você; e qualquer coisa que você não saiba. ' +
+    'Chamar isto registra a passagem e deixa a conversa marcada para a equipe, que responde neste ' +
+    'mesmo número. Depois, escreva no máximo uma frase curta dizendo que vai confirmar e já ' +
+    'retorna, sem falar em encaminhar para setor nenhum (só crítica, sugestão e feedback são ditos ' +
+    'de outro jeito: que você vai levar aquilo para a coordenação avaliar).',
   input_schema: {
     type: 'object',
     properties: {
@@ -272,9 +321,11 @@ const TOOL_GRUPO = {
 const TOOL_LIGACAO = {
   name: 'registrar_preferencia_ligacao',
   description:
-    'Use quando ele aceitar conversar por ligação ou por videochamada e disser como prefere. ' +
-    'Você não marca dia nem hora: só registra a preferência, e a equipe combina com ele. ' +
-    'Chamar isto já registra a passagem para a equipe.',
+    'Use SÓ quando ele estiver respondendo por escrito ao pedido de ligação da integração (a ' +
+    'mensagem do quinto dia, com os botões "Começo da manhã" e "Fim da tarde") e disser o que ' +
+    'prefere. Você não marca dia nem hora: só registra a preferência, e a equipe combina com ele. ' +
+    'Chamar isto já registra a passagem para a equipe. Fora desse convite, quem pede ligação ou ' +
+    'videochamada vai por passar_para_atendente com o assunto ligacao, sem você perguntar nada.',
   input_schema: {
     type: 'object',
     properties: {
@@ -296,7 +347,54 @@ const TOOL_TCC = {
   input_schema: { type: 'object', properties: {}, required: [], additionalProperties: false },
 } as const;
 
-const FERRAMENTAS = [TOOL_QUIETO, TOOL_PASSAR, TOOL_AULAS, TOOL_GRUPO, TOOL_LIGACAO, TOOL_TCC];
+// O perfil do aluno (pedido do Rafael, 11/09): a meta dele com a pós e como ele conheceu a
+// gente, para um dashboard futuro. Sem campo de sexo de propósito: o sexo sai do primeiro nome,
+// no banco, e o assistente nunca pergunta nem registra. As listas são as dos CHECKs da tabela.
+const TOOL_PERFIL = {
+  name: 'registrar_perfil_do_aluno',
+  description:
+    'Use logo depois de perguntar a meta pessoal dele com a pós ou como ele conheceu a gente, com ' +
+    'acabei_de_perguntar, para ficar marcado. E use quando ele responder: as palavras dele, ' +
+    'copiadas da mensagem dele, e a categoria que mais se aproxima (resposta vaga vai do jeito ' +
+    'que veio, com a categoria outro). Numa chamada vai uma coisa só: ou a resposta dele, ou ' +
+    'acabei_de_perguntar; se ele respondeu e você perguntou a outra na mesma mensagem, chame ' +
+    'duas vezes. Registre só o que ele disse, nunca o que você acha, e sem resumir nem corrigir ' +
+    'as palavras dele. Não registra mais nada da vida dele.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      meta_pessoal: {
+        type: 'string',
+        description: 'A meta dele com a pós, com as palavras dele, copiadas da mensagem dele (sem resumir ' +
+          'e sem corrigir). Vai sempre junto com meta_pessoal_categoria.',
+      },
+      meta_pessoal_categoria: {
+        type: 'string',
+        enum: [...CATEGORIAS_META_PESSOAL],
+        description: 'A categoria que mais se aproxima da meta que ele disse. Na dúvida, outro.',
+      },
+      como_conheceu: {
+        type: 'string',
+        enum: [...CATEGORIAS_COMO_CONHECEU],
+        description: 'Como ele conheceu a gente: a categoria que mais se aproxima do que ele disse. Na dúvida, outro.',
+      },
+      como_conheceu_detalhe: {
+        type: 'string',
+        description: 'O detalhe que ele deu, com as palavras dele, copiadas da mensagem dele: quem indicou, ' +
+          'qual rede, qual curso ou evento. Só junto com como_conheceu.',
+      },
+      acabei_de_perguntar: {
+        type: 'string',
+        enum: [...PERGUNTAS_DO_PERFIL],
+        description: 'Qual das duas perguntas você acabou de fazer.',
+      },
+    },
+    required: [],
+    additionalProperties: false,
+  },
+} as const;
+
+const FERRAMENTAS = [TOOL_QUIETO, TOOL_PASSAR, TOOL_AULAS, TOOL_GRUPO, TOOL_LIGACAO, TOOL_TCC, TOOL_PERFIL];
 
 // ── Envio pela fila ──────────────────────────────────────────────────────────
 
@@ -314,20 +412,25 @@ const FERRAMENTAS = [TOOL_QUIETO, TOOL_PASSAR, TOOL_AULAS, TOOL_GRUPO, TOOL_LIGA
  * desses três (é resposta a quem acabou de escrever, não disparo de motor); qualquer outro
  * bloqueio segue valendo. Por isso a linha volta com o status: cancelada na entrada vira
  * `bloqueio`, e quem chama registra o evento certo em vez de 'respondido'.
+ *
+ * Devolve também o id da linha nova e o das pendentes que esta resposta cancelou: é por eles
+ * que a pergunta do perfil só conta depois de a mensagem existir de verdade na fila, e que a
+ * pergunta de uma mensagem cancelada deixa de contar (ver `marcarPerguntaFeita`).
  */
 async function enviar(
   conta: string, telefone: string, texto: string, leadId: string | null, opId: string,
-): Promise<{ espera: number; bloqueio: string | null }> {
+): Promise<{ espera: number; bloqueio: string | null; filaId: string | null; canceladas: string[] }> {
   const espera = esperaSorteada();
   const quando = new Date(Date.now() + espera * 1000).toISOString();
 
   // Se o aluno escreveu de novo antes da resposta sair, esta aqui já considerou tudo: a
   // pendente é substituída, para ele não receber duas respostas parecidas em seguida.
-  await supabase.from('crm_mensagens_agendadas')
+  const { data: canceladas } = await supabase.from('crm_mensagens_agendadas')
     .update({ status: 'cancelado', erro_detalhe: 'Substituída por uma resposta mais nova do assistente pedagógico.' })
     .eq('oportunidade_id', opId)
     .eq('criado_por_nome', AUTOR)
-    .eq('status', 'agendado');
+    .eq('status', 'agendado')
+    .select('id');
 
   const { data: linha, error } = await supabase.from('crm_mensagens_agendadas').insert({
     criado_por_nome: AUTOR,
@@ -340,12 +443,17 @@ async function enviar(
     conteudo: texto,
     enviar_em: quando,
     status: 'agendado',
-  }).select('status, erro_detalhe').maybeSingle();
+  }).select('id, status, erro_detalhe').maybeSingle();
   if (error) throw new Error(`fila crm_mensagens_agendadas: ${error.message}`);
   const bloqueio = linha?.status === 'cancelado'
     ? String(linha.erro_detalhe ?? '').trim() || 'cancelada pela fila na entrada'
     : null;
-  return { espera, bloqueio };
+  return {
+    espera,
+    bloqueio,
+    filaId: linha?.id ? String(linha.id) : null,
+    canceladas: ((canceladas ?? []) as { id?: unknown }[]).map((l) => String(l?.id ?? '')).filter(Boolean),
+  };
 }
 
 // ── O aluno ──────────────────────────────────────────────────────────────────
@@ -378,6 +486,81 @@ async function abrirTransferencia(
     telefone, lead_id: aluno.lead_id, oportunidade_id: aluno.oportunidade_id, motivo, erro: error?.message ?? null,
   });
   return data ? String(data) : null;
+}
+
+/**
+ * A pergunta do perfil só CONTA depois de a resposta existir na fila. Antes ela era gravada no
+ * meio do turno, e a mensagem com a pergunta sai de 2 a 4 minutos depois: turno que terminava em
+ * silêncio, em resposta vazia ou com a fila bloqueando a linha contava uma pergunta que o aluno
+ * nunca leu, e queimava uma das duas que ele tem em toda a integração.
+ *
+ * O evento guarda o id da linha da fila e o carimbo que havia ANTES: é por ele que a marca é
+ * desfeita se essa mensagem for cancelada por uma resposta mais nova (ver o desfazer abaixo).
+ */
+async function marcarPerguntaFeita(
+  aluno: Aluno, pergunta: PerguntaDoPerfil, antes: string | null, filaId: string | null,
+  rastro: Record<string, unknown>,
+): Promise<void> {
+  const { data, error } = await supabase.rpc('onb_agente_registrar_perfil', {
+    p_oportunidade_id: aluno.oportunidade_id,
+    p_meta_pessoal: null, p_meta_categoria: null, p_como_conheceu: null, p_como_detalhe: null,
+    p_perguntou: pergunta,
+  });
+  const estado = (data && typeof data === 'object' ? data : null) as Record<string, unknown> | null;
+  const coluna = pergunta === 'meta_pessoal' ? 'meta_pessoal_perguntada_em' : 'como_conheceu_perguntada_em';
+  const marcadaEm = estado?.[coluna] ? String(estado[coluna]) : null;
+  await evento('perfil:pergunta_marcada', {
+    ...rastro,
+    pergunta,
+    fila_id: filaId,
+    marcada_em: marcadaEm,
+    antes,
+    // A mensagem com a pergunta já está na fila: não dá para voltar atrás, e a conta das duas
+    // vezes vai ficar curta. Fica o rastro em vez de um silêncio.
+    erro: error?.message ?? (estado ? null : 'a RPC não devolveu o estado (oportunidade não encontrada)'),
+  });
+}
+
+/**
+ * A resposta que levava a pergunta foi cancelada antes de sair (o aluno escreveu de novo e esta
+ * resposta substituiu a pendente): a pergunta não foi feita, então ela não pode continuar
+ * contada. Desfaz pelo carimbo exato que a marca gravou, e por isso repetir é inofensivo: se
+ * outra marca veio depois, o carimbo já é outro e a RPC não mexe em nada.
+ */
+async function desfazerPerguntasCanceladas(
+  aluno: Aluno, canceladas: string[], rastro: Record<string, unknown>,
+): Promise<void> {
+  if (!canceladas.length) return;
+  const { data: marcas, error: erroLeitura } = await supabase
+    .from('onb_agente_eventos')
+    .select('detalhe')
+    .eq('tipo', 'perfil:pergunta_marcada')
+    .eq('oportunidade_id', aluno.oportunidade_id)
+    .in('detalhe->>fila_id', canceladas)
+    .limit(10);
+  // Sem esta leitura não há o que desfazer, e o desfazer é a metade invisível da conta: a
+  // pergunta continuaria contada para sempre, o aluno perderia uma das duas que tem na
+  // integração inteira e nada explicaria por quê. Não dá para repetir (a resposta já foi
+  // cancelada), mas o rastro deixa alguém enxergar que a conta ficou alta.
+  if (erroLeitura) {
+    await evento('perfil:desfazer_falhou', { ...rastro, fila_ids: canceladas, erro: erroLeitura.message });
+    return;
+  }
+  for (const m of (marcas ?? []) as { detalhe?: Record<string, unknown> | null }[]) {
+    const d = m?.detalhe ?? {};
+    const pergunta = String(d.pergunta ?? '');
+    const marcadaEm = d.marcada_em ? String(d.marcada_em) : '';
+    if (!(PERGUNTAS_DO_PERFIL as readonly string[]).includes(pergunta) || !marcadaEm) continue;
+    const { data: desfeita, error } = await supabase.rpc('onb_agente_desmarcar_pergunta', {
+      p_oportunidade_id: aluno.oportunidade_id,
+      p_pergunta: pergunta,
+      p_marcada_em: marcadaEm,
+      p_anterior: d.antes ? String(d.antes) : null,
+    });
+    await evento('perfil:pergunta_desfeita', {
+      ...rastro, pergunta, fila_id: d.fila_id ?? null, desfeita: desfeita === true, erro: error?.message ?? null,
+    });
+  }
 }
 
 /**
@@ -543,10 +726,12 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
       await evento('ligacao:registrada', { ...rastro, periodo: botao.periodo, pelo: 'botao', erro: error?.message ?? null });
     }
 
-    // ── HORÁRIO: pela hora em que a mensagem CHEGOU ───────────────────────────
-    // Fora do horário não se chama o modelo nem se enfileira nada para as 8h: o tick das 8h
+    // ── HORÁRIO: pela hora e pelo DIA em que a mensagem CHEGOU ────────────────
+    // Fora do horário não se chama o modelo nem se enfileira nada para as 8h: o tick da manhã
     // refaz o turno do zero, e se um atendente já tiver respondido, a porta do humano cala.
-    if (!ehManha && !dentroDoHorario(chegouEm, cfg.horario_inicio ?? '08:00', cfg.horario_fim ?? '21:00')) {
+    // Segunda a sexta das 8h às 21h, sábado até meio-dia e domingo fechado (tudo da config):
+    // o que chega sábado à tarde ou no domingo é respondido na segunda de manhã.
+    if (!ehManha && !dentroDoHorario(chegouEm, horarioDaConfig(cfg))) {
       await evento('adiado:fora_do_horario', rastro);
       return;
     }
@@ -582,12 +767,58 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
       .reverse()
       .slice(-MAX_HISTORICO);
 
+    // O que ELE escreveu nesta conversa: é contra isto que a ferramenta do perfil confere se a
+    // meta e o detalhe são mesmo as palavras dele, e não a versão do modelo.
+    //
+    // Vai nas DUAS formas, a crua e a saneada, porque o modelo não lê a crua: `sanearParaModelo`
+    // troca "5 a 10" por "5 a 10" e o travessão por vírgula antes de o texto chegar nele. Só com a
+    // crua, o aluno que escreve "sair de 5 a 10 mil" tem a meta recusada por não ser dele, e ele
+    // copiou certinho o que leu.
+    const falasDoAluno: string[] = [];
+    const guardarFala = (cru: string) => {
+      if (!cru.trim()) return;
+      falasDoAluno.push(cru);
+      const saneada = sanearParaModelo(cru);
+      if (saneada !== cru) falasDoAluno.push(saneada);
+    };
+    for (const m of conversa) {
+      if (m.direcao === 'inbound') guardarFala(String(m.conteudo ?? ''));
+    }
+    guardarFala(conteudo);
+
     // ── JANELA ────────────────────────────────────────────────────────────────
     const ultimoInbound = daPessoa.find((m: any) => m.direcao === 'inbound');
     const idadeH = ultimoInbound
       ? (Date.now() - new Date(ultimoInbound.created_at).getTime()) / 3_600_000
       : Infinity;
-    if (idadeH > JANELA_HORAS) { await evento('pulado:janela', { ...rastro, idadeH }); return; }
+    if (idadeH > JANELA_HORAS) {
+      // ⚠️ A retomada da manhã chega DEPOIS das 24 h quando ele escreve no fim de semana: o que
+      // chegou sábado às 13h só é retomado segunda às 8h, 43 h depois (é por isso que a busca do
+      // tick vai a 48 h). Responder ali é impossível, a Meta recusa texto livre fora da janela de
+      // 24 h do último inbound. E sair calado seria pior do que antes desta régua: o tick já
+      // gravou `manha:disparada`, então nenhuma rodada seguinte volta a buscar essa pessoa, e a
+      // mensagem dela morreria sem ninguém saber. Então a conversa vai para a equipe, que
+      // responde por modelo. Sem incomodar quem já está com ela: pessoa conduzindo a linha ou
+      // passagem ainda aberta dispensam a nova.
+      let paraAEquipe = false;
+      if (ehManha) {
+        const humanoNaLinha = daPessoa.find((m: any) => m.direcao === 'outbound')?.metadata?.origem === 'humano';
+        const { data: jaAberta } = await supabase
+          .from('onb_agente_transferencias')
+          .select('id')
+          .eq('oportunidade_id', aluno.oportunidade_id)
+          .is('resolvida_em', null)
+          .limit(1)
+          .maybeSingle();
+        paraAEquipe = !humanoNaLinha && !jaAberta?.id;
+        if (paraAEquipe) {
+          await passar('outro', 'ele escreveu fora do horário de atendimento e a janela de 24 horas do WhatsApp ' +
+            'fechou antes da retomada: o assistente não pode mais responder, quem responde é a equipe');
+        }
+      }
+      await evento('pulado:janela', { ...rastro, idadeH, manha: ehManha, passou_para_equipe: paraAEquipe });
+      return;
+    }
 
     // ── Porta do humano: uma PESSOA está conduzindo esta conversa ─────────────
     // Se a última mensagem nossa nesta linha foi escrita por gente, ele não fala. A régua é
@@ -652,10 +883,19 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
         'frase, sem marcar dia nem hora.';
     }
 
+    // Um relógio só para o turno: o que o contexto diz que pode ser perguntado hoje e o que a
+    // ferramenta aceita marcar têm de concordar, inclusive perto da meia-noite.
+    const agora = new Date();
+    const perfil = perfilDoContexto(ctx);
+    /** A pergunta que o modelo fez neste turno e que só será contada se a resposta for enviada. */
+    let perguntaPendente: PerguntaDoPerfil | null = null;
+
     const contexto = montarContexto(ctx, {
-      agora: new Date(),
+      agora,
       ehManha,
       totalEmIntegracao: Number(aluno.total_em_integracao ?? 1),
+      // O mesmo horário que decidiu se ele responde agora: o prompt não crava hora nenhuma.
+      horario: horarioDaConfig(cfg),
       tccSiteUrl: cfg.tcc_site_url,
       mentoriaQuando: cfg.mentoria_tcc_quando,
       mentoriaUrl: cfg.mentoria_tcc_url,
@@ -812,7 +1052,9 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
           await passar('ligacao', obs);
           results.push({
             type: 'tool_result', tool_use_id: u.id,
-            content: 'Registrado, e a equipe vai combinar com ele. Diga numa frase que já deixou combinado, sem prometer dia nem hora.',
+            // Nada de "já deixei combinado": não há nada combinado ainda, e prometer combinado é
+            // a promessa que o Rafael mandou tirar na revisão de 12/09.
+            content: 'Registrado, e a equipe já foi avisada. Diga numa frase que alguém da equipe vai falar com ele para combinar, sem prometer dia nem hora.',
           });
           continue;
         }
@@ -836,6 +1078,71 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
                 : Number(linha.encontrados ?? 0) === 0
                   ? 'Não achei TCC enviado no nome dele. Se ele diz que já enviou, use passar_para_atendente com o assunto tcc. Se ainda não enviou, oriente pelo site do TCC, se o curso tiver TCC.'
                   : `Etapa do trabalho dele: ${sanearParaModelo(linha.rotulo)}. Diga só isso, com essas palavras, sem prazo nenhum.`,
+          });
+          continue;
+        }
+
+        if (u.name === 'registrar_perfil_do_aluno') {
+          // Só os campos da ferramenta passam, categoria fora da lista volta para o modelo
+          // corrigir (a RPC a trocaria por "outro" calada, e "outro" é a resposta vaga DELE, não
+          // um engano do modelo que some no dashboard) e texto que não está nas palavras do
+          // aluno é recusado, assim como resposta e pergunta na mesma chamada.
+          const lido = parametrosDoPerfil(aluno.oportunidade_id, u.input, falasDoAluno);
+          if (!lido.ok) {
+            await evento('perfil:recusado', { ...rastro, motivo: lido.motivo });
+            results.push({ type: 'tool_result', tool_use_id: u.id, is_error: true, content: lido.paraOModelo });
+            continue;
+          }
+          const params = { ...lido.params };
+
+          // Ou este uso é a pergunta que ele acabou de fazer, ou é o que o aluno respondeu:
+          // nunca os dois (a régua recusa), e cada um segue um caminho.
+          if (params.p_perguntou) {
+            if (params.p_perguntou === perguntaPendente) {
+              results.push({ type: 'tool_result', tool_use_id: u.id, content: 'Já está anotado.' });
+              continue;
+            }
+            // A pergunta só vale se podia ir agora (uma por dia, nunca as duas, no máximo duas
+            // vezes, a meta primeiro, nada com passagem aberta neste turno). Vetada, ele tira a
+            // pergunta da mensagem: o texto que veio junto com a ferramenta ainda não saiu.
+            const veto = vetoDaPerguntaDoPerfil(params.p_perguntou, {
+              perfil,
+              agora,
+              outraMarcadaNesteTurno: perguntaPendente !== null,
+              passouParaEquipe: assuntosDesteTurno.size > 0,
+            });
+            if (veto) {
+              await evento('perfil:recusado', { ...rastro, motivo: 'pergunta_vetada', pergunta: params.p_perguntou });
+              results.push({ type: 'tool_result', tool_use_id: u.id, content: veto });
+              continue;
+            }
+            // ⚠️ Nada é gravado aqui: a mensagem com a pergunta só entra na fila no fim do turno
+            // e sai de 2 a 4 minutos depois. Quem conta é `marcarPerguntaFeita`, depois do envio.
+            perguntaPendente = params.p_perguntou;
+            results.push({
+              type: 'tool_result', tool_use_id: u.id,
+              content: 'Anotado. Agora escreva a sua mensagem para ele com essa pergunta, uma vez só, e sem a outra.',
+            });
+            continue;
+          }
+
+          // O que ELE respondeu vai para o banco na hora: isso não depende de nenhuma mensagem
+          // nossa sair. Oportunidade que o banco não acha volta NULO, sem erro: também é falha.
+          const { data: gravado, error } = await supabase.rpc('onb_agente_registrar_perfil', params);
+          const falha = error?.message ?? (gravado ? null : 'a RPC não devolveu o estado (oportunidade não encontrada)');
+          await evento('perfil:registrado', {
+            ...rastro,
+            meta_categoria: params.p_meta_categoria,
+            como_conheceu: params.p_como_conheceu,
+            erro: falha,
+          });
+          results.push({
+            type: 'tool_result', tool_use_id: u.id,
+            content: falha
+              ? 'Não deu para registrar agora. Continue a conversa normalmente, sem comentar isso com ele.'
+              : params.p_meta_pessoal
+                ? 'Registrado. Se for comentar a meta dele, uma frase, com naturalidade, sem elogio exagerado e sem prometer resultado.'
+                : 'Registrado.',
           });
           continue;
         }
@@ -868,12 +1175,23 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
     }
 
     const envio = await enviar(conta, telefone, resposta, aluno.lead_id, aluno.oportunidade_id);
+    // DESFAZER antes de MARCAR, sempre: as duas mexem no mesmo carimbo, e na ordem trocada a
+    // pergunta da resposta cancelada ficaria contada para sempre (o desfazer não a acharia).
+    await desfazerPerguntasCanceladas(aluno, envio.canceladas, rastro);
     if (envio.bloqueio) {
       // A fila cancelou na entrada: o aluno não vai receber nada, e 'respondido' seria mentira.
+      // A pergunta deste turno também não conta: ninguém vai ler.
       await evento('erro:fila_bloqueou', {
         ...rastro, bloqueio: envio.bloqueio, ferramentas: usouFerramentas, manha: ehManha,
+        pergunta_nao_marcada: perguntaPendente,
       });
       return;
+    }
+    if (perguntaPendente) {
+      const antes = perguntaPendente === 'meta_pessoal'
+        ? perfil?.metaPerguntadaEm ?? null
+        : perfil?.comoPerguntadaEm ?? null;
+      await marcarPerguntaFeita(aluno, perguntaPendente, antes, envio.filaId, rastro);
     }
     await evento('respondido', {
       ...rastro, rodadas: rodada, tamanho: resposta.length, ferramentas: usouFerramentas,

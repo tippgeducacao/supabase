@@ -30,20 +30,92 @@ export function paraMinutos(hhmm: string | null | undefined): number | null {
   return h * 60 + min;
 }
 
+/** 0 = domingo, 6 = sábado, pelo calendário de Ampére (o dia local, nunca o de UTC). */
+export function diaDaSemanaEmSP(d: Date): number {
+  const p = new Intl.DateTimeFormat('en-CA', { timeZone: FUSO, year: 'numeric', month: '2-digit', day: '2-digit' })
+    .format(d); // YYYY-MM-DD
+  const [y, m, dd] = p.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, dd)).getUTCDay();
+}
+
 /**
- * O assistente atende das 8h às 21h, horário de Ampére (decisão do Rafael). O início conta
- * como dentro e o fim como fora: 08:00 responde, 21:00 já fica para a manhã seguinte.
+ * O horário de atendimento como ele vem de `onb_agente_config` (linha única, editável sem
+ * deploy). Nada aqui é a regra: a regra mora no banco, e estes campos são só o que a edge leu.
+ */
+export type HorarioDaSemana = {
+  inicio?: string | null;
+  fim?: string | null;
+  /** `horario_fim_sabado`: sábado fecha mais cedo. */
+  fimSabado?: string | null;
+  /** `atende_domingo`: domingo só existe com isto ligado. */
+  atendeDomingo?: boolean | null;
+};
+
+/**
+ * A reserva de quando a leitura da config falha, e NÃO a regra: com a config em pé, quem manda
+ * é ela. Mesmo assim a reserva não é "sempre aberto", é o horário que o Rafael pediu.
+ */
+export const HORARIO_RESERVA: Required<HorarioDaSemana> = {
+  inicio: '08:00', fim: '21:00', fimSabado: '12:00', atendeDomingo: false,
+};
+
+/**
+ * A janela de atendimento DESTE dia da semana, em minutos desde a meia-noite, ou null quando o
+ * dia é fechado. Decisão do Rafael (revisão de 12/09/2026): "segunda até sábado de meio dia".
+ * Segunda a sexta das 8h às 21h; sábado das 8h ao meio-dia; domingo fechado.
+ */
+export function janelaDoDia(dia: number, c: HorarioDaSemana = {}): { inicio: number; fim: number } | null {
+  const inicio = paraMinutos(c.inicio) ?? paraMinutos(HORARIO_RESERVA.inicio)!;
+  const fim = paraMinutos(c.fim) ?? paraMinutos(HORARIO_RESERVA.fim)!;
+  if (dia === 0) return c.atendeDomingo === true ? { inicio, fim } : null;
+  if (dia === 6) return { inicio, fim: paraMinutos(c.fimSabado) ?? paraMinutos(HORARIO_RESERVA.fimSabado)! };
+  return { inicio, fim };
+}
+
+/**
+ * Se o assistente atende neste instante. O início conta como dentro e o fim como fora: 08:00
+ * responde, 21:00 já fica para a manhã seguinte; sábado 12:00 já é segunda de manhã.
  *
  * Fora do horário ele NÃO enfileira a resposta para as 8h: uma resposta que espera 11 horas
  * na fila sairia por cima de um atendente que respondeu às 7h50, e a fila não confere isso.
- * Quem retoma é o tick das 8h, que refaz o turno do zero com o estado real da conversa.
+ * Quem retoma é o tick da manhã, que refaz o turno do zero com o estado real da conversa, e
+ * que também respeita o dia da semana: o que chega sábado à tarde é respondido segunda.
  */
-export function dentroDoHorario(d: Date, inicio = '08:00', fim = '21:00'): boolean {
-  const ini = paraMinutos(inicio) ?? 8 * 60;
-  const fi = paraMinutos(fim) ?? 21 * 60;
+export function dentroDoHorario(d: Date, c: HorarioDaSemana = {}): boolean {
+  const janela = janelaDoDia(diaDaSemanaEmSP(d), c);
+  if (!janela) return false;
   const agora = minutosDoDiaEmSP(d);
   // Janela que vira a meia-noite (ex.: 22:00 até 06:00) também funciona, por segurança.
-  return ini <= fi ? agora >= ini && agora < fi : agora >= ini || agora < fi;
+  return janela.inicio <= janela.fim
+    ? agora >= janela.inicio && agora < janela.fim
+    : agora >= janela.inicio || agora < janela.fim;
+}
+
+/** Minutos desde a meia-noite do jeito que se fala: 480 vira "8h", 510 vira "8h30". */
+function horaFalada(min: number): string {
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return m === 0 ? `${h}h` : `${h}h${String(m).padStart(2, '0')}`;
+}
+
+const faixaFalada = (j: { inicio: number; fim: number }): string =>
+  `das ${horaFalada(j.inicio)} ${j.fim === 12 * 60 ? 'ao meio-dia' : `às ${horaFalada(j.fim)}`}`;
+
+/**
+ * O horário de atendimento em uma frase, montado da MESMA config que decide se ele responde
+ * agora. O prompt não crava hora nenhuma de propósito: mudar o expediente é um UPDATE na linha
+ * de `onb_agente_config` (a migration do horário da semana diz isso), e o aluno tem de ouvir o
+ * horário que está valendo, não o que estava escrito no dia do deploy.
+ */
+export function frasePeriodoDeAtendimento(c: HorarioDaSemana = {}): string {
+  // 3 é uma quarta-feira: qualquer dia de segunda a sexta serve, todos têm a mesma janela.
+  const semana = janelaDoDia(3, c)!;
+  const sabado = janelaDoDia(6, c);
+  const domingo = janelaDoDia(0, c);
+  const partes = [`segunda a sexta ${faixaFalada(semana)}`];
+  partes.push(sabado ? `sábado ${faixaFalada(sabado)}` : 'sábado não tem atendimento');
+  partes.push(domingo ? `domingo ${faixaFalada(domingo)}` : 'domingo não tem atendimento');
+  return partes.join(', ');
 }
 
 /** Que dia é hoje, por extenso e com a hora, no fuso de Ampére. O modelo não tem relógio. */
@@ -72,12 +144,18 @@ export function diasDesde(iso: string | null | undefined, agora: Date = new Date
 // ── Espera antes de responder ──────────────────────────────────────────────
 
 /**
- * Mesmo ritmo do agente de RH (decisão do Rafael, 10/09): responder em três segundos é a
- * assinatura de um robô. De 120 a 165 s, e a fila varre de minuto em minuto, então o tempo
- * real na conversa fica entre 2 e perto de 4 minutos.
+ * Responder em três segundos é a assinatura de um robô. Na revisão de 12/09/2026 o Rafael
+ * pediu explicitamente a janela: "envie uma resposta dentro de uma janela de 2 a 4 minutos
+ * depois de receber a dúvida", e nada de digitar logo depois de o aluno responder.
+ *
+ * ⚠️ O sorteio NÃO é o tempo que o aluno espera: a resposta vai para `crm_mensagens_agendadas` e
+ * quem entrega é o cron `crm-mensagens-agendadas-dispatch`, que varre de minuto em minuto. O
+ * tempo real é o sorteio MAIS até 60 s de varredura, então o teto do sorteio é 180 s (3 min), e
+ * não 240: com 240 o pior caso vira 5 minutos, fora da janela que ele pediu. Mudar este número
+ * sem descontar a varredura é o mesmo erro de novo.
  */
 export const ESPERA_MIN_S = 120;
-export const ESPERA_MAX_S = 165;
+export const ESPERA_MAX_S = 180;
 export function esperaSorteada(sorteio: () => number = Math.random): number {
   const r = Math.min(Math.max(sorteio(), 0), 0.999999);
   return ESPERA_MIN_S + Math.floor(r * (ESPERA_MAX_S - ESPERA_MIN_S + 1));
@@ -266,6 +344,14 @@ export function primeiroNome(nome: unknown): string {
  * O que chega sem texto (áudio, imagem, figurinha) vira uma descrição honesta para o modelo.
  * O webhook grava marcadores como "[áudio]"; deixá-los crus faz o modelo responder ao
  * marcador, e "não consigo ouvir" seria ele anunciando sozinho que é sistema.
+ *
+ * ⚠️ O `case 'audio'` e a seção QUANDO ELE MANDA ÁUDIO do `prompt.ts` são UM PAR: o system diz o
+ * que ele pode fazer com áudio e isto aqui é o que ele recebe de verdade na conversa. Enquanto
+ * não existir transcrição no caminho deste agente (o `crm-transcrever-audio` só é chamado pelo
+ * botão do SAC e pelo cron do histórico do SDR; medido em 12/09/2026: 2541 de 2541 áudios dos
+ * últimos 30 dias chegam só com o marcador), os dois dizem que ele não ouve. Mudar um sem o
+ * outro põe o modelo entre duas instruções opostas em 100% dos áudios, e o teste do vocabulário
+ * confere as duas pontas.
  */
 export function descreverParaModelo(tipo: unknown, conteudo: unknown): string {
   const c = String(conteudo ?? '');
@@ -352,6 +438,15 @@ export type ContextoAluno = {
   etapa_entrou_em?: string | null;
   ultima_regua?: { template_name?: string | null; enviado_em?: string | null } | null;
   transferencia_aberta?: { id?: string | null; assunto?: string | null; criada_em?: string | null } | null;
+  // O perfil do aluno (20260911235100). Só o que ele JÁ respondeu e quantas vezes foi
+  // perguntado, nunca o texto da resposta nem o sexo: o sexo sai do primeiro nome, no banco,
+  // para a aba da equipe, e o assistente não pergunta, não registra e não lê.
+  meta_pessoal_respondida?: boolean | null;
+  meta_pessoal_perguntas?: number | null;
+  meta_pessoal_perguntada_em?: string | null;
+  como_conheceu_respondido?: boolean | null;
+  como_conheceu_perguntas?: number | null;
+  como_conheceu_perguntada_em?: string | null;
 };
 
 /**
@@ -398,10 +493,310 @@ export function descreverModeloDaRegua(nome: unknown): string {
   return (m && REGUA[m[1]]) || sanearParaModelo(nome);
 }
 
+// ── O perfil do aluno: a meta dele com a pós e como ele conheceu a gente ────
+//
+// Pedido do Rafael (11/09/2026): na integração, guardar para um dashboard futuro a meta
+// pessoal do aluno com a pós e como ele conheceu a casa. Quem pergunta é o assistente, na
+// conversa, e o que ele responde vai para `onb_integracao_estado` pela
+// `onb_agente_registrar_perfil`.
+//
+// As listas são FECHADAS e iguais aos CHECKs das colunas (o teste agenteAlunoSemFinanceiro
+// confere as duas pontas): categoria fora delas é recusada aqui, antes do banco, e o modelo é
+// avisado para corrigir. Mudar aqui exige mudar lá.
+
+export const CATEGORIAS_META_PESSOAL = [
+  'crescer_na_carreira',
+  'aumentar_renda',
+  'empreender',
+  'mudar_de_area',
+  'especializacao_tecnica',
+  'docencia_pesquisa',
+  'concurso',
+  'realizacao_pessoal',
+  'outro',
+] as const;
+export const CATEGORIAS_COMO_CONHECEU = [
+  'redes_sociais',
+  'indicacao',
+  'google_site',
+  'curso_evento_ppg',
+  'youtube',
+  'outro',
+] as const;
+export const PERGUNTAS_DO_PERFIL = ['meta_pessoal', 'como_conheceu'] as const;
+export type PerguntaDoPerfil = typeof PERGUNTAS_DO_PERFIL[number];
+/** Cada pergunta vai no máximo duas vezes em toda a integração, em dias diferentes (Rafael). */
+export const MAX_PERGUNTAS_DO_PERFIL = 2;
+
+/** O que vai para `onb_agente_registrar_perfil`. Sem sexo, e não há como pôr: a lista é esta. */
+export type ParametrosDoPerfil = {
+  p_oportunidade_id: string;
+  p_meta_pessoal: string | null;
+  p_meta_categoria: string | null;
+  p_como_conheceu: string | null;
+  p_como_detalhe: string | null;
+  p_perguntou: PerguntaDoPerfil | null;
+};
+
+export type LeituraDoPerfil =
+  | { ok: true; params: ParametrosDoPerfil }
+  | { ok: false; motivo: string; paraOModelo: string };
+
+/** As palavras dele numa linha só, sem sobra nas pontas, com teto. Vazio vira null. */
+function palavrasDele(v: unknown, max: number): string | null {
+  if (typeof v !== 'string') return null;
+  const t = v.replace(/\s+/g, ' ').trim().slice(0, max).trim();
+  return t || null;
+}
+
+/** Item de lista fechada: ausente é null; fora da lista é `false` (recusa, nunca "outro"). */
+function itemDaLista<T extends string>(v: unknown, lista: readonly T[]): T | null | false {
+  if (v === undefined || v === null || (typeof v === 'string' && !v.trim())) return null;
+  const s = String(v).trim();
+  return (lista as readonly string[]).includes(s) ? s as T : false;
+}
+
+/**
+ * O texto está mesmo nas palavras do aluno? Compara normalizado (sem acento, minúsculo,
+ * pontuação virando espaço) com tudo o que ELE escreveu nesta conversa, lido neste turno.
+ *
+ * Sem isto, nada impede o modelo de resumir, corrigir ou completar a fala dele antes de gravar,
+ * e o que vai para o dashboard deixa de ser a resposta do aluno para virar a versão do modelo.
+ * As mensagens entram juntas de propósito: quem responde em três balões continua sendo ele.
+ */
+export function nasPalavrasDoAluno(texto: unknown, falasDoAluno: readonly string[]): boolean {
+  const alvo = normalizarTitulo(texto);
+  if (!alvo) return false;
+  return normalizarTitulo(falasDoAluno.join(' ')).includes(alvo);
+}
+
+/**
+ * Lê a entrada de `registrar_perfil_do_aluno` e monta os parâmetros da RPC, ou diz ao modelo o
+ * que corrigir. Categoria fora da lista é RECUSADA, e não trocada por "outro": "outro" é a
+ * resposta vaga do aluno, e uma categoria inventada pelo modelo não é isso. Sem a oportunidade
+ * não há o que gravar, e a RPC nem é chamada.
+ *
+ * `falasDoAluno` são as mensagens dele que este turno leu: todo texto livre gravado (a meta e o
+ * detalhe do como conheceu) precisa aparecer ali, senão é recusado. E resposta e pergunta nunca
+ * vêm na mesma chamada: misturadas, uma recusa do que ele disse levava junto a marca da
+ * pergunta (ou o contrário), e as duas coisas seguem réguas diferentes.
+ *
+ * Só os cinco campos da ferramenta passam. Qualquer outro (sexo, idade) é ignorado aqui mesmo,
+ * se o modelo inventar de mandar.
+ */
+export function parametrosDoPerfil(
+  oportunidadeId: unknown, input: unknown, falasDoAluno: readonly string[],
+): LeituraDoPerfil {
+  const op = typeof oportunidadeId === 'string' ? oportunidadeId.trim() : '';
+  if (!op) {
+    return {
+      ok: false, motivo: 'sem_oportunidade',
+      paraOModelo: 'Não deu para registrar agora. Continue a conversa normalmente, sem comentar isso com ele.',
+    };
+  }
+  const i = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
+  const meta = palavrasDele(i.meta_pessoal, 500);
+  const metaCat = itemDaLista(i.meta_pessoal_categoria, CATEGORIAS_META_PESSOAL);
+  const como = itemDaLista(i.como_conheceu, CATEGORIAS_COMO_CONHECEU);
+  const detalhe = palavrasDele(i.como_conheceu_detalhe, 300);
+  const perguntou = itemDaLista(i.acabei_de_perguntar, PERGUNTAS_DO_PERFIL);
+
+  const recusa = (motivo: string, paraOModelo: string): LeituraDoPerfil => ({ ok: false, motivo, paraOModelo });
+  if (metaCat === false) {
+    return recusa('meta_categoria_fora_da_lista',
+      `meta_pessoal_categoria tem de ser uma destas: ${CATEGORIAS_META_PESSOAL.join(', ')}. ` +
+      'Chame de novo com a que mais se aproxima do que ele disse; na dúvida, outro.');
+  }
+  if (como === false) {
+    return recusa('como_conheceu_fora_da_lista',
+      `como_conheceu tem de ser uma destas: ${CATEGORIAS_COMO_CONHECEU.join(', ')}. ` +
+      'Chame de novo com a que mais se aproxima do que ele disse; na dúvida, outro.');
+  }
+  if (perguntou === false) {
+    return recusa('pergunta_fora_da_lista',
+      `acabei_de_perguntar tem de ser uma destas: ${PERGUNTAS_DO_PERFIL.join(', ')}.`);
+  }
+  if (perguntou && (meta || metaCat || como || detalhe)) {
+    return recusa('pergunta_com_resposta',
+      'Numa chamada só vai ou a resposta dele, ou acabei_de_perguntar, nunca as duas coisas. ' +
+      'Chame primeiro com o que ele respondeu; se depois disso você fizer uma pergunta do perfil, ' +
+      'chame de novo só com acabei_de_perguntar.');
+  }
+  if (meta && !nasPalavrasDoAluno(meta, falasDoAluno)) {
+    return recusa('meta_nao_e_do_aluno',
+      'meta_pessoal tem de ser o que ELE escreveu, copiado da mensagem dele, sem resumir e sem ' +
+      'reescrever. Chame de novo com as palavras dele, ou não registre nada agora.');
+  }
+  if (detalhe && !nasPalavrasDoAluno(detalhe, falasDoAluno)) {
+    return recusa('detalhe_nao_e_do_aluno',
+      'como_conheceu_detalhe tem de ser o que ELE escreveu, copiado da mensagem dele. Chame de ' +
+      'novo com as palavras dele, ou registre só a categoria.');
+  }
+  if (meta && !metaCat) {
+    return recusa('meta_sem_categoria',
+      'Faltou meta_pessoal_categoria: chame de novo com as palavras dele e a categoria que mais se aproxima; na dúvida, outro.');
+  }
+  if (metaCat && !meta) {
+    return recusa('categoria_sem_meta',
+      'Faltou meta_pessoal, com as palavras dele. Registre só o que ele disse, nunca o que você acha.');
+  }
+  if (detalhe && !como) {
+    return recusa('detalhe_sem_categoria',
+      'Faltou como_conheceu: chame de novo com a categoria que mais se aproxima do que ele disse; na dúvida, outro.');
+  }
+  if (!meta && !como && !perguntou) {
+    return recusa('vazio',
+      'Nada para registrar. Use acabei_de_perguntar logo depois de fazer a pergunta, ou as palavras dele e a categoria quando ele responder.');
+  }
+  return {
+    ok: true,
+    params: {
+      p_oportunidade_id: op,
+      p_meta_pessoal: meta,
+      p_meta_categoria: metaCat || null,
+      p_como_conheceu: como || null,
+      p_como_detalhe: como ? detalhe : null,
+      p_perguntou: perguntou || null,
+    },
+  };
+}
+
+/** O perfil do jeito que o assistente usa: respondido ou não, quantas vezes e quando perguntou. */
+export type PerfilDoAluno = {
+  metaRespondida: boolean;
+  metaPerguntas: number;
+  metaPerguntadaEm: string | null;
+  comoRespondido: boolean;
+  comoPerguntas: number;
+  comoPerguntadaEm: string | null;
+};
+
+/**
+ * O perfil que veio no contexto, ou null quando o banco ainda não sabe dele: a edge sobe sozinha
+ * no push, e a migration é aplicada à mão, então por um tempo a `onb_agente_contexto` pode vir
+ * sem esses campos. Sem eles ninguém sabe quantas vezes já perguntou, e o assistente não
+ * pergunta (fica mudo nesse ponto, que é reversível; perguntar todo dia não é).
+ *
+ * Campo presente e nulo (aluno sem linha em `onb_integracao_estado` ainda) é zero, não ausência.
+ */
+export function perfilDoContexto(c: ContextoAluno): PerfilDoAluno | null {
+  if (
+    c.meta_pessoal_respondida === undefined && c.meta_pessoal_perguntas === undefined &&
+    c.como_conheceu_respondido === undefined && c.como_conheceu_perguntas === undefined
+  ) return null;
+  const vezes = (v: unknown) => {
+    const n = Math.floor(Number(v ?? 0));
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  };
+  return {
+    metaRespondida: c.meta_pessoal_respondida === true,
+    metaPerguntas: vezes(c.meta_pessoal_perguntas),
+    metaPerguntadaEm: c.meta_pessoal_perguntada_em ?? null,
+    comoRespondido: c.como_conheceu_respondido === true,
+    comoPerguntas: vezes(c.como_conheceu_perguntas),
+    comoPerguntadaEm: c.como_conheceu_perguntada_em ?? null,
+  };
+}
+
+export type PerguntasDeHoje = {
+  liberadas: PerguntaDoPerfil[];
+  /** Por que nenhuma está liberada: indisponivel, ja_perguntou_hoje ou nada_mais. */
+  motivo: 'liberada' | 'indisponivel' | 'ja_perguntou_hoje' | 'nada_mais';
+};
+
+/**
+ * Quais perguntas do perfil podem ir HOJE, pela régua do Rafael: uma por dia no máximo (nunca
+ * as duas no mesmo dia), cada uma no máximo duas vezes em toda a integração, e a meta primeiro
+ * (como conheceu só depois de a meta ter sido perguntada ou respondida). O que ele já respondeu
+ * não é perguntado de novo. O dia é o de Ampére.
+ *
+ * O prompt diz a mesma coisa, e isto não é redundância: o contexto conta ao modelo o que pode
+ * ir hoje, e a ferramenta recusa marcar o que não podia (instrução no prompt não segura sempre).
+ */
+export function perguntasDoPerfilDeHoje(p: PerfilDoAluno | null, agora: Date): PerguntasDeHoje {
+  if (!p) return { liberadas: [], motivo: 'indisponivel' };
+  const hoje = (iso: string | null) => {
+    const d = diasDesde(iso, agora);
+    return d !== null && d <= 0;
+  };
+  if (hoje(p.metaPerguntadaEm) || hoje(p.comoPerguntadaEm)) return { liberadas: [], motivo: 'ja_perguntou_hoje' };
+  const liberadas: PerguntaDoPerfil[] = [];
+  if (!p.metaRespondida && p.metaPerguntas < MAX_PERGUNTAS_DO_PERFIL) liberadas.push('meta_pessoal');
+  if (!p.comoRespondido && p.comoPerguntas < MAX_PERGUNTAS_DO_PERFIL && (p.metaRespondida || p.metaPerguntas > 0)) {
+    liberadas.push('como_conheceu');
+  }
+  return liberadas.length ? { liberadas, motivo: 'liberada' } : { liberadas: [], motivo: 'nada_mais' };
+}
+
+const NOME_DA_PERGUNTA: Record<PerguntaDoPerfil, string> = {
+  meta_pessoal: 'a meta pessoal dele com a pós',
+  como_conheceu: 'como ele conheceu a gente',
+};
+
+/**
+ * Se a pergunta que o modelo diz ter acabado de fazer podia ir agora. Devolve null quando pode,
+ * ou o que dizer ao modelo quando não pode (e aí ela não é marcada: ele tira a pergunta da
+ * mensagem, porque o texto que veio junto com a ferramenta ainda não foi enviado).
+ */
+export function vetoDaPerguntaDoPerfil(
+  qual: PerguntaDoPerfil,
+  o: { perfil: PerfilDoAluno | null; agora: Date; outraMarcadaNesteTurno: boolean; passouParaEquipe: boolean },
+): string | null {
+  const tire = 'Tire essa pergunta da mensagem e escreva a sua resposta sem ela.';
+  if (o.passouParaEquipe) {
+    return `Não faça essa pergunta agora: neste turno a conversa foi passada para a equipe. ${tire}`;
+  }
+  if (o.outraMarcadaNesteTurno) {
+    return `Nunca as duas perguntas do perfil juntas, e a outra já foi feita. ${tire}`;
+  }
+  const hoje = perguntasDoPerfilDeHoje(o.perfil, o.agora);
+  if (hoje.liberadas.includes(qual)) return null;
+  if (hoje.motivo === 'indisponivel') return `O perfil do aluno não está disponível agora. ${tire}`;
+  if (hoje.motivo === 'ja_perguntou_hoje') return `Hoje você já fez uma pergunta do perfil. ${tire}`;
+  if (hoje.liberadas.length) {
+    return `Hoje a pergunta do perfil que pode ir é ${NOME_DA_PERGUNTA[hoje.liberadas[0]]}, e não essa. ${tire}`;
+  }
+  return `Essa pergunta não vai mais: ele já respondeu, ou ela já foi feita duas vezes. ${tire}`;
+}
+
+/** "perguntada 2 vezes, a última em 10/09/2026", ou "nunca perguntada". Contagem, sem casas. */
+function vezesPerguntada(vezes: number, em: string | null, feminino: boolean): string {
+  const nunca = feminino ? 'nunca perguntada' : 'nunca perguntado';
+  if (vezes <= 0) return nunca;
+  const dia = diaBrDoInstante(em);
+  return `${feminino ? 'perguntada' : 'perguntado'} ${vezes} ${vezes === 1 ? 'vez' : 'vezes'}${dia ? `, a última em ${dia}` : ''}`;
+}
+
+/**
+ * A linha do perfil no contexto: o que ele já respondeu, quantas vezes cada pergunta foi feita,
+ * quando foi a última (dia de Ampére), e qual pode ir hoje. Nunca a resposta dele, e nunca sexo.
+ */
+export function linhaDoPerfil(c: ContextoAluno, agora: Date): string {
+  const p = perfilDoContexto(c);
+  if (!p) {
+    return '- Perfil do aluno: não disponível agora. Não pergunte a meta dele nem como ele conheceu a gente.';
+  }
+  const meta = `meta pessoal com a pós ${p.metaRespondida ? 'já respondida' : 'ainda não respondida'}, ` +
+    vezesPerguntada(p.metaPerguntas, p.metaPerguntadaEm, true);
+  const como = `como ele conheceu a gente ${p.comoRespondido ? 'já respondido' : 'ainda não respondido'}, ` +
+    vezesPerguntada(p.comoPerguntas, p.comoPerguntadaEm, false);
+  const hoje = perguntasDoPerfilDeHoje(p, agora);
+  const quando = hoje.liberadas.length === 2
+    ? `Hoje, se a conversa estiver tranquila, você pode perguntar ${NOME_DA_PERGUNTA.meta_pessoal} ou ${NOME_DA_PERGUNTA.como_conheceu}, uma das duas só.`
+    : hoje.liberadas.length === 1
+      ? `Hoje, se a conversa estiver tranquila, você pode perguntar ${NOME_DA_PERGUNTA[hoje.liberadas[0]]}.`
+      : hoje.motivo === 'ja_perguntou_hoje'
+        ? 'Hoje você já fez uma pergunta do perfil: não pergunte de novo.'
+        : 'Não pergunte mais nada do perfil: o que faltava já foi respondido ou já foi perguntado duas vezes.';
+  return `- Perfil do aluno: ${meta}; ${como}. ${quando}`;
+}
+
 export type OpcoesContexto = {
   agora: Date;
   ehManha: boolean;
   totalEmIntegracao: number;
+  /** O expediente que está valendo agora (`onb_agente_config`), para o prompt não cravar hora. */
+  horario?: HorarioDaSemana;
   tccSiteUrl?: string | null;
   mentoriaQuando?: string | null;
   mentoriaUrl?: string | null;
@@ -417,6 +812,10 @@ export function montarContexto(c: ContextoAluno, o: OpcoesContexto): string {
   const s = (v: unknown) => sanearParaModelo(v).trim();
   const linhas: string[] = [];
   linhas.push(`- HOJE é ${agoraPorExtenso(o.agora)}.`);
+  // O horário vem daqui, e não do prompt: quem muda o expediente muda a config, sem deploy, e
+  // o aluno não pode continuar ouvindo o horário antigo.
+  linhas.push(`- Horário de atendimento daqui, o que está valendo: ${frasePeriodoDeAtendimento(o.horario)}. ` +
+    'Esse é o único horário que você diz a ele.');
 
   const nome = primeiroNome(c.lead_nome);
   linhas.push(`- Primeiro nome do aluno: ${nome || 'não informado'}.`);
@@ -489,9 +888,13 @@ export function montarContexto(c: ContextoAluno, o: OpcoesContexto): string {
       `${c.ultima_regua.enviado_em ? `, em ${momentoBr(c.ultima_regua.enviado_em)}` : ''}.`
     : '- Última mensagem da régua que ele recebeu: nenhuma ainda.');
 
+  // Por último de propósito: não é dado do curso, é o que ele pode perguntar nesta conversa.
+  linhas.push(linhaDoPerfil(c, o.agora));
+
   let texto = `CONTEXTO DESTE ALUNO (não repita de volta para ele; use para conversar):\n${linhas.join('\n')}`;
   if (o.ehManha) {
-    texto += '\n\nESTA RESPOSTA SAI ÀS 8H: ele escreveu fora do horário de atendimento. Responda ao que ele ' +
+    // Sem a hora cravada: a abertura sai de `horario_inicio`, que muda por UPDATE na config.
+    texto += '\n\nESTA RESPOSTA SAI NA ABERTURA DO ATENDIMENTO: ele escreveu fora do horário. Responda ao que ele ' +
       'mandou, retomando o assunto, sem se desculpar pelo horário e sem explicar expediente.';
   }
   if (o.instrucaoAgora) texto += `\n\nAGORA: ${o.instrucaoAgora}`;
