@@ -2,6 +2,7 @@
 // Body: { integration_id?: string }  -> if omitted, syncs all active integrations with tokens
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
+import { atualizacaoAgendaDescoberta } from '../_shared/atualizacaoAgendaDescoberta.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -23,6 +24,7 @@ interface Integration {
   account_email?: string | null;
   owner_user_id?: string | null;
   scope?: string | null;
+  scopes?: string | null;
   is_primary?: boolean | null;
 }
 
@@ -64,11 +66,8 @@ async function upsertCalendarIntegrations(
         .eq('ativo', true)
         .limit(1);
 
-      const patch: Record<string, unknown> = { ...row };
+      const patch = atualizacaoAgendaDescoberta(row, Boolean(caixaRef?.[0]?.id));
       if (caixaRef?.[0]?.id) {
-        delete patch.oauth_access_token;
-        delete patch.oauth_refresh_token;
-        delete patch.oauth_token_expires_at;
         console.warn('[calendar] token preservado (linha usada por caixa de e-mail)', existing[0].id);
       }
 
@@ -119,7 +118,7 @@ async function discoverSubCalendars(admin: any, integ: Integration, accessToken:
     integ.is_primary = true;
   }
 
-  // Insere/atualiza sub-agendas (selected=false por padrão)
+  // Apenas sub-agendas novas começam desmarcadas; as existentes mantêm a seleção.
   const subs = items.filter(i => i.id !== primaryId).map(i => ({
     owner_user_id: integ.owner_user_id,
     scope: integ.scope ?? 'personal',
@@ -131,6 +130,7 @@ async function discoverSubCalendars(admin: any, integ: Integration, accessToken:
     oauth_access_token: accessToken,
     oauth_refresh_token: integ.oauth_refresh_token,
     oauth_token_expires_at: integ.oauth_token_expires_at,
+    scopes: integ.scopes,
     is_primary: false,
     selected: false,
     is_active: true,
@@ -330,7 +330,7 @@ Deno.serve(async (req) => {
   if (integrationId) {
     const { data: base, error: bErr } = await admin
       .from('calendar_integrations')
-      .select('id, external_calendar_id, oauth_access_token, oauth_refresh_token, oauth_token_expires_at, owner_user_id, account_email, scope, is_primary')
+      .select('id, external_calendar_id, oauth_access_token, oauth_refresh_token, oauth_token_expires_at, owner_user_id, account_email, scope, scopes, is_primary')
       .eq('id', integrationId)
       .maybeSingle();
     if (bErr || !base) {
@@ -343,7 +343,7 @@ Deno.serve(async (req) => {
     // Demais sub-agendas SELECTED da mesma conta
     const { data: siblings } = await admin
       .from('calendar_integrations')
-      .select('id, external_calendar_id, oauth_access_token, oauth_refresh_token, oauth_token_expires_at, account_email, owner_user_id, scope, is_primary')
+      .select('id, external_calendar_id, oauth_access_token, oauth_refresh_token, oauth_token_expires_at, account_email, owner_user_id, scope, scopes, is_primary')
       .eq('is_active', true)
       .eq('selected', true)
       .eq('account_email', (base as any).account_email)
@@ -354,7 +354,7 @@ Deno.serve(async (req) => {
   } else {
     const { data, error } = await admin
       .from('calendar_integrations')
-      .select('id, external_calendar_id, oauth_access_token, oauth_refresh_token, oauth_token_expires_at, account_email, owner_user_id, scope, is_primary')
+      .select('id, external_calendar_id, oauth_access_token, oauth_refresh_token, oauth_token_expires_at, account_email, owner_user_id, scope, scopes, is_primary')
       .eq('is_active', true)
       .eq('selected', true)
       .not('oauth_refresh_token', 'is', null);

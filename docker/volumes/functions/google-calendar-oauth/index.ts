@@ -3,6 +3,7 @@
 // - GET /callback?code=...&state=...      -> exchange code, store tokens, close popup
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
+import { atualizacaoAgendaDescoberta } from '../_shared/atualizacaoAgendaDescoberta.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -96,11 +97,8 @@ async function upsertCalendarIntegrations(
         .eq('ativo', true)
         .limit(1);
 
-      const patch: Record<string, unknown> = { ...row };
+      const patch = atualizacaoAgendaDescoberta(row, Boolean(caixaRef?.[0]?.id));
       if (caixaRef?.[0]?.id) {
-        delete patch.oauth_access_token;
-        delete patch.oauth_refresh_token;
-        delete patch.oauth_token_expires_at;
         console.warn('[calendar] token preservado (linha usada por caixa de e-mail)', existing[0].id);
       }
 
@@ -311,13 +309,13 @@ Deno.serve(async (req) => {
     const primaryItem = items.find(i => i.primary) ?? items[0];
     const primaryId = primaryItem?.id ?? 'primary';
 
-    // 1) Atualiza a integration original como agenda PRIMARY da conta
+    // 1) Atualiza a integration original como agenda PRIMARY da conta.
+    // A reconexão não deve sobrescrever a seleção feita no sistema.
     const baseUpdates: Record<string, unknown> = {
       oauth_access_token: access_token,
       oauth_token_expires_at: expiresAt,
       external_calendar_id: primaryId,
       is_primary: true,
-      selected: true,
       scopes: grantedScope ?? buildScopes(mode),
     };
     if (refresh_token) baseUpdates.oauth_refresh_token = refresh_token;
@@ -343,7 +341,7 @@ Deno.serve(async (req) => {
         .eq('email_caixa', accountEmail);
     }
 
-    // 2) Insere/atualiza demais sub-agendas (selected=false por padrão)
+    // 2) Apenas sub-agendas novas começam desmarcadas; existentes mantêm a seleção.
     const subItems = items.filter(i => i.id !== primaryId);
     if (subItems.length > 0 && accountEmail) {
       const rows = subItems.map(i => ({
@@ -367,7 +365,7 @@ Deno.serve(async (req) => {
 
       const { error: deactivateErr } = await admin
         .from('calendar_integrations')
-        .update({ is_active: false, selected: false })
+        .update({ is_active: false })
         .eq('account_email', accountEmail)
         .eq('owner_user_id', baseInteg.owner_user_id)
         .neq('id', state.i)
