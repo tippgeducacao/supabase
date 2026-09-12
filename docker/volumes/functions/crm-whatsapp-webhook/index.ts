@@ -290,21 +290,46 @@ async function processarEventoChamada(admin: any, value: any): Promise<number> {
         // Entrada: o lead está ligando. A linha é o que a tela assina para tocar.
         const de = String(call?.from ?? "");
 
-        // Para QUEM toca. A ligação chega num número, não numa pessoa: o dono do
-        // atendimento daquele telefone atende primeiro, e o plantão (todo mundo com o
-        // CRM aberto) entra 15s depois. Sem dono, já nasce no plantão.
+        // Para QUEM toca. A ligação chega num número, não numa pessoa.
+        //
+        // Número COM rodízio (crm_ligacao_rodizio): `crm_chamada_montar_plano` devolve o
+        // plano inteiro com hora do banco — dono (se está no CRM) → cada atendente do
+        // rodízio que está no CRM, um por vez → todos os selecionados de uma vez. Só
+        // quem está no plano toca. `atendente_alvo_id`/`plantao_em` seguem gravados por
+        // compatibilidade (plantao_em = instante do "todos").
+        //
+        // Número SEM rodízio: regra antiga — dono atende primeiro, e o plantão (quem
+        // tem a chave `crm-atender-ligacoes`) entra 15s depois. Sem dono, nasce no plantão.
         let alvo: string | null = null;
+        let plano: Record<string, unknown> | null = null;
         try {
-          const { data } = await admin.rpc("crm_chamada_resolver_alvo", {
+          const { data, error } = await admin.rpc("crm_chamada_montar_plano", {
             p_wa_account_id: accountId,
             p_telefone: de,
           });
-          alvo = (data as string | null) ?? null;
+          if (error) throw error;
+          if (data && typeof data === "object") plano = data as Record<string, unknown>;
         } catch (e) {
-          // Falhar aqui não pode calar o telefone — sem dono, toca para todos.
-          console.error("[crm-whatsapp-webhook] resolver alvo falhou:", e instanceof Error ? e.message : String(e));
+          // Falhar aqui não pode calar o telefone — cai na regra antiga.
+          console.error("[crm-whatsapp-webhook] montar plano falhou:", e instanceof Error ? e.message : String(e));
         }
-        const plantaoEm = new Date(Date.now() + (alvo ? 15_000 : 0)).toISOString();
+        if (plano) {
+          alvo = (plano.dono_id as string | null) ?? null;
+        } else {
+          try {
+            const { data } = await admin.rpc("crm_chamada_resolver_alvo", {
+              p_wa_account_id: accountId,
+              p_telefone: de,
+            });
+            alvo = (data as string | null) ?? null;
+          } catch (e) {
+            // Falhar aqui não pode calar o telefone — sem dono, toca para todos.
+            console.error("[crm-whatsapp-webhook] resolver alvo falhou:", e instanceof Error ? e.message : String(e));
+          }
+        }
+        const plantaoEm = plano?.todos_em
+          ? new Date(String(plano.todos_em)).toISOString()
+          : new Date(Date.now() + (alvo ? 15_000 : 0)).toISOString();
 
         // QUAL card do SAC v2 é o desta ligação: o da LINHA que recebeu. Vai gravado na
         // própria chamada para o "Abrir" da notificação cair nele — navegar só por
@@ -329,13 +354,19 @@ async function processarEventoChamada(admin: any, value: any): Promise<number> {
           status: "ringing",
           atendente_alvo_id: alvo,
           plantao_em: plantaoEm,
+          plano,
           sac_v2_funil_id: alvoV2?.funil_id ?? null,
           sac_v2_atendimento_id: alvoV2?.atendimento_id ?? null,
           ...(sdpType === "offer" && sdp ? { sdp_offer: sdp } : {}),
           biz_opaque: call?.biz_opaque_callback_data ?? null,
           metadata: call ?? {},
         });
-        console.log(`[crm-whatsapp-webhook] chamada recebida de ${de} — alvo=${alvo ?? "plantão"}`);
+        console.log(
+          `[crm-whatsapp-webhook] chamada recebida de ${de} — alvo=${alvo ?? "plantão"}` +
+          (plano
+            ? ` rodízio=${Array.isArray(plano.rodizio) ? plano.rodizio.length : 0} todos_em=${String(plano.todos_em)}`
+            : " (número sem rodízio)"),
+        );
 
         // Faz o card SUBIR e marcar não lido, como faria uma mensagem nova — só que sem
         // inserir mensagem nenhuma (ver o porquê na migration 20260903030000). Sem isto,
