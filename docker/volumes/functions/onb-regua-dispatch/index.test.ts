@@ -117,6 +117,7 @@ beforeEach(() => {
         error: null,
       };
     }
+    if (nome === 'onb_regua_template_24h') return { data: ultimoTemplate24h, error: null };
     if (nome === 'onb_regua_mover') return { data: { movido: true, motivo: 'passo_sem_modelo' }, error: null };
     return { data: null, error: null };
   });
@@ -150,6 +151,8 @@ const envios = () => chamadas('crm-whatsapp-send');
 const corpoDoEnvio = () => JSON.parse(String(envios()[0][1].body));
 const chamadasRpc = (nome: string) => mocks.rpc.mock.calls.filter((c) => c[0] === nome).map((c) => c[1]);
 const registros = () => chamadasRpc('onb_regua_registrar');
+/** Último modelo que a pessoa recebeu nas últimas 24 h; vazio = caminho livre. */
+let ultimoTemplate24h: unknown[] = [];
 const registro = () => registros().at(-1) as Record<string, unknown>;
 
 describe('modo simulação', () => {
@@ -482,5 +485,46 @@ describe('quem pode chamar', () => {
       method: 'GET', headers: { Authorization: 'Bearer chave-do-container' },
     }));
     expect(res.status).toBe(405);
+  });
+});
+
+describe('espaço de 24 h entre modelos', () => {
+  // A trava da casa está desligada desde 01/06/2026 (bypass até 2099) e 21,84% das pessoas
+  // recebem dois ou mais modelos no mesmo dia. A régua se espaça sozinha, sem mexer no resto.
+  beforeEach(() => { ultimoTemplate24h = []; });
+
+  it('em produção, quem recebeu modelo há pouco tem o passo adiado, sem mover a etapa', async () => {
+    config.modo = 'producao';
+    ultimoTemplate24h = [{ enviado_em: new Date().toISOString(), template_nome: 'cobranca_dia_03', conta: 'PPG Educação (BM04) (COBRANÇA)' }];
+    const { corpo } = await chamar();
+    expect(envios()).toHaveLength(0);
+    expect(corpo).toMatchObject({ pulados: 1, enviados: 0 });
+    const reg = registro();
+    expect(reg?.p_status).toBe('pulado');
+    expect(String(reg?.p_motivo)).toContain('template_24h');
+    expect(String(reg?.p_motivo)).toContain('cobranca_dia_03');
+  });
+
+  it('caminho livre em produção envia normalmente', async () => {
+    config.modo = 'producao';
+    const { corpo } = await chamar();
+    expect(corpo.enviados).toBe(1);
+  });
+
+  it('no modo teste a trava não vale: a régua acelerada sai inteira para o mesmo número', async () => {
+    config.modo = 'teste';
+    candidatos[0].telefone = TELEFONE_DO_TESTE;
+    ultimoTemplate24h = [{ enviado_em: new Date().toISOString(), template_nome: 'int_aluno_01_boasvindas_cronograma', conta: 'Grupo PPG Educação (3250)' }];
+    const { corpo } = await chamar();
+    expect(corpo.enviados).toBe(1);
+  });
+
+  it('respeitar_24h desligado na configuração deixa passar', async () => {
+    config.modo = 'producao';
+    (config as Record<string, unknown>).respeitar_24h = false;
+    ultimoTemplate24h = [{ enviado_em: new Date().toISOString(), template_nome: 'cobranca_dia_03', conta: 'x' }];
+    const { corpo } = await chamar();
+    expect(corpo.enviados).toBe(1);
+    delete (config as Record<string, unknown>).respeitar_24h;
   });
 });

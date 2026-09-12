@@ -258,6 +258,8 @@ type ContextoRodada = {
   telefonesTeste: (string | null)[];
   aprovados: Set<string> | null;
   conta: string;
+  /** onb_regua_config.respeitar_24h: adiar o passo de quem já recebeu modelo nas últimas 24 h. */
+  respeitar24h: boolean;
 };
 
 /**
@@ -328,6 +330,27 @@ async function jaSaiu(admin: Admin, cand: Candidato): Promise<boolean> {
   return !!data;
 }
 
+/**
+ * A pessoa recebeu algum modelo nosso nas últimas 24 h, em qualquer número da casa?
+ *
+ * A trava antiga (`crm_whatsapp_template_enviado_24h`) responde sempre "não" enquanto o bypass de
+ * `crm_pipeline_settings` estiver aberto, e ele está aberto até 2099 desde 01/06/2026. Esta aqui
+ * ignora o bypass de propósito: é a régua se espaçando sozinha, sem mexer no resto da casa.
+ * Falha de leitura NÃO segura o passo: melhor um toque a mais do que a régua parar calada.
+ */
+async function espacoDe24h(admin: Admin, telefone: string | null): Promise<{ template: string; conta: string } | null> {
+  // Sem telefone a trava `sem_telefone` já barrou antes; aqui só não há o que conferir.
+  if (!telefone) return null;
+  const { data, error } = await admin.rpc('onb_regua_template_24h', { p_telefone: telefone });
+  if (error) {
+    console.log(`[${FN}] espaço de 24 h não pôde ser conferido: ${error.message}`);
+    return null;
+  }
+  const linha = (Array.isArray(data) ? data[0] : data) as Record<string, unknown> | undefined;
+  if (!linha?.enviado_em) return null;
+  return { template: String(linha.template_nome ?? ''), conta: String(linha.conta ?? '') };
+}
+
 async function processarCandidato(admin: Admin, cand: Candidato, ctx: ContextoRodada): Promise<Linha> {
   // acao='mover': o passo não manda nada (passo sem modelo, ou D+5 de quem já interagiu).
   // Quem sabe se já deu o tempo é o banco; aqui só se pede o movimento.
@@ -367,6 +390,20 @@ async function processarCandidato(admin: Admin, cand: Candidato, ctx: ContextoRo
       console.log(`[${FN}] modo teste: ${mascararTelefone(cand.telefone)} fora da lista, passo D+${cand.dia ?? '?'} pulado`);
     }
     return await registrar(admin, cand, ctx, 'pulado', motivo, { modo: ctx.modo, dia: cand.dia ?? null }, telefoneEnvio);
+  }
+
+  // Espaço de 24 h: vem depois das travas baratas e ANTES do PDF, para não gerar cronograma de
+  // quem não vai receber nada agora. Não move a etapa: o passo fica onde está e sai amanhã.
+  // SÓ VALE EM PRODUÇÃO, de propósito: no teste a régua inteira sai numa tarde (acelerar_minutos)
+  // para o mesmo telefone, e esta trava mataria justamente o teste que ela deveria proteger.
+  if (ctx.respeitar24h && ctx.modo === 'producao') {
+    const ocupado = await espacoDe24h(admin, telefoneEnvio);
+    if (ocupado) {
+      return await registrar(
+        admin, cand, ctx, 'pulado', `${MOTIVO.template_24h}:${ocupado.template}`,
+        { modo: ctx.modo, dia: cand.dia ?? null, conta_do_ultimo: ocupado.conta }, telefoneEnvio,
+      );
+    }
   }
 
   // As travas já conferiram os valores; aqui eles só são materializados (função pura).
@@ -536,6 +573,7 @@ async function rodar(req: Request): Promise<Response> {
       // passo cairia por modelo ainda não aprovado.
       aprovados: await templatesAprovados(conta),
       conta,
+      respeitar24h: config?.respeitar_24h !== false,
     };
 
     const resultados: Linha[] = [];

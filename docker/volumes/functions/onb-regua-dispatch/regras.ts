@@ -167,6 +167,13 @@ export const MOTIVO = {
    * enquanto a janela de bypass de crm_pipeline_settings estiver fechada.
    */
   frequencia_meta: 'frequencia_meta',
+  /**
+   * A pessoa já recebeu um modelo nosso nas últimas 24 h, em qualquer número da casa (cobrança,
+   * comercial, pedagógico). A régua adia o passo em vez de empilhar: quem paga a conta de dois
+   * toques no mesmo dia é o aluno novo. A trava antiga da casa está desligada desde 01/06/2026
+   * (bypass até 2099), então esta aqui não depende dela. Desliga por onb_regua_config.respeitar_24h.
+   */
+  template_24h: 'template_24h',
 } as const;
 
 export type Motivo = (typeof MOTIVO)[keyof typeof MOTIVO];
