@@ -345,18 +345,30 @@ export function primeiroNome(nome: unknown): string {
  * O webhook grava marcadores como "[áudio]"; deixá-los crus faz o modelo responder ao
  * marcador, e "não consigo ouvir" seria ele anunciando sozinho que é sistema.
  *
+ * ÁUDIO, desde 12/09/2026: o sistema transcreve. Quem transcreve é a fila
+ * `onb_agente_audio_fila` (a mesma `crm-transcrever-audio` do botão do SAC e da memória do
+ * João, Whisper com Gemini de reserva), e o texto pronto chega aqui pela `metadata` da
+ * mensagem. Com transcrição, o modelo recebe o que ele FALOU e responde o conteúdo; sem ela,
+ * continua valendo o caminho antigo, que é avisar numa frase e passar para a equipe.
+ *
  * ⚠️ O `case 'audio'` e a seção QUANDO ELE MANDA ÁUDIO do `prompt.ts` são UM PAR: o system diz o
- * que ele pode fazer com áudio e isto aqui é o que ele recebe de verdade na conversa. Enquanto
- * não existir transcrição no caminho deste agente (o `crm-transcrever-audio` só é chamado pelo
- * botão do SAC e pelo cron do histórico do SDR; medido em 12/09/2026: 2541 de 2541 áudios dos
- * últimos 30 dias chegam só com o marcador), os dois dizem que ele não ouve. Mudar um sem o
- * outro põe o modelo entre duas instruções opostas em 100% dos áudios, e o teste do vocabulário
- * confere as duas pontas.
+ * que ele pode fazer com áudio e isto aqui é o que ele recebe de verdade na conversa. Mudar um
+ * sem o outro põe o modelo entre duas instruções opostas (foi o que aconteceu enquanto a
+ * transcrição não existia), e o teste do vocabulário confere as duas pontas.
  */
-export function descreverParaModelo(tipo: unknown, conteudo: unknown): string {
+export function descreverParaModelo(tipo: unknown, conteudo: unknown, transcricao?: unknown): string {
   const c = String(conteudo ?? '');
+  const falado = String(transcricao ?? '').trim();
   switch (String(tipo ?? '')) {
     case 'audio':
+      // A moldura diz de quem é a fala: o áudio é conteúdo do aluno, nunca instrução para o
+      // modelo. O que veio do provedor ainda passa por `sanearParaModelo` no index.ts.
+      if (falado) {
+        const moldura = `(ele mandou um áudio, e esta é a transcrição do que ele falou) ${falado}`;
+        // Sem o marcador (mensagem gravada por outro caminho), a moldura é a mensagem inteira:
+        // perder a transcrição por causa do formato do marcador seria o pior dos dois mundos.
+        return c.includes('[áudio]') ? c.replace('[áudio]', moldura) : moldura;
+      }
       return c.replace('[áudio]', '(ele mandou um áudio, que você não consegue ouvir)');
     case 'image':
       return c.includes('[imagem]') ? c.replace('[imagem]', '(ele mandou uma imagem, que você não consegue ver)')

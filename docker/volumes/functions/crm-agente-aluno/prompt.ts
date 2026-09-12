@@ -57,15 +57,16 @@
 // (que ainda NÃO está construída) sempre espera o "sim" e espera cerca de 30 minutos depois de o
 // aluno concluir uma fase.
 //
-// ⚠️ Das quatro, só o HORÁRIO existe em código (20260912120000), e ele não está escrito aqui: a
-// frase vem do CONTEXTO, montada da config, porque mudar o expediente é um UPDATE, nunca um
-// deploy. A TRANSCRIÇÃO ainda não existe em lugar nenhum deste agente (o crm-transcrever-audio só
-// é chamado pelo botão do SAC e pelo cron do histórico do SDR; 2541 de 2541 áudios inbound dos
-// últimos 30 dias chegaram só com o marcador). Por isso a seção QUANDO ELE MANDA ÁUDIO continua
-// descrevendo o que acontece de verdade: ele não escuta, avisa numa frase e passa para a equipe.
-// Ela e o `case 'audio'` do `descreverParaModelo` são UM PAR, e mudam juntos: prometer a
-// transcrição só aqui deixaria o system e a conversa dizendo o contrário um do outro em 100% dos
-// áudios. O teste do vocabulário confere os dois lados.
+// ⚠️ O HORÁRIO existe em código (20260912120000) e NÃO está escrito aqui: a frase vem do
+// CONTEXTO, montada da config, porque mudar o expediente é um UPDATE, nunca um deploy.
+// A TRANSCRIÇÃO passou a existir em 12/09/2026 (20260912160000): a trigger do banco enfileira o
+// áudio de entrada desta linha, a crm-transcrever-audio (a mesma do botão do SAC e da memória do
+// João) devolve o texto, e o turno espera por ele antes de montar a conversa. Por isso a seção
+// QUANDO ELE MANDA ÁUDIO descreve os DOIS caminhos: com transcrição ele responde o conteúdo;
+// sem ela, avisa numa frase e passa para a equipe, que é o que acontecia sempre antes.
+// Ela e o `case 'audio'` do `descreverParaModelo` são UM PAR, e mudam juntos: prometer aqui o
+// que a conversa não entrega deixaria o system e o histórico dizendo o contrário um do outro.
+// O teste do vocabulário confere os dois lados.
 //
 // TOTALMENTE INDEPENDENTE, por decisão explícita do Rafael: este arquivo não importa nada de
 // `crm-agente-sdr` (o João) nem de `crm-agente-rh`, e nenhum dos dois enxerga nada daqui.
@@ -301,7 +302,7 @@ Passe sempre que:
      (dúvida sobre aula, tema ou cronograma não é isso: essa você responde);
   8. a resposta depender da plataforma dele, da documentação dele ou da situação dele lá
      dentro, que você não enxerga;
-  9. ele mandar um áudio, que não chega até você;
+  9. ele mandar um áudio e a transcrição não vier junto;
  10. ele pedir para falar com uma pessoa, com o pedagógico, por ligação ou por videochamada;
  11. você simplesmente não souber.
 Na dúvida entre responder e passar, passe. Errar para mais aqui custa o tempo de um atendente.
@@ -321,13 +322,19 @@ isso em uma frase e pare. É a única passagem que se anuncia, e mesmo ela não 
 chamado nem em prazo de resposta.
 
 QUANDO ELE MANDA ÁUDIO
-Áudio é normal, e muita gente prefere falar a digitar. Só que o áudio não chega até você: a
-conversa te diz que ele mandou um áudio, e nada do que ele falou.
-Não adivinhe o assunto pelo que veio antes e não responda como se tivesse escutado. Diga numa
+Áudio é normal, e muita gente prefere falar a digitar. O sistema transcreve o áudio dele para
+você, e a conversa te entrega essa transcrição marcada como o que ele falou.
+Quando a transcrição estiver ali, trate aquilo como a mensagem dele e responda o conteúdo, do
+mesmo jeito que responderia se ele tivesse digitado. Não comente que veio em áudio, não diga que
+escutou nem que ouviu, e não peça para ele repetir por escrito. Se a transcrição estiver
+truncada, confusa ou sem sentido, pergunte em uma frase o que ele quis dizer, sem culpar o áudio
+dele e sem falar em transcrição.
+Às vezes a transcrição não vem, e aí a conversa te diz só que ele mandou um áudio. Nesse caso
+não adivinhe o assunto pelo que veio antes e não responda como se tivesse entendido: diga numa
 frase que não conseguiu escutar o áudio aqui, que já vai pedir para alguém da equipe ouvir, e
 use passar_para_atendente com o assunto audio.
-Nada de pedir para ele escrever da próxima vez, nada de reclamar do áudio e nada de explicar
-por que você não ouve: uma frase gentil e a passagem, só isso.
+Nos dois casos, nada de pedir para ele escrever da próxima vez, nada de reclamar do áudio e nada
+de explicar como o áudio chega até você.
 
 QUANDO ELE QUISER FALAR POR VOZ, OU NUM MEET
 Se ele pedir para fazer junto, por ligação ou por videochamada, é pedido de verdade e a gente

@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { acessoWorkerAutorizado, processarHistoricoSdr, type RpcHistorico, type TrabalhoAudio } from "./historicoSdr";
+import {
+  acessoWorkerAutorizado,
+  FILA_ALUNO,
+  processarFilaAudio,
+  processarHistoricoSdr,
+  type RpcHistorico,
+  type TrabalhoAudio,
+} from "./historicoSdr";
 
 const trabalho = (id: string, cache: string | null = null): TrabalhoAudio => ({
   mensagem_id: id, tentativa: 2, audio_url: `https://storage.test/${id}.ogg`, mime_type: "audio/ogg", transcricao_cache: cache,
@@ -93,6 +100,26 @@ describe("worker de memória SDR", () => {
     expect(await processarHistoricoSdr({ rpc, transcrever: vi.fn().mockResolvedValue("Transcrição.") }))
       .toEqual({ reivindicados: 1, concluidos: 0, falhas: 0, obsoletos: 1, erros_registro: 0 });
     expect(rpc).toHaveBeenCalledTimes(2);
+  });
+
+  /**
+   * A fila do ALUNO (12/09/2026) é a mesma mecânica com outro nome de função. O guarda existe
+   * para que ninguém "simplifique" o worker de volta para os nomes cravados do SDR: a fila do
+   * SDR é de saída humana, e a trigger dela apaga qualquer linha que não seja isso.
+   */
+  it("a fila do aluno usa as funções dela, e nunca as do SDR", async () => {
+    const rpc = vi.fn<RpcHistorico>()
+      .mockResolvedValueOnce({ data: [trabalho("um")], error: null })
+      .mockResolvedValue({ data: true, error: null });
+    const resultado = await processarFilaAudio({
+      rpc, fila: FILA_ALUNO, transcrever: vi.fn().mockResolvedValue("  Oi, é sobre o cronograma.  "),
+    });
+    expect(resultado).toEqual({ reivindicados: 1, concluidos: 1, falhas: 0, obsoletos: 0, erros_registro: 0 });
+    expect(rpc.mock.calls).toEqual([
+      ["onb_agente_audio_reivindicar", { p_limite: 3 }],
+      ["onb_agente_audio_concluir", { p_mensagem_id: "um", p_tentativa: 2, p_transcricao: "Oi, é sobre o cronograma." }],
+    ]);
+    expect(rpc.mock.calls.some(([nome]) => String(nome).includes("sdr"))).toBe(false);
   });
 
   it("erro de lease antigo é descartado quando falhar devolve false", async () => {

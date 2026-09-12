@@ -933,6 +933,51 @@ describe('crm-agente-aluno: o perfil do aluno (a meta e como conheceu)', () => {
   });
 });
 
+/**
+ * ÁUDIO (12/09/2026). Quem transcreve é a fila do banco (`onb_agente_audio_fila`, migration
+ * 20260912160000); a edge só espera o texto aparecer na `metadata` da mensagem. O banco falso
+ * devolve `estado.origem` na consulta por wa_message_id, que é exatamente o que a espera lê.
+ */
+describe('crm-agente-aluno: áudio do aluno', () => {
+  const audio = (metadata: Linha = {}) =>
+    mensagem({ tipo: 'audio', conteudo: '[áudio]', metadata });
+  const renovacoes = () => estado.rpcs.filter((r) => r.nome === 'onb_agente_lock_renovar').length;
+
+  it('com a transcrição pronta, o modelo recebe o que ele FALOU e não espera nada', async () => {
+    estado.origem = audio({ audio_transcricao: 'Oi, queria saber quando começa a minha turma.' });
+    estado.historico = [estado.origem];
+    await chamar(C);
+    const enviado = JSON.stringify((estado.anthropic[0] as { messages: unknown }).messages);
+    expect(enviado).toContain('Oi, queria saber quando começa a minha turma.');
+    expect(enviado).toContain('esta é a transcrição do que ele falou');
+    expect(enviado).not.toContain('não consegue ouvir');
+    expect(eventos()).toContain('audio:transcrito');
+    expect(renovacoes()).toBe(0);
+  });
+
+  it('sem transcrição no prazo, espera, avisa e mantém o caminho antigo', async () => {
+    estado.origem = audio();
+    estado.historico = [estado.origem];
+    await chamar(C);
+    const enviado = JSON.stringify((estado.anthropic[0] as { messages: unknown }).messages);
+    expect(enviado).toContain('(ele mandou um áudio, que você não consegue ouvir)');
+    expect(eventos()).toContain('audio:sem_transcricao');
+    // Esperou de verdade, renovando a trava a cada volta: sem isso a espera comeria a trava.
+    expect(renovacoes()).toBeGreaterThan(0);
+  });
+
+  it('áudio de quem o assistente não atende não segura turno nenhum', async () => {
+    // Fora do horário a mensagem é adiada ANTES da espera: a transcrição do áudio de madrugada
+    // continua acontecendo na fila, mas o turno não fica parado esperando por ela.
+    estado.origem = audio();
+    estado.origem = { ...estado.origem, created_at: ultimaVez(23) };
+    await chamar(C);
+    expect(eventos()).toContain('adiado:fora_do_horario');
+    expect(eventos()).not.toContain('audio:sem_transcricao');
+    expect(renovacoes()).toBe(0);
+  });
+});
+
 describe('crm-agente-aluno: o que chegou no meio do turno', () => {
   const b = { wa_message_id: 'wamid.B', telefone: FONE, created_at: new Date().toISOString() };
 

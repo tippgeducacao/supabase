@@ -232,9 +232,26 @@ describe('aula e turma, do jeito que o aluno lê', () => {
 });
 
 describe('mídia sem texto vira descrição honesta', () => {
-  it('troca o marcador do webhook e mantém a citação', () => {
+  it('áudio transcrito chega ao modelo como a fala dele, com a citação preservada', () => {
+    expect(descreverParaModelo('audio', '[áudio]', 'Oi, queria saber do cronograma.'))
+      .toBe('(ele mandou um áudio, e esta é a transcrição do que ele falou) Oi, queria saber do cronograma.');
+    expect(descreverParaModelo('audio', '[Em resposta à mensagem: "Oi"] [áudio]', '  Quando começa?  '))
+      .toBe('[Em resposta à mensagem: "Oi"] (ele mandou um áudio, e esta é a transcrição do que ele falou) Quando começa?');
+    // Mensagem sem o marcador do webhook não pode engolir a transcrição.
+    expect(descreverParaModelo('audio', '', 'Falei sem marcador.'))
+      .toBe('(ele mandou um áudio, e esta é a transcrição do que ele falou) Falei sem marcador.');
+  });
+
+  it('sem transcrição (ainda na fila, ou falhou) continua valendo o caminho antigo', () => {
     expect(descreverParaModelo('audio', '[Em resposta à mensagem: "Oi"] [áudio]'))
       .toBe('[Em resposta à mensagem: "Oi"] (ele mandou um áudio, que você não consegue ouvir)');
+    expect(descreverParaModelo('audio', '[áudio]', '   '))
+      .toBe('(ele mandou um áudio, que você não consegue ouvir)');
+    expect(descreverParaModelo('audio', '[áudio]', null))
+      .toBe('(ele mandou um áudio, que você não consegue ouvir)');
+  });
+
+  it('troca o marcador do webhook e mantém a citação', () => {
     expect(descreverParaModelo('document', 'rg.pdf')).toBe('(ele mandou um arquivo, que você não consegue abrir) rg.pdf');
     expect(descreverParaModelo('reaction', '[reacao]👍')).toBe('(ele reagiu com 👍)');
     expect(descreverParaModelo('text', 'bom dia')).toBe('bom dia');

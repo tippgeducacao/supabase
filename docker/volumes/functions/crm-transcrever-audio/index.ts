@@ -1,8 +1,17 @@
 // crm-transcrever-audio
 // OpenAI primeiro; Gemini cobre falha, limite, timeout ou transcrição vazia.
-// O mesmo caminho atende botão do SAC e memória humana do SDR, sem enviar mensagens.
+// O mesmo caminho atende três chamadores, e NENHUM deles envia mensagem:
+//   1. botão do SAC          (POST com mensagem_id e JWT de atendente)
+//   2. memória humana do SDR (?mode=historico-sdr, saída humana da linha comercial)
+//   3. áudio do ALUNO        (?mode=aluno-inbound, entrada na linha do assistente pedagógico,
+//      desde 12/09/2026). A fila é outra, o segredo é outro, o worker é o mesmo.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
-import { acessoWorkerAutorizado, processarHistoricoSdr } from "./historicoSdr.ts";
+import {
+  acessoWorkerAutorizado,
+  FILA_ALUNO,
+  processarFilaAudio,
+  processarHistoricoSdr,
+} from "./historicoSdr.ts";
 import { codigoErroSeguro, transcreverAudio } from "./transcricao.ts";
 import { resolverGemini } from './configuracao.ts';
 import { criarTelemetria } from '../crm-agente-sdr/eventos.ts';
@@ -40,7 +49,31 @@ Deno.serve(async (req) => {
       registrar: evento => tel.registrar('transcricao_audio_' + evento.fase, evento) });
   };
 
-  if (new URL(req.url).searchParams.get("mode") === "historico-sdr") {
+  const modo = new URL(req.url).searchParams.get("mode");
+
+  // Áudio de entrada na linha do assistente pedagógico. Segredo PRÓPRIO, em tabela própria: a
+  // config do assistente tem leitura para diretor, e chave de endpoint não entra num select de
+  // tela. Quem chama é a trigger do banco (na hora) e o cron `onb-agente-audio` (as falhas).
+  if (modo === "aluno-inbound") {
+    try {
+      const { data: chave, error: chaveErr } = await admin.from("onb_agente_audio_chave")
+        .select("chave").eq("id", true).maybeSingle();
+      if (chaveErr) return json({ error: "configuracao_indisponivel" }, 500);
+      if (!acessoWorkerAutorizado(req.method, req.headers.get("x-onb-audio-key"), chave?.chave)) {
+        return json({ error: "não autorizado" }, 401);
+      }
+      const resultado = await processarFilaAudio({
+        rpc: async (nome, parametros) => await admin.rpc(nome, parametros),
+        transcrever,
+        fila: FILA_ALUNO,
+      });
+      return json({ ok: true, ...resultado });
+    } catch (erro) {
+      return json({ error: codigoErroSeguro(erro) }, 500);
+    }
+  }
+
+  if (modo === "historico-sdr") {
     try {
       // O service_role do cron pode diferir do container no self-hosted. O segredo
       // compartilhado só é lido no servidor; JWT de atendente não autoriza o worker.

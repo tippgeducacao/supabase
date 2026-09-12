@@ -27,6 +27,13 @@
 //   8. HUMANO   se a última mensagem nossa foi de uma pessoa, ele cala.
 //   9. PASSAGEM se já passou a conversa para a equipe e ninguém respondeu ainda, ele cala.
 //
+// ÁUDIO (12/09/2026): o assistente responde o que foi FALADO. Quem transcreve é a fila
+// `onb_agente_audio_fila`, enchida pela trigger do banco quando chega áudio de entrada nesta
+// linha e drenada pela `crm-transcrever-audio` (a mesma do botão do SAC e da memória do João).
+// O turno espera o texto por até 20 s depois das portas acima, e só então monta o histórico.
+// Sem transcrição no prazo, nada muda em relação a antes: uma frase gentil e a passagem com o
+// assunto `audio`.
+//
 // NENHUMA ferramenta nem consulta daqui enxerga financeiro (o teste agenteAlunoSemFinanceiro
 // confere). Isso sozinho NÃO basta: a 3250 é a linha em que a EQUIPE responde o financeiro, e o
 // histórico que o modelo lê teria o valor, o vencimento, o link do boleto e até a senha
@@ -85,6 +92,15 @@ const PERSONA = 'aluno';
 const AUTOR = 'Assistente pedagógico';
 const BUFFER_MS = 6000;          // quem manda 3 balões seguidos recebe UMA resposta
 const LOCK_TTL_SEGUNDOS = 90;
+/**
+ * Quanto o turno espera a transcrição do áudio que ACABOU de chegar. A fila
+ * (`onb_agente_audio_fila`) é acordada pela própria trigger do banco assim que a mensagem é
+ * gravada, então na prática o texto chega em poucos segundos; o teto existe porque o aluno
+ * está do outro lado esperando resposta, e um provedor lento não pode virar silêncio. Sem
+ * transcrição no prazo, vale o caminho de sempre: uma frase e a passagem para a equipe.
+ */
+const ESPERA_TRANSCRICAO_MS = 20_000;
+const PASSO_TRANSCRICAO_MS = 2_000;
 const JANELA_HORAS = 24;
 const MAX_HISTORICO = 40;
 const MAX_RODADAS = 4;
@@ -262,7 +278,7 @@ const TOOL_PASSAR = {
     'vida acadêmica dele; algo que depende da situação dele na plataforma; documento que ele ' +
     'mandou por aqui; ligação ou videochamada; TCC com pendência; turma que você não sabe; grupo ' +
     'da turma sem link; pedido para falar com uma pessoa ou com o pedagógico; quem não quer mais ' +
-    'receber mensagens; áudio, que não chega até você; e qualquer coisa que você não saiba. ' +
+    'receber mensagens; áudio que chegou sem transcrição; e qualquer coisa que você não saiba. ' +
     'Chamar isto registra a passagem e deixa a conversa marcada para a equipe, que responde neste ' +
     'mesmo número. Depois, escreva no máximo uma frase curta dizendo que vai confirmar e já ' +
     'retorna, sem falar em encaminhar para setor nenhum (só crítica, sugestão e feedback são ditos ' +
@@ -583,6 +599,36 @@ async function manhaAutentica(id: string, telefone: string): Promise<boolean> {
   return !!data && mesmoTelefone(data.telefone, telefone);
 }
 
+/** O que a fila de transcrição gravou nesta mensagem. Vazio enquanto não terminou. */
+const transcricaoDe = (metadata: any): string => String(metadata?.audio_transcricao ?? '').trim();
+
+/**
+ * Espera a transcrição do áudio que acabou de chegar, igual ao que o João faz com o áudio do
+ * vendedor: quem transcreve é a fila do banco, e o turno segura o passo em vez de responder
+ * "não consigo ouvir" a um áudio que estaria pronto três segundos depois.
+ *
+ * Renova a trava a cada volta: sem isso, uma espera de 20 s comeria um quinto dos 90 s da
+ * trava justamente no turno mais longo, e o próximo balão do aluno entraria por cima.
+ * Devolve '' quando o prazo acaba, e aí o turno segue pelo caminho antigo.
+ */
+async function esperarTranscricao(msgId: string, chave: string): Promise<string> {
+  const limite = Date.now() + ESPERA_TRANSCRICAO_MS;
+  while (true) {
+    const { data } = await supabase
+      .from('crm_whatsapp_messages')
+      .select('metadata')
+      .eq('wa_message_id', msgId)
+      .eq('direcao', 'inbound')
+      .limit(1)
+      .maybeSingle();
+    const texto = transcricaoDe(data?.metadata);
+    if (texto) return texto;
+    if (Date.now() >= limite) return '';
+    await supabase.rpc('onb_agente_lock_renovar', { p_telefone: chave, p_ttl_segundos: LOCK_TTL_SEGUNDOS });
+    await dormir(PASSO_TRANSCRICAO_MS);
+  }
+}
+
 async function processar(payload: any, conta: string, profundidade = 0): Promise<void> {
   const msgId = String(payload?.id ?? '').trim();
   if (!msgId) return;
@@ -736,6 +782,18 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
       return;
     }
 
+    // ── ÁUDIO: o que ele falou, em texto ──────────────────────────────────────
+    // A trigger do banco enfileira o áudio de entrada desta linha assim que o webhook grava a
+    // mensagem, e acorda a `crm-transcrever-audio` na hora. Aqui o turno só espera o texto
+    // aparecer na `metadata`, e espera DEPOIS das portas: nada de segurar o turno por um
+    // áudio de quem não é aluno da integração, ou de quem escreveu fora do horário.
+    let transcricaoAgora = '';
+    if (!ehManha && tipo === 'audio') {
+      transcricaoAgora = await esperarTranscricao(msgId, chave);
+      await evento(transcricaoAgora ? 'audio:transcrito' : 'audio:sem_transcricao',
+        { ...rastro, caracteres: transcricaoAgora.length });
+    }
+
     // ── Histórico da conversa NESTA linha, com ESTA pessoa ────────────────────
     // O `ilike` pelos últimos 8 dígitos acha a linha com e sem o 9 e com e sem o 55; o
     // refiltro pelo canon (DDD + 8) tira o número igual de outro DDD. A 3250 fala com o
@@ -782,9 +840,15 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
       if (saneada !== cru) falasDoAluno.push(saneada);
     };
     for (const m of conversa) {
-      if (m.direcao === 'inbound') guardarFala(String(m.conteudo ?? ''));
+      if (m.direcao !== 'inbound') continue;
+      guardarFala(String(m.conteudo ?? ''));
+      // O que ele falou num áudio é fala dele igual. Sem isto, a meta pessoal dita por voz
+      // seria recusada pela própria trava que existe para não deixar o modelo inventar: o
+      // texto cru daquela mensagem é "[áudio]".
+      guardarFala(transcricaoDe(m.metadata));
     }
     guardarFala(conteudo);
+    guardarFala(transcricaoAgora);
 
     // ── JANELA ────────────────────────────────────────────────────────────────
     const ultimoInbound = daPessoa.find((m: any) => m.direcao === 'inbound');
@@ -909,7 +973,11 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
         // ESCRITA_POR_PESSOA). O resto passa pelo saneamento: ele copia o estilo do que lê.
         content: m.direcao === 'outbound' && m.metadata?.origem === 'humano'
           ? ESCRITA_POR_PESSOA
-          : sanearParaModelo(m.direcao === 'inbound' ? descreverParaModelo(m.tipo, m.conteudo) : m.conteudo)
+          : sanearParaModelo(m.direcao === 'inbound'
+              // A transcrição vem da mesma linha da mensagem: áudio antigo já transcrito pela
+              // fila entra no histórico como o que ele falou, e não como marcador.
+              ? descreverParaModelo(m.tipo, m.conteudo, transcricaoDe(m.metadata))
+              : m.conteudo)
             .slice(0, 4000).trim(),
       }))
       // ⚠️ Bloco vazio derruba a chamada inteira com HTTP 400.
@@ -926,7 +994,7 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
         role: 'user',
         content: ehManha
           ? '(sem mensagem nova: é a retomada das 8h do que ele escreveu fora do horário)'
-          : sanearParaModelo(descreverParaModelo(tipo, conteudo)).slice(0, 4000).trim() ||
+          : sanearParaModelo(descreverParaModelo(tipo, conteudo, transcricaoAgora)).slice(0, 4000).trim() ||
             '(ele mandou algo sem texto)',
       });
     }
