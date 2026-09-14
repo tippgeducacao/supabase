@@ -47,7 +47,7 @@ beforeEach(() => {
   vi.spyOn(console, 'log').mockImplementation(() => {})
   vi.spyOn(console, 'warn').mockImplementation(() => {})
   fronteiras.rpc.mockImplementation(async (nome: string) => {
-    if (['threec_sdr_travar', 'threec_sdr_destravar'].includes(nome)) return { data: true, error: null }
+    if (['threec_sdr_travar', 'threec_sdr_destravar', 'threec_mailing_lista_travar', 'threec_mailing_lista_destravar'].includes(nome)) return { data: true, error: null }
     if (nome === 'threec_sdr_lote_iniciar') return { data: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', error: null }
     if (nome === 'threec_sdr_lote_confirmar') return { data: leads.length, error: null }
     if (['threec_mailing_selecionar_lista', 'threec_mailing_selecionar'].includes(nome)) {
