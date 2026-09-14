@@ -4,6 +4,7 @@
 // atualiza contadores. Respeita 'pausada' / 'cancelada'.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { buscarSupressoes, normalizarEmail } from "../_shared/supressao.ts";
+import { enfileirarContatosSegmentoEmail, resolverSegmentoEmail } from "../_shared/emailSegmentos.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -13,95 +14,52 @@ const corsHeaders = {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-const WHITELIST: Record<string, { emailCol: string; nomeCol: string; campos: string[] }> = {
-  profiles: { emailCol: "email", nomeCol: "nome", campos: ["ativo", "departamento_id", "user_type", "nivel", "setor"] },
-  ped_professores: { emailCol: "email", nomeCol: "nome", campos: ["ativo", "status"] },
-  alunos: { emailCol: "email", nomeCol: "nome", campos: ["status", "curso_id"] },
-  leads: { emailCol: "email", nomeCol: "nome", campos: ["status", "etapa", "origem"] },
-};
-const OPS = new Set(["eq","neq","in","contains","gt","lt","is_null","is_not_null"]);
-
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
-
-function applyFiltros(q: any, filtros: any[], campos: string[]) {
-  for (const f of filtros) {
-    if (!campos.includes(f.campo) || !OPS.has(f.operador)) continue;
-    switch (f.operador) {
-      case "eq": q = q.eq(f.campo, f.valor); break;
-      case "neq": q = q.neq(f.campo, f.valor); break;
-      case "in": q = q.in(f.campo, Array.isArray(f.valor) ? f.valor : [f.valor]); break;
-      case "contains": q = q.ilike(f.campo, `%${f.valor}%`); break;
-      case "gt": q = q.gt(f.campo, f.valor); break;
-      case "lt": q = q.lt(f.campo, f.valor); break;
-      case "is_null": q = q.is(f.campo, null); break;
-      case "is_not_null": q = q.not(f.campo, "is", null); break;
-    }
-  }
-  return q;
-}
-
-async function resolverSegmento(supabase: any, segmento: any): Promise<Array<{ email: string; nome: string | null; metadata: any }>> {
-  if (segmento.tipo === "estatico") {
-    return (segmento.contatos_estaticos ?? []).map((c: any) => ({
-      email: c.email, nome: c.nome ?? null, metadata: c.metadata ?? null,
-    })).filter((c: any) => c.email);
-  }
-  const q = segmento.query_dinamica;
-  if (!q?.tabela || !WHITELIST[q.tabela]) return [];
-  const cfg = WHITELIST[q.tabela];
-  let sb = supabase.from(q.tabela).select(`${cfg.emailCol}, ${cfg.nomeCol}`).limit(10000);
-  sb = applyFiltros(sb, q.filtros ?? [], cfg.campos);
-  const { data } = await sb;
-  return (data ?? [])
-    .filter((r: any) => r[cfg.emailCol])
-    .map((r: any) => ({ email: r[cfg.emailCol], nome: r[cfg.nomeCol] ?? null, metadata: null }));
-}
 
 async function processarCampanha(supabase: any, campanha: any) {
   // Carrega segmento se ainda não populou envios
-  const { count: jaTem } = await supabase
+  const { count: jaTem, error: erroFila } = await supabase
     .from("email_campanhas_envios")
     .select("*", { count: "exact", head: true })
     .eq("campanha_id", campanha.id);
 
-  if ((jaTem ?? 0) === 0) {
-    const { data: seg } = await supabase.from("email_segmentos").select("*").eq("id", campanha.segmento_id).single();
-    const contatos = await resolverSegmento(supabase, seg);
-    if (contatos.length === 0) {
-      await supabase.from("email_campanhas").update({
+  if (erroFila) throw new Error("Não foi possível consultar a fila da campanha.");
+
+  if (campanha.status === "agendada" || !campanha.iniciada_em || (jaTem ?? 0) === 0) {
+    const { data: seg, error: erroSegmento } = await supabase.from("email_segmentos").select("*").eq("id", campanha.segmento_id).single();
+    if (erroSegmento || !seg) throw new Error("Não foi possível carregar o segmento da campanha.");
+    const contatos = await resolverSegmentoEmail(supabase, seg);
+    // Só sai de agendada depois que TODOS os lotes existem. Uma falha intermediária
+    // deixa a campanha agendada; o próximo ciclo completa a fila por upsert, sem
+    // trocar os IDs e as chaves de idempotência dos destinatários já preparados.
+    await enfileirarContatosSegmentoEmail(supabase, campanha.id, contatos);
+    const { count: totalFila, error: erroTotal } = await supabase.from("email_campanhas_envios")
+      .select("*", { count: "exact", head: true }).eq("campanha_id", campanha.id);
+    if (erroTotal || totalFila == null) throw new Error("Não foi possível conferir a fila da campanha.");
+    if (totalFila === 0) {
+      const { error } = await supabase.from("email_campanhas").update({
         status: "enviada", concluida_em: new Date().toISOString(), total_destinatarios: 0,
-      }).eq("id", campanha.id);
+      }).eq("id", campanha.id).eq("status", campanha.status);
+      if (error) throw new Error("Não foi possível concluir a campanha sem destinatários.");
       return;
     }
-    // dedupe por email
-    const seen = new Set<string>();
-    const unicos = contatos.filter(c => { if (seen.has(c.email)) return false; seen.add(c.email); return true; });
-    const rows = unicos.map(c => ({
-      campanha_id: campanha.id, contato_email: c.email, contato_nome: c.nome, contato_metadata: c.metadata, status: "pendente",
-    }));
-    // insert em chunks de 500
-    for (let i = 0; i < rows.length; i += 500) {
-      await supabase.from("email_campanhas_envios").insert(rows.slice(i, i + 500));
-    }
-    await supabase.from("email_campanhas").update({
-      total_destinatarios: unicos.length,
+    const { error } = await supabase.from("email_campanhas").update({
+      total_destinatarios: totalFila,
       status: "enviando",
       iniciada_em: campanha.iniciada_em ?? new Date().toISOString(),
-    }).eq("id", campanha.id);
-    campanha.total_destinatarios = unicos.length;
-  } else if (campanha.status === "agendada") {
-    await supabase.from("email_campanhas").update({
-      status: "enviando", iniciada_em: campanha.iniciada_em ?? new Date().toISOString(),
-    }).eq("id", campanha.id);
+    }).eq("id", campanha.id).eq("status", campanha.status);
+    if (error) throw new Error("Não foi possível iniciar a fila da campanha.");
+    campanha.total_destinatarios = totalFila;
   }
 
   // Lote de até 50 envios pendentes
-  const { data: loteBruto } = await supabase
+  const { data: loteBruto, error: erroLote } = await supabase
     .from("email_campanhas_envios")
     .select("*")
     .eq("campanha_id", campanha.id)
     .eq("status", "pendente")
     .limit(50);
+  if (erroLote) throw new Error("Não foi possível consultar os envios pendentes da campanha.");
 
   // Supressão em LOTE: quem deu bounce duro, marcou spam ou se descadastrou sai do
   // lote antes de virar chamada de envio. O email-send confere de novo (defesa em
@@ -128,12 +86,13 @@ async function processarCampanha(supabase: any, campanha: any) {
 
   if (pendentes.length === 0) {
     // Finaliza
-    const { count: rest } = await supabase
+    const { count: rest, error: erroPendentes } = await supabase
       .from("email_campanhas_envios")
       .select("*", { count: "exact", head: true })
       .eq("campanha_id", campanha.id)
       .eq("status", "pendente");
-    if ((rest ?? 0) === 0) {
+    if (erroPendentes || rest == null) throw new Error("Não foi possível conferir os envios pendentes da campanha.");
+    if (rest === 0) {
       await supabase.from("email_campanhas").update({
         status: "enviada", concluida_em: new Date().toISOString(),
       }).eq("id", campanha.id);
