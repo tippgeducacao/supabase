@@ -846,6 +846,11 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
     // foi gravado e nada foi movido, e a régua manda o template deste passo no dia normal.
     let entregaPendente = false;
     let entregaMidia: Midia | null = null;
+    // ⚠️ A ETAPA QUE O ROTEIRO DEVOLVEU, guardada aqui até a confirmação. Perguntar de novo depois
+    // do envio era carimbar um passo que ninguém entregou: entre o roteiro e a confirmação cabe o
+    // tick da régua (de 5 em 5 min, e o dispatch ENVIA antes de registrar) e cabe uma pessoa
+    // arrastando o card no kanban.
+    let entregaEtapaId: string | null = null;
     let instrucaoAgora: string | null = null;
     const botao = semInbound ? null : interpretarBotao(botaoBruto);
     if (botao?.tipo === 'grupo') {
@@ -1018,22 +1023,33 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
         p_oportunidade_id: aluno.oportunidade_id,
       });
       const rot = (rotBruto ?? {}) as Record<string, unknown>;
+      // ⚠️ FALHA DE INFRAESTRUTURA NÃO É RESPOSTA DO NEGÓCIO. Sem esta separação, um timeout da
+      // RPC fechava a oferta como 'recusada' e o aluno só ganharia outra ao fechar mais um passo.
+      // Agora a oferta fica de pé (ela expira sozinha em 20 h) e o turno sai calado.
+      if (errRot) {
+        await evento('acelerada:oferta_falhou', { ...rastro, erro: errRot.message });
+        return;
+      }
       conviteDaOferta = rot.ok === true ? String(rot.convite ?? '').trim() : '';
       if (!conviteDaOferta) {
-        // Passo de resgate, passo que só sai por template, etapa fora da régua, ou o D+1 (a porta
-        // de entrada não se oferece): não há o que convidar, e falar sem ter o que oferecer é pior
-        // do que ficar quieto. A oferta morre AQUI em vez de segurar a vaga única por 20 h — assim
-        // o aluno volta a poder receber uma assim que fechar o próximo passo.
+        // Aqui o banco RESPONDEU que não há o que oferecer: passo de resgate, passo que só sai por
+        // template, aluno que pediu para parar, etapa fora da régua, ou o D+1 (a porta de entrada
+        // não se oferece). Falar sem ter o que oferecer é pior do que ficar quieto, e a oferta
+        // morre AQUI em vez de segurar a vaga única por 20 h — assim o aluno volta a poder receber
+        // uma assim que fechar o próximo passo.
         const agoraIso = new Date().toISOString();
         await supabase.from('onb_acelerada_ofertas')
           .update({
             status: 'recusada',
-            motivo: `sem convite: ${rot.motivo ?? errRot?.message ?? 'passo sem oferta_convite'}`,
+            motivo: `sem convite: ${rot.motivo ?? 'passo sem oferta_convite'}`,
             respondida_em: agoraIso,
             atualizada_em: agoraIso,
           })
-          .eq('oportunidade_id', aluno.oportunidade_id);
-        await evento('acelerada:sem_convite', { ...rastro, motivo: rot.motivo ?? errRot?.message ?? null });
+          .eq('oportunidade_id', aluno.oportunidade_id)
+          // Só fecha a oferta que ESTÁ SENDO OFERECIDA agora. Um turno atrasado não pode derrubar
+          // a oferta nova que o aluno ganhou enquanto isso.
+          .eq('status', 'oferecida');
+        await evento('acelerada:sem_convite', { ...rastro, motivo: rot.motivo ?? null });
         return;
       }
     }
@@ -1258,6 +1274,8 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
             };
           }
           entregaPendente = true;
+          // É ESTA etapa que vai ser carimbada lá embaixo, e não a que o banco disser depois.
+          entregaEtapaId = String(rot.etapa_id ?? '').trim() || null;
           const pontos = Array.isArray(rot.pontos) ? (rot.pontos as string[]) : [];
           results.push({
             type: 'tool_result', tool_use_id: u.id,
@@ -1446,13 +1464,24 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
     // ⚠️ A ORDEM AQUI É A REGRA DE NEGÓCIO. Só marca o passo e move o aluno DEPOIS de a mensagem
     // ter entrado na fila sem bloqueio. Se o envio falhar, o `return` acima já saiu e nada disto
     // rodou: o aluno continua na mesma etapa e a régua manda o template dele no dia normal.
-    // Sem isso, um envio bloqueado marcaria o passo como entregue e o aluno nunca receberia.
+    //
+    // ⚠️⚠️ MAS "NA FILA" NÃO É "ENTREGUE". O `enviar()` enfileira; quem manda é o
+    // `crm-agendadas-dispatch`, depois. Se ele falhar (mídia fora do ar, recusa da Meta) ou se uma
+    // resposta mais nova cancelar a linha, o aluno não recebe nada e o carimbo daqui seria mentira
+    // permanente — a régua nunca mais mandaria aquele passo. Por isso o `fila_id` vai junto: o
+    // `onb_acelerada_tick` confere a fila de minuto em minuto e DESFAZ o carimbo do que morreu
+    // (`onb_acelerada_desfazer_entregas_mortas`), e aí o passo volta a sair por template.
     if (entregaPendente) {
       const { data: r, error: errEntrega } = await supabase.rpc('onb_acelerada_confirmar_entrega', {
-        p_oportunidade_id: aluno.oportunidade_id, p_wa_message_id: null,
+        p_oportunidade_id: aluno.oportunidade_id,
+        // A etapa é a que o ROTEIRO devolveu, não a que o banco calcularia agora.
+        p_etapa_id: entregaEtapaId,
+        p_wa_message_id: null,
+        p_fila_id: envio.filaId,
       });
       await evento('acelerada:entregue', {
-        ...rastro, resultado: r ?? null, com_midia: !!entregaMidia, erro: errEntrega?.message ?? null,
+        ...rastro, resultado: r ?? null, etapa_entregue: entregaEtapaId, fila_id: envio.filaId,
+        com_midia: !!entregaMidia, erro: errEntrega?.message ?? null,
       });
     }
     await evento('respondido', {
