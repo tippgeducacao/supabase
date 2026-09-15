@@ -6,6 +6,7 @@ import { PROMPT_ROUTER } from './prompts.ts';
 import type { Msg } from './historico.ts';
 import { INSTRUCAO_MEMORIA_HUMANA } from './memoriaHumana.ts';
 import { INSTRUCAO_DISPONIBILIDADE_CONTATO } from './disponibilidadeContato.ts';
+import { INSTRUCAO_EVENTOS } from './instrucaoEventos.ts';
 import { descreverToolsSdr } from './descricoesTools.ts';
 import { respostaParaFalhaCatalogo } from './falhaCatalogo.ts';
 import { INSTRUCAO_FATOS_DO_LEAD } from './fatosLead.ts';
@@ -62,7 +63,8 @@ export async function chamarRouter(
       { type: 'text', text: PROMPT_ROUTER },
       { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA },
       { type: 'text', text: INSTRUCAO_FATOS_DO_LEAD },
-      { type: 'text', text: INSTRUCAO_DISPONIBILIDADE_CONTATO, cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: INSTRUCAO_DISPONIBILIDADE_CONTATO },
+      { type: 'text', text: INSTRUCAO_EVENTOS, cache_control: { type: 'ephemeral' } },
     ],
     messages: historicoLimpo,
     tools: [{
@@ -117,6 +119,7 @@ export async function chamarAgentePrincipal(opts: {
     { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA },
     { type: 'text', text: INSTRUCAO_FATOS_DO_LEAD },
     { type: 'text', text: INSTRUCAO_DISPONIBILIDADE_CONTATO },
+    { type: 'text', text: INSTRUCAO_EVENTOS },
     { type: 'text', text: INSTRUCAO_CANAL_RESPOSTA, cache_control: { type: 'ephemeral' } },
   ];
 

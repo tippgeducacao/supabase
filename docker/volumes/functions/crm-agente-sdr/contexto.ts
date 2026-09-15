@@ -311,7 +311,7 @@ ${status.mensagem}
 **PRÓXIMOS DIAS (data = dia da semana — use ESTA tabela, NUNCA calcule de cabeça):**
 ${calendarioProximosDias()}
 
-**HORÁRIOS DE ATENDIMENTO DA SEMANA:**
+**HORÁRIOS DE ATENDIMENTO PARA CONVERSA COM O MONITOR (NÃO SÃO HORÁRIOS DE AULAS):**
 • Segunda-feira: 09:30-11:30 e 14:30-20:30
 • Terça-feira: 09:30-11:30 e 14:30-20:30
 • Quarta-feira: 09:30-11:30 e 14:30-19:30
@@ -320,7 +320,8 @@ ${calendarioProximosDias()}
 • Sábado: 08:30-11:30
 • Domingo: Não atendemos
 
-**PERÍODO QUE VOCÊ PODE OFERECER HOJE: ${periodos.frase || 'nenhum — ofereça o próximo dia útil'}**
+**PERÍODOS DE ATENDIMENTO HOJE, SOMENTE PARA A CONVERSA COM O MONITOR: ${periodos.frase || 'nenhum — consulte o próximo dia útil após o aceite da conversa'}**
+Essas janelas não são disponibilidade confirmada nem programação de aula ou evento. Confirmação de participação em aula não autoriza consultar ou oferecer reunião. Para a conversa individual, primeiro obtenha o aceite específico do lead e consulte a agenda; ao apresentar opções reais, diga que são para a conversa com o monitor.
 
 ${blocoElegibilidadeFormatura()}`;
 }

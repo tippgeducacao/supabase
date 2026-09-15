@@ -8,6 +8,7 @@ import { AGENTE_RECONTATO } from './prompts-recontato';
 import { FOLLOWUP_SYSTEM } from './prompts-followup';
 import { montarContextoEntregaMateriais } from './entregaMateriais';
 import { INSTRUCAO_DISPONIBILIDADE_CONTATO } from './disponibilidadeContato';
+import { INSTRUCAO_EVENTOS } from './instrucaoEventos';
 import { INSTRUCAO_FATOS_DO_LEAD } from './fatosLead';
 import { INSTRUCAO_CANAL_RESPOSTA, NOME_TOOL_RESPOSTA } from './canalResposta';
 
@@ -68,6 +69,33 @@ beforeEach(() => {
 });
 
 describe('instrução de memória no system enviado à Anthropic', () => {
+  // Verifica os requests montados, sem atribuir ao modelo simulado decisões reais.
+  it.each([
+    ['confirmação do botão', '[Em resposta à mensagem: "Hoje às 19h teremos a aula ao vivo. Consegue confirmar?"] Confirmar Participação'],
+    ['dúvida após oferta indevida', 'Não estava marcado para 19h?'],
+    ['novo pedido explícito de reunião', 'Vou participar da aula. Também quero a conversa com o monitor amanhã às 10h.'],
+    ['confirmação de convite antigo', '[Em resposta à mensagem: "Hoje às 20h teremos a aula ao vivo."] confirmo'],
+  ])('preserva %s e envia a distinção de eventos ao router e às quatro personas', async (_cenario, mensagem) => {
+    const historico: Msg[] = [
+      { role: 'assistant', content: '[ATENDIMENTO_HUMANO] 2026-09-14 12:00 UTC\nHoje às 19h teremos a aula ao vivo.' },
+      { role: 'user', content: mensagem },
+    ];
+    const original = structuredClone(historico);
+    await chamarRouter(limparParaRouter(historico));
+    expect(ultimoPedido().system.at(-1)?.text).toBe(INSTRUCAO_EVENTOS);
+    expect(ultimoPedido().messages.at(-1)?.content).toBe(mensagem);
+    for (const prompt of [AGENTE_VALIDACAO, AGENTE_QUALIFICADOR, AGENTE_CAMPANHA_DIRETA, AGENTE_RECONTATO]) {
+      await chamarAgentePrincipal({ promptAgente: prompt, contextoTemporal: montarContextoTemporal(), messages: historico, tools: [] });
+      const pedido = ultimoPedido();
+      expect(pedido.system.map(bloco => bloco.text)).toContain(INSTRUCAO_EVENTOS);
+      expect(pedido.messages[0]).toEqual(historico[0]);
+      const conteudo = pedido.messages.at(-1)?.content;
+      expect(Array.isArray(conteudo)).toBe(true);
+      expect(Array.isArray(conteudo) ? conteudo[0].text : null).toBe(mensagem);
+    }
+    expect(historico).toEqual(original);
+  });
+
   it('recupera resposta fora do canal com pergunta e preço internos preservados, sem publicar o rascunho', async () => {
     const messages: Msg[] = [
       { role: 'user', content: 'Qual é o valor integral da pós?' },
@@ -114,7 +142,8 @@ describe('instrução de memória no system enviado à Anthropic', () => {
       { type: 'text', text: PROMPT_ROUTER },
       { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA },
       { type: 'text', text: INSTRUCAO_FATOS_DO_LEAD },
-      { type: 'text', text: INSTRUCAO_DISPONIBILIDADE_CONTATO, cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: INSTRUCAO_DISPONIBILIDADE_CONTATO },
+      { type: 'text', text: INSTRUCAO_EVENTOS, cache_control: { type: 'ephemeral' } },
     ]);
     expect(pedido.messages).toEqual(entrada);
     expect(pedido.messages[1]).toEqual(memoria[0]);
@@ -148,6 +177,7 @@ describe('instrução de memória no system enviado à Anthropic', () => {
       { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA },
       { type: 'text', text: INSTRUCAO_FATOS_DO_LEAD },
       { type: 'text', text: INSTRUCAO_DISPONIBILIDADE_CONTATO },
+      { type: 'text', text: INSTRUCAO_EVENTOS },
       { type: 'text', text: INSTRUCAO_CANAL_RESPOSTA, cache_control: { type: 'ephemeral' } },
     ]);
     // A exceção já chegava no segundo bloco, mas perdia força porque a persona

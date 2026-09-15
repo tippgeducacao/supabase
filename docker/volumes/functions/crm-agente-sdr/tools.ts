@@ -181,14 +181,15 @@ async function consultaDisponibilidade(supabase: any, input: any, ctx: CtxConver
   let conteudo: string;
   if (!slots.length) {
     // Âncora do HOJE junto: "sem horário" nunca pode reforçar uma data errada do modelo.
-    conteudo = `Nenhum horário disponível para o período solicitado. (Referência: HOJE é ${hoje.display}, ${hoje.iso}.)`;
+    conteudo = `Nenhum horário disponível para a conversa com o monitor no período solicitado. Isso não informa nem altera o horário de aula ou evento. (Referência: HOJE é ${hoje.display}, ${hoje.iso}.)`;
   } else {
     const formatted = slots.map((s) => {
       const brt = toBrasilia(s.inicio);
       return `- ${brt.display} de ${brt.diaSemana}, dia ${brt.data} (vendedor_id: ${s.vendedor_id}, nome: ${s.vendedor_nome})`;
     });
-    conteudo = `Horários disponíveis (Brasília):\n${formatted.join('\n')}\n` +
-      `(O dia da semana informado acima é o correto — use-o exatamente, não recalcule.)`;
+    conteudo = `Horários disponíveis para a conversa com o monitor (Brasília):\n${formatted.join('\n')}\n` +
+      `(O dia da semana informado acima é o correto — use-o exatamente, não recalcule.)\n` +
+      `Ao apresentar as opções, diga que são para a conversa com o monitor. Não são horários de aula ou evento e não alteram a programação do convite. Só ofereça após aceite específico para essa conversa.`;
   }
 
   // Formação ainda NÃO verificada ⇒ o horário é uma OPÇÃO, não um combinado.

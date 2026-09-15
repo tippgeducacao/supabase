@@ -1,5 +1,6 @@
 // Contratos versionados junto dos executores. A lista/permissões continua vindo
 // de lista_tools_claude; a descrição efetiva não depende de editar produção para testar.
+import { INSTRUCAO_AGENDA_EVENTOS } from './instrucaoEventos.ts';
 type Propriedade = { description?: string; [chave: string]: unknown };
 type ToolSdr = {
   name: string;
@@ -10,6 +11,10 @@ type ToolSdr = {
 export function descreverToolsSdr(tools: ToolSdr[]): ToolSdr[] {
   return tools.map(original => {
     const tool = structuredClone(original);
+    if (['consulta_disponibilidade', 'confirmar_agendamento', 'remarcar_agendamento'].includes(tool.name)
+      && !tool.description?.includes(INSTRUCAO_AGENDA_EVENTOS)) {
+      tool.description = INSTRUCAO_AGENDA_EVENTOS + '\n\n' + (tool.description ?? '');
+    }
     if (tool.name === 'pausa_ia') {
       tool.description = 'Para tipo=sem_graduacao, exige declaração explícita do próprio lead de nunca ter cursado graduação ou ter somente ensino médio/técnico, sem graduação em andamento nem outra concluída. O executor confere o histórico e bloqueia sem evidência. Não atuar/trabalhar em nenhuma área, pretender atuar, cadastro vazio e resposta curta sobre trabalho NÃO informam formação. Interesse somente na aula aberta não autoriza desqualificar nem arquivar. Se faltar informação, preserve o atendimento e esclareça somente o necessário para o objetivo atual.\n' + (tool.description ?? '');
     }
