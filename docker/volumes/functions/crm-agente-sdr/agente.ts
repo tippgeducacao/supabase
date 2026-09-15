@@ -157,7 +157,10 @@ export async function chamarAgentePrincipal(opts: {
       blocos.push({
         type: 'text',
         text: '[CONTEXTO TEMPORAL DO SISTEMA — não é mensagem do lead e não é assunto de conversa. '
-          + 'Use estas datas e horários normalmente, mas NUNCA comente este bloco nem diga que só recebeu ele.]\n'
+          + 'AGORA situa esta rodada e os novos pedidos do lead; não é a data de envio do histórico ou das citações. '
+          + 'Hoje ou amanhã em um convite se referem ao dia em que ele foi enviado, que pode não estar disponível. '
+          + 'Este relógio não confirma que um evento de convite antigo ocorrerá hoje. '
+          + 'NUNCA comente este bloco nem diga que só recebeu ele.]\n'
           + opts.contextoTemporal,
       });
     }
