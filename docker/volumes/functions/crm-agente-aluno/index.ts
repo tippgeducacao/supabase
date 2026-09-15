@@ -49,7 +49,9 @@ import { PROMPT_ALUNO } from './prompt.ts';
 import {
   ASSUNTOS_TRANSFERENCIA,
   assuntoValido,
+  BOTAO_FECHA_O_PASSO,
   canonDdd8,
+  DIA_DO_BOTAO,
   CATEGORIAS_COMO_CONHECEU,
   CATEGORIAS_META_PESSOAL,
   type ContextoAluno,
@@ -783,6 +785,10 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
   // Até onde este turno LEU a conversa: é isso que decide o que "chegou no meio".
   let conversaLidaAte = new Date().toISOString();
   let rastro: Record<string, unknown> = { telefone, msgId };
+  // Do turno da oferta, para o `finally` soltar a vaga se nada chegou a sair. Ficam FORA do
+  // `try` porque é de lá que o `finally` os lê, e todo `return` de porta passa por ele.
+  let ofertaVirouMensagem = false;
+  let ofertaOportunidadeId: string | null = null;
 
   try {
     if (!semInbound) await dormir(BUFFER_MS);
@@ -800,6 +806,7 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
       telefone, msgId, lead_id: aluno.lead_id, oportunidade_id: aluno.oportunidade_id,
       via: aluno.via, etapa: aluno.etapa_nome,
     };
+    ofertaOportunidadeId = aluno.oportunidade_id;
 
     // ── ETAPA: papel do banco, nunca o nome ───────────────────────────────────
     // Renomear uma etapa no kanban não pode ligar nem desligar o agente. Etapa sem papel é
@@ -894,7 +901,8 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
     // Brasil inteiro, e contexto de outra pessoa é o pior erro possível aqui.
     const { data: msgs } = await supabase
       .from('crm_whatsapp_messages')
-      .select('direcao, tipo, conteudo, created_at, telefone, status_entrega, metadata')
+      // `wa_message_id` entra por causa do botão: é ele que marca o toque como já contado.
+      .select('direcao, tipo, conteudo, created_at, telefone, status_entrega, metadata, wa_message_id')
       .eq('wa_account_id', conta)
       .ilike('telefone', `%${ultimos8(telefone)}`)
       .order('created_at', { ascending: false })
@@ -910,9 +918,17 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
     // "Não estou" tocado às 23h, ou seguido de um "pode mandar?", perdia a garantia do link.
     const iSaida = daPessoa.findIndex((m: any) => m.direcao === 'outbound');
     const semResposta = iSaida === -1 ? daPessoa : daPessoa.slice(0, iSaida);
-    const botaoPendente = botao ?? semResposta
-      .map((m: any) => (m.direcao === 'inbound' ? interpretarBotao(m.metadata?.interactive_reply) : null))
-      .find((b: ReturnType<typeof interpretarBotao>) => b !== null) ?? null;
+    // A mensagem de onde o botão veio, e não só o botão: é o `wa_message_id` dela que impede o
+    // mesmo toque de fechar o passo duas vezes (ele fica "sem resposta" enquanto o assistente não
+    // falar nada, e `nao_responder` não grava saída nenhuma).
+    const linhaDoBotaoPendente = botao
+      ? null
+      : semResposta.find((m: any) => m.direcao === 'inbound' && interpretarBotao(m.metadata?.interactive_reply)) ?? null;
+    const botaoPendente = botao ??
+      (linhaDoBotaoPendente ? interpretarBotao(linhaDoBotaoPendente.metadata?.interactive_reply) : null);
+    const botaoPendenteMsgId = botao
+      ? msgId
+      : (linhaDoBotaoPendente?.wa_message_id ? String(linhaDoBotaoPendente.wa_message_id) : null);
 
     const conversa = daPessoa
       .filter((m: any) => String(m.conteudo ?? '').trim() && !(m.direcao === 'outbound' && m.status_entrega === 'failed'))
@@ -1056,10 +1072,21 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
 
     // O que o botão pede, dito ao modelo com o link já na mão. Botão antigo que o estado já
     // desmentiu (alguém da equipe corrigiu o "está no grupo" depois) não vale mais.
-    const botaoDaVez = botaoPendente?.tipo === 'grupo' && ctx.no_grupo !== null && ctx.no_grupo !== undefined &&
-        ctx.no_grupo !== botaoPendente.estaNoGrupo
+    //
+    // ⚠️⚠️ NO TURNO DA OFERTA O BOTÃO NÃO VALE MAIS. Ele já foi tratado no turno em que chegou;
+    // o que trouxe a gente aqui foi o tick, dez minutos depois. Sem esta linha, o botão continua
+    // "pendente" (o assistente ficou calado, então não há saída nossa depois dele) e a instrução
+    // dele — "não precisa responder (use nao_responder)" — entra como ÚLTIMA linha do contexto,
+    // brigando com o pedido de oferta que está na última mensagem do usuário. O modelo obedece à
+    // negativa e cala: o passo fecharia e a oferta continuaria não saindo, que é exatamente o
+    // problema que este conserto existe para resolver. Achado na revisão adversarial, 15/09/2026.
+    const botaoDaVez = ehOferta
+      ? null
+      : botaoPendente?.tipo === 'grupo' && ctx.no_grupo !== null && ctx.no_grupo !== undefined &&
+          ctx.no_grupo !== botaoPendente.estaNoGrupo
       ? null
       : botaoPendente;
+
     if (botaoDaVez?.tipo === 'grupo' && botaoDaVez.estaNoGrupo) {
       instrucaoAgora = 'Ele tocou no botão dizendo que JÁ ESTÁ no grupo da turma, e isso já ficou ' +
         'registrado. Se a mensagem não pede mais nada, não precisa responder (use nao_responder); ' +
@@ -1074,6 +1101,17 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
       instrucaoAgora = 'Ele tocou no botão dizendo que NÃO está no grupo da turma, e nós não temos o ' +
         'link da turma dele. A equipe já foi avisada. Diga numa frase que vai providenciar o acesso ' +
         'e já retorna. Não mande link nenhum.';
+    } else if (botaoDaVez?.tipo === 'entendido') {
+      instrucaoAgora = 'Ele tocou em "Ok, entendido" na mensagem sobre as aulas ao vivo. Já está ' +
+        'anotado. Não precisa responder (use nao_responder); se responder, uma frase curta.';
+    } else if (botaoDaVez?.tipo === 'duvida') {
+      // Quem ficou com dúvida NÃO concluiu nada: aqui o assistente tem de abrir a boca.
+      instrucaoAgora = 'Ele tocou em "Fiquei com dúvida" na mensagem sobre as aulas ao vivo. ' +
+        'Pergunte, em UMA frase, qual é a dúvida dele. Não explique nada antes de saber o que ele ' +
+        'não entendeu.';
+    } else if (botaoDaVez?.tipo === 'combinado') {
+      instrucaoAgora = 'Ele tocou no botão da mensagem sobre quem cuida do suporte dele. Já está ' +
+        'anotado. Não precisa responder (use nao_responder); se responder, uma frase curta.';
     } else if (botaoDaVez?.tipo === 'ligacao') {
       // Vale o botão desta mensagem e, na retomada das 8h, o que ele tocou de madrugada.
       const periodo = botaoDaVez.periodo === 'comeco_da_manha' ? 'começo da manhã' : 'fim da tarde';
@@ -1081,6 +1119,65 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
       instrucaoAgora = `Ele escolheu pelo botão do pedido de ligação: ${periodo}. Já ficou registrado e ` +
         'a equipe vai combinar com ele. Pergunte só se ele prefere ligação ou videochamada, numa ' +
         'frase, sem marcar dia nem hora.';
+    }
+
+    // ── O BOTÃO FECHA O PASSO, sem passar pelo modelo ────────────────────────
+    // ⚠️ 15/09/2026, pergunta do Rafael na primeira noite no ar: oito alunos tocaram "Sim, estou"
+    // e a integração acelerada não soube de NENHUM. `marcar_passo_concluido` foi chamada zero vez
+    // no dia. A causa é estrutural, não do modelo: o botão é registrado por código e a instrução
+    // que ele recebe diz "isso já ficou registrado, não precisa responder" — então ele cala, e a
+    // ferramenta que dispara a acelerada é uma decisão DELE que nunca acontece.
+    //
+    // Botão é sinal BINÁRIO. "Ele responder se está ou não no grupo da turma" é, literalmente, o
+    // critério de conclusão do D+1 escrito no banco; os oito fizeram exatamente isso.
+    //
+    // DEPOIS da cadeia de instruções de propósito: é lá que o "Não estou" sem link da turma abre
+    // passagem para a equipe, e passo que acabou de virar assunto de gente não vira oferta.
+    if (botaoDaVez && BOTAO_FECHA_O_PASSO.has(botaoDaVez.tipo)) {
+      // O botão é de OUTRO passo? Quick-reply de mensagem antiga continua clicável no WhatsApp:
+      // o aluno rola a conversa, toca no "Ok, entendido" do D+3 estando no D+9, e sem esta trava
+      // isso fecharia o D+9 e ofereceria o D+11 — dois passos adiantados por um toque no lugar
+      // errado. `passo_dia` é o passo em que o card está, que é a mensagem que ele acabou de
+      // receber. (Achado na revisão adversarial: os tipos novos não tinham a conferência de
+      // coerência que o `grupo` já tinha contra `ctx.no_grupo`.)
+      const diaDoBotao = DIA_DO_BOTAO[botaoDaVez.tipo];
+      // O mesmo toque não pode contar duas vezes: enquanto o assistente não responde nada, o
+      // botão continua "sem resposta" para sempre, e a oferta seguinte (depois de a primeira
+      // expirar) nasceria de um toque de ontem.
+      const jaContado = botaoPendenteMsgId
+        ? !!(await supabase
+          .from('onb_agente_eventos')
+          .select('id')
+          .eq('tipo', 'acelerada:fechou')
+          .eq('detalhe->>botao_msg_id', botaoPendenteMsgId)
+          .limit(1)
+          .maybeSingle()).data
+        : false;
+
+      const recusa = assuntosDesteTurno.size
+        ? 'passagem_aberta_neste_turno'
+        : jaContado
+        ? 'botao_ja_contado'
+        : diaDoBotao !== undefined && ctx.passo_dia != null && ctx.passo_dia !== diaDoBotao
+        ? `botao_de_outro_passo(D+${diaDoBotao} tocado no D+${ctx.passo_dia})`
+        : null;
+
+      if (recusa) {
+        await evento('acelerada:botao_nao_fecha', {
+          ...rastro, motivo: recusa, botao: botaoDaVez.tipo, botao_msg_id: botaoPendenteMsgId,
+        });
+      } else {
+        const { data: r, error } = await supabase.rpc('onb_acelerada_agendar', {
+          // ⚠️ `p_etapa_id` é IGNORADO pela função: quem decide o passo é
+          // `onb_acelerada_passo_pendente`, a partir do estado do card. Vai só por compatibilidade
+          // de assinatura — não confie nele para fixar passo nenhum.
+          p_oportunidade_id: aluno.oportunidade_id, p_etapa_id: aluno.etapa_id,
+        });
+        await evento('acelerada:fechou', {
+          ...rastro, resultado: String(r ?? (error ? 'erro' : '?')), pelo: 'botao',
+          botao: botaoDaVez.tipo, botao_msg_id: botaoPendenteMsgId, erro: error?.message ?? null,
+        });
+      }
     }
 
     // Um relógio só para o turno: o que o contexto diz que pode ser perguntado hoje e o que a
@@ -1455,6 +1552,9 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
       });
       return;
     }
+    // A oferta virou mensagem de verdade: a partir daqui ela SEGURA a vaga com razão, esperando
+    // o sim do aluno (e expira sozinha em 20 h se ele não responder).
+    ofertaVirouMensagem = true;
     if (perguntaPendente) {
       const antes = perguntaPendente === 'meta_pessoal'
         ? perfil?.metaPerguntadaEm ?? null
@@ -1492,6 +1592,29 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
     await evento('erro', { ...rastro, motivo: e instanceof Error ? e.message : String(e) });
     console.error('[crm-agente-aluno]', e);
   } finally {
+    // ── OFERTA QUE NÃO VIROU MENSAGEM NÃO PODE SEGURAR A VAGA ────────────────
+    // ⚠️ Só existe UMA oferta viva por aluno, e `onb_acelerada_agendar` só reabre quando a
+    // anterior está num estado final. O tick marca 'oferecida' ANTES do POST, então toda oferta
+    // que morre depois disso — passagem aberta, humano no comando, janela de 24 h fechada, erro
+    // de RPC, ou o próprio modelo decidindo calar — travava a acelerada do aluno por 20 horas.
+    // Aconteceu de verdade em 15/09 (`pulado:transferencia_aberta` seis segundos depois do tick).
+    //
+    // Mora no `finally` de propósito: os `return` de porta estão espalhados pelo turno inteiro e
+    // qualquer um deles chega aqui. Se a mensagem SAIU, a oferta continua de pé esperando o sim.
+    if (ehOferta && !ofertaVirouMensagem) {
+      try {
+        const agoraIso = new Date().toISOString();
+        await supabase.from('onb_acelerada_ofertas')
+          .update({
+            status: 'expirada', motivo: 'a oferta não chegou a virar mensagem',
+            respondida_em: agoraIso, atualizada_em: agoraIso,
+          })
+          .eq('oportunidade_id', ofertaOportunidadeId ?? '00000000-0000-0000-0000-000000000000')
+          .eq('status', 'oferecida');
+      } catch (e) {
+        console.error('[crm-agente-aluno] não consegui soltar a oferta:', e instanceof Error ? e.message : String(e));
+      }
+    }
     await supabase.rpc('onb_agente_lock_liberar', { p_telefone: chave });
     // Em TODO desfecho do turno, e não só quando ele respondeu: o `return` do silêncio, da
     // resposta vazia ou de uma porta também passa por aqui. A mensagem que bateu no lock

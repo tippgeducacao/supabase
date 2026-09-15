@@ -21,6 +21,7 @@ import {
   ESPERA_MIN_S,
   descreverModeloDaRegua,
   horarioLegivel,
+  BOTAO_FECHA_O_PASSO,
   interpretarBotao,
   mesmoTelefone,
   montarContexto,
@@ -158,6 +159,29 @@ describe('botões da régua', () => {
       .toEqual({ tipo: 'ligacao', periodo: 'comeco_da_manha' });
     expect(interpretarBotao({ tipo: 'template_button', id: 'FIM DA TARDE!', title: null }))
       .toEqual({ tipo: 'ligacao', periodo: 'fim_da_tarde' });
+  });
+
+  // 15/09/2026: estes dois estavam VIVOS na Meta e o código não os conhecia. Botão não
+  // reconhecido vira texto solto, e o prompt manda não tratar "ok" solto como conclusão — o D+3 e
+  // o D+7 nunca fechariam. Se alguém trocar o texto de um botão lá, este teste é que avisa.
+  it('os botões do D+3 e do D+7, que faltavam', () => {
+    expect(interpretarBotao({ tipo: 'template_button', id: 'Ok, entendido', title: 'Ok, entendido' }))
+      .toEqual({ tipo: 'entendido' });
+    expect(interpretarBotao({ tipo: 'template_button', id: null, title: 'Fiquei com dúvida' }))
+      .toEqual({ tipo: 'duvida' });
+    expect(interpretarBotao({ tipo: 'template_button', id: 'Combinado', title: 'Combinado' }))
+      .toEqual({ tipo: 'combinado' });
+    expect(interpretarBotao({ tipo: 'button_reply', id: null, title: 'Já salvei' }))
+      .toEqual({ tipo: 'combinado' });
+    expect(interpretarBotao({ tipo: 'button_reply', id: null, title: 'Vou salvar' }))
+      .toEqual({ tipo: 'combinado' });
+  });
+
+  it('só os botões de CONCLUSÃO fecham o passo; dúvida e ligação não', () => {
+    expect([...BOTAO_FECHA_O_PASSO].sort()).toEqual(['combinado', 'entendido', 'grupo']);
+    // "Fiquei com dúvida" é o contrário de concluir, e o D+5 (ligação) é passo de resgate.
+    expect(BOTAO_FECHA_O_PASSO.has('duvida')).toBe(false);
+    expect(BOTAO_FECHA_O_PASSO.has('ligacao')).toBe(false);
   });
 
   it('botão de outro modelo, lista, texto livre e lixo não viram nada', () => {
