@@ -12,6 +12,9 @@ let provider: string;
 let fetcher: ReturnType<typeof vi.fn<typeof fetch>>;
 let tabelas: string[];
 let insercoes: number;
+let usuarioAtivo: boolean;
+let usuarioValido: boolean;
+let cargoUsuario: string;
 
 beforeAll(async () => {
   vi.stubGlobal("Deno", { env: { get: (k: string) => env?.[k] }, serve: (handler: typeof atender) => { atender = handler; } });
@@ -23,16 +26,22 @@ beforeEach(() => {
   env = { SUPABASE_URL: "http://kong:8000", SUPABASE_PUBLIC_URL: "https://api.exemplo.com",
     SUPABASE_SERVICE_ROLE_KEY: "service-teste", RESEND_API_KEY: "resend-teste", RESEND_WEBHOOK_SECRET: "whsec_teste" };
   log = {}; existente = null; suprimido = null; provider = "resend"; tabelas = []; insercoes = 0;
+  usuarioAtivo = true; usuarioValido = true; cargoUsuario = "admin";
   fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ id: "resend-1" })));
   vi.stubGlobal("fetch", fetcher);
   ambiente.criarCliente.mockReturnValue({
-    auth: { getUser: async () => ({ data: { user: { id: "usuario-1" } } }) },
+    auth: { getUser: async () => ({ data: { user: usuarioValido ? { id: "usuario-1" } : null } }) },
+    rpc: async (_nome: string, args: { role_name: string }) => ({ data: args.role_name === cargoUsuario, error: null }),
     from: (tabela: string) => {
       tabelas.push(tabela);
       let acao = "select";
       let valores: Record<string, unknown> = {};
       const filtros: Record<string, unknown> = {};
       const resolver = () => {
+        if (tabela === "profiles") return { data: { ativo: usuarioAtivo }, error: null };
+        if (tabela === "email_campanhas") return { data: { id: "campanha-1", template_id: "tpl-1", remetente_id: "rem-1", status: "enviando" }, error: null };
+        if (tabela === "email_campanhas_envios") return { data: { campanha_id: "campanha-1", contato_email: "aluno@exemplo.com", template_id: "tpl-1", status: "pendente" }, error: null };
+        if (tabela === "email_templates") return { data: { id: "tpl-1", uso: "marketing", ativo: true, assunto: "Curso", corpo_html: "<html><body>Olá</body></html>", corpo_texto: "Olá", remetente_id: "rem-1" }, error: null };
         if (tabela === "email_remetentes") return { data: { id: "rem-1", provider, ativo: true,
           nome_remetente: "PPG", email_completo: "cursos@mail.exemplo.com", reply_to_email: "secretaria@exemplo.com" } };
         if (tabela === "email_supressoes") return { data: suprimido };
@@ -62,13 +71,31 @@ beforeEach(() => {
   });
 });
 
-const requisicao = (extra = {}) => new Request("https://api.exemplo.com/functions/v1/email-send", {
-  method: "POST", headers: { "Content-Type": "application/json" },
+const requisicao = (extra = {}, authorization: string | null = "Bearer service-teste") => new Request("https://api.exemplo.com/functions/v1/email-send", {
+  method: "POST", headers: { "Content-Type": "application/json", ...(authorization ? { Authorization: authorization } : {}) },
   body: JSON.stringify({ remetente_id: "rem-1", destinatario_email: "aluno@exemplo.com", contexto_tipo: "campanha",
+    contexto_id: "campanha-1", template_id: "tpl-1", idempotencia_key: "campanha:11111111-1111-4111-8111-111111111111",
     assunto: "Curso", corpo_html: "<html><body>Olá</body></html>", corpo_texto: "Olá", ...extra }),
 });
 
 describe("email-send integrado ao Resend", () => {
+  it("recusa chamada anônima antes de ler modelos, criar log ou enviar ao provedor", async () => {
+    expect((await atender(requisicao({}, null))).status).toBe(401);
+    expect(tabelas).toEqual([]); expect(insercoes).toBe(0); expect(fetcher).not.toHaveBeenCalled();
+  });
+  it.each(["invalido", "inativo", "vendedor"])("recusa acesso direto %s sem emitir mensagem", async tipo => {
+    if (tipo === "invalido") usuarioValido = false;
+    if (tipo === "inativo") usuarioAtivo = false;
+    if (tipo === "vendedor") cargoUsuario = "vendedor";
+    const resposta = await atender(requisicao({}, "Bearer sessao-usuario"));
+    expect(resposta.status).toBe(tipo === "invalido" ? 401 : 403);
+    expect(tabelas).not.toContain("email_remetentes"); expect(insercoes).toBe(0); expect(fetcher).not.toHaveBeenCalled();
+  });
+  it("permite teste da sessão administrativa ativa e conserva autoria", async () => {
+    const resposta = await atender(requisicao({ contexto_tipo: "teste", idempotencia_key: undefined, usuario_esperado: "usuario-1" }, "Bearer sessao-usuario"));
+    expect(resposta.status).toBe(200); expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(log.enviado_por).toBe("usuario-1");
+  });
   it("usa Resend, grava ID comum e inclui descadastro público no HTML, texto e headers", async () => {
     const resposta = await atender(requisicao({ anexos: [{ filename: "curso.pdf", content_base64: "JVBERi0=" }] }));
     expect(resposta.status).toBe(200);
@@ -117,8 +144,9 @@ describe("email-send integrado ao Resend", () => {
   });
 
   it("requisição repetida após falha fica sem confirmação e não faz novo envio", async () => {
-    existente = { id: "log-anterior", provider: "resend", status: "falhou", provider_message_id: null };
-    const resposta = await atender(requisicao({ idempotencia_key: "campanha:1" }));
+    existente = { id: "log-anterior", provider: "resend", status: "falhou", provider_message_id: null,
+      contexto_tipo: "campanha", contexto_id: "campanha-1", template_id: "tpl-1", destinatario_email: "aluno@exemplo.com" };
+    const resposta = await atender(requisicao());
     expect(resposta.status).toBe(409);
     expect(await resposta.json()).toMatchObject({ ok: false, duplicado: true, id: "log-anterior" });
     expect(fetcher).not.toHaveBeenCalled();

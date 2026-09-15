@@ -410,7 +410,48 @@ const TOOL_PERFIL = {
   },
 } as const;
 
-const FERRAMENTAS = [TOOL_QUIETO, TOOL_PASSAR, TOOL_AULAS, TOOL_GRUPO, TOOL_LIGACAO, TOOL_TCC, TOOL_PERFIL];
+// ── Integração acelerada ─────────────────────────────────────────────────────
+// O aluno engajado não precisa esperar 15 dias. Se ele está conversando, o assistente oferece o
+// próximo passo. Duas ferramentas, e a ordem entre elas é a regra de negócio inteira:
+//   1. ele FECHA um passo  → marcar_passo_concluido agenda uma oferta para daqui a 10 minutos
+//   2. ele diz SIM         → entregar_proximo_passo devolve o roteiro, e só DEPOIS de a mensagem
+//                            sair é que o passo é marcado e o aluno é movido.
+// Oferta nunca move ninguém. Quem não responde fica onde está e recebe o template no dia normal.
+
+const TOOL_FECHOU = {
+  name: 'marcar_passo_concluido',
+  description:
+    'Use quando ele DEIXAR CLARO que terminou o que a mensagem de hoje pedia: disse que assistiu ' +
+    'ao vídeo, que conseguiu entrar, que achou o material, que salvou o número. Não use com um ' +
+    '"ok" solto nem com "vou ver depois": isso não é terminar, é acusar recebimento. ' +
+    'Não responde nada ao aluno; só marca que daqui a pouco cabe oferecer o próximo passo.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      como_ele_disse: {
+        type: 'string',
+        description: 'O trecho, nas palavras dele, que mostra que terminou. Máx. 200 caracteres.',
+      },
+    },
+    required: ['como_ele_disse'],
+    additionalProperties: false,
+  },
+} as const;
+
+const TOOL_ENTREGAR = {
+  name: 'entregar_proximo_passo',
+  description:
+    'Use SÓ quando você tiver oferecido o próximo passo e ele tiver ACEITADO ("sim", "pode ' +
+    'mandar", "quero"). Nunca use por conta própria, sem ele ter dito que sim. ' +
+    'Devolve os PONTOS que a sua mensagem precisa cobrir. Escreva com as suas palavras, ' +
+    'continuando a conversa de onde parou: nada de "oi, tudo bem" nem de "hoje vamos falar de".',
+  input_schema: { type: 'object', properties: {}, additionalProperties: false },
+} as const;
+
+const FERRAMENTAS = [
+  TOOL_QUIETO, TOOL_PASSAR, TOOL_AULAS, TOOL_GRUPO, TOOL_LIGACAO, TOOL_TCC, TOOL_PERFIL,
+  TOOL_FECHOU, TOOL_ENTREGAR,
+];
 
 // ── Envio pela fila ──────────────────────────────────────────────────────────
 
@@ -433,8 +474,30 @@ const FERRAMENTAS = [TOOL_QUIETO, TOOL_PASSAR, TOOL_AULAS, TOOL_GRUPO, TOOL_LIGA
  * que a pergunta do perfil só conta depois de a mensagem existir de verdade na fila, e que a
  * pergunta de uma mensagem cancelada deixa de contar (ver `marcarPerguntaFeita`).
  */
+/**
+ * A mídia da integração acelerada. A fila e o `crm-agendadas-dispatch` já sabem entregar
+ * `tipo_mensagem = 'midia'` lendo anexo_url/filename/mime_type; o que não existia era o
+ * assistente preencher esses campos. Sem isto ele entregaria o passo da plataforma falando de um
+ * vídeo que nunca chega.
+ */
+type Midia = { url: string; nome: string | null; mime: string };
+
+function mimeDaMidia(url: string, cabecalho: string | null): string {
+  const ext = (url.split('?')[0].split('.').pop() ?? '').toLowerCase();
+  if (ext === 'mp4') return 'video/mp4';
+  if (ext === 'pdf') return 'application/pdf';
+  if (ext === 'png') return 'image/png';
+  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
+  // Sem extensão reconhecida, o cabeçalho cadastrado no passo decide.
+  const c = String(cabecalho ?? '').toLowerCase();
+  if (c === 'video') return 'video/mp4';
+  if (c === 'documento') return 'application/pdf';
+  return 'image/jpeg';
+}
+
 async function enviar(
   conta: string, telefone: string, texto: string, leadId: string | null, opId: string,
+  midia: Midia | null = null,
 ): Promise<{ espera: number; bloqueio: string | null; filaId: string | null; canceladas: string[] }> {
   const espera = esperaSorteada();
   const quando = new Date(Date.now() + espera * 1000).toISOString();
@@ -455,8 +518,11 @@ async function enviar(
     lead_id: leadId,
     oportunidade_id: opId,
     telefone,
-    tipo_mensagem: 'texto',
+    tipo_mensagem: midia ? 'midia' : 'texto',
     conteudo: texto,
+    ...(midia
+      ? { anexo_url: midia.url, filename: midia.nome ?? undefined, mime_type: midia.mime }
+      : {}),
     enviar_em: quando,
     status: 'agendado',
   }).select('id, status, erro_detalhe').maybeSingle();
@@ -585,19 +651,31 @@ async function desfazerPerguntasCanceladas(
  * a marca que o próprio tick grava antes de chamar, com o mesmo id, que ninguém de fora
  * consegue escrever (a tabela de eventos não aceita insert de usuário).
  */
-async function manhaAutentica(id: string, telefone: string): Promise<boolean> {
-  if (!id.startsWith('manha-') || !telefone) return false;
+/**
+ * O endpoint é público (VERIFY_JWT desligado no self-hosted), então quem diz "sou o tick" tem de
+ * provar: o tick grava a marca ANTES do POST, e aqui a gente confere que ela existe, é recente e
+ * é do mesmo telefone. Vale para a retomada das 8h e para a oferta da integração acelerada.
+ */
+async function tickAutentico(
+  id: string, telefone: string, prefixo: string, tipoEvento: string,
+): Promise<boolean> {
+  if (!id.startsWith(prefixo) || !telefone) return false;
   const desde = new Date(Date.now() - MANHA_VALIDADE_MIN * 60_000).toISOString();
   const { data } = await supabase
     .from('onb_agente_eventos')
     .select('telefone')
-    .eq('tipo', 'manha:disparada')
+    .eq('tipo', tipoEvento)
     .eq('detalhe->>id', id)
     .gte('criada_em', desde)
     .limit(1)
     .maybeSingle();
   return !!data && mesmoTelefone(data.telefone, telefone);
 }
+
+const manhaAutentica = (id: string, telefone: string) =>
+  tickAutentico(id, telefone, 'manha-', 'manha:disparada');
+const ofertaAutentica = (id: string, telefone: string) =>
+  tickAutentico(id, telefone, 'oferta-', 'acelerada:oferta_disparada');
 
 /** O que a fila de transcrição gravou nesta mensagem. Vazio enquanto não terminou. */
 const transcricaoDe = (metadata: any): string => String(metadata?.audio_transcricao ?? '').trim();
@@ -633,6 +711,10 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
   const msgId = String(payload?.id ?? '').trim();
   if (!msgId) return;
   const ehManha = payload?.motivo === 'manha';
+  // A oferta da integração acelerada entra pela mesma porta da retomada das 8h: o tick faz o
+  // POST, e aqui não há mensagem nova do aluno para ler.
+  const ehOferta = payload?.motivo === 'oferta';
+  const semInbound = ehManha || ehOferta;
 
   // ── ORIGEM: o que o payload diz só vale se o banco confirmar ──────────────
   // O endpoint é público (VERIFY_JWT desligado no self-hosted) e o UUID da conta está no
@@ -643,10 +725,13 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
   let conteudo = '';
   let botaoBruto: unknown = null;
   let chegouEm = new Date();
-  if (ehManha) {
+  if (semInbound) {
     telefone = digitos(payload?.telefone);
-    if (!(await manhaAutentica(msgId, telefone))) {
-      console.log('[crm-agente-aluno] retomada das 8h sem marca do tick, ignorada:', msgId);
+    const ok = ehManha
+      ? await manhaAutentica(msgId, telefone)
+      : await ofertaAutentica(msgId, telefone);
+    if (!ok) {
+      console.log('[crm-agente-aluno] tick sem marca, ignorado:', msgId);
       return;
     }
   } else {
@@ -676,7 +761,7 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
     .from('onb_agente_processadas').insert({ wa_message_id: msgId, telefone });
   if (errDup) { await evento('pulado:duplicada', { telefone, msgId }); return; }
 
-  await evento('recebido', { telefone, msgId, tipo, conteudo: conteudo.slice(0, 200), motivo: ehManha ? 'manha' : null });
+  await evento('recebido', { telefone, msgId, tipo, conteudo: conteudo.slice(0, 200), motivo: ehManha ? 'manha' : (ehOferta ? 'oferta' : null) });
 
   // Reação e figurinha não pedem resposta, e o modelo não precisa ser acordado para isso.
   // (Para a régua elas contam como interação: quem mede é a automação, não este agente.)
@@ -700,7 +785,7 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
   let rastro: Record<string, unknown> = { telefone, msgId };
 
   try {
-    if (!ehManha) await dormir(BUFFER_MS);
+    if (!semInbound) await dormir(BUFFER_MS);
 
     // ── ALUNO: card próprio OU posição no funil da integração ─────────────────
     // A busca mora no banco, pelo telefone canônico (DDD + 8), porque o funil está marcado
@@ -757,8 +842,12 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
     // portas: aberta aqui, o toque das 22h virava passagem aberta, e a retomada das 8h calava
     // diante dela sem nunca perguntar se ele prefere ligação ou vídeo.
     let linkQueTemQueIr: string | null = null;
+    // Integração acelerada: o passo só é marcado DEPOIS de a mensagem sair. Se ela falhar, nada
+    // foi gravado e nada foi movido, e a régua manda o template deste passo no dia normal.
+    let entregaPendente = false;
+    let entregaMidia: Midia | null = null;
     let instrucaoAgora: string | null = null;
-    const botao = ehManha ? null : interpretarBotao(botaoBruto);
+    const botao = semInbound ? null : interpretarBotao(botaoBruto);
     if (botao?.tipo === 'grupo') {
       const { error } = await supabase.rpc('onb_agente_registrar_grupo', {
         p_oportunidade_id: aluno.oportunidade_id, p_no_grupo: botao.estaNoGrupo,
@@ -994,6 +1083,10 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
         role: 'user',
         content: ehManha
           ? '(sem mensagem nova: é a retomada das 8h do que ele escreveu fora do horário)'
+          : ehOferta
+          ? '(sem mensagem nova: ele terminou o passo de hoje há pouco. Ofereça o próximo em UMA frase, '
+            + 'do jeito que a conversa estava, e espere. Não entregue nada agora, não explique o que vem, '
+            + 'não abra com saudação. Se ele disser que sim, aí sim use entregar_proximo_passo.)'
           : sanearParaModelo(descreverParaModelo(tipo, conteudo, transcricaoAgora)).slice(0, 4000).trim() ||
             '(ele mandou algo sem texto)',
       });
@@ -1087,6 +1180,61 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
               : (aulas ?? []).length
                 ? (aulas as any[]).map((a) => linhaDaAula(a)).join('\n')
                 : 'Não há aula futura cadastrada para a turma dele. Não invente data: use passar_para_atendente com o assunto outro.',
+          });
+          continue;
+        }
+
+        if (u.name === 'marcar_passo_concluido') {
+          const como = String(u.input?.como_ele_disse ?? '').trim().slice(0, 200) || null;
+          const { data, error } = await supabase.rpc('onb_acelerada_agendar', {
+            p_oportunidade_id: aluno.oportunidade_id, p_etapa_id: aluno.etapa_id,
+          });
+          const r = String(data ?? (error ? 'erro' : '?'));
+          await evento('acelerada:fechou', { ...rastro, resultado: r, como, erro: error?.message ?? null });
+          results.push({
+            type: 'tool_result', tool_use_id: u.id,
+            // O aluno NÃO pode saber que existe uma fila esperando: a oferta chega daqui a pouco
+            // como se fosse ideia do assistente, no meio da conversa.
+            content: r === 'agendada'
+              ? 'Anotado. Não fale nada sobre isso, siga a conversa normalmente.'
+              : 'Anotado, mas não cabe oferecer o próximo passo agora. Siga a conversa normalmente.',
+          });
+          continue;
+        }
+
+        if (u.name === 'entregar_proximo_passo') {
+          const { data, error } = await supabase.rpc('onb_acelerada_roteiro', {
+            p_oportunidade_id: aluno.oportunidade_id,
+          });
+          const rot = (data ?? {}) as Record<string, unknown>;
+          if (error || rot.ok !== true) {
+            await evento('acelerada:sem_roteiro', { ...rastro, motivo: rot.motivo ?? error?.message ?? null });
+            results.push({
+              type: 'tool_result', tool_use_id: u.id,
+              content: 'Agora não dá para adiantar nada. Responda a ele sem prometer próximo passo.',
+            });
+            continue;
+          }
+          const url = String(rot.midia_url ?? '').trim();
+          if (url) {
+            entregaMidia = {
+              url,
+              nome: String(rot.midia_nome ?? '').trim() || null,
+              mime: mimeDaMidia(url, String(rot.cabecalho ?? '') || null),
+            };
+          }
+          entregaPendente = true;
+          const pontos = Array.isArray(rot.pontos) ? (rot.pontos as string[]) : [];
+          results.push({
+            type: 'tool_result', tool_use_id: u.id,
+            content: [
+              `Assunto: ${rot.assunto ?? ''}`,
+              'Cubra estes pontos, com as SUAS palavras:',
+              ...pontos.map((p) => `· ${p}`),
+              entregaMidia ? 'O vídeo vai junto com a sua mensagem: fale dele como quem está mandando agora.' : '',
+              'Continue a conversa de onde parou. NÃO comece com saudação, não diga "hoje vamos falar de",',
+              'não numere etapa nem dia. Ele acabou de dizer que sim: escreva como quem já estava falando com ele.',
+            ].filter(Boolean).join('\n'),
           });
           continue;
         }
@@ -1242,7 +1390,9 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
       await evento('alerta:vocabulario', { ...rastro, trecho: resposta.slice(0, 300) });
     }
 
-    const envio = await enviar(conta, telefone, resposta, aluno.lead_id, aluno.oportunidade_id);
+    const envio = await enviar(
+      conta, telefone, resposta, aluno.lead_id, aluno.oportunidade_id, entregaMidia,
+    );
     // DESFAZER antes de MARCAR, sempre: as duas mexem no mesmo carimbo, e na ordem trocada a
     // pergunta da resposta cancelada ficaria contada para sempre (o desfazer não a acharia).
     await desfazerPerguntasCanceladas(aluno, envio.canceladas, rastro);
@@ -1260,6 +1410,18 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
         ? perfil?.metaPerguntadaEm ?? null
         : perfil?.comoPerguntadaEm ?? null;
       await marcarPerguntaFeita(aluno, perguntaPendente, antes, envio.filaId, rastro);
+    }
+    // ⚠️ A ORDEM AQUI É A REGRA DE NEGÓCIO. Só marca o passo e move o aluno DEPOIS de a mensagem
+    // ter entrado na fila sem bloqueio. Se o envio falhar, o `return` acima já saiu e nada disto
+    // rodou: o aluno continua na mesma etapa e a régua manda o template dele no dia normal.
+    // Sem isso, um envio bloqueado marcaria o passo como entregue e o aluno nunca receberia.
+    if (entregaPendente) {
+      const { data: r, error: errEntrega } = await supabase.rpc('onb_acelerada_confirmar_entrega', {
+        p_oportunidade_id: aluno.oportunidade_id, p_wa_message_id: null,
+      });
+      await evento('acelerada:entregue', {
+        ...rastro, resultado: r ?? null, com_midia: !!entregaMidia, erro: errEntrega?.message ?? null,
+      });
     }
     await evento('respondido', {
       ...rastro, rodadas: rodada, tamanho: resposta.length, ferramentas: usouFerramentas,

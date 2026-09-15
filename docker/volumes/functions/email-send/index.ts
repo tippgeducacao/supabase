@@ -15,8 +15,11 @@ import { formatarFrom, linkDescadastro, tagSegura } from "../_shared/envioComum.
 import { urlPublicaEmail } from "../_shared/urlPublicaEmail.ts";
 import { ErroEnvio, obterProvedor, provedorEfetivo } from "../_shared/emailProviders/index.ts";
 import { buscarSupressao, supressaoSeAplica } from "../_shared/supressao.ts";
-import { respostaEnvioExistente } from "./idempotencia.ts";
+import { conferirConsultaIdempotente, permiteNovaChaveIdempotente, respostaEnvioExistente } from "./idempotencia.ts";
 import { emailEhMarketing, renderizarEmailWebhook } from "./renderizacaoWebhook.ts";
+import { resolverModeloCampanhaAB } from "./campanhaAB.ts";
+import { respostaOpcoesCampanhas } from "../_shared/emailCampanhasCapacidades.ts";
+import { autorizarEnvioEmail, conferirContaEnvioEmail, ErroAcessoEnvioEmail } from "../_shared/emailSendAuth.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -35,6 +38,7 @@ interface SendPayload {
   variaveis?: Record<string, string>;
   contexto_tipo?: string;
   contexto_id?: string;
+  campanha_envio_id?: string;
   anexos?: Array<{ filename: string; content_base64: string; content_type?: string }>;
   idempotencia_key?: string;
   // Janela (min) p/ a dedup por idempotencia_key. Sem isto, casa QUALQUER linha com a
@@ -43,6 +47,7 @@ interface SendPayload {
   assunto?: string;
   corpo_html?: string;
   corpo_texto?: string;
+  usuario_esperado?: string;
 }
 
 function renderTemplate(s: string, vars: Record<string, string>): string {
@@ -137,7 +142,8 @@ async function refreshGoogleToken(refreshToken: string): Promise<{ access_token:
 }
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  if (req.method === "OPTIONS") return respostaOpcoesCampanhas(corsHeaders);
+  if (req.method !== "POST") return new Response(JSON.stringify({ error: "Método não permitido." }), { status: 405, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
   try {
     const supabaseAdmin = createClient(
@@ -145,34 +151,37 @@ Deno.serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
 
+    const acesso = await autorizarEnvioEmail(supabaseAdmin, req.headers.get("Authorization"), {
+      permitirInterno: true, chaveServico: Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"),
+    });
+    const userId = acesso.usuarioId;
     const payload = (await req.json()) as SendPayload;
+    conferirContaEnvioEmail(payload.usuario_esperado, userId);
     if (!payload.destinatario_email) {
       return new Response(JSON.stringify({ error: "destinatario_email obrigatório" }), {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    let userId: string | null = null;
-    const authHeader = req.headers.get("Authorization");
-    if (authHeader) {
-      const { data: { user } } = await supabaseAdmin.auth.getUser(authHeader.replace("Bearer ", ""));
-      userId = user?.id ?? null;
-    }
+    // Validar a fila ANTES da dedup impede reservar uma chave de campanha para
+    // outro destinatário/conteúdo usando o endpoint de envio comum.
+    const modeloCampanha = await resolverModeloCampanhaAB(supabaseAdmin, payload, acesso.interno);
 
     // Idempotência (opcionalmente limitada a uma janela de tempo)
     if (payload.idempotencia_key) {
       let dupQuery = supabaseAdmin
         .from("emails_enviados")
-        .select("id, status, provider, provider_message_id")
+        .select("id, status, provider, provider_message_id, contexto_tipo, contexto_id, destinatario_email, template_id")
         .eq("idempotencia_key", payload.idempotencia_key);
       if (payload.idempotencia_janela_min && payload.idempotencia_janela_min > 0) {
         const desde = new Date(Date.now() - payload.idempotencia_janela_min * 60_000).toISOString();
         dupQuery = dupQuery.gte("criado_em", desde);
       }
-      const { data: existente } = await dupQuery
+      const { data: existente, error: erroDuplicado } = await dupQuery
         .order("criado_em", { ascending: false })
         .limit(1)
         .maybeSingle();
+      conferirConsultaIdempotente(erroDuplicado, existente, payload);
       if (existente) {
         const duplicado = respostaEnvioExistente(existente);
         return new Response(JSON.stringify(duplicado.corpo), {
@@ -189,7 +198,12 @@ Deno.serve(async (req) => {
     const templateId = payload.template_id ?? null;
     let usoModelo: string | null = null;
 
-    if (templateId) {
+    if (modeloCampanha) {
+      assunto = modeloCampanha.assunto;
+      corpoHtml = modeloCampanha.corpo_html;
+      corpoTexto = modeloCampanha.corpo_texto;
+      usoModelo = "marketing";
+    } else if (templateId) {
       const { data: tpl, error: tplErr } = await supabaseAdmin
         .from("email_templates").select("*").eq("id", templateId).single();
       if (tplErr || !tpl) {
@@ -355,19 +369,23 @@ Deno.serve(async (req) => {
       //  (b) REENVIO legítimo de etapa enviada FORA da janela: grava NOVO registro com
       //      chave de-colidida (preserva o histórico e entrega o e-mail).
       let dupCheck = supabaseAdmin
-        .from("emails_enviados").select("id, status, provider, provider_message_id")
+        .from("emails_enviados").select("id, status, provider, provider_message_id, contexto_tipo, contexto_id, destinatario_email, template_id")
         .eq("idempotencia_key", payload.idempotencia_key);
       if (payload.idempotencia_janela_min && payload.idempotencia_janela_min > 0) {
         const desde = new Date(Date.now() - payload.idempotencia_janela_min * 60_000).toISOString();
         dupCheck = dupCheck.gte("criado_em", desde);
       }
-      const { data: recente } = await dupCheck
+      const { data: recente, error: erroRecente } = await dupCheck
         .order("criado_em", { ascending: false }).limit(1).maybeSingle();
+      conferirConsultaIdempotente(erroRecente, recente, payload);
       if (recente) {
         const duplicado = respostaEnvioExistente(recente);
         return new Response(JSON.stringify(duplicado.corpo), {
           status: duplicado.status, headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
+      }
+      if (!permiteNovaChaveIdempotente(payload.idempotencia_janela_min, payload.contexto_tipo, payload.idempotencia_key)) {
+        throw new Error("Já existe uma reserva deste envio. A chave foi preservada; confira o log antes de reenviar.");
       }
       const retry = await supabaseAdmin
         .from("emails_enviados")
@@ -553,6 +571,9 @@ Deno.serve(async (req) => {
       ok: true, log_id: log.id, gmail_id: gmailData.id, thread_id: gmailData.threadId,
     }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
   } catch (e) {
+    if (e instanceof ErroAcessoEnvioEmail) return new Response(JSON.stringify({ error: e.message, code: e.code }), {
+      status: e.status, headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
     const msg = e instanceof Error ? e.message : "erro desconhecido";
     return new Response(JSON.stringify({ error: msg }), {
       status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },

@@ -9,6 +9,15 @@ export const MAX_CARACTERES_SIMULACAO = 200_000;
 export type Persona = 'validacao' | 'qualificador' | 'campanha_direta';
 export type AgenteRouter = 'agente_validacao' | 'agente_qualificador';
 export type MensagemTextual = { role: 'user' | 'assistant'; content: string };
+/** 14/09/2026: o lead responde por OUTRO número da PPGVET (trocaDeNumero.ts). Só o 1º turno recebe a nota. */
+export type TrocaDeNumeroSimulada = {
+  /** Texto do template que saiu por este número antes da resposta (null = o lead escreveu por conta própria). */
+  template: string | null;
+  gap_min: number | null;
+  conta_anterior: string | null;
+  conta_atual: string | null;
+  agendado: boolean;
+};
 export type EntradaSimulacao = {
   modo: 'principal' | 'followup';
   followup_stage: number;
@@ -26,6 +35,7 @@ export type EntradaSimulacao = {
   /** A pessoa JÁ tem a tag da Escola: o prompt leva o aviso (NOTA_JA_ESTA_NA_ESCOLA) no lugar do convite. */
   esta_na_escola: boolean;
   prompt_extra: string;
+  troca_de_numero: TrocaDeNumeroSimulada | null;
 };
 
 export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
@@ -69,6 +79,24 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
     throw new Error('agente_atual inválido');
   }
   if (body.mocks != null && (typeof body.mocks !== 'object' || Array.isArray(body.mocks))) throw new Error('mocks deve ser objeto');
+  let trocaDeNumero: TrocaDeNumeroSimulada | null = null;
+  if (body.troca_de_numero != null) {
+    const t = body.troca_de_numero;
+    if (typeof t !== 'object' || Array.isArray(t)) throw new Error('troca_de_numero deve ser objeto');
+    if (modo === 'followup') throw new Error('followup não aceita troca_de_numero');
+    const o = t as Record<string, unknown>;
+    const chaves = ['template', 'gap_min', 'conta_anterior', 'conta_atual', 'agendado'];
+    if (Object.keys(o).some((k) => !chaves.includes(k))) throw new Error(`troca_de_numero aceita somente ${chaves.join(', ')}`);
+    if (o.gap_min != null && (typeof o.gap_min !== 'number' || !Number.isFinite(o.gap_min) || o.gap_min < 0)) throw new Error('troca_de_numero.gap_min deve ser número >= 0');
+    if (o.agendado !== undefined && typeof o.agendado !== 'boolean') throw new Error('troca_de_numero.agendado deve ser booleano');
+    trocaDeNumero = {
+      template: texto(o.template ?? undefined, 'troca_de_numero.template').trim() || null,
+      gap_min: o.gap_min == null ? null : Number(o.gap_min),
+      conta_anterior: texto(o.conta_anterior ?? undefined, 'troca_de_numero.conta_anterior').trim() || null,
+      conta_atual: texto(o.conta_atual ?? undefined, 'troca_de_numero.conta_atual').trim() || null,
+      agendado: o.agendado === true,
+    };
+  }
   return {
     modo,
     followup_stage: Number(stage),
@@ -85,6 +113,7 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
     sem_presente_escola: body.sem_presente_escola === true,
     esta_na_escola: body.esta_na_escola === true,
     prompt_extra: texto(body.prompt_extra, 'prompt_extra').trim(),
+    troca_de_numero: trocaDeNumero,
   };
 }
 

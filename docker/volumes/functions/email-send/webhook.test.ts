@@ -48,6 +48,7 @@ beforeAll(async () => {
   vi.stubGlobal("Deno", {
     env: { get: (nome: string) => ({
       SUPABASE_URL: "https://api.example", RESEND_API_KEY: "chave-ficticia",
+      SUPABASE_SERVICE_ROLE_KEY: "servico-ficticio",
       RESEND_WEBHOOK_SECRET: "segredo-ficticio",
     })[nome] },
     serve: (handler: (req: Request) => Promise<Response>) => { teste.handler = handler; },
@@ -72,7 +73,7 @@ beforeEach(() => {
 
 async function enviar(contexto = "webhook", nome = "Ana & João") {
   return teste.handler!(new Request("https://api.example/functions/v1/email-send", {
-    method: "POST", headers: { "Content-Type": "application/json" },
+    method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer servico-ficticio" },
     body: JSON.stringify({ template_id: "modelo", remetente_id: "remetente",
       destinatario_email: "destino@example.com", contexto_tipo: contexto,
       contexto_id: "integracao", variaveis: { nome }, idempotencia_key: "teste" }),

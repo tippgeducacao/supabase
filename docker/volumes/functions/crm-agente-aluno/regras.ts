@@ -783,6 +783,21 @@ function vezesPerguntada(vezes: number, em: string | null, feminino: boolean): s
  * A linha do perfil no contexto: o que ele já respondeu, quantas vezes cada pergunta foi feita,
  * quando foi a última (dia de Ampére), e qual pode ir hoje. Nunca a resposta dele, e nunca sexo.
  */
+/**
+ * O dia da régua, lido do nome da etapa ("D+7 · QUEM É O SUPORTE" → 7; "NOVO ALUNO" → 1).
+ * Serve só para saber se ainda estamos no começo da integração; nada depende dele para funcionar.
+ */
+export function diaDaEtapa(etapaNome: string | null | undefined): number | null {
+  const nome = String(etapaNome ?? '').trim().toUpperCase();
+  if (!nome) return null;
+  if (nome.startsWith('NOVO ALUNO')) return 1;
+  const m = nome.match(/^D\+(\d{1,2})\b/);
+  return m ? Number(m[1]) : null;
+}
+
+/** Até que dia da integração o Rafael quer as duas perguntas do perfil respondidas (14/09/2026). */
+export const PERFIL_ATE_O_DIA = 4;
+
 export function linhaDoPerfil(c: ContextoAluno, agora: Date): string {
   const p = perfilDoContexto(c);
   if (!p) {
@@ -800,7 +815,21 @@ export function linhaDoPerfil(c: ContextoAluno, agora: Date): string {
       : hoje.motivo === 'ja_perguntou_hoje'
         ? 'Hoje você já fez uma pergunta do perfil: não pergunte de novo.'
         : 'Não pergunte mais nada do perfil: o que faltava já foi respondido ou já foi perguntado duas vezes.';
-  return `- Perfil do aluno: ${meta}; ${como}. ${quando}`;
+
+  // A janela dos primeiros dias (decisão do Rafael, 14/09): as duas respostas valem mais cedo,
+  // quando o aluno ainda está encantado e falante. Isso é PRIORIDADE, não obrigação: a regra da
+  // conversa tranquila continua mandando, e perguntar no meio de um problema estraga tudo.
+  const dia = diaDaEtapa(c.etapa_nome);
+  const falta = !p.metaRespondida || !p.comoRespondido;
+  let janela = '';
+  if (falta && hoje.liberadas.length) {
+    janela = dia !== null && dia <= PERFIL_ATE_O_DIA
+      ? ` Estamos no D+${dia}, e é aqui que essas respostas valem mais: se a conversa estiver tranquila, pergunte HOJE, sem deixar para depois.`
+      : dia !== null
+        ? ` Já passou do D+${PERFIL_ATE_O_DIA}, o melhor momento ficou para trás: pergunte se surgir uma brecha boa, mas não force.`
+        : '';
+  }
+  return `- Perfil do aluno: ${meta}; ${como}. ${quando}${janela}`;
 }
 
 export type OpcoesContexto = {

@@ -478,10 +478,12 @@ describe('crm-agente-aluno: o turno', () => {
     expect(String(corpo.system[1].text)).toContain('CONTEXTO DESTE ALUNO');
     expect(corpo.messages[0].role).toBe('user');
     expect(corpo.messages[corpo.messages.length - 1].role).toBe('user');
+    // Lista FECHADA e na ordem, de propósito: é o que impede alguém de dar uma ferramenta nova
+    // ao assistente sem ninguém perceber. As duas últimas são da integração acelerada.
     expect(corpo.tools.map((t) => t.name)).toEqual([
       'nao_responder', 'passar_para_atendente', 'consultar_proximas_aulas',
       'registrar_grupo_da_turma', 'registrar_preferencia_ligacao', 'consultar_tcc',
-      'registrar_perfil_do_aluno',
+      'registrar_perfil_do_aluno', 'marcar_passo_concluido', 'entregar_proximo_passo',
     ]);
   });
 

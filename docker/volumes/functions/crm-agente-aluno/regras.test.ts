@@ -7,6 +7,7 @@ import {
   diaDaSemanaEmSP,
   janelaDoDia,
   linhaDoPerfil,
+  diaDaEtapa,
   parametrosDoPerfil,
   perfilDoContexto,
   perguntasDoPerfilDeHoje,
@@ -418,6 +419,56 @@ describe('contexto do aluno', () => {
       expect(t).not.toMatch(/sexo|feminin|masculin|mulher|homem/i);
       expect(t).not.toContain('0.98');
     }
+  });
+
+  // Decisão do Rafael em 14/09: as duas perguntas valem nos primeiros quatro dias, enquanto o
+  // aluno ainda está animado. Depois disso ele responde menos e responde pior.
+  describe('a janela dos primeiros quatro dias', () => {
+    const semPerfil = {
+      meta_pessoal_respondida: false, meta_pessoal_perguntas: 0, meta_pessoal_perguntada_em: null,
+      como_conheceu_respondido: false, como_conheceu_perguntas: 0, como_conheceu_perguntada_em: null,
+    };
+
+    it('lê o dia do nome da etapa, e NOVO ALUNO é o D+1', () => {
+      expect(diaDaEtapa('NOVO ALUNO')).toBe(1);
+      expect(diaDaEtapa('D+7 · QUEM É O SUPORTE')).toBe(7);
+      expect(diaDaEtapa('D+15 · AVALIAÇÃO')).toBe(15);
+      expect(diaDaEtapa('INTEGRADO')).toBeNull();
+      expect(diaDaEtapa(null)).toBeNull();
+    });
+
+    it('dentro da janela, cobra para perguntar hoje', () => {
+      const c = { ...base, ...semPerfil, etapa_nome: 'D+2 · PLATAFORMA' } as ContextoAluno;
+      const t = linhaDoPerfil(c, agora);
+      expect(t).toContain('Estamos no D+2');
+      expect(t).toContain('pergunte HOJE');
+    });
+
+    it('passada a janela, pede para não forçar', () => {
+      const c = { ...base, ...semPerfil, etapa_nome: 'D+9 · DOCUMENTOS' } as ContextoAluno;
+      const t = linhaDoPerfil(c, agora);
+      expect(t).toContain('Já passou do D+4');
+      expect(t).toContain('não force');
+      expect(t).not.toContain('pergunte HOJE');
+    });
+
+    it('com tudo respondido, não cobra nada, nem dentro da janela', () => {
+      const c = {
+        ...base, etapa_nome: 'D+2 · PLATAFORMA',
+        meta_pessoal_respondida: true, meta_pessoal_perguntas: 1, meta_pessoal_perguntada_em: null,
+        como_conheceu_respondido: true, como_conheceu_perguntas: 1, como_conheceu_perguntada_em: null,
+      } as ContextoAluno;
+      const t = linhaDoPerfil(c, agora);
+      expect(t).not.toContain('pergunte HOJE');
+      expect(t).not.toContain('Já passou');
+    });
+
+    it('etapa que não é da régua não inventa dia', () => {
+      const c = { ...base, ...semPerfil, etapa_nome: 'INTEGRADO' } as ContextoAluno;
+      const t = linhaDoPerfil(c, agora);
+      expect(t).not.toContain('Estamos no D+');
+      expect(t).not.toContain('Já passou do D+');
+    });
   });
 });
 

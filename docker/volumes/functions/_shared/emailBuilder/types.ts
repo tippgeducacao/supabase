@@ -165,6 +165,8 @@ export const GLOBAIS_PADRAO: GlobaisDoc = {
   breakpointMobile: 480,
 };
 
+import type { SnapshotFontesEmailIA } from "./aiFontes.ts";
+
 export interface DocumentoEmail {
   versao: number;
   /** Nome interno — só a equipe vê, serve para achar na lista. */
@@ -178,6 +180,8 @@ export interface DocumentoEmail {
   /** Texto do preheader — o trecho que aparece na lista da caixa, ao lado do assunto.
    *  Sem isso o cliente de e-mail usa a primeira frase do corpo, que costuma ser ruim. */
   preheader?: string;
+  /** Fontes consultadas na criação. Acompanham o modelo salvo, sem entrar no HTML. */
+  fontesIA?: SnapshotFontesEmailIA;
 }
 
 export function docVazio(nome = "Novo e-mail"): DocumentoEmail {

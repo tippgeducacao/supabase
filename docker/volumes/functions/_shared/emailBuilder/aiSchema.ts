@@ -15,8 +15,9 @@
  * https://ai.google.dev/api/generate-content#GenerationConfig
  */
 import { GLOBAIS_PADRAO } from "./types.ts";
+import type { AjusteEmailIA } from "./aiEdicao.ts";
 
-interface Schema {
+export interface Schema {
   type?: "object" | "array" | "string" | "number" | "integer" | "boolean";
   description?: string;
   properties?: Record<string, Schema>;
@@ -27,6 +28,7 @@ interface Schema {
   enum?: Array<string | number>;
   $ref?: string;
   $defs?: Record<string, Schema>;
+  anyOf?: Schema[];
 }
 
 const texto = (description: string): Schema => ({ type: "string", description });
@@ -111,6 +113,27 @@ export const SCHEMA_RESULTADO_EMAIL_IA: Schema = {
   }),
   $defs: DEFINICOES,
 };
+
+/** Saída restrita ao alvo: o modelo não recebe uma superfície para devolver
+ * alterações nas outras seções. Só mantemos definições realmente referenciadas. */
+export function schemaAjusteEmailIA(tipo: AjusteEmailIA["tipo"]): Schema {
+  if (tipo === "documento") return SCHEMA_RESULTADO_EMAIL_IA;
+  const propriedades: Record<string, Schema> = tipo === "cores"
+    ? { cores: objeto({ corFundo: COR, corFundoPagina: COR, corTexto: COR, corLink: COR }) }
+    : { [tipo]: ref(tipo) };
+  const schema = objeto({ resumo: texto("Resumo em português apenas do ajuste solicitado, até 300 caracteres."), ...propriedades });
+  const definicoes: Record<string, Schema> = {};
+  const visitar = (item: Schema) => {
+    if (item.$ref) {
+      const nome = item.$ref.split("/").at(-1)!;
+      if (!definicoes[nome]) { definicoes[nome] = DEFINICOES[nome]; visitar(DEFINICOES[nome]); }
+    }
+    for (const propriedade of Object.values(item.properties ?? {})) visitar(propriedade);
+    if (item.items) visitar(item.items);
+  };
+  visitar(schema);
+  return Object.keys(definicoes).length ? { ...schema, $defs: definicoes } : schema;
+}
 
 /** Exemplo real, validado nos testes contra o schema E contra o compilador.
  * Sem imagem nem link de campanha inventados: o único destino é o descadastro. */

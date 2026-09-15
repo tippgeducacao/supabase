@@ -28,10 +28,11 @@ import { prepararMensagem } from './midia.ts';
 import { persistirEntradasDoLote, registrarEntrada } from './historicoEntradaPausa.ts';
 import { aguardarAudiosDoHistorico, contarAudiosPendentes } from './sincronizacaoAudio.ts';
 import { conversaTexto, enviarResposta, horariosInventados, humanizarTexto, removerRaciocinioVazado } from './saida.ts';
-import { contaDoLead, personaDaConta } from './conta.ts';
+import { contaDoLead, dadosDaConta, personaDaConta } from './conta.ts';
 import { rodarEsteiraFollowup } from './followup.ts';
 import { rodarEsteiraFollowupTemplate } from './followup-template.ts';
 import { criarTelemetria, resumir, type Telemetria } from './eventos.ts';
+import { carregarModoTrocaNumero, carregarSinalTrocaDeNumero, comNotaNoContexto, comNotaParaRouter, notaTrocaDeNumero, resumoDoSinal, sinalInerte, type SinalTrocaDeNumero } from './trocaDeNumero.ts';
 
 declare const EdgeRuntime: { waitUntil?: (p: Promise<unknown>) => void } | undefined;
 
@@ -233,6 +234,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   tel.registrar('rodada_inicio', {
     mensagens: itens.map((i: any) => resumir(i.mensagem, 300)),
     arquivos: itens.filter((i: any) => i.arquivo).length,
+    wa_account_id: [...itens].reverse().find((i: any) => i?.wa_account_id != null)?.wa_account_id ?? null,
   });
   // Contexto da CONVERSA: conta/lead/oportunidade vêm do último item do buffer QUE
   // TEM o campo — o POST de drenagem do reconciliador (drenar_orfao) chegava SEM
@@ -274,6 +276,18 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     template_followup_em: null,
   });
 
+  // 14/09/2026 — TROCA DE NÚMERO: o lead pode estar escrevendo por OUTRO número da PPGVET
+  // (respondeu a um template de disparo/cadência de um número que nunca conversou com ele)
+  // enquanto a memória, que é uma só por telefone, traz a conversa do número anterior — e o
+  // modelo cobrava aqui o horário "combinado" lá. O sinal é determinístico (crm_whatsapp_messages
+  // sabe a conta de cada mensagem); o que fazer com ele depende do modo na config. Regra, casos
+  // de borda e a nota em trocaDeNumero.ts.
+  const modoTroca = await carregarModoTrocaNumero(supabase);
+  const contasNoLote = new Set(itens.map((i: any) => i?.wa_account_id).filter(Boolean)).size;
+  const sinalTroca: SinalTrocaDeNumero = modoTroca === 'off'
+    ? sinalInerte(ctx.waAccountId ?? null, contasNoLote, 'desligado')
+    : await carregarSinalTrocaDeNumero(supabase, { telefone, contaAtual: ctx.waAccountId, itens, contasNoLote });
+
   // Contexto do lead + temporal (mesma montagem do node "normalizador").
   const formacaoNormalizada = encontrarFormacao(lead?.formacao_academica ?? '');
   const vars = {
@@ -300,9 +314,35 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     ? 'recontato'
     : personaDoNumero === 'campanha_direta' ? 'campanha_direta' : 'qualificador';
   const ehCampanha = persona === 'campanha_direta';
+  // Só o modo 'ativo' muda comportamento; 'sombra' registra o que faria. Recontato tem missão
+  // fixa e dossiê próprio — não recebe a nota (a telemetria ainda mede a troca).
+  const aplicarTroca = modoTroca === 'ativo' && sinalTroca.trocou && persona !== 'recontato';
+  // Ratchet do agente_atual ignorado SÓ nesta rodada e SÓ sem reunião confirmada: o router
+  // decide de novo vendo a fronteira; reunião marcada é fato e mantém o fechamento.
+  const agenteAnterior: string | null = aplicarTroca && lead?.agendado !== true ? null : (lead?.agente_atual ?? null);
+  let notaTroca: string | null = null;
+  if (aplicarTroca) {
+    const [contaAtual, contaAnterior] = await Promise.all([
+      dadosDaConta(supabase, sinalTroca.contaAtual),
+      dadosDaConta(supabase, sinalTroca.contaAnterior),
+    ]);
+    notaTroca = notaTrocaDeNumero(sinalTroca, { atual: contaAtual, anterior: contaAnterior }, { agendado: lead?.agendado === true });
+  }
+  if (modoTroca !== 'off' && (sinalTroca.trocou || sinalTroca.contasNoLote > 1)) {
+    tel.registrar('troca_de_numero', {
+      ...resumoDoSinal(sinalTroca),
+      modo: modoTroca,
+      aplicado: aplicarTroca,
+      ratchet_ignorado: agenteAnterior !== (lead?.agente_atual ?? null),
+      agente_atual_antes: lead?.agente_atual ?? null,
+      agendado: lead?.agendado === true,
+      persona,
+    });
+  }
   let promptAgente: string;
   let tools: any[];
-  let contextoEfetivo = contextoTemporal;
+  // A nota vai no bloco de contexto temporal: relido a cada volta, fora do prefixo cacheado.
+  let contextoEfetivo = comNotaNoContexto(contextoTemporal, notaTroca);
   let agenteEfetivo: string;
 
   if (persona === 'recontato') {
@@ -329,13 +369,13 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     const coletaFeita = Boolean(
       String(lead?.nome ?? '').trim() && String(lead?.formacao_academica ?? '').trim(),
     );
-    let agenteAtual = lead?.agente_atual === 'agente_qualificador' ? 'agente_qualificador' : 'agente_validacao';
+    let agenteAtual = agenteAnterior === 'agente_qualificador' ? 'agente_qualificador' : 'agente_validacao';
     let decidiu: string = agenteAtual;
     const consultarRouter = agenteAtual !== 'agente_qualificador' && coletaFeita;
     const inicioRouter = Date.now();
     if (consultarRouter) {
       try {
-        decidiu = await chamarRouter(limparParaRouter(await carregarHistorico(supabase, remotejid)));
+        decidiu = await chamarRouter(limparParaRouter(comNotaParaRouter(await carregarHistorico(supabase, remotejid), notaTroca)));
         if (decidiu === 'agente_qualificador') agenteAtual = 'agente_qualificador';
       } catch (e) {
         console.error('[crm-agente-sdr] router (campanha direta) falhou, mantendo a abertura:', e);
@@ -350,6 +390,8 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       persona,
       coleta_feita: coletaFeita,
       router_consultado: consultarRouter,
+      troca_numero: sinalTroca.trocou,
+      ratchet_ignorado: agenteAnterior !== (lead?.agente_atual ?? null),
     }, Date.now() - inicioRouter);
     promptAgente = renderPrompt(
       agenteAtual === 'agente_qualificador' ? AGENTE_QUALIFICADOR : AGENTE_CAMPANHA_DIRETA,
@@ -362,19 +404,21 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     const inicioRouter = Date.now();
     let routerFallback = false;
     try {
-      proximo = await chamarRouter(limparParaRouter(await carregarHistorico(supabase, remotejid)));
+      proximo = await chamarRouter(limparParaRouter(comNotaParaRouter(await carregarHistorico(supabase, remotejid), notaTroca)));
     } catch (e) {
       console.error('[crm-agente-sdr] router falhou, mantendo agente atual:', e);
       routerFallback = true;
-      proximo = lead?.agente_atual === 'agente_qualificador' ? 'agente_qualificador' : 'agente_validacao';
+      proximo = agenteAnterior === 'agente_qualificador' ? 'agente_qualificador' : 'agente_validacao';
     }
-    const agenteAtual = await atualizarAgenteComRatchet(supabase, remotejid, lead?.agente_atual ?? null, proximo);
+    const agenteAtual = await atualizarAgenteComRatchet(supabase, remotejid, agenteAnterior, proximo);
     agenteEfetivo = agenteAtual;
     tel.registrar('router_decisao', {
       decidiu: proximo,
       efetivo: agenteAtual,
       anterior: lead?.agente_atual ?? null,
       fallback: routerFallback,
+      troca_numero: sinalTroca.trocou,
+      ratchet_ignorado: agenteAnterior !== (lead?.agente_atual ?? null),
       persona,
     }, Date.now() - inicioRouter);
     // (campanha_direta não cai aqui — tem branch próprio, sem router na abertura)

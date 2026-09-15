@@ -228,3 +228,40 @@ describe('geração isolada de followup', () => {
     expect(resultado.routers).toEqual([]);
   });
 });
+
+describe('troca de número no harness (14/09/2026)', () => {
+  const base = { persona: 'validacao', mensagens: ['Oi, quero saber mais'], usar_router: true, agente_atual: 'agente_qualificador' };
+
+  it('aceita o cenário de troca com os cinco campos e normaliza os opcionais', () => {
+    const entrada = validarEntradaSimulacao({ ...base, troca_de_numero: { template: ' Oi Marta. Foi prorrogado o acesso. ', gap_min: 4320, conta_anterior: 'IA SDR', conta_atual: 'Amanda PPGVET' } });
+    expect(entrada.troca_de_numero).toEqual({ template: 'Oi Marta. Foi prorrogado o acesso.', gap_min: 4320, conta_anterior: 'IA SDR', conta_atual: 'Amanda PPGVET', agendado: false });
+    const espontaneo = validarEntradaSimulacao({ ...base, troca_de_numero: { template: null, agendado: true } });
+    expect(espontaneo.troca_de_numero).toEqual({ template: null, gap_min: null, conta_anterior: null, conta_atual: null, agendado: true });
+    expect(validarEntradaSimulacao(base).troca_de_numero).toBeNull();
+    expect(validarEntradaSimulacao({ ...base, troca_de_numero: null }).troca_de_numero).toBeNull();
+  });
+
+  it('rejeita chave desconhecida, tipos errados e uso no followup', () => {
+    expect(() => validarEntradaSimulacao({ ...base, troca_de_numero: { template: 'x', conta: 'y' } })).toThrow('troca_de_numero aceita somente');
+    expect(() => validarEntradaSimulacao({ ...base, troca_de_numero: { gap_min: -5 } })).toThrow('gap_min');
+    expect(() => validarEntradaSimulacao({ ...base, troca_de_numero: { gap_min: '90' } })).toThrow('gap_min');
+    expect(() => validarEntradaSimulacao({ ...base, troca_de_numero: { agendado: 'sim' } })).toThrow('agendado');
+    expect(() => validarEntradaSimulacao({ ...base, troca_de_numero: { template: 42 } })).toThrow('troca_de_numero.template');
+    expect(() => validarEntradaSimulacao({ ...base, troca_de_numero: ['x'] })).toThrow('troca_de_numero deve ser objeto');
+    expect(() => validarEntradaSimulacao({ modo: 'followup', historico_inicial: [{ role: 'user', content: 'oi' }], troca_de_numero: { template: 'x' } })).toThrow('followup não aceita troca_de_numero');
+  });
+
+  it('o roteiro troca-de-numero.json valida inteiro e só o controle vem sem troca', () => {
+    const arquivo = JSON.parse(readFileSync('scripts/teste-agente/roteiros/troca-de-numero.json', 'utf8'));
+    expect(arquivo.cenarios.length).toBeGreaterThanOrEqual(6);
+    for (const cenario of arquivo.cenarios) {
+      const entrada = validarEntradaSimulacao(cenario);
+      expect(entrada.usar_router).toBe(true);
+      expect(entrada.agente_atual).toBe('agente_qualificador');
+      if (cenario.id.startsWith('troca-00-controle')) expect(entrada.troca_de_numero).toBeNull();
+      else expect(entrada.troca_de_numero).not.toBeNull();
+    }
+    const confirmada = arquivo.cenarios.find((c: { id: string }) => c.id === 'troca-03-reuniao-ja-confirmada');
+    expect(validarEntradaSimulacao(confirmada).troca_de_numero?.agendado).toBe(true);
+  });
+});

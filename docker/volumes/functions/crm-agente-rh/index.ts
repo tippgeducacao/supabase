@@ -19,6 +19,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3';
 import { PROMPT_RH } from './prompt.ts';
+import { extrairToolsVazadas, limparResposta } from '../_shared/respostaModelo.ts';
 
 declare const EdgeRuntime: { waitUntil?: (p: Promise<unknown>) => void } | undefined;
 
@@ -230,17 +231,13 @@ async function evento(tipo: string, dados: Record<string, unknown> = {}) {
   }
 }
 
-// ── Raciocínio nunca chega ao candidato ────────────────────────────────────
-// Lição do agente do João: às vezes o modelo SIMULA o raciocínio dentro do bloco de
-// texto, embrulhado em <thinking>. Instrução no prompt não resolve sempre; esta régua
-// determinística resolve. Fica no funil por onde todo balão passa.
-const TAGS = '(?:antml:)?(?:thinking|thought|thoughts|scratchpad|reasoning|reflection)';
-export function limparResposta(texto: string): string {
-  let t = texto ?? '';
-  t = t.replace(new RegExp(`<${TAGS}[^>]*>[\\s\\S]*?</${TAGS}>`, 'gi'), '');
-  t = t.replace(new RegExp(`</?${TAGS}[^>]*>`, 'gi'), '');
-  return t.trim();
-}
+// ── Nada que não seja mensagem chega ao candidato ─────────────────────────
+// A régua é COMPARTILHADA (`_shared/respostaModelo.ts`) e determinística: tira o
+// raciocínio simulado em <thinking> (lição do agente do João) e a chamada de ferramenta
+// que o modelo escreveu no canal de texto (14/09/2026, candidata Ana). O porquê de cada
+// uma, com os dois casos reais, está lá. Reexportada porque é por esta função que todo
+// balão deste agente passa.
+export { limparResposta };
 
 // ── Anthropic com retry ────────────────────────────────────────────────────
 async function chamarClaude(body: Record<string, unknown>): Promise<any> {
@@ -686,8 +683,12 @@ async function processar(payload: any, profundidade = 0) {
       .order('created_at', { ascending: false })
       .limit(120);
 
+    // ⚠️ Uma chamada de ferramenta que vazou uma vez fica GRAVADA como mensagem enviada e
+    // volta por aqui como turno do assistente — o XML viraria exemplo do próprio jeito de
+    // responder. Passa pela mesma régua na ENTRADA, e o que sobrar vazio sai do histórico.
     const conversa = (msgs ?? [])
-      .filter((m: any) => (m.conteudo ?? '').trim() && so8(m.telefone) === fone8)
+      .map((m: any) => ({ ...m, conteudo: limparResposta(String(m.conteudo ?? '')) }))
+      .filter((m: any) => m.conteudo.trim() && so8(m.telefone) === fone8)
       .reverse()
       .slice(-MAX_HISTORICO);
 
@@ -837,8 +838,28 @@ async function processar(payload: any, profundidade = 0) {
       });
 
       const blocos = r?.content ?? [];
-      const texto = blocos.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n').trim();
+      let texto = blocos.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n').trim();
       const usos = blocos.filter((b: any) => b.type === 'tool_use');
+
+      // O modelo erra o CANAL de vez em quando e escreve a chamada dentro do texto. O que
+      // falhou foi o formato, não a decisão: a chamada é remontada, entra no laço como se
+      // tivesse vindo certa, e a rodada seguinte escreve a mensagem de verdade. Sem isto,
+      // o XML ia inteiro para o WhatsApp do candidato — foi o que aconteceu em 14/09/2026.
+      if (!usos.length && texto) {
+        const vazada = extrairToolsVazadas(texto);
+        if (vazada.chamadas.length) {
+          await evento('tool_vazada_no_texto', {
+            telefone, lead_id: leadId, oportunidade_id: card.oportunidade_id, rodada,
+            tools: vazada.chamadas.map((c) => c.name),
+          });
+          // O texto que sobrou é mensagem de verdade: vira a rede do `textoAntesDaFerramenta`
+          // logo abaixo, como acontece com qualquer texto que veio junto de uma ferramenta.
+          texto = vazada.limpo;
+          vazada.chamadas.forEach((c, i) => usos.push({
+            type: 'tool_use', id: `toolu_txt${rodada}${i}`, name: c.name, input: c.input,
+          }));
+        }
+      }
 
       if (usos.length) {
         // ⚠️ SÓ os blocos de ferramenta entram no histórico — nunca o texto que veio

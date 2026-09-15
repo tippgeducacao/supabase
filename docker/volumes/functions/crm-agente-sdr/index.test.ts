@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { limparCacheContas } from './conta';
 
 const fronteiras = vi.hoisted(() => ({
   from: vi.fn(), rpc: vi.fn(), buscarLead: vi.fn(), criarLead: vi.fn(), atualizarLead: vi.fn(),
@@ -306,5 +307,146 @@ describe('sincronização de áudio na entrada HTTP', () => {
     expect(fronteiras.buffer).toEqual([]);
     expect(fronteiras.rpc).toHaveBeenCalledWith('crm_sdr_registrar_entrada', expect.objectContaining({ p_pausa_observada: true }));
     semResposta();
+  });
+});
+
+describe('troca de número: nota ao router e ao principal, ratchet e telemetria', () => {
+  const A = 'conta-a-ia-sdr';
+  const B = 'conta-b-amanda';
+  const agora = Date.now();
+  const iso = (minAtras: number) => new Date(agora - minAtras * 60_000).toISOString();
+  // Conversa em A até o lead escolher horário; template de B; a resposta do lead em B é a do lote.
+  const mensagensCrm = [
+    { wa_account_id: A, direcao: 'outbound', tipo: 'text', conteudo: 'tenho 15h30, funciona?', created_at: iso(300), wa_message_id: 'wamid.a1', status_entrega: 'read' },
+    { wa_account_id: A, direcao: 'inbound', tipo: 'text', conteudo: '15h30 pode ser', created_at: iso(290), wa_message_id: 'wamid.a2', status_entrega: 'delivered' },
+    { wa_account_id: B, direcao: 'outbound', tipo: 'template', template_name: 'escola_prorrogacao', conteudo: 'Foi prorrogado o acesso da Escola', created_at: iso(120), wa_message_id: 'wamid.b1', status_entrega: 'read' },
+    { wa_account_id: B, direcao: 'inbound', tipo: 'text', conteudo: 'Oi, quero saber mais', created_at: iso(1), wa_message_id: payload.id, status_entrega: 'delivered' },
+  ];
+  const historicoCompartilhado = [
+    { role: 'assistant', content: 'tenho 15h30, funciona?' }, { role: 'user', content: '15h30 pode ser' },
+    { role: 'assistant', content: 'Foi prorrogado o acesso da Escola' }, { role: 'user', content: 'Oi, quero saber mais' },
+  ];
+  let updatesDoLead: Record<string, unknown>[] = [];
+  let consultasCrm: string[] = [];
+
+  function prepararRodada(modo: string, lead: Record<string, unknown>) {
+    limparCacheContas();
+    updatesDoLead = [];
+    consultasCrm = [];
+    fronteiras.buscarLead.mockResolvedValue({ ...leadAtivo, nome: 'Marta', ...lead });
+    fronteiras.historico.mockResolvedValue(historicoCompartilhado.map((m) => ({ ...m })));
+    fronteiras.rpc.mockImplementation(async (nome: string) => {
+      if (nome === 'crm_sdr_registrar_entrada') return { data: { estado: 'ativa', gravada: true }, error: null };
+      if (nome === 'crm_agente_sdr_lock_claim') return { data: true, error: null };
+      if (['crm_e_aluno_telefone', 'crm_esta_na_escola', 'crm_agente_sdr_lock_renovar'].includes(nome)) return { data: false, error: null };
+      throw new Error(`RPC inesperada: ${nome}`);
+    });
+    fronteiras.tools.mockResolvedValue([]);
+    fronteiras.humanizar.mockImplementation((t: string) => t);
+    fronteiras.horarios.mockReturnValue([]);
+    fronteiras.conversa.mockReturnValue('');
+    fronteiras.chamarRouter.mockResolvedValue('agente_validacao');
+    fronteiras.chamarPrincipal.mockResolvedValue({ content: [{ type: 'text', text: 'oi Marta! vi que a gente já se falou por outro número da PPG. sobre a Escola, me conta o que vc quer saber?' }] });
+    const base = fronteiras.from.getMockImplementation()!;
+    fronteiras.from.mockImplementation((tabela: string) => {
+      if (tabela === 'crm_agente_sdr_config') return {
+        select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { teste_telefones: [], troca_numero_modo: modo }, error: null }) }) }),
+      };
+      if (tabela === 'crm_whatsapp_accounts') return { select: async () => ({ data: [
+        { id: A, agente_ia_persona: 'qualificador', nome: 'IA SDR', numero_display: '+55 46 9970-8477' },
+        { id: B, agente_ia_persona: 'qualificador', nome: 'Amanda PPGVET', numero_display: '46 9 9901-3539' },
+      ], error: null }) };
+      if (tabela === 'cliente_ppg_leads_sdr') return {
+        select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { pausa_ia: false }, error: null }) }) }),
+        // atualizarAgenteComRatchet grava pelo atualizarLead REAL do módulo (não pelo mock).
+        update: (campos: Record<string, unknown>) => { updatesDoLead.push(campos); return { in: async () => ({ error: null }) }; },
+      };
+      if (tabela === 'crm_whatsapp_messages') {
+        let selecao = '';
+        const q: Record<string, unknown> = {};
+        q.select = (campos: string) => { selecao = campos; consultasCrm.push(campos); return q; };
+        for (const m of ['eq', 'in', 'not', 'order']) q[m] = () => q;
+        // Só a consulta da troca (wa_account_id, direcao, …) enxerga as linhas; a do status de
+        // materiais (envioMateriais.ts, também com template_name) recebe vazio.
+        q.limit = async () => ({ data: selecao.includes('wa_account_id, direcao') ? mensagensCrm : [], error: null });
+        return q;
+      }
+      return base(tabela);
+    });
+  }
+  const ultimoTurnoDoRouter = () => {
+    const historico = fronteiras.chamarRouter.mock.calls[0][0] as { role: string; content: string }[];
+    return historico[historico.length - 1];
+  };
+
+  it("modo 'ativo': router recebe a nota fundida à fala do lead, o ratchet não segura o qualificador e o principal recebe a nota no contexto", async () => {
+    prepararRodada('ativo', { agente_atual: 'agente_qualificador', agendado: false });
+    expect((await chamar({ wa_account_id: B, agente_ia_persona: 'qualificador' })).status).toBe(200);
+    expect(consultasCrm.some((c) => c.includes('wa_account_id, direcao'))).toBe(true);
+    const ultimo = ultimoTurnoDoRouter();
+    expect(ultimo.role).toBe('user');
+    expect(ultimo.content).toContain('[NOTA INTERNA');
+    expect(ultimo.content).toContain('TROCA DE NÚMERO');
+    expect(ultimo.content).toContain('Oi, quero saber mais');
+    // Nota nunca vai para o histórico persistido.
+    for (const [, , msg] of fronteiras.gravar.mock.calls) expect(JSON.stringify(msg)).not.toContain('NOTA INTERNA');
+    expect(updatesDoLead).toContainEqual({ agente_atual: 'agente_validacao' });
+    const chamada = fronteiras.chamarPrincipal.mock.calls[0][0];
+    expect(chamada.contextoTemporal).toContain('TROCA DE NÚMERO');
+    expect(chamada.contextoTemporal).toContain('«Amanda PPGVET» (final 3539)');
+    expect(chamada.contextoTemporal).toContain('«IA SDR» (final 8477)');
+    expect(chamada.contextoTemporal).toContain('Foi prorrogado o acesso da Escola');
+    expect(chamada.promptAgente).not.toContain('NOTA INTERNA');
+    expect(fronteiras.registrar).toHaveBeenCalledWith('troca_de_numero', expect.objectContaining({
+      trocou: true, modo: 'ativo', aplicado: true, ratchet_ignorado: true, conta_anterior: A, conta_atual: B,
+      template_na_troca: 'escola_prorrogacao', agente_atual_antes: 'agente_qualificador', agendado: false,
+    }));
+    expect(fronteiras.registrar).toHaveBeenCalledWith('router_decisao', expect.objectContaining({
+      decidiu: 'agente_validacao', efetivo: 'agente_validacao', anterior: 'agente_qualificador', troca_numero: true, ratchet_ignorado: true,
+    }), expect.anything());
+    expect(fronteiras.registrar).toHaveBeenCalledWith('rodada_inicio', expect.objectContaining({ wa_account_id: B }));
+    expect(fronteiras.enviar).toHaveBeenCalledOnce();
+  });
+
+  it("modo 'sombra': só registra a troca; router sem nota, ratchet valendo, contexto sem nota", async () => {
+    prepararRodada('sombra', { agente_atual: 'agente_qualificador', agendado: false });
+    expect((await chamar({ wa_account_id: B, agente_ia_persona: 'qualificador' })).status).toBe(200);
+    expect(ultimoTurnoDoRouter().content).not.toContain('NOTA INTERNA');
+    expect(updatesDoLead).toContainEqual({ agente_atual: 'agente_qualificador' });
+    expect(fronteiras.chamarPrincipal.mock.calls[0][0].contextoTemporal).not.toContain('TROCA DE NÚMERO');
+    expect(fronteiras.registrar).toHaveBeenCalledWith('troca_de_numero', expect.objectContaining({ trocou: true, modo: 'sombra', aplicado: false, ratchet_ignorado: false }));
+    expect(fronteiras.registrar).toHaveBeenCalledWith('router_decisao', expect.objectContaining({ efetivo: 'agente_qualificador', troca_numero: true, ratchet_ignorado: false }), expect.anything());
+  });
+
+  it("modo 'ativo' com reunião confirmada: a nota entra, mas o ratchet segura o qualificador", async () => {
+    prepararRodada('ativo', { agente_atual: 'agente_qualificador', agendado: true });
+    expect((await chamar({ wa_account_id: B, agente_ia_persona: 'qualificador' })).status).toBe(200);
+    expect(ultimoTurnoDoRouter().content).toContain('reunião CONFIRMADA');
+    expect(updatesDoLead).toContainEqual({ agente_atual: 'agente_qualificador' });
+    expect(fronteiras.chamarPrincipal.mock.calls[0][0].contextoTemporal).toContain('reunião CONFIRMADA');
+    expect(fronteiras.registrar).toHaveBeenCalledWith('troca_de_numero', expect.objectContaining({ aplicado: true, ratchet_ignorado: false, agendado: true }));
+  });
+
+  it("modo 'ativo' sem troca (conversa já vive neste número): comportamento antigo, sem nota e sem evento", async () => {
+    prepararRodada('ativo', { agente_atual: 'agente_qualificador', agendado: false });
+    // O João já respondeu em B depois da conversa em A → não é troca.
+    mensagensCrm.splice(3, 0, { wa_account_id: B, direcao: 'outbound', tipo: 'text', conteudo: 'oi Marta!', created_at: iso(60), wa_message_id: 'wamid.b2', status_entrega: 'read' });
+    try {
+      expect((await chamar({ wa_account_id: B, agente_ia_persona: 'qualificador' })).status).toBe(200);
+      expect(ultimoTurnoDoRouter().content).not.toContain('NOTA INTERNA');
+      expect(updatesDoLead).toContainEqual({ agente_atual: 'agente_qualificador' });
+      expect(fronteiras.registrar.mock.calls.some(([tipo]) => tipo === 'troca_de_numero')).toBe(false);
+    } finally {
+      mensagensCrm.splice(3, 1);
+    }
+  });
+
+  it("modo 'off' (ou coluna ausente): não consulta o CRM pela troca nem registra evento", async () => {
+    prepararRodada('off', { agente_atual: 'agente_qualificador', agendado: false });
+    expect((await chamar({ wa_account_id: B, agente_ia_persona: 'qualificador' })).status).toBe(200);
+    expect(consultasCrm.some((c) => c.includes('wa_account_id, direcao'))).toBe(false);
+    expect(ultimoTurnoDoRouter().content).not.toContain('NOTA INTERNA');
+    expect(updatesDoLead).toContainEqual({ agente_atual: 'agente_qualificador' });
+    expect(fronteiras.registrar.mock.calls.some(([tipo]) => tipo === 'troca_de_numero')).toBe(false);
   });
 });

@@ -29,6 +29,7 @@ import { humanizarTexto } from '../crm-agente-sdr/saida.ts';
 import { limparParaRouter } from '../crm-agente-sdr/historico.ts';
 import { gerarFollowup } from '../crm-agente-sdr/followup.ts';
 import { VERSAO_MEMORIA_HUMANA } from '../crm-agente-sdr/memoriaHumana.ts';
+import { comNotaNoContexto, comNotaParaRouter, notaTrocaDeNumero, sinalInerte } from '../crm-agente-sdr/trocaDeNumero.ts';
 import { executarFollowupSimulado, executarSimulacao, extrairUso, MAX_CARACTERES_SIMULACAO, validarEntradaSimulacao, type AgenteRouter } from './simulacao.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
@@ -241,6 +242,18 @@ Deno.serve(async (req) => {
       prepararRodada: async (messages, turno) => {
         let agente = entrada.persona === 'campanha_direta' ? 'agente_campanha_direta'
           : entrada.persona === 'qualificador' ? 'agente_qualificador' : 'agente_validacao';
+        // TROCA DE NÚMERO (14/09/2026): mesma nota e mesma exceção do ratchet da produção
+        // (crm-agente-sdr/index.ts), só na 1ª rodada — depois o João já falou por este número.
+        const troca = turno === 1 ? entrada.troca_de_numero : null;
+        const notaTroca = troca ? notaTrocaDeNumero(
+          { ...sinalInerte('conta-atual-simulada', 1, 'trocou'), trocou: true, contaAnterior: 'conta-anterior-simulada',
+            gapMin: troca.gap_min ?? 90,
+            templateAtual: troca.template ? { nome: null, conteudo: troca.template, em: new Date().toISOString() } : null },
+          { atual: troca.conta_atual ? { id: 'conta-atual-simulada', persona: 'qualificador', nome: troca.conta_atual, numero_display: null } : null,
+            anterior: troca.conta_anterior ? { id: 'conta-anterior-simulada', persona: 'qualificador', nome: troca.conta_anterior, numero_display: null } : null },
+          { agendado: troca.agendado },
+        ) : null;
+        const ratchetIgnorado = Boolean(notaTroca) && !troca?.agendado;
         if (entrada.usar_router) {
           const anterior = agenteAtual;
           const campanha = entrada.persona === 'campanha_direta';
@@ -252,7 +265,7 @@ Deno.serve(async (req) => {
           let modeloRouter = MODELO_AGENTE;
           if (consultar) {
             try {
-              decidiu = await chamarRouter(limparParaRouter(messages), (resposta) => {
+              decidiu = await chamarRouter(limparParaRouter(comNotaParaRouter(messages, notaTroca)), (resposta) => {
                 usoRouter = extrairUso(resposta.usage);
                 modeloRouter = resposta.model ?? MODELO_AGENTE;
               });
@@ -260,9 +273,10 @@ Deno.serve(async (req) => {
               fallback = true;
             }
           }
-          agenteAtual = anterior === 'agente_qualificador' ? anterior : decidiu;
+          agenteAtual = anterior === 'agente_qualificador' && !ratchetIgnorado ? anterior : decidiu;
           agente = campanha && agenteAtual === 'agente_validacao' ? 'agente_campanha_direta' : agenteAtual;
           routers.push({ turno, anterior, decidiu, efetivo: agenteAtual, consultado: consultar, fallback,
+            ...(notaTroca ? { troca_numero: true, ratchet_ignorado: ratchetIgnorado } : {}),
             ...(consultar ? { modelo: modeloRouter, usage: usoRouter } : {}) });
         }
         const promptBase = agente === 'agente_campanha_direta' ? AGENTE_CAMPANHA_DIRETA
@@ -284,7 +298,7 @@ Deno.serve(async (req) => {
           const extras = (await toolsDe('agente_campanha_direta')).filter((t) => t?.name === 'atualizar_dados_lead');
           tools = [...tools, ...extras];
         }
-        return { agente: agenteTools, promptAgente, contextoTemporal: montarContextoTemporal() + notaDoNome(vars.nome) + notaDoCurso(vars.curso_interesse_original), tools };
+        return { agente: agenteTools, promptAgente, contextoTemporal: comNotaNoContexto(montarContextoTemporal() + notaDoNome(vars.nome) + notaDoCurso(vars.curso_interesse_original), notaTroca), tools };
       },
       chamarPrincipal: chamarAgentePrincipal,
       humanizar: humanizarTexto,

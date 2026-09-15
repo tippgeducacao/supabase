@@ -27,23 +27,42 @@ export function phoneVariants(raw: string): string[] {
   return [...set];
 }
 
-// Personas das contas Meta, com cache curto (o worker vive entre requests; o tick
-// processa dezenas/centenas de leads — não martelar a tabela a cada envio).
-let cachePersonas: { at: number; mapa: Map<string, string | null> } | null = null;
-async function personasContas(supabase: any): Promise<Map<string, string | null>> {
-  if (cachePersonas && Date.now() - cachePersonas.at < 60_000) return cachePersonas.mapa;
+// Contas Meta (persona, nome, número), com cache curto (o worker vive entre requests; o
+// tick processa dezenas/centenas de leads — não martelar a tabela a cada envio).
+// 14/09/2026: nome e numero_display entraram pra nota de TROCA DE NÚMERO (trocaDeNumero.ts)
+// dizer ao modelo por qual número o lead está falando agora e por qual falou antes.
+export type DadosConta = { id: string; persona: string | null; nome: string | null; numero_display: string | null };
+let cacheContas: { at: number; mapa: Map<string, DadosConta> } | null = null;
+export async function mapaDeContas(supabase: any): Promise<Map<string, DadosConta>> {
+  if (cacheContas && Date.now() - cacheContas.at < 60_000) return cacheContas.mapa;
   const { data, error } = await supabase
     .from('crm_whatsapp_accounts')
-    .select('id, agente_ia_persona');
+    .select('id, agente_ia_persona, nome, numero_display');
   if (error) {
-    console.error(`[crm-agente-sdr][conta] personasContas: ${error.message}`);
-    return cachePersonas?.mapa ?? new Map();
+    console.error(`[crm-agente-sdr][conta] mapaDeContas: ${error.message}`);
+    return cacheContas?.mapa ?? new Map();
   }
-  const mapa = new Map<string, string | null>(
-    (data ?? []).map((r: any) => [String(r.id), r.agente_ia_persona ?? null]),
+  const mapa = new Map<string, DadosConta>(
+    (data ?? []).map((r: any) => [String(r.id), {
+      id: String(r.id),
+      persona: r.agente_ia_persona ?? null,
+      nome: r.nome ?? null,
+      numero_display: r.numero_display ?? null,
+    }]),
   );
-  cachePersonas = { at: Date.now(), mapa };
+  cacheContas = { at: Date.now(), mapa };
   return mapa;
+}
+/** Só para testes: o cache é de módulo e sobrevive entre casos. */
+export function limparCacheContas(): void { cacheContas = null; }
+async function personasContas(supabase: any): Promise<Map<string, string | null>> {
+  const contas = await mapaDeContas(supabase);
+  return new Map<string, string | null>([...contas].map(([id, c]) => [id, c.persona]));
+}
+/** Nome/número/persona da conta (null = desconhecida). */
+export async function dadosDaConta(supabase: any, id: unknown): Promise<DadosConta | null> {
+  if (!id) return null;
+  return (await mapaDeContas(supabase)).get(String(id)) ?? null;
 }
 
 /**
