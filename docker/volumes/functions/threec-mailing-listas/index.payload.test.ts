@@ -57,6 +57,8 @@ beforeEach(() => {
       return { data: leads.length, error: null }
     }
     if (nome === 'threec_mailing_rodada_registrar') return { data: null, error: null }
+    if (nome === 'threec_mailing_a_expurgar_lista') return { data: [], error: null }
+    if (nome === 'threec_mailing_lista_substituir') return { data: 0, error: null }
     throw new Error(`RPC inesperada: ${nome}`)
   })
   fronteiras.from.mockImplementation((tabela: string) => {
@@ -76,6 +78,9 @@ beforeEach(() => {
     throw new Error(`Tabela inesperada: ${tabela}`)
   })
   fronteiras.fetch.mockImplementation(async (url: string, init: RequestInit) => {
+    if (!init.method && new URL(url).pathname === '/api/v1/campaigns/campanha-teste/lists') {
+      return Response.json({ data: [{ id: 'lista-teste', name: 'Lista existente', weight: 1, total: 5 }] })
+    }
     if (url !== 'https://threec.invalid/api/v1/campaigns/campanha-teste/lists/lista-teste/mailing?api_token=token-teste'
       || init.method !== 'POST') throw new Error('Request inesperado no teste')
     return Response.json({ imported_lines: 1 })
@@ -92,8 +97,10 @@ describe.each(campanhas)('$funcao: dados visíveis no atendimento do 3C', ({ fun
   it('envia nome e demais campos em mailing.data, preservando identificação e contagem de descartes', async () => {
     const resposta = await chamar(funcao)
     expect(resposta.status).toBe(200)
-    expect(fronteiras.fetch).toHaveBeenCalledOnce()
-    const corpo = JSON.parse(fronteiras.fetch.mock.calls[0][1].body)
+    const envios = fronteiras.fetch.mock.calls.filter(([, init]) => init.method === 'POST')
+    expect(envios).toHaveLength(1)
+    expect(fronteiras.fetch).toHaveBeenCalledTimes(funcao === 'threec-mailing-listas' ? 2 : 1)
+    const corpo = JSON.parse(envios[0][1].body)
     const mailing = corpo.mailing[0]
 
     // A tela Ligação Discador enumera somente mailing.data. Campos na raiz

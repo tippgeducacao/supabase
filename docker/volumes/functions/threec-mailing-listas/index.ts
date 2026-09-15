@@ -25,6 +25,7 @@
 //   POST ?limite=500                                       -> sobrescreve o limite da linha
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0'
+import { recuperarListaAutomatica } from './recuperacao-lista.ts'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -145,74 +146,17 @@ interface ExpurgoRow {
   motivo: string
 }
 
-// --------------------------------------------------------------- lista no 3C ----
-// Nunca cria lista nova por rodada: o histórico dessa campanha mostra o estrago
-// (a quente chegou a 104 listas). Usa a da config; se ela não tem, adota a mais
-// recente que já existe na campanha; só cria quando a campanha está vazia.
-async function resolverListaId(cfg: ListaCfg, renovarLease?: RenovarLease): Promise<{ listaId: string | null; criada: boolean; erro?: string }> {
-  if (cfg.lista_id) return { listaId: cfg.lista_id, criada: false }
-
-  const listas = new Map<string, { id: string; created_at: string }>()
+// Todas as URLs permanecem no host configurado; erros nunca expõem o api_token.
+async function api3c(path: string, init: RequestInit = {}): Promise<Response> {
+  const url = new URL(`${THREEC_BASE}${path}`)
+  url.searchParams.set('api_token', THREEC_TOKEN)
   try {
-    let paginasEsperadas: number | null = null
-    for (let pagina = 1; pagina <= 200; pagina++) {
-      await renovarLease?.()
-      const alvo = `${THREEC_BASE}/campaigns/${cfg.campanha_id}/lists?api_token=${THREEC_TOKEN}&page=${pagina}`
-      const resp = await fetch(alvo, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(API_TIMEOUT_MS) })
-      if (!resp.ok) return { listaId: null, criada: false, erro: `falha ao consultar listas: HTTP ${resp.status}` }
-      const corpo = await resp.json()
-      const linhas = Array.isArray(corpo) ? corpo : corpo?.data
-      if (!Array.isArray(linhas)) throw new Error('resposta de listas inválida')
-
-      // Mesmo contrato de paginação de threec-campanha-metricas. Nunca usamos
-      // uma URL retornada pela API com nosso token nem tratamos uma página como tudo.
-      const paginacao = corpo?.meta?.pagination
-      const paginas = paginacao ? Number(paginacao.total_pages) : null
-      if (paginacao && (paginas === null || !Number.isSafeInteger(paginas) || paginas < pagina || paginas > 200)) {
-        throw new Error('paginação de listas inválida')
-      }
-      if (paginacao?.current_page !== undefined && Number(paginacao.current_page) !== pagina) {
-        throw new Error('página de listas diferente da solicitada')
-      }
-      if (pagina > 1 && paginas !== paginasEsperadas) throw new Error('paginação de listas mudou durante a consulta')
-      paginasEsperadas = paginas
-      if (paginas !== null && pagina < paginas && linhas.length === 0) throw new Error('página de listas incompleta')
-      for (const linha of linhas) {
-        if (!linha || !['string', 'number'].includes(typeof linha.id) || !String(linha.id).trim()) {
-          throw new Error('lista sem identificador válido')
-        }
-        listas.set(String(linha.id), { id: String(linha.id), created_at: typeof linha.created_at === 'string' ? linha.created_at : '' })
-      }
-      if (paginas === null || pagina >= paginas) break
-    }
-  } catch (err) {
-    return { listaId: null, criada: false, erro: `falha ao listar mailing lists: ${String(err)}` }
-  }
-  if (listas.size > 0) {
-    const maisNova = [...listas.values()].sort((a, b) =>
-      b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id, undefined, { numeric: true }),
-    )[0]
-    return { listaId: maisNova.id, criada: false }
-  }
-
-  // Só cria após confirmar uma coleção válida e inteiramente vazia.
-  const criar = `${THREEC_BASE}/campaigns/${cfg.campanha_id}/lists?api_token=${THREEC_TOKEN}`
-  try {
-    await renovarLease?.()
-    const r = await fetch(criar, {
-      method: 'POST',
+    return await fetch(url.toString(), { ...init,
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...init.headers },
       signal: AbortSignal.timeout(API_TIMEOUT_MS),
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ name: `auto | ${cfg.nome}`.slice(0, 60) }),
     })
-    const corpo = await r.json().catch(() => null)
-    const novo = corpo?.data?.id ?? corpo?.id
-    if (!r.ok || !novo) {
-      return { listaId: null, criada: false, erro: `3C recusou criar a lista: HTTP ${r.status}` }
-    }
-    return { listaId: String(novo), criada: true }
-  } catch (err) {
-    return { listaId: null, criada: false, erro: `falha ao criar a lista: ${String(err)}` }
+  } catch {
+    throw new Error('3C indisponivel ou tempo de resposta excedido')
   }
 }
 
@@ -296,7 +240,43 @@ async function expurgar(cfg: ListaCfg, limite: number, dry: boolean, renovarLeas
 }
 
 // --------------------------------------------------------------- sincronizar ----
-async function sincronizar(cfg: ListaCfg, limite: number | null, dry: boolean, renovarLease?: RenovarLease): Promise<Response> {
+async function sincronizar(cfg: ListaCfg, limite: number | null, dry: boolean, renovarLease?: RenovarLease, tokenLease?: string): Promise<Response> {
+  let recuperacao: Awaited<ReturnType<typeof recuperarListaAutomatica>> | undefined
+  let liberados = 0
+  if (!dry) {
+    // A recuperação também roda sem novos candidatos. Antes, um ID apagado ficava
+    // escondido pelo retorno antecipado "sem novos contatos" para sempre.
+    const pendentes = await supabase.rpc('threec_mailing_a_expurgar_lista', { p_lista: cfg.id, p_limite: 1 })
+    if (pendentes.error || !Array.isArray(pendentes.data)) {
+      throw new Error('nao foi possivel conferir o expurgo antes de recuperar a lista')
+    }
+    if (pendentes.data.length > 0) {
+      await registrar(cfg.id, 'sincronizar', {}, 'retirada de contatos ainda pendente; aguardando manutencao')
+      return json({ ok: false, campanha: cfg.nome, error: 'retirada de contatos ainda pendente' }, 409)
+    }
+    try {
+      recuperacao = await recuperarListaAutomatica(cfg, { api: api3c, renovarLease })
+    } catch (err) {
+      await registrar(cfg.id, 'sincronizar', {}, `falha ao recuperar lista: ${String(err)}`)
+      return json({ ok: false, campanha: cfg.nome, error: 'falha ao recuperar lista', detail: String(err) }, 502)
+    }
+    // Confere também um ID mantido: a configuração foi lida antes de adquirir a
+    // lease e outra rodada pode tê-la substituído nesse pequeno intervalo.
+    {
+      await renovarLease?.()
+      const troca = await supabase.rpc('threec_mailing_lista_substituir', {
+        p_lista: cfg.id, p_token: tokenLease, p_lista_anterior: cfg.lista_id,
+        p_lista_nova: recuperacao.listaId, p_anterior_excluida: recuperacao.anteriorExcluida,
+      })
+      if (troca.error || typeof troca.data !== 'number') {
+        throw new Error('lista recuperada no 3C mas confirmacao local pendente; envio interrompido')
+      }
+      liberados = troca.data
+      cfg.lista_id = recuperacao.listaId
+    }
+  }
+  const detalheRecuperacao = recuperacao && (recuperacao.criada || recuperacao.anteriorExcluida || recuperacao.reativada)
+    ? { recuperacao: { ...recuperacao, liberados_para_reavaliacao: liberados } } : {}
   const { data, error } = await supabase.rpc('threec_mailing_selecionar_lista', {
     p_lista: cfg.id,
     p_limite: limite ?? cfg.limite_por_rodada,
@@ -310,11 +290,11 @@ async function sincronizar(cfg: ListaCfg, limite: number | null, dry: boolean, r
   if (rows.length === 0) {
     if (!dry) {
       await supabase.from('threec_mailing_listas').update({
-        ultimo_resultado: { enviados: 0, motivo: 'sem novos contatos liberados agora' },
+        ultimo_resultado: { enviados: 0, motivo: 'sem novos contatos liberados agora', ...detalheRecuperacao },
       }).eq('id', cfg.id)
     }
-    if (!dry) await registrar(cfg.id, 'sincronizar', {}, undefined, { motivo: 'sem novos contatos liberados agora' })
-    return json({ ok: true, campanha: cfg.nome, enviados: 0, motivo: 'sem novos contatos liberados agora' })
+    if (!dry) await registrar(cfg.id, 'sincronizar', {}, undefined, { motivo: 'sem novos contatos liberados agora', ...detalheRecuperacao })
+    return json({ ok: true, campanha: cfg.nome, enviados: 0, motivo: 'sem novos contatos liberados agora', ...detalheRecuperacao })
   }
 
   const mailing = rows.map((r) => ({
@@ -338,14 +318,7 @@ async function sincronizar(cfg: ListaCfg, limite: number | null, dry: boolean, r
     })
   }
 
-  const { listaId, criada, erro } = await resolverListaId(cfg, renovarLease)
-  if (!listaId) {
-    await registrar(cfg.id, 'sincronizar', {}, `sem mailing list no 3C: ${erro ?? ''}`)
-    return json({ error: 'sem mailing list no 3C', detail: erro }, 502)
-  }
-  if (criada || cfg.lista_id !== listaId) {
-    await supabase.from('threec_mailing_listas').update({ lista_id: listaId }).eq('id', cfg.id)
-  }
+  const listaId = recuperacao!.listaId
 
   const alvo = `${THREEC_BASE}/campaigns/${cfg.campanha_id}/lists/${listaId}/mailing?api_token=${THREEC_TOKEN}`
   const aceitos: number[] = []
@@ -417,6 +390,7 @@ async function sincronizar(cfg: ListaCfg, limite: number | null, dry: boolean, r
     marcados: (marcados as number) ?? 0,
     descartados_duplicata_campanha: descartadosPeloTresC,
     falhas: falhas.slice(0, 3),
+    ...detalheRecuperacao,
   }
   await supabase.from('threec_mailing_listas').update({
     ultimo_resultado: resultado,
@@ -426,17 +400,17 @@ async function sincronizar(cfg: ListaCfg, limite: number | null, dry: boolean, r
     enviados: enviados.length,
     aceitos: enviados.length - descartadosPeloTresC,
     descartados: descartadosPeloTresC,
-  }, falhas.length ? falhas.slice(0, 3).join(' | ') : undefined, { lista_id: listaId })
+  }, falhas.length ? falhas.slice(0, 3).join(' | ') : undefined, { lista_id: listaId, ...detalheRecuperacao })
 
   return json({ ok: falhas.length === 0, campanha: cfg.nome, lista_id: listaId, ...resultado })
 }
 
 async function executarAcao(cfg: ListaCfg, acao: 'expurgar' | 'sincronizar', limite: number | null,
-  dry: boolean, renovarLease?: RenovarLease): Promise<Response> {
+  dry: boolean, renovarLease?: RenovarLease, tokenLease?: string): Promise<Response> {
   try {
     return acao === 'expurgar'
       ? await expurgar(cfg, limite ?? 500, dry, renovarLease)
-      : await sincronizar(cfg, limite, dry, renovarLease)
+      : await sincronizar(cfg, limite, dry, renovarLease, tokenLease)
   } catch (err) {
     if (!dry) await registrar(cfg.id, acao, {}, `falha inesperada: ${String(err)}`)
     return json({ ok: false, error: `falha ao ${acao}`, detail: String(err) }, 500)
@@ -509,8 +483,8 @@ async function handler(req: Request): Promise<Response> {
   } : undefined
 
   try {
-    if (acao !== 'manter') return await executarAcao(cfg, acao as 'expurgar' | 'sincronizar', qLimite, dry, renovarLease)
-    const respostaExpurgo = await executarAcao(cfg, 'expurgar', qLimite, dry, renovarLease)
+    if (acao !== 'manter') return await executarAcao(cfg, acao as 'expurgar' | 'sincronizar', qLimite, dry, renovarLease, token ?? undefined)
+    const respostaExpurgo = await executarAcao(cfg, 'expurgar', qLimite, dry, renovarLease, token ?? undefined)
     const resultadoExpurgo = await respostaExpurgo.json()
     // DELETE parcialmente recusado também responde com ok=false. Não basta HTTP 200:
     // abastecer agora poderia manter no discador quem acabou de remarcar a reunião.
@@ -518,7 +492,7 @@ async function handler(req: Request): Promise<Response> {
       return json({ ok: false, campanha: cfg.nome, etapa: 'expurgar', expurgo: resultadoExpurgo },
         respostaExpurgo.ok ? 502 : respostaExpurgo.status)
     }
-    const respostaSync = await executarAcao(cfg, 'sincronizar', qLimite, dry, renovarLease)
+    const respostaSync = await executarAcao(cfg, 'sincronizar', qLimite, dry, renovarLease, token ?? undefined)
     const resultadoSync = await respostaSync.json()
     return json({ ok: respostaSync.ok && resultadoSync.ok === true, ...(dry ? { dry: true } : {}),
       campanha: cfg.nome, expurgo: resultadoExpurgo, sincronizacao: resultadoSync }, respostaSync.status)
