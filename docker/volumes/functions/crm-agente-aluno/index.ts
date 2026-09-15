@@ -1007,6 +1007,37 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
       return;
     }
 
+    // ── A OFERTA PRECISA SABER O QUE ESTÁ OFERECENDO ─────────────────────────
+    // ⚠️ 15/09: o primeiro teste em produção entregou "Que bom, Rafael! Fico feliz que os primeiros
+    // dias tenham sido bons pra você" — gentileza, não oferta. O convite de cada passo estava
+    // escrito no banco desde 14/09 e nunca chegava aqui: pedir "ofereça o próximo passo" sem dizer
+    // QUAL faz o modelo puxar conversa e encerrar, que é o único movimento possível sem objeto.
+    let conviteDaOferta = '';
+    if (ehOferta) {
+      const { data: rotBruto, error: errRot } = await supabase.rpc('onb_acelerada_roteiro', {
+        p_oportunidade_id: aluno.oportunidade_id,
+      });
+      const rot = (rotBruto ?? {}) as Record<string, unknown>;
+      conviteDaOferta = rot.ok === true ? String(rot.convite ?? '').trim() : '';
+      if (!conviteDaOferta) {
+        // Passo de resgate, passo que só sai por template, etapa fora da régua, ou o D+1 (a porta
+        // de entrada não se oferece): não há o que convidar, e falar sem ter o que oferecer é pior
+        // do que ficar quieto. A oferta morre AQUI em vez de segurar a vaga única por 20 h — assim
+        // o aluno volta a poder receber uma assim que fechar o próximo passo.
+        const agoraIso = new Date().toISOString();
+        await supabase.from('onb_acelerada_ofertas')
+          .update({
+            status: 'recusada',
+            motivo: `sem convite: ${rot.motivo ?? errRot?.message ?? 'passo sem oferta_convite'}`,
+            respondida_em: agoraIso,
+            atualizada_em: agoraIso,
+          })
+          .eq('oportunidade_id', aluno.oportunidade_id);
+        await evento('acelerada:sem_convite', { ...rastro, motivo: rot.motivo ?? errRot?.message ?? null });
+        return;
+      }
+    }
+
     // O que o botão pede, dito ao modelo com o link já na mão. Botão antigo que o estado já
     // desmentiu (alguém da equipe corrigiu o "está no grupo" depois) não vale mais.
     const botaoDaVez = botaoPendente?.tipo === 'grupo' && ctx.no_grupo !== null && ctx.no_grupo !== undefined &&
@@ -1084,9 +1115,13 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
         content: ehManha
           ? '(sem mensagem nova: é a retomada das 8h do que ele escreveu fora do horário)'
           : ehOferta
-          ? '(sem mensagem nova: ele terminou o passo de hoje há pouco. Ofereça o próximo em UMA frase, '
-            + 'do jeito que a conversa estava, e espere. Não entregue nada agora, não explique o que vem, '
-            + 'não abra com saudação. Se ele disser que sim, aí sim use entregar_proximo_passo.)'
+          // O convite vem do passo em que ele está AGORA (onb_regua_passos.oferta_convite), não de
+          // uma frase pronta: o modelo adapta às palavras da conversa. Sem ele o turno nem chega
+          // aqui — ver a porta do convite, lá em cima.
+          ? `(sem mensagem nova: ele terminou o passo de hoje há pouco e a conversa continua aberta. `
+            + `Faça o convite — ${conviteDaOferta} — em UMA frase, continuando de onde a conversa parou, `
+            + `e espere. Não entregue nada agora, não explique o que vem, não abra com saudação e não `
+            + `encerre a conversa. Se ele disser que sim, aí sim use entregar_proximo_passo.)`
           : sanearParaModelo(descreverParaModelo(tipo, conteudo, transcricaoAgora)).slice(0, 4000).trim() ||
             '(ele mandou algo sem texto)',
       });
