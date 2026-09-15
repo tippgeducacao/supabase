@@ -30,6 +30,7 @@ const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 
 async function gmail(path: string, token: string, init: RequestInit = {}) {
   const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me${path}`, {
+    signal: AbortSignal.timeout(20_000),
     ...init,
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers || {}) },
   });
@@ -220,7 +221,7 @@ async function reconciliarEstado(
   return resultado;
 }
 
-async function syncCaixa(admin: any, caixaId: string, forceInitial: boolean, sozinha: boolean) {
+async function syncCaixa(admin: any, caixaId: string, forceInitial: boolean, sozinha: boolean, rapido = false) {
   const { data: caixa, error: cErr } = await admin
     .from('email_caixas_conectadas')
     .select('*, integ:calendar_integrations(*)')
@@ -234,6 +235,9 @@ async function syncCaixa(admin: any, caixaId: string, forceInitial: boolean, soz
   // caixa CONVERTIDA de gmail para imap ainda carrega o calendar_integration_id
   // antigo, então nem a ausência de integração serve de filtro.
   if (caixa.provider === 'imap') return { skipped: true, motivo: 'caixa_imap' };
+  // A busca frequente cuida só de novidades. Carga inicial e recuperação de
+  // histórico expirado continuam na rotina completa, sem varrer a caixa a cada 15s.
+  if (rapido && !caixa.history_id) return { skipped: true, reason: 'aguardando_sync_completo' };
 
   // Erros PERMANENTES (exigem reconectar) bloqueiam próximas tentativas:
   // `token_revoked` (Google derrubou o grant) e `scope_insuficiente` (token
@@ -284,6 +288,7 @@ async function syncCaixa(admin: any, caixaId: string, forceInitial: boolean, soz
         pages++;
       } while (pageToken && pages < MAX_PAGES);
     } catch (e) {
+      if (rapido) throw e;
       console.warn('history failed, doing fallback list', e);
       forceInitial = true;
     }
@@ -481,6 +486,8 @@ async function syncCaixa(admin: any, caixaId: string, forceInitial: boolean, soz
     last_sync_error: null,
   }).eq('id', caixa.id);
 
+  if (rapido) return { inserted, history_id: newHistoryId, rapido: true };
+
   // Reconcilia DEPOIS de gravar o progresso, e sem poder derrubar a rodada:
   // mensagem nova vale mais que contador. Se a reconciliação estourar (ou o
   // worker morrer no meio dela), o history_id já avançou e a próxima rodada
@@ -515,9 +522,22 @@ Deno.serve(async (req) => {
     const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
     const body = req.method === 'POST' ? await req.json().catch(() => ({})) : {};
     const { caixa_id, initial } = body;
+    const rapido = body.rapido === true;
+    if (rapido) {
+      const { data, error } = await admin.rpc('email_sync_validar_cron', {
+        p_segredo: req.headers.get('x-email-sync-secret'),
+      });
+      if (error || data !== true) return new Response(JSON.stringify({ error: 'Não autorizado' }), {
+        status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
 
     let caixaIds: string[];
-    if (caixa_id) {
+    if (rapido) {
+      const { data, error } = await admin.from('sac_v2_email_rotas').select('caixa_id').eq('ativo', true);
+      if (error) throw error;
+      caixaIds = [...new Set<string>((data || []).map((r: any) => r.caixa_id))];
+    } else if (caixa_id) {
       caixaIds = [caixa_id];
     } else {
       // Ordena pela última sync DESC: caixas saudáveis (sync recente, incremental
@@ -541,8 +561,14 @@ Deno.serve(async (req) => {
     let totalInserido = 0;
     const results: any[] = [];
     for (const id of caixaIds) {
+      const posse = crypto.randomUUID();
       try {
-        const r = await syncCaixa(admin, id, !!initial, !!caixa_id);
+        // Cron rápido, cron completo e atualização manual compartilham a trava:
+        // duas leituras concorrentes não podem regredir o history_id da caixa.
+        const { data: livre, error: travaErro } = await admin.rpc('email_sync_adquirir', { p_caixa: id, p_posse: posse });
+        if (travaErro) throw travaErro;
+        if (!livre) { results.push({ caixa_id: id, skipped: true, reason: 'em_andamento' }); continue; }
+        const r = await syncCaixa(admin, id, rapido ? false : !!initial, !rapido && !!caixa_id, rapido);
         results.push({ caixa_id: id, ...r });
         totalInserido += (r as any)?.inserted || 0;
       } catch (e) {
@@ -551,6 +577,8 @@ Deno.serve(async (req) => {
         // reconexão no front) em vez de repetir o mesmo 403 a cada rodada do cron.
         if (isScopeInsufficientError(e)) await markCaixaEscopoInsuficiente(admin, id);
         results.push({ caixa_id: id, error: (e as Error).message });
+      } finally {
+        await admin.rpc('email_sync_liberar', { p_caixa: id, p_posse: posse });
       }
       if (totalInserido >= GLOBAL_MAX) {
         results.push({ stopped: 'global_budget', totalInserido });
