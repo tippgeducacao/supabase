@@ -550,6 +550,46 @@ describe('crm-agente-aluno: o turno', () => {
     expect(fila()).toHaveLength(0);
   });
 
+  it('texto antes da ferramenta nunca vira resposta quando a rodada seguinte fica vazia', async () => {
+    estado.respostasModelo = [
+      { content: [
+        { type: 'text', text: 'Preciso analisar a turma e decidir o que responder.' },
+        { type: 'tool_use', id: 't1', name: 'consultar_proximas_aulas', input: {} },
+      ] },
+      { content: [] },
+    ];
+    await chamar(C);
+    expect(estado.anthropic).toHaveLength(2);
+    expect(fila()).toHaveLength(0);
+    expect(eventos()).toContain('erro');
+    expect(eventos()).not.toContain('respondido');
+  });
+
+  it('não recupera texto intermediário quando esgota as quatro rodadas de ferramentas', async () => {
+    estado.respostasModelo = Array.from({ length: 4 }, (_, i) => ({ content: [
+      { type: 'text', text: 'Preciso analisar a turma e decidir o que responder.' },
+      { type: 'tool_use', id: `t${i}`, name: 'consultar_proximas_aulas', input: {} },
+    ] }));
+    await chamar(C);
+    expect(estado.anthropic).toHaveLength(4);
+    expect(fila()).toHaveLength(0);
+    expect(eventos()).not.toContain('respondido');
+  });
+
+  it('transfere sem aviso se só recebeu análise junto da ferramenta', async () => {
+    estado.respostasModelo = [
+      { content: [
+        { type: 'text', text: 'Vou passar o caso ao financeiro e interromper a resposta.' },
+        { type: 'tool_use', id: 't1', name: 'passar_para_atendente', input: { assunto: 'financeiro' } },
+      ] },
+      { content: [{ type: 'text', text: '<thinking>Preciso formular uma frase curta.' }] },
+    ];
+    await chamar(C);
+    expect(fila()).toHaveLength(0);
+    expect(eventos()).toContain('transferido_sem_aviso');
+    expect(estado.rpcs.map((r) => r.nome)).toContain('onb_agente_registrar_transferencia');
+  });
+
   it('consultar_proximas_aulas devolve a linha saneada ao modelo', async () => {
     estado.respostasModelo = [
       { content: [{ type: 'tool_use', id: 't1', name: 'consultar_proximas_aulas', input: { quantidade: 1 } }] },

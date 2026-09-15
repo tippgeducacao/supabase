@@ -20,6 +20,8 @@ import {
   limiteFormaturaFormatado,
 } from './elegibilidadeFormatura.ts';
 import { atualizarLead, buscarLead } from './historico.ts';
+import type { Msg } from './historico.ts';
+import { avaliarEvidenciaSemGraduacao, bloqueioSemEvidenciaGraduacao } from './evidenciaFormacao.ts';
 import { chamarAnthropic } from './agente.ts';
 import { temDorFinanceira } from './objecaoFinanceira.ts';
 import { montarRetornoInformacoes } from './envioMateriais.ts';
@@ -54,6 +56,8 @@ export type CtxConversa = ContextoElegibilidade & {
   canal?: 'whatsapp' | 'webchat';
   /** Cache só desta rodada: um novo pedido do lead recebe um contexto novo. */
   enviosMateriais?: Map<string, Record<string, unknown>>;
+  /** Histórico real da rodada; argumentos de ferramentas não são prova de formação. */
+  historicoConversa?: Msg[];
 };
 
 function sdrApi(path: string, init: RequestInit = {}): Promise<Response> {
@@ -910,6 +914,11 @@ async function enviaInformacoes(supabase: any, input: any, ctx: CtxConversa, too
 // pausas por desinteresse e o lead seguia recebendo template (1.244 pessoas
 // cutucadas depois de pedir pra parar, em 90 dias).
 async function pausaIa(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
+  // Antes de QUALQUER escrita: o enum escolhido pelo modelo não comprova o fato.
+  // Contextos legados sem histórico também ficam fechados para sem_graduacao.
+  if (input.tipo === 'sem_graduacao' && !avaliarEvidenciaSemGraduacao(ctx.historicoConversa).autorizada) {
+    return bloqueioSemEvidenciaGraduacao(toolUseId);
+  }
   const { error } = await supabase.rpc('crm_set_pausa_ia', {
     p_telefone: ctx.telefone,
     p_pausa: true,

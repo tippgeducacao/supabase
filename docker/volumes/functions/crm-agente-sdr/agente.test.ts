@@ -8,10 +8,14 @@ import { AGENTE_RECONTATO } from './prompts-recontato';
 import { FOLLOWUP_SYSTEM } from './prompts-followup';
 import { montarContextoEntregaMateriais } from './entregaMateriais';
 import { INSTRUCAO_DISPONIBILIDADE_CONTATO } from './disponibilidadeContato';
+import { INSTRUCAO_FATOS_DO_LEAD } from './fatosLead';
+import { INSTRUCAO_CANAL_RESPOSTA, NOME_TOOL_RESPOSTA } from './canalResposta';
 
 // Exercita o request HTTP real das três rotas, com o transporte como única fronteira
 // de IA simulada. Nenhuma mensagem, tool, consulta ou escrita externa é executada.
-vi.mock('./saida.ts', () => ({ enviarResposta: vi.fn() }));
+vi.mock('./saida.ts', async (importOriginal) => ({
+  ...await importOriginal<typeof import('./saida')>(), enviarResposta: vi.fn(),
+}));
 
 const transporte = vi.fn();
 let chamarRouter: typeof import('./agente').chamarRouter;
@@ -23,6 +27,7 @@ type Pedido = {
   messages: Msg[];
   thinking: { type: string };
   tool_choice?: { type: string; name: string };
+  tools?: { name: string }[];
 };
 
 const memoria: Msg[] = [
@@ -49,17 +54,49 @@ beforeEach(() => {
   transporte.mockImplementation(async (url: string, opts: RequestInit) => {
     if (url !== 'https://api.anthropic.com/v1/messages') throw new Error(`HTTP inesperado: ${url}`);
     const body: Pedido = JSON.parse(String(opts.body));
-    const content = body.tool_choice
+    const content = body.tool_choice?.name === 'router_output'
       ? [{ type: 'tool_use', id: 'router-teste', name: 'router_output', input: { agent: 'agente_qualificador' } }]
+      : body.tools?.some((tool) => tool.name === NOME_TOOL_RESPOSTA)
+        ? [{ type: 'tool_use', id: 'resposta-teste', name: NOME_TOOL_RESPOSTA, input: { mensagem: 'mensagem sintética' } }]
       : [{ type: 'text', text: '{"message":"mensagem sintética","final_answer":"teste"}' }];
     return new Response(JSON.stringify({
       model: 'modelo-resposta-sintetico', usage: { input_tokens: 10, output_tokens: 5 },
-      content, thinking: 'não deve chegar ao callback',
+      content, stop_reason: content[0].type === 'tool_use' ? 'tool_use' : 'end_turn',
+      thinking: 'não deve chegar ao callback',
     }), { status: 200 });
   });
 });
 
 describe('instrução de memória no system enviado à Anthropic', () => {
+  it('recupera resposta fora do canal com pergunta e preço internos preservados, sem publicar o rascunho', async () => {
+    const messages: Msg[] = [
+      { role: 'user', content: 'Qual é o valor integral da pós?' },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'consulta-preco', name: 'envia_informacoes', input: { conteudo: 'valor' } }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'consulta-preco', content: 'Consulta apenas de valor. Valor integral: R$ 4.200,00.' }] },
+    ];
+    const original = structuredClone(messages);
+    transporte.mockResolvedValueOnce(Response.json({
+      content: [{ type: 'text', text: 'RASCUNHO NÃO PUBLICADO: esse é o valor integral mesmo.' }], stop_reason: 'end_turn',
+    })).mockResolvedValueOnce(Response.json({
+      content: [{ type: 'tool_use', id: 'resposta-preco', name: NOME_TOOL_RESPOSTA,
+        input: { mensagem: 'O valor integral é R$ 4.200,00.' } }], stop_reason: 'tool_use',
+    }));
+    const resposta = await chamarAgentePrincipal({ promptAgente: AGENTE_QUALIFICADOR, contextoTemporal: '', tools: [], messages });
+    const recuperacao = ultimoPedido();
+    expect(recuperacao.thinking).toEqual({ type: 'disabled' });
+    expect(recuperacao.tools?.map((tool) => tool.name)).toEqual([NOME_TOOL_RESPOSTA]);
+    expect(JSON.stringify(recuperacao.messages)).toContain('Qual é o valor integral da pós?');
+    expect(JSON.stringify(recuperacao.messages)).toContain('Valor integral: R$ 4.200,00.');
+    expect(JSON.stringify(recuperacao.messages)).not.toContain('RASCUNHO NÃO PUBLICADO');
+    expect(recuperacao.system.at(-1)?.text).toContain('Nenhuma mensagem do rascunho anterior foi publicada');
+    expect(recuperacao.system.at(-1)?.text).toContain('o cliente não leu esses textos');
+    expect(recuperacao.system.at(-1)?.text).toContain('sem apontar para uma informação que o cliente ainda não recebeu');
+    expect(recuperacao.system.at(-1)?.text).toContain('não invente valores, condições ou ações realizadas');
+    expect(resposta.content).toEqual([{ type: 'text', text: 'O valor integral é R$ 4.200,00.' }]);
+    expect(messages).toEqual(original);
+    expect(transporte).toHaveBeenCalledTimes(2);
+  });
+
   it('responde falha de catálogo sem deixar o modelo prometer um retorno inexistente', async () => {
     const resposta = await chamarAgentePrincipal({ promptAgente: 'Prompt original', contextoTemporal: '', tools: [], messages: [
       { role: 'assistant', content: [{ type: 'tool_use', id: 'consulta', name: 'consulta_pos_disponiveis', input: {} }] },
@@ -76,6 +113,7 @@ describe('instrução de memória no system enviado à Anthropic', () => {
     expect(pedido.system).toEqual([
       { type: 'text', text: PROMPT_ROUTER },
       { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA },
+      { type: 'text', text: INSTRUCAO_FATOS_DO_LEAD },
       { type: 'text', text: INSTRUCAO_DISPONIBILIDADE_CONTATO, cache_control: { type: 'ephemeral' } },
     ]);
     expect(pedido.messages).toEqual(entrada);
@@ -108,7 +146,9 @@ describe('instrução de memória no system enviado à Anthropic', () => {
     expect(pedido.system).toEqual([
       { type: 'text', text: prompt },
       { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA },
-      { type: 'text', text: INSTRUCAO_DISPONIBILIDADE_CONTATO, cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: INSTRUCAO_FATOS_DO_LEAD },
+      { type: 'text', text: INSTRUCAO_DISPONIBILIDADE_CONTATO },
+      { type: 'text', text: INSTRUCAO_CANAL_RESPOSTA, cache_control: { type: 'ephemeral' } },
     ]);
     // A exceção já chegava no segundo bloco, mas perdia força porque a persona
     // proibia reenvio no primeiro. Confere o pedido montado, nas quatro personas.

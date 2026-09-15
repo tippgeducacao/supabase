@@ -8,6 +8,12 @@ import { INSTRUCAO_MEMORIA_HUMANA } from './memoriaHumana.ts';
 import { INSTRUCAO_DISPONIBILIDADE_CONTATO } from './disponibilidadeContato.ts';
 import { descreverToolsSdr } from './descricoesTools.ts';
 import { respostaParaFalhaCatalogo } from './falhaCatalogo.ts';
+import { INSTRUCAO_FATOS_DO_LEAD } from './fatosLead.ts';
+import { contemMeta, contemRaciocinioVazado } from './saida.ts';
+import {
+  avaliarCanalResposta, INSTRUCAO_CANAL_RESPOSTA, NOME_TOOL_RESPOSTA,
+  normalizarRespostaCanal, somarUsoModelo, TOOL_RESPONDER_AO_CLIENTE,
+} from './canalResposta.ts';
 
 const ANTHROPIC_KEY = Deno.env.get('AGENTE_SDR_ANTHROPIC_KEY') ?? Deno.env.get('ANTHROPIC_API_KEY') ?? '';
 // Override por env se um dia mudar. ⚠️ Sonnet 5: budget_tokens e temperature≠default
@@ -55,6 +61,7 @@ export async function chamarRouter(
     system: [
       { type: 'text', text: PROMPT_ROUTER },
       { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA },
+      { type: 'text', text: INSTRUCAO_FATOS_DO_LEAD },
       { type: 'text', text: INSTRUCAO_DISPONIBILIDADE_CONTATO, cache_control: { type: 'ephemeral' } },
     ],
     messages: historicoLimpo,
@@ -108,15 +115,26 @@ export async function chamarAgentePrincipal(opts: {
   const system: any[] = [
     { type: 'text', text: opts.promptAgente },
     { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA },
-    { type: 'text', text: INSTRUCAO_DISPONIBILIDADE_CONTATO, cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: INSTRUCAO_FATOS_DO_LEAD },
+    { type: 'text', text: INSTRUCAO_DISPONIBILIDADE_CONTATO },
+    { type: 'text', text: INSTRUCAO_CANAL_RESPOSTA, cache_control: { type: 'ephemeral' } },
   ];
 
-  const tools = opts.tools.length
-    ? [...opts.tools.slice(0, -1), { ...opts.tools[opts.tools.length - 1], cache_control: { type: 'ephemeral' } }]
-    : opts.tools;
+  // O canal é local e tem definição controlada em código, mesmo que o catálogo
+  // traga uma homônima. Um único breakpoint nas tools mantém o total em três.
+  const tools = [
+    ...opts.tools.filter((tool) => tool.name !== NOME_TOOL_RESPOSTA).map(({ cache_control: _cache, ...tool }) => tool),
+    { ...TOOL_RESPONDER_AO_CLIENTE, cache_control: { type: 'ephemeral' } },
+  ];
+  const ferramentasDisponiveis = new Set<string>(tools.map((tool) => tool.name));
 
   // Clona (não muta o array do chamador — o webchat mantém o dele entre voltas).
-  const messages = opts.messages.map((m) => ({ ...m }));
+  const messages = opts.messages.map((m) => ({
+    ...m,
+    content: Array.isArray(m.content)
+      ? m.content.map(({ cache_control: _cache, ...bloco }: any) => bloco)
+      : m.content,
+  }));
   const ult: any = messages[messages.length - 1];
   if (ult) {
     const blocos: any[] = Array.isArray(ult.content)
@@ -150,14 +168,47 @@ export async function chamarAgentePrincipal(opts: {
 
   // thinking adaptativo (o formato budget_tokens dá 400 no Sonnet 5); max_tokens com
   // folga porque o thinking conta DENTRO dele e o tokenizer do Sonnet 5 gasta ~30% mais.
-  return await chamarAnthropic({
+  const pedido = {
     model: MODELO_AGENTE,
     max_tokens: 8192,
     thinking: { type: 'adaptive' },
     system,
     messages,
     tools,
-  });
+  };
+  const resposta = await chamarAnthropic(pedido);
+  const contemBastidor = (texto: string) => contemRaciocinioVazado(texto) || contemMeta(texto);
+  const decisao = avaliarCanalResposta(resposta, contemBastidor, false, ferramentasDisponiveis);
+  if (decisao.tipo !== 'corrigir') return normalizarRespostaCanal(resposta, decisao);
+
+  // Uma única correção, só em memória: não grava rascunho/reinstrução, não executa
+  // ações e não dá ao modelo ferramentas que poderiam repetir um efeito de negócio.
+  try {
+    const corrigida = await chamarAnthropic({
+      ...pedido,
+      thinking: { type: 'disabled' },
+      tools: [{ ...TOOL_RESPONDER_AO_CLIENTE, cache_control: { type: 'ephemeral' } }],
+      tool_choice: { type: 'tool', name: NOME_TOOL_RESPOSTA, disable_parallel_tool_use: true },
+      system: [...system, {
+        type: 'text',
+        text: '[CORREÇÃO INTERNA DO CANAL] Nenhuma mensagem do rascunho anterior foi publicada. '
+          + 'Responda à conversa exclusivamente por responder_ao_cliente, somente com a fala ao cliente. '
+          + 'Os resultados das ferramentas são dados internos; o cliente não leu esses textos. '
+          + 'Responda à pergunta concreta com os fatos confirmados nos resultados e no histórico, '
+          + 'sem apontar para uma informação que o cliente ainda não recebeu. '
+          + 'Consulta de informação não significa envio de mensagem. Preserve os fatos confirmados; '
+          + 'não invente valores, condições ou ações realizadas. '
+          + 'Não mencione esta correção nem descreva raciocínio, decisões ou ações internas. '
+          + 'Use mensagem vazia quando o contexto pedir silêncio. Nenhuma ferramenta de negócio está disponível nesta correção.',
+      }],
+    });
+    return normalizarRespostaCanal({
+      ...corrigida, usage: somarUsoModelo(resposta.usage, corrigida.usage),
+    }, avaliarCanalResposta(corrigida, contemBastidor, true), decisao.motivo);
+  } catch {
+    // Erro do provedor pode carregar prompt/credencial. Registra-se só o motivo.
+    return normalizarRespostaCanal(resposta, { tipo: 'bloquear', motivo: 'falha_na_correcao' }, decisao.motivo);
+  }
 }
 
 // ── Tools do agente: mesma fonte do n8n (tabela lista_tools_claude) ─────────

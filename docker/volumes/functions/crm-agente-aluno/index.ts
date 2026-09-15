@@ -1097,7 +1097,6 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
     // dele. No RH os dois vão juntos e o cache nunca acerta, porque a hora muda o prefixo.
     const modelo = (cfg.modelo ?? '').trim() || MODELO_RESERVA;
     let resposta = '';
-    let textoAntesDaFerramenta = '';
     let rodada = 0;
     let usouFerramentas: string[] = [];
     const historico: any[] = [...messages];
@@ -1120,11 +1119,11 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
       const texto = blocos.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n').trim();
       const usos = blocos.filter((b: any) => b.type === 'tool_use');
 
-      if (!usos.length) { resposta = texto || textoAntesDaFerramenta; break; }
+      if (!usos.length) { resposta = texto; break; }
 
       // ⚠️ SÓ os blocos de ferramenta entram no histórico, nunca o texto que veio junto: esse
       // texto ainda não foi enviado, e deixá-lo aqui faz o modelo achar que já falou (lição do
-      // RH, 30/08). Ele fica guardado como rede, logo abaixo.
+      // RH, 30/08). Também não serve como resposta reserva: pode ser análise interna.
       historico.push({ role: 'assistant', content: usos });
       const results: any[] = [];
       for (const u of usos) {
@@ -1367,12 +1366,10 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
         results.push({ type: 'tool_result', tool_use_id: u.id, is_error: true, content: 'Ferramenta desconhecida.' });
       }
       historico.push({ role: 'user', content: results });
-      // Rede: se a rodada final não escrever nada, vale o que ele escreveu antes da ferramenta.
-      if (texto && !textoAntesDaFerramenta) textoAntesDaFerramenta = texto;
     }
 
-    // Rodadas esgotadas só com ferramenta: vale o que ele escreveu antes delas.
-    if (!resposta) resposta = textoAntesDaFerramenta;
+    // 14/09/2026: resposta vazia ou limite de tools não autoriza enviar o texto
+    // intermediário. O fluxo abaixo registra silêncio/transferência sem aviso.
     resposta = sanearParaModelo(limparResposta(resposta)).trim();
     if (linkQueTemQueIr && resposta && !resposta.includes(linkQueTemQueIr)) {
       // O modelo prometeu o link e esqueceu de colar: o link é o que resolve, então vai junto.

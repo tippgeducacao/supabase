@@ -73,6 +73,10 @@ export function extrairToolsVazadas(texto: string): { limpo: string; chamadas: T
 export function limparResposta(texto: string): string {
   let t = texto ?? '';
   t = t.replace(new RegExp(`<${TAGS}[^>]*>[\\s\\S]*?</${TAGS}>`, 'gi'), '');
+  // 14/09/2026 (agente de RH): só tirar a tag órfã deixava o raciocínio inteiro à vista.
+  // Abertura sem fechamento descarta dali em diante; fechamento sem abertura, do começo até ele.
+  t = t.replace(new RegExp(`<${TAGS}[^>]*>[\\s\\S]*$`, 'i'), '');
+  t = t.replace(new RegExp(`^[\\s\\S]*?</${TAGS}[^>]*>`, 'i'), '');
   t = t.replace(new RegExp(`</?${TAGS}[^>]*>`, 'gi'), '');
   t = extrairToolsVazadas(t).limpo;
   return t.trim();

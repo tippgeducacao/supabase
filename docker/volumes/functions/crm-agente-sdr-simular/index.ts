@@ -29,6 +29,7 @@ import { humanizarTexto } from '../crm-agente-sdr/saida.ts';
 import { limparParaRouter } from '../crm-agente-sdr/historico.ts';
 import { gerarFollowup } from '../crm-agente-sdr/followup.ts';
 import { VERSAO_MEMORIA_HUMANA } from '../crm-agente-sdr/memoriaHumana.ts';
+import { montarRetornoInformacoes } from '../crm-agente-sdr/envioMateriais.ts';
 import { comNotaNoContexto, comNotaParaRouter, notaTrocaDeNumero, sinalInerte } from '../crm-agente-sdr/trocaDeNumero.ts';
 import { executarFollowupSimulado, executarSimulacao, extrairUso, MAX_CARACTERES_SIMULACAO, validarEntradaSimulacao, type AgenteRouter } from './simulacao.ts';
 
@@ -90,6 +91,12 @@ async function mockTool(nome: string, input: any, mocks: any): Promise<string> {
     case 'consulta_pos_disponiveis':
       return await resolverPos(String(input?.trocar_para ?? '').trim());
     case 'envia_informacoes':
+      // 14/09/2026: consultar preço não envia mensagem nem PDF. O mock antigo
+      // dizia "cronograma enviado" até para valor e induzia a pular a informação
+      // pedida. Usa o mesmo contrato do executor, com preço sintético do ensaio.
+      if (input?.conteudo === 'valor') return JSON.stringify(montarRetornoInformacoes(true, {
+        data: { curso: input?.curso_escolhido ?? null, valor_integral: 'R$ 4.200,00' },
+      }, 'valor', 'harness-consulta-valor'));
       return `Cronograma enviado ao lead no WhatsApp (conteudo="${input?.conteudo ?? '?'}"). Valor integral: R$ 4.200,00.`;
     case 'verificar_compatibilidade_curso': {
       const m = mocks?.compatibilidade ?? 'aprovado';

@@ -196,6 +196,13 @@ describe('saneamento do que o modelo lê', () => {
     expect(limparResposta('Oi <reasoning>x</reasoning>de novo')).toBe('Oi de novo');
   });
 
+  it.each(['thinking', 'thought', 'thoughts', 'scratchpad', 'reasoning', 'reflection', 'antml:thinking'])('remove raciocínio truncado e fechamento órfão de %s', (tag) => {
+    expect(limparResposta(`<${tag}>Preciso decidir o próximo passo.`)).toBe('');
+    expect(limparResposta(`Sua próxima aula é amanhã. <${tag}>Vou conferir outra coisa.`)).toBe('Sua próxima aula é amanhã.');
+    expect(limparResposta(`Preciso decidir o próximo passo.</${tag}>Sua próxima aula é amanhã!`)).toBe('Sua próxima aula é amanhã!');
+    expect(limparResposta(`<${tag}>Análise.</${tag}> Sua próxima aula é amanhã!`)).toBe('Sua próxima aula é amanhã!');
+  });
+
   it('acusa "biblioteca" em qualquer forma', () => {
     expect(temPalavraProibida('na Biblioteca do curso')).toBe(true);
     expect(temPalavraProibida('bibliotecas')).toBe(true);

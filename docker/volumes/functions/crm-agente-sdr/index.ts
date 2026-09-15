@@ -17,7 +17,7 @@ import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO } from './prompts.ts';
 import { AGENTE_RECONTATO, montarDossieRecontato } from './prompts-recontato.ts';
 import { AGENTE_CAMPANHA_DIRETA } from './prompts-campanha-direta.ts';
 import { comBlocoDaEscola, comLinkPedido, comPresenteNaDespedida, jaTemOPresente, LINK_ESCOLA_GRATUITA } from './escolaGratuita.ts';
-import type { Encerramento } from './encerramento.ts';
+import { respostaDoEncerramento, toolConcluida, type Encerramento } from './encerramento.ts';
 import { comContinuidadeWebchat } from './continuidadeWebchat.ts';
 import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoCurso, notaDoNome, renderPrompt } from './contexto.ts';
 import { atualizarAgenteComRatchet, atualizarLead, buscarLead, carregarHistorico, criarLead, excluirDadosLead, gravarMensagem, limparParaRouter, sanitizarHistorico } from './historico.ts';
@@ -598,6 +598,8 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       carregarStatusMateriais(supabase, ctx),
     ]);
     const messages = sanitizarHistorico(historico);
+    // Evidência vem das falas carregadas pelo servidor, nunca do motivo da tool.
+    ctx.historicoConversa = historico;
     const contextoComMateriais = contextoEfetivo;
     const instrucaoEncerramento = retornoPorFormatura ? INSTRUCAO_POS_RETORNO : INSTRUCAO_POS_PAUSA;
     const inicioLlm = Date.now();
@@ -611,7 +613,9 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
           ? `${contextoComMateriais}\n\n${INSTRUCAO_REACAO}`
           : contextoComMateriais,
       messages,
-      tools,
+      // A ação terminal já concluiu: esta volta só pode redigir a resposta.
+      // Não permitir pausar/arquivar/agendar outra vez para tentar escrever o adeus.
+      tools: encerrouPorTool ? [] : tools,
     });
     // OUTPUT da IA (não o prompt): o que o modelo gerou nesta volta — raciocínio
     // (thinking), resposta crua (text) e as tools que ELA decidiu chamar.
@@ -626,6 +630,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       agente: agenteEfetivo,
       modelo: resp.model ?? null,
       stop_reason: resp.stop_reason ?? null,
+      canal_resposta: resp.canal_resposta ?? null,
       tokens_entrada: resp.usage?.input_tokens ?? null,
       tokens_saida: resp.usage?.output_tokens ?? null,
       // Sonnet 5 adaptativo: o TEXTO do thinking vem criptografado (vazio+signature),
@@ -638,7 +643,11 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       texto: iaTexto ? resumir(iaTexto, 2000) : undefined,
       tools_decididas: iaTools.length ? iaTools : undefined,
     }, Date.now() - inicioLlm);
-    await gravarMensagem(supabase, remotejid, { role: 'assistant', content: semRaciocinioNoTexto(resp.content) });
+    // Silêncio explícito ou canal bloqueado não gera assistant vazio no histórico
+    // (além de não ter sido enviado, content: [] é inválido no próximo replay).
+    if (blocosResp.length) {
+      await gravarMensagem(supabase, remotejid, { role: 'assistant', content: semRaciocinioNoTexto(resp.content) });
+    }
 
     const toolUses = (resp.content ?? []).filter((b: any) => b.type === 'tool_use');
     if (toolUses.length) {
@@ -656,34 +665,28 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
         outputs.push(output);
       }
       await gravarMensagem(supabase, remotejid, { role: 'user', content: montarToolResults(outputs) });
-      if (toolUses.some((tu: any) => TOOLS_QUE_ENCERRAM.has(tu.name))) {
+      // Uma tentativa bloqueada não pausou nem encerrou. Também não pode enviar
+      // a despedida gerada junto da inferência: a próxima volta recebe a recusa.
+      const toolsConcluidas = toolUses.filter((_: any, i: number) => toolConcluida(outputs[i]));
+      if (toolsConcluidas.some((tu: any) => TOOLS_QUE_ENCERRAM.has(tu.name))) {
         encerrouPorTool = true;
-        if (toolUses.some((tu: any) => TOOLS_QUE_PAUSAM.has(tu.name))) pausouPorTool = true;
-        retornoPorFormatura = toolUses.some(
+        if (toolsConcluidas.some((tu: any) => TOOLS_QUE_PAUSAM.has(tu.name))) pausouPorTool = true;
+        retornoPorFormatura = toolsConcluidas.some(
           (tu: any) => tu.name === 'agendar_retorno' && tu.input?.tipo === 'formatura',
         );
-        const tuFim = toolUses.find((tu: any) => TOOLS_QUE_ENCERRAM.has(tu.name));
+        const tuFim = toolsConcluidas.find((tu: any) => TOOLS_QUE_ENCERRAM.has(tu.name));
         if (tuFim) encerramento = { tool: tuFim.name, input: (tuFim.input ?? {}) as Record<string, unknown> };
-        // O prompt manda a despedida vir NA MESMA resposta da tool que encerra;
-        // sem este envio ela era descartada pelo `continue` e a rodada acabava
-        // muda pro lead (casos Claudia 2026-07-06 e Matheus 2026-08-08).
-        // ⚠️ Sem recheck de pausa SÓ quando quem pausou foi o próprio agente; em
-        // `agendar_retorno` a IA segue ativa, então pausa de ATENDENTE ainda vale.
-        // ⚠️ Aqui é onde a despedida mais se perde: se o texto que veio junto da tool
-        // é 100% bastidor, a limpeza zera e o lead fica sem NADA depois de ter dito
-        // "não consigo pagar" (caso Carolina). Pede a despedida de novo, 1x.
-        if (iaTexto && !humanizarTexto(iaTexto) && !corrigiuVazio) {
-          corrigiuVazio = true;
-          tel.registrar('resposta_vazia_reinstruida', { onde: 'despedida_pos_tool', texto: resumir(iaTexto, 600) });
-          await gravarMensagem(supabase, remotejid, {
-            role: 'user',
-            content: CORRECAO_VAZIO.replace('%TEXTO%', resumir(iaTexto, 600)),
-          });
-          continue;
-        }
-        if (iaTexto) {
-          const comPresente = comPresenteNaDespedida(iaTexto, encerramento, conversaTexto(messages), estaNaEscola);
+        if (outputs.some((output) => !toolConcluida(output))) continue;
+        // 14/09/2026, Adriana: o text junto de pausa_ia era análise livre, e o
+        // filtro retirava só algumas frases. Texto de tool_use NUNCA é resposta.
+        // Encerramentos conhecidos têm despedida determinística, preservando o
+        // adeus mesmo se o modelo escreveu só bastidor ou nenhum texto.
+        const despedida = respostaDoEncerramento(encerramento);
+        if (despedida) {
+          const comPresente = comPresenteNaDespedida(despedida, encerramento, conversaTexto(messages), estaNaEscola);
           if (comPresente.anexou) tel.registrar('presente_escola_anexado', { onde: 'despedida_com_tool' });
+          tel.registrar('despedida_deterministica', { tool: encerramento?.tool });
+          await gravarMensagem(supabase, remotejid, { role: 'assistant', content: comPresente.texto });
           await enviarResposta(
             ctx, comPresente.texto, renovar, tel,
             pausouPorTool ? undefined : () => iaPausada(remotejid),

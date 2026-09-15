@@ -194,6 +194,39 @@ describe('entrada HTTP: memória da pausa antes de mídia, buffer e LLM', () => 
 });
 
 describe('loop HTTP do SDR: recuperação de material', () => {
+  it('pausa bloqueada mantém atendimento, suprime despedida falsa e passa histórico real ao executor', async () => {
+    fronteiras.buscarLead.mockResolvedValue({ ...leadAtivo, modo_recontato: true, nome: 'Visitante' });
+    const historico = [{ role: 'assistant', content: 'Em qual área você atua hoje?' }, { role: 'user', content: 'Nenhuma. Pretendo atuar em Qualidade.' }];
+    fronteiras.historico.mockResolvedValue(historico);
+    fronteiras.tools.mockResolvedValue([]);
+    fronteiras.humanizar.mockImplementation((t: string) => t);
+    fronteiras.horarios.mockReturnValue([]);
+    fronteiras.conversa.mockReturnValue('');
+    fronteiras.rpc.mockImplementation(async (nome: string) => {
+      if (nome === 'crm_sdr_registrar_entrada') return { data: { estado: 'ativa', gravada: true }, error: null };
+      if (nome === 'crm_agente_sdr_lock_claim') return { data: true, error: null };
+      if (['crm_e_aluno_telefone', 'crm_esta_na_escola', 'crm_agente_sdr_lock_renovar'].includes(nome)) return { data: false, error: null };
+      throw new Error(`RPC inesperada: ${nome}`);
+    });
+    const anterior = fronteiras.from.getMockImplementation()!;
+    fronteiras.from.mockImplementation((tabela: string) => {
+      if (tabela !== 'crm_whatsapp_messages') return anterior(tabela);
+      const q = { select: () => q, eq: () => q, in: () => q, order: () => q, limit: async () => ({ data: [], error: null }) };
+      return q;
+    });
+    fronteiras.executar.mockResolvedValue({ id: 'pausa-1', status: 'bloqueado', codigo: 'SEM_EVIDENCIA_SEM_GRADUACAO' });
+    fronteiras.chamarPrincipal.mockResolvedValueOnce({ content: [
+      { type: 'text', text: 'Sem graduação você não pode entrar na pós.' },
+      { type: 'tool_use', id: 'pausa-1', name: 'pausa_ia', input: { tipo: 'sem_graduacao' } },
+    ] }).mockResolvedValueOnce({ content: [{ type: 'text', text: 'O que te interessou na aula?' }] });
+    expect((await chamar({ wa_account_id: 'conta-sintetica', agente_ia_persona: 'recontato' })).status).toBe(200);
+    expect(fronteiras.executar.mock.calls[0][2].historicoConversa).toEqual(historico);
+    expect(fronteiras.enviar).toHaveBeenCalledOnce();
+    expect(fronteiras.enviar.mock.calls[0][1]).toBe('O que te interessou na aula?');
+    expect(fronteiras.chamarPrincipal).toHaveBeenCalledTimes(2);
+    expect(fronteiras.enviar.mock.calls[0][4]).toBeTypeOf('function');
+  });
+
   it('relê a falha assíncrona e envia a pergunta para continuar, sem pausar', async () => {
     fronteiras.buscarLead.mockResolvedValue({ ...leadAtivo, modo_recontato: true, nome: 'Ana', curso_interesse_original: 'Curso de teste' });
     fronteiras.historico.mockResolvedValue([{ role: 'user', content: 'Não recebi o cronograma. Pode reenviar?' }]);
@@ -239,6 +272,81 @@ describe('loop HTTP do SDR: recuperação de material', () => {
     expect(fronteiras.chamarPrincipal.mock.calls[1][0].promptAgente).toContain('FALHA NO MATERIAL NÃO ENCERRA O ATENDIMENTO');
     expect(fronteiras.enviar).toHaveBeenCalledOnce();
     expect(fronteiras.enviar.mock.calls[0][1]).toBe('não estou conseguindo enviar o cronograma pelo WhatsApp agora. enquanto isso, podemos continuar com o agendamento?');
+  });
+});
+
+describe('SDR: texto de ferramenta nunca vira despedida', () => {
+  beforeEach(() => {
+    fronteiras.buscarLead.mockResolvedValue({ ...leadAtivo, modo_recontato: true, nome: 'Visitante' });
+    fronteiras.historico.mockResolvedValue([{ role: 'user', content: 'Pode retirar' }]);
+    fronteiras.tools.mockResolvedValue([{ name: 'pausa_ia' }]);
+    fronteiras.humanizar.mockImplementation((t: string) => t);
+    fronteiras.horarios.mockReturnValue([]);
+    fronteiras.conversa.mockReturnValue('Pode retirar');
+    fronteiras.rpc.mockImplementation(async (nome: string) => {
+      if (nome === 'crm_sdr_registrar_entrada') return { data: { estado: 'ativa', gravada: true }, error: null };
+      if (nome === 'crm_agente_sdr_lock_claim') return { data: true, error: null };
+      if (['crm_e_aluno_telefone', 'crm_esta_na_escola', 'crm_agente_sdr_lock_renovar'].includes(nome)) return { data: false, error: null };
+      throw new Error(`RPC inesperada: ${nome}`);
+    });
+    const anterior = fronteiras.from.getMockImplementation()!;
+    fronteiras.from.mockImplementation((tabela: string) => {
+      if (tabela !== 'crm_whatsapp_messages') return anterior(tabela);
+      const q = { select: () => q, eq: () => q, in: () => q, order: () => q, limit: async () => ({ data: [], error: null }) };
+      return q;
+    });
+  });
+
+  it.each([
+    'Já foi feita a pergunta de retenção antes ("tem interesse? posso retirar?"). Isso conta como retenção explícita.',
+    'FORMULAÇÃO INTERNA INÉDITA SEM PALAVRAS DO DETECTOR',
+    '',
+  ])('despedida independe do texto junto de pausa_ia: %s', async (texto) => {
+    fronteiras.executar.mockResolvedValue({ id: 'pausa', status: 'pausado' });
+    fronteiras.chamarPrincipal.mockResolvedValueOnce({ stop_reason: 'tool_use', content: [
+      ...(texto ? [{ type: 'text', text: texto }] : []),
+      { type: 'tool_use', id: 'pausa', name: 'pausa_ia', input: { tipo: 'nao_perturbe' } },
+    ] });
+    await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
+    expect(fronteiras.chamarPrincipal).toHaveBeenCalledOnce();
+    expect(fronteiras.enviar).toHaveBeenCalledOnce();
+    const enviada = fronteiras.enviar.mock.calls[0][1];
+    expect(enviada).toMatch(/^tranquilo, agradeço/);
+    expect(enviada).toContain('https://escoladeespecializacao.ppgvet.com.br');
+    expect(enviada).not.toMatch(/retenção|FORMULAÇÃO|Isso conta/);
+    expect(fronteiras.enviar.mock.calls[0][4]).toBeUndefined();
+    expect(fronteiras.gravar).toHaveBeenCalledWith(expect.anything(), payload.remotejid, { role: 'assistant', content: enviada });
+  });
+
+  it('encerramento desconhecido exige nova resposta e desliga tools de negócio', async () => {
+    fronteiras.executar.mockResolvedValue({ id: 'pausa', status: 'pausado' });
+    fronteiras.chamarPrincipal.mockResolvedValueOnce({ stop_reason: 'tool_use', content: [
+      { type: 'text', text: 'PREÂMBULO QUE NUNCA DEVE SAIR' },
+      { type: 'tool_use', id: 'pausa', name: 'pausa_ia', input: { tipo: 'pausa', motivo: 'motivo não classificado' } },
+    ] }).mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'certo, vou respeitar seu pedido.' }] });
+    await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
+    expect(fronteiras.chamarPrincipal).toHaveBeenCalledTimes(2);
+    expect(fronteiras.chamarPrincipal.mock.calls[1][0].tools).toEqual([]);
+    expect(fronteiras.enviar.mock.calls[0][1]).not.toContain('PREÂMBULO');
+  });
+
+  it('erro legado da tool não autoriza afirmar que a pausa concluiu', async () => {
+    fronteiras.executar.mockResolvedValue({ id: 'pausa', resultado: 'Erro ao executar pausa_ia: indisponível.' });
+    fronteiras.chamarPrincipal.mockResolvedValueOnce({ content: [
+      { type: 'text', text: 'ENCERRAMENTO NÃO CONFIRMADO' },
+      { type: 'tool_use', id: 'pausa', name: 'pausa_ia', input: { tipo: 'nao_perturbe' } },
+    ] }).mockResolvedValueOnce({ content: [] });
+    await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
+    expect(fronteiras.enviar).not.toHaveBeenCalled();
+    expect(fronteiras.registrar.mock.calls.some(([tipo]) => tipo === 'despedida_deterministica')).toBe(false);
+  });
+
+  it('canal bloqueado não envia nem persiste assistant vazio', async () => {
+    fronteiras.chamarPrincipal.mockResolvedValueOnce({ content: [], stop_reason: 'end_turn', canal_resposta: { motivo: 'bastidor_no_canal' } });
+    await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
+    expect(fronteiras.enviar).not.toHaveBeenCalled();
+    expect(fronteiras.gravar.mock.calls.some(([, , mensagem]) => mensagem.role === 'assistant')).toBe(false);
+    expect(fronteiras.registrar).toHaveBeenCalledWith('llm_chamada', expect.objectContaining({ canal_resposta: { motivo: 'bastidor_no_canal' } }), expect.any(Number));
   });
 });
 

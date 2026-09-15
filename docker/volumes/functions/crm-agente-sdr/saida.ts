@@ -52,8 +52,12 @@ const CHUNKING_SCHEMA = {
 // (a resposta de verdade só saía no fim). Ocorreu 5x em 30 dias, desde 2026-06-30.
 // A régua vive aqui, no funil por onde TODO balão passa (agente SDR, follow-up e
 // webchat chamam humanizarTexto), e não no prompt: instrução o modelo desobedece.
-const RE_TAG_RACIOCINIO = /<\/?(?:antml:)?(?:thinking|thought|thoughts|scratchpad|reasoning|reflection)\b/i;
-const TAGS_RACIOCINIO = '(?:antml:)?(?:thinking|thoughts|thought|scratchpad|reasoning|reflection)';
+export const RE_TAG_RACIOCINIO = /<\/?(?:antml:)?(?:thinking|thought|thoughts|scratchpad|reasoning|reflection|analysis)\b/i;
+const TAGS_RACIOCINIO = '(?:antml:)?(?:thinking|thoughts|thought|scratchpad|reasoning|reflection|analysis)';
+
+export function contemRaciocinioVazado(texto: string): boolean {
+  return RE_TAG_RACIOCINIO.test(texto ?? '');
+}
 
 export function removerRaciocinioVazado(texto: string): string {
   let t = texto ?? '';
@@ -210,6 +214,15 @@ const RE_META: RegExp[] = [
   /^vou\s+(?:reconhecer|acolher|respeitar|encerrar|seguir|manter|evitar|for[çc]ar|deixar)\b[^.!?]*\bd(?:ele|ela)\b/i,
   /\bsem\s+agendar\b/i,
   /\bn[ãa]o\s+(?:devo|posso)\s+insistir\b/i,
+  // 14/09/2026: a análise do caso Adriana citava a própria pergunta, com '?' no
+  // meio. Cortar frases deixava a citação e a justificativa chegarem ao cliente.
+  /\b(?:pergunta|tentativa|pedido)\s+(?:de\s+)?reten[çc][ãa]o\b/i,
+  /\breten[çc][ãa]o\s+(?:expl[íi]cita|(?:ainda\s+)?registrada)\b/i,
+  /\breitera[çc][ãa]o\s+do\s+n[ãa]o\b/i,
+  /\bisso\s+conta\s+como\s+(?:reten[çc][ãa]o|reitera[çc][ãa]o|recusa|desinteresse)\b/i,
+  /\b(?:preciso|precisa|devo)\b[^.!?]{0,80}\b(?:antes|depois)\s+de\s+(?:pausar|chamar\s+a\s+(?:fun[çc][ãa]o|ferramenta))\b/i,
+  /^(?:preciso|devo)\s+(?:perguntar|responder)\s*[.!]?$/i,
+  /\b(?:I\s+(?:need\s+to|should|must)|let\s+me\s+(?:think|reason))\b/i,
 ];
 
 // Só valem quando a frase NÃO fala com o lead em 2ª pessoa: "não uma mensagem real
@@ -286,7 +299,12 @@ export function removerLinhasMeta(texto: string): string {
 // Hífen DENTRO de palavra (pós-graduação, segunda-feira) é preservado.
 export function humanizarTexto(texto: string): string {
   let t = removerRaciocinioVazado(texto);
-  t = removerLinhasMeta(t);
+  // Bastidor sem delimitador torna o texto inteiro ambíguo: uma citação dentro
+  // da análise pode parecer fala ao cliente. Regerar a mensagem é seguro;
+  // aproveitar as frases que não casaram com regex não é (incidente Adriana).
+  if (contemMeta(t)) return '';
+  // Tag incompleta/nested que o removedor não conseguiu delimitar não vira fala.
+  if (contemRaciocinioVazado(t)) return '';
   t = t.replace(/\s*[—–]\s*/g, ', ');        // travessão tipográfico vira vírgula
   t = t.replace(/(^|\s)-(\s|$)/gm, '$1, ');  // hífen solto usado como travessão
   t = t.replace(/([?])!+/g, '$1');           // "?!" vira só "?"
@@ -328,6 +346,8 @@ export function contemLinkCritico(texto: string): boolean {
 }
 
 export async function fracionarResposta(texto: string): Promise<string[]> {
+  texto = humanizarTexto(texto);
+  if (!texto) return [];
   if (contemLinkCritico(texto)) return [texto];
   try {
     const res = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -349,7 +369,12 @@ export async function fracionarResposta(texto: string): Promise<string[]> {
       .sort((a: any, b: any) => a.sequence_number - b.sequence_number)
       .map((c: any) => String(c.message ?? '').trim())
       .filter((c: string) => c.length > 0);
-    return chunks.length ? chunks : [texto];
+    // O fracionador também é um LLM: schema só garante formato, não fidelidade.
+    // Aceitamos apenas a extração integral, na ordem, sem mudar palavras/links
+    // nem inventar preâmbulos. No erro, o único fallback é a entrada já validada.
+    const normalizar = (t: string) => t.replace(/\s+/g, ' ').trim();
+    const fiel = chunks.length > 0 && normalizar(chunks.join(' ')) === normalizar(texto);
+    return fiel ? chunks : [texto];
   } catch (e) {
     console.log(`[crm-agente-sdr] chunking falhou, enviando balão único: ${(e as Error).message}`);
     return [texto];

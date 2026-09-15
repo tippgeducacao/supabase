@@ -9,6 +9,8 @@ vi.mock('../crm-agente-sdr/saida.ts', () => ({ enviarResposta: vi.fn() }));
 import { chamarAnthropic } from '../crm-agente-sdr/agente';
 import { enviarResposta } from '../crm-agente-sdr/saida';
 import { gerarFollowup } from '../crm-agente-sdr/followup';
+import { LINK_ESCOLA_GRATUITA } from '../crm-agente-sdr/escolaGratuita';
+import { respostaDoEncerramento } from '../crm-agente-sdr/encerramento';
 
 const humano = { role: 'assistant', content: '[ATENDIMENTO_HUMANO] Renata\nEnviei o PDF.' };
 const respostaPausa = { role: 'user', content: '[MENSAGEM_LEAD_PAUSA]\nSou veterinária formada desde 2021.' };
@@ -71,6 +73,156 @@ function dependencias(): DependenciasSimulacao {
 }
 
 describe('replay sem envio e diagnóstico sem thinking', () => {
+  it('nunca publica texto intermediário junto de ferramenta, mesmo sem tags de raciocínio', async () => {
+    const deps = dependencias();
+    vi.mocked(deps.chamarPrincipal)
+      .mockResolvedValueOnce({ content: [
+        { type: 'text', text: 'Vou verificar a grade para decidir qual informação oferecer.' },
+        { type: 'tool_use', id: 'consulta-1', name: 'consulta_pos_disponiveis', input: {} },
+      ] })
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: 'A pós tem aulas online.' }] });
+    const resultado = await executarSimulacao(validarEntradaSimulacao({ mensagens: ['Como são as aulas?'] }), deps);
+    expect(resultado.transcript.filter((t) => t.quem === 'joao').map((t) => t.texto)).toEqual(['A pós tem aulas online.']);
+    expect(JSON.stringify(resultado)).not.toContain('decidir qual informação oferecer');
+    expect(deps.mockTool).toHaveBeenCalledExactlyOnceWith('consulta_pos_disponiveis', {});
+    expect(deps.chamarPrincipal).toHaveBeenCalledTimes(2);
+  });
+
+  it('não usa texto intermediário como resposta se a ferramenta esgota o limite', async () => {
+    const deps = dependencias();
+    let chamada = 0;
+    vi.mocked(deps.chamarPrincipal).mockImplementation(async () => ({ content: [
+      { type: 'text', text: 'Preciso conferir novamente antes de responder.' },
+      { type: 'tool_use', id: `consulta-${++chamada}`, name: 'consulta_disponibilidade', input: {} },
+    ] }));
+    const resultado = await executarSimulacao(validarEntradaSimulacao({ mensagens: ['Quais horários?'] }), deps);
+    expect(resultado.transcript.filter((t) => t.quem === 'joao')).toEqual([]);
+    expect(resultado.limites_atingidos).toEqual([{ turno: 1, motivo: 'limite de 6 chamadas do agente atingido' }]);
+    expect(JSON.stringify(resultado)).not.toContain('conferir novamente antes');
+  });
+
+  it.each(['pausa_ia', 'temporizador_proxima_turma', 'agendar_retorno'])('despedida de %s usa a régua real, sem publicar a análise da retenção', async (nome) => {
+    const deps = dependencias();
+    const input = nome === 'agendar_retorno' ? { tipo: 'formatura', meses: 4 } : { tipo: 'nao_perturbe', motivo: 'desinteresse' };
+    vi.mocked(deps.chamarPrincipal).mockResolvedValueOnce({ content: [
+      { type: 'text', text: 'Já foi feita a pergunta de retenção antes e ele confirmou o retirar. Isso conta como retenção explícita e reiteração do não.' },
+      { type: 'tool_use', id: 'fim-1', name: nome, input },
+    ] });
+    const resultado = await executarSimulacao(validarEntradaSimulacao({ mensagens: ['Pode retirar'], sem_presente_escola: true }), deps);
+    expect(deps.chamarPrincipal).toHaveBeenCalledTimes(1);
+    expect(deps.mockTool).toHaveBeenCalledExactlyOnceWith(nome, input);
+    expect(resultado.transcript.filter((t) => t.quem === 'joao').map((t) => t.texto)).toEqual([
+      respostaDoEncerramento({ tool: nome, input }),
+    ]);
+    expect(JSON.stringify(resultado)).not.toContain('Isso conta como retenção');
+  });
+
+  it('mantém o presente na despedida e registra a resposta pública para o próximo turno', async () => {
+    const deps = dependencias();
+    vi.mocked(deps.chamarPrincipal).mockResolvedValueOnce({ content: [
+      { type: 'text', text: 'O roteiro manda pausar e oferecer a Escola.' },
+      { type: 'tool_use', id: 'fim-1', name: 'pausa_ia', input: { tipo: 'nao_perturbe' } },
+    ] });
+    const resultado = await executarSimulacao(validarEntradaSimulacao({ mensagens: ['Pode retirar', 'Obrigado'] }), deps);
+    const falas = resultado.transcript.filter((t) => t.quem === 'joao').map((t) => t.texto);
+    expect(falas[0]).toContain(LINK_ESCOLA_GRATUITA);
+    expect(falas[1]).toBe('Podemos continuar.');
+    const ultimaPreparacao = vi.mocked(deps.prepararRodada).mock.calls[1][0];
+    expect(ultimaPreparacao).toContainEqual({ role: 'assistant', content: [{ type: 'text', text: falas[0] }] });
+    expect(JSON.stringify(resultado)).not.toContain('O roteiro manda pausar');
+  });
+
+  it.each([
+    { esta_na_escola: true },
+    { sem_presente_escola: true },
+    { historico_inicial: [{ role: 'assistant', content: `Seu acesso: ${LINK_ESCOLA_GRATUITA}` }] },
+  ])('respeita a guarda do presente na despedida: %j', async (opcoes) => {
+    const deps = dependencias();
+    vi.mocked(deps.chamarPrincipal).mockResolvedValueOnce({ content: [
+      { type: 'tool_use', id: 'fim-1', name: 'pausa_ia', input: { tipo: 'nao_perturbe' } },
+    ] });
+    const resultado = await executarSimulacao(validarEntradaSimulacao({ mensagens: ['Pode retirar'], ...opcoes }), deps);
+    expect(resultado.transcript.filter((t) => t.quem === 'joao').map((t) => t.texto).join('\n')).not.toContain(LINK_ESCOLA_GRATUITA);
+  });
+
+  it('motivo desconhecido pede uma resposta final sem reaproveitar a fala junto da pausa', async () => {
+    const deps = dependencias();
+    vi.mocked(deps.prepararRodada).mockResolvedValueOnce({ promptAgente: 'prompt', contextoTemporal: 'contexto', tools: [{ name: 'pausa_ia' }], agente: 'agente_validacao' });
+    vi.mocked(deps.chamarPrincipal).mockResolvedValueOnce({ content: [
+      { type: 'text', text: 'Vou escolher como tratar essa situação.' },
+      { type: 'tool_use', id: 'fim-1', name: 'pausa_ia', input: { motivo: 'situação específica' } },
+    ] });
+    const resultado = await executarSimulacao(validarEntradaSimulacao({ mensagens: ['Preciso de uma ajuda'] }), deps);
+    expect(deps.chamarPrincipal).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(deps.chamarPrincipal).mock.calls[1][0].tools).toEqual([]);
+    expect(resultado.transcript.filter((t) => t.quem === 'joao').map((t) => t.texto)).toEqual(['Podemos continuar.']);
+  });
+
+  it('silêncio do canal não deixa assistant vazio no próximo turno', async () => {
+    const deps = dependencias();
+    vi.mocked(deps.chamarPrincipal).mockResolvedValueOnce({ content: [], stop_reason: 'end_turn' });
+    const resultado = await executarSimulacao(validarEntradaSimulacao({ mensagens: ['Obrigado', 'Uma dúvida'] }), deps);
+    const proxima = vi.mocked(deps.chamarPrincipal).mock.calls[1][0].messages;
+    expect(proxima.filter((m) => m.role === 'assistant')).toEqual([]);
+    expect(resultado.transcript.filter((t) => t.quem === 'joao').map((t) => t.texto)).toEqual(['Podemos continuar.']);
+  });
+
+  it('recusa vinda do mock não vira despedida nem encerra o turno', async () => {
+    const deps = dependencias();
+    vi.mocked(deps.chamarPrincipal).mockResolvedValueOnce({ content: [
+      { type: 'text', text: 'Vou encerrar a conversa por aqui.' },
+      { type: 'tool_use', id: 'fim-1', name: 'pausa_ia', input: { tipo: 'nao_perturbe' } },
+    ] });
+    vi.mocked(deps.mockTool).mockResolvedValueOnce(JSON.stringify({ status: 'bloqueado' }));
+    const resultado = await executarSimulacao(validarEntradaSimulacao({ mensagens: ['Preciso de uma ajuda'] }), deps);
+    expect(deps.chamarPrincipal).toHaveBeenCalledTimes(2);
+    expect(resultado.transcript.filter((t) => t.quem === 'joao').map((t) => t.texto)).toEqual(['Podemos continuar.']);
+    expect(resultado.transcript.find((t) => t.quem === 'tool')).toMatchObject({ bloqueado: true });
+  });
+
+  it.each([
+    JSON.stringify({ status: 'erro' }),
+    JSON.stringify({ ok: false }),
+    'Erro ao executar agendar_retorno: indisponível',
+    'Não consegui agendar o retorno.',
+  ])('falha da ferramenta não confirma despedida: %s', async (resultadoMock) => {
+    const deps = dependencias();
+    vi.mocked(deps.chamarPrincipal).mockResolvedValueOnce({ content: [
+      { type: 'tool_use', id: 'fim-1', name: 'agendar_retorno', input: { tipo: 'formatura', meses: 4 } },
+    ] });
+    vi.mocked(deps.mockTool).mockResolvedValueOnce(resultadoMock);
+    const resultado = await executarSimulacao(validarEntradaSimulacao({ mensagens: ['Me formo ano que vem'] }), deps);
+    expect(deps.chamarPrincipal).toHaveBeenCalledTimes(2);
+    expect(resultado.transcript.filter((t) => t.quem === 'joao').map((t) => t.texto)).toEqual(['Podemos continuar.']);
+  });
+
+  it('bloqueia arquivo sem evidência, descarta a despedida falsa e deixa o modelo corrigir', async () => {
+    const deps = dependencias();
+    vi.mocked(deps.chamarPrincipal).mockResolvedValueOnce({ content: [
+      { type: 'text', text: 'Sem graduação você não pode entrar na pós.' },
+      { type: 'tool_use', id: 'sem-formacao', name: 'pausa_ia', input: { tipo: 'sem_graduacao', motivo: 'apenas pretende atuar' } },
+    ] });
+    const resultado = await executarSimulacao(validarEntradaSimulacao({
+      historico_inicial: [{ role: 'assistant', content: 'Em qual área você atua hoje?' }],
+      mensagens: ['Nenhuma. Pretendo atuar na área de Qualidade.'],
+    }), deps);
+    expect(deps.mockTool).not.toHaveBeenCalled();
+    expect(deps.chamarPrincipal).toHaveBeenCalledTimes(2);
+    expect(resultado.transcript.filter((t) => t.quem === 'joao').map((t) => t.texto)).toEqual(['Podemos continuar.']);
+    expect(resultado.transcript).toContainEqual(expect.objectContaining({ nome: 'pausa_ia', bloqueado: true }));
+    expect(resultado.transcript.find((t) => t.quem === 'tool')?.resultado).toContain('SEM_EVIDENCIA_SEM_GRADUACAO');
+  });
+
+  it('mantém a pausa simulada quando há declaração explícita de única formação', async () => {
+    const deps = dependencias();
+    vi.mocked(deps.chamarPrincipal).mockResolvedValueOnce({ content: [
+      { type: 'tool_use', id: 'sem-formacao', name: 'pausa_ia', input: { tipo: 'sem_graduacao' } },
+    ] });
+    const resultado = await executarSimulacao(validarEntradaSimulacao({ mensagens: ['Só tenho ensino médio.'] }), deps);
+    expect(deps.mockTool).toHaveBeenCalledExactlyOnceWith('pausa_ia', { tipo: 'sem_graduacao' });
+    expect(resultado.transcript.find((t) => t.quem === 'tool')?.bloqueado).toBeUndefined();
+  });
+
   it('usa sanitizador de produção, mantém marcadores/autoria e não altera o roteiro', async () => {
     const entrada = validarEntradaSimulacao({ mensagens: ['Podemos seguir?'], historico_inicial: [humano, respostaPausa] });
     const original = structuredClone(entrada);
@@ -106,9 +258,9 @@ describe('replay sem envio e diagnóstico sem thinking', () => {
     expect(resultado.chamadas[0].usage).toEqual({ input_tokens: 12 });
   });
 
-  it('prepara cada novo turno e encerra a cadeia quando pausa_ia é mockada', async () => {
+  it('prepara cada novo turno e encerra a cadeia quando uma pausa conhecida é mockada', async () => {
     const deps = dependencias();
-    vi.mocked(deps.chamarPrincipal).mockResolvedValue({ content: [{ type: 'tool_use', id: 'p1', name: 'pausa_ia', input: { motivo: 'pedido' } }] });
+    vi.mocked(deps.chamarPrincipal).mockResolvedValue({ content: [{ type: 'tool_use', id: 'p1', name: 'pausa_ia', input: { tipo: 'nao_perturbe' } }] });
     const resultado = await executarSimulacao(validarEntradaSimulacao({ mensagens: ['Quero esperar', 'Voltei'] }), deps);
     expect(deps.prepararRodada).toHaveBeenCalledTimes(2);
     expect(deps.chamarPrincipal).toHaveBeenCalledTimes(2);

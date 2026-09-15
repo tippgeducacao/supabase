@@ -816,7 +816,6 @@ async function processar(payload: any, profundidade = 0) {
         : '');
 
     let resposta = '';
-    let textoAntesDaFerramenta = '';
     let dadosGravados: string[] = [];
     let rodada = 0;
     const historico: any[] = [...messages];
@@ -994,12 +993,11 @@ async function processar(payload: any, profundidade = 0) {
           results.push({ type: 'tool_result', tool_use_id: u.id, content: `ok, gravei: ${gravou.join(', ') || 'nada novo'}` });
         }
         historico.push({ role: 'user', content: results });
-        // Rede de segurança: se a rodada final não escrever nada, vale o que ele
-        // escreveu antes da ferramenta — melhor a mensagem boa do que o silêncio.
-        if (texto && !textoAntesDaFerramenta) textoAntesDaFerramenta = texto;
         continue;
       }
-      resposta = texto || textoAntesDaFerramenta;
+      // 14/09/2026: texto junto de ferramenta é intermediário e pode conter análise
+      // interna. Resposta vazia não autoriza recuperá-lo como fala ao candidato.
+      resposta = texto;
       break;
     }
 

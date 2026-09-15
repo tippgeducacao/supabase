@@ -19,6 +19,8 @@ import { INSTRUCAO_MEMORIA_HUMANA } from "../crm-agente-sdr/memoriaHumana.ts";
 import { comPresenteEscola, LINK_ESCOLA_GRATUITA } from "../crm-agente-sdr/escolaGratuita.ts";
 import { carregarTools, chamarAgentePrincipal, chamarRouter } from "../crm-agente-sdr/agente.ts";
 import { type CtxConversa, executarTool, montarToolResults } from "../crm-agente-sdr/tools.ts";
+import { avaliarEvidenciaSemGraduacao, bloqueioSemEvidenciaGraduacao } from "../crm-agente-sdr/evidenciaFormacao.ts";
+import { toolConcluida } from "../crm-agente-sdr/encerramento.ts";
 import { type EstadoElegibilidade, VERSAO_REGRA_ELEGIBILIDADE } from "../crm-agente-sdr/elegibilidadeAgendamento.ts";
 // Frases que viram PARÂMETRO de template ficam num módulo puro pra poderem ser testadas:
 // elas saem no WhatsApp de um lead, com a marca da PPGVET.
@@ -28,7 +30,8 @@ import { buscarLead, limparParaRouter, sanitizarHistorico } from "../crm-agente-
 // Fracionamento humanizado — o MESMO do João de WhatsApp (saida.ts): humaniza (tira "!"/
 // travessão) e quebra em 2-3 frases via gpt-4o-mini. Aqui só GERA os chunks; o espaçamento
 // temporal ("digitando" entre balões) é feito no widget (client-side), não no servidor.
-import { fracionarResposta, humanizarTexto } from "../crm-agente-sdr/saida.ts";
+import { contemMeta, contemRaciocinioVazado, fracionarResposta, humanizarTexto } from "../crm-agente-sdr/saida.ts";
+import { avaliarCanalResposta, INSTRUCAO_CANAL_RESPOSTA, NOME_TOOL_RESPOSTA, TOOL_RESPONDER_AO_CLIENTE } from "../crm-agente-sdr/canalResposta.ts";
 // Persona da ESCOLA DE ESPECIALIZAÇÃO (produto='escola') — bloco próprio, ver escola.ts.
 import { fallbackAberturaEscola, filtrarLinkMatricula, instrucaoAberturaEscola, notaCanalEscola } from "./escola.ts";
 import { resultadoToolMockado, toolDeveSerMockada } from "./modoTeste.ts";
@@ -453,8 +456,8 @@ export async function aberturaWebchat(nome: string, curso: string | null, produt
       : `Oi${primeiro ? ", " + primeiro : ""}, tudo bem? Me conta rapidinho qual área vc tá querendo, pra eu te falar da pós certa: bovinos e leite, aves, suínos, animais de companhia, gestão e agronegócio, ou saúde e alimentos?`;
   if (!ANTHROPIC_KEY) return dividirAberturaEm2(fallback);
   try {
-    // sem tools na abertura (é só a saudação/oferta); usa o prompt real de validação +
-    // o contexto temporal (pra não falar de horário fora da hora).
+    // Abertura usa só o canal local de resposta, sem ferramentas de negócio.
+    // Texto livre da saudação também pode ser bastidor e nunca vira balão.
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
@@ -468,7 +471,10 @@ export async function aberturaWebchat(nome: string, curso: string | null, produt
           { type: "text", text: promptDoEstagio(nome, curso, "validacao", produto) },
           { type: "text", text: INSTRUCAO_MEMORIA_HUMANA },
           { type: "text", text: montarContextoTemporal() },
+          { type: "text", text: INSTRUCAO_CANAL_RESPOSTA },
         ],
+        tools: [TOOL_RESPONDER_AO_CLIENTE],
+        tool_choice: { type: 'tool', name: NOME_TOOL_RESPOSTA, disable_parallel_tool_use: true },
         messages: [{
           role: "user",
           content: escola
@@ -477,10 +483,13 @@ export async function aberturaWebchat(nome: string, curso: string | null, produt
         }],
       }),
     });
+    if (!res.ok) return dividirAberturaEm2(fallback);
     const data = await res.json();
-    const texto = textoDe(data.content);
+    const canal = avaliarCanalResposta(data, (texto) => contemRaciocinioVazado(texto) || contemMeta(texto), true);
+    if (canal.tipo !== 'resposta') return dividirAberturaEm2(fallback);
+    if (!canal.mensagem) return [];
     // abertura em 2 balões MANUAIS (sem fracionador) — pedido do diretor
-    const baloes = texto ? dividirAberturaEm2(texto) : [];
+    const baloes = dividirAberturaEm2(canal.mensagem);
     return baloes.length ? baloes : dividirAberturaEm2(fallback);
   } catch (_e) {
     return dividirAberturaEm2(fallback);
@@ -560,6 +569,9 @@ export async function responderWebchat(
     : '');
   const ctx = ctxDe(telefone, leadId, nome || null);
   ctx.modoTeste = modoTeste;
+  // Mesmas mensagens brutas usadas pelo WhatsApp/harness. Fundir turnos da API
+  // mudaria o que conta como última declaração para a guarda de formação.
+  ctx.historicoConversa = raw;
   if (modoTeste && sessaoId) {
     // A análise pode acontecer em um turno e a confirmação em outro. O harness
     // conserva seu estado nos próprios logs da sessão, sem escrever aprovação SDR.
@@ -594,7 +606,7 @@ export async function responderWebchat(
       promptAgente,
       contextoTemporal: encerramento ? `${contextoTemporal}\n\n${instrucaoPosPausa(produto)}` : contextoTemporal,
       messages,
-      tools,
+      tools: encerramento ? [] : tools,
     });
     const blocos: any[] = resp.content ?? [];
     const toolUses = blocos.filter((b) => b.type === "tool_use");
@@ -605,6 +617,12 @@ export async function responderWebchat(
       // guarda. Foi assim que a despedida de quem desistiu foi parar em lead sem
       // graduação, em quem já era aluno e em quem pediu humano (q-01/q-04/q-05).
       const despedida = despedidaDe(encerramento);
+      // O canal estruturado diferencia ausência de resposta de falha de conteúdo.
+      // Em ambos os casos, vazio não autoriza inventar uma pergunta ao visitante.
+      // A despedida de uma ação já concluída continua determinística.
+      if (!despedida && resp.canal_resposta && !textoDe(blocos)) {
+        return { chunks: [], estagio, tools: chamadas };
+      }
       const fallback = encerramento ? DESPEDIDA_GENERICA : "Pode me contar um pouco mais? 😊";
       let chunks = despedida ? [despedida] : await emChunks(textoDe(blocos) || fallback);
       if (!chunks.length) chunks = [fallback];
@@ -661,15 +679,20 @@ export async function responderWebchat(
     for (const tu of toolUses) {
       const nomeTool = String(tu.name ?? "");
       const input = (tu.input && typeof tu.input === "object" ? tu.input : {}) as Record<string, unknown>;
-      if (TOOLS_QUE_PAUSAM.has(nomeTool)) encerramento = { tool: nomeTool, input };
       const mockado = toolDeveSerMockada(modoTeste, nomeTool);
       const registro: WebchatToolChamada = { nome: nomeTool, input, mockado };
       chamadas.push(registro);
       let saidaTool: ResultadoToolWebchat;
-      if (mockado) saidaTool = resultadoToolMockado(tu, limparCurso(curso), ctx.ultimaElegibilidade);
+      // O harness do chat aplica a mesma trava antes do mock, sem mutações reais.
+      if (nomeTool === 'pausa_ia' && input.tipo === 'sem_graduacao'
+        && !avaliarEvidenciaSemGraduacao(ctx.historicoConversa).autorizada) {
+        saidaTool = bloqueioSemEvidenciaGraduacao(tu.id);
+      }
+      else if (mockado) saidaTool = resultadoToolMockado(tu, limparCurso(curso), ctx.ultimaElegibilidade);
       else if (nomeTool === "envia_informacoes") saidaTool = await webchatEnviaInformacoes(tu, telefone, curso, nome, sessaoId);
       else if (nomeTool === "levar_para_whatsapp") saidaTool = await webchatLevarParaWhatsapp(tu, telefone, curso, nome, sessaoId);
       else saidaTool = await executarTool(supabase, tu, ctx);
+      if (TOOLS_QUE_PAUSAM.has(nomeTool) && toolConcluida(saidaTool)) encerramento = { tool: nomeTool, input };
       if (modoTeste) {
         if ((nomeTool === 'atualizar_dados_lead' && (input.formacao || input.tempo_formacao))
           || (nomeTool === 'consulta_pos_disponiveis' && input.trocar_para)) {

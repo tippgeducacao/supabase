@@ -10,10 +10,8 @@
 // ../crm-agente-sdr/ (mesmo padrão do escolaGratuita.ts, que este agente já importa de lá).
 // Reexportados aqui pra que o resto do webchat continue enxergando um lugar só.
 export type { Encerramento } from '../crm-agente-sdr/encerramento.ts';
-export { ehDespedidaDeVerdade, motivoDoEncerramento } from '../crm-agente-sdr/encerramento.ts';
+export { ehDespedidaDeVerdade, motivoDoEncerramento, despedidaDe, DESPEDIDA_GENERICA } from '../crm-agente-sdr/encerramento.ts';
 export { notaDoNome } from '../crm-agente-sdr/nomeDoLead.ts';
-import type { Encerramento, MotivoEncerramento } from '../crm-agente-sdr/encerramento.ts';
-import { motivoDoEncerramento } from '../crm-agente-sdr/encerramento.ts';
 
 // ── 1. Despedida por MOTIVO ────────────────────────────────────────────────────
 // Rodada de 20/08: a despedida de quem DESISTIU saiu para o lead sem graduação (q-01),
@@ -22,34 +20,7 @@ import { motivoDoEncerramento } from '../crm-agente-sdr/encerramento.ts';
 // MODELO escolheu o texto errado tendo o certo no roteiro; no último saiu o texto fixo do
 // código. Por isso o texto passou a ser NOSSO, sempre: o modelo decide qual é a situação
 // (chamando a tool com o tipo/motivo certo), a frase quem escolhe é esta função.
-const DESPEDIDAS: Record<MotivoEncerramento, string> = {
-  sem_graduacao:
-    "nossas pós seguem o modelo lato sensu, que pede graduação completa pra matrícula. "
-    + "fica à vontade pra nos procurar quando concluir, vai ser um prazer marcar essa conversa.",
-  humano: "claro, já te passo pra alguém do time aqui.",
-  ligacao: "beleza, já vou te ligar.",
-  aluno:
-    "esse convite era pra quem ainda não é aluno, desculpa a confusão. "
-    + "vou te direcionar pra alguém do suporte, que cuida da sua turma.",
-  incompativel:
-    "nossas pós seguem o modelo lato sensu, que pede graduação completa compatível pra "
-    + "matrícula. fica à vontade pra nos procurar futuramente, vai ser um prazer te ajudar.",
-  proxima_turma:
-    "fechado, deixo anotado pra te chamar quando abrir a próxima turma. obrigado!",
-  cancelamento: "tranquilo, já vou verificar isso pra vc aqui.",
-  desinteresse:
-    "tranquilo, agradeço sua preferência pelo Grupo PPG e fico à disposição se precisar. 🙌",
-};
-
-/** Usada quando o modelo não escreveu nada e o motivo não foi reconhecido. */
-export const DESPEDIDA_GENERICA = DESPEDIDAS.desinteresse;
-
-/** A despedida canônica do motivo, ou null quando não é caso de encerramento. */
-export function despedidaDe(e: Encerramento | null): string | null {
-  if (!e) return null;
-  const motivo = motivoDoEncerramento(e);
-  return motivo ? DESPEDIDAS[motivo] : null;
-}
+// A tabela e a seleção agora moram no módulo compartilhado encerramento.ts.
 
 // ── 2. O material vai pro WhatsApp, não pro chat ───────────────────────────────
 // cron-04: "Consegui te mandar aqui, oh" e "já te mandei ali em cima". O PDF sai por

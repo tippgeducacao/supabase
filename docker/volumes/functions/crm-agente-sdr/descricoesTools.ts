@@ -10,6 +10,9 @@ type ToolSdr = {
 export function descreverToolsSdr(tools: ToolSdr[]): ToolSdr[] {
   return tools.map(original => {
     const tool = structuredClone(original);
+    if (tool.name === 'pausa_ia') {
+      tool.description = 'Para tipo=sem_graduacao, exige declaração explícita do próprio lead de nunca ter cursado graduação ou ter somente ensino médio/técnico, sem graduação em andamento nem outra concluída. O executor confere o histórico e bloqueia sem evidência. Não atuar/trabalhar em nenhuma área, pretender atuar, cadastro vazio e resposta curta sobre trabalho NÃO informam formação. Interesse somente na aula aberta não autoriza desqualificar nem arquivar. Se faltar informação, preserve o atendimento e esclareça somente o necessário para o objetivo atual.\n' + (tool.description ?? '');
+    }
     if (tool.name === 'consulta_disponibilidade') {
       tool.description = 'Esta ferramenta consulta horários de REUNIÃO, não de retorno por mensagem. Ausência momentânea ("agora não posso atender") exige perguntar quando pode chamar por aqui, sem consultar agenda. Uma data/hora respondida a essa pergunta é retorno no canal, não aceite de Meet. Só consulte para interesse explícito em agendar a reunião.\n' + (tool.description ?? '');
       tool.description = (tool.description ?? '') + '\nSe o lead propôs data e hora concretas para a reunião, consulte exatamente essa opção, mesmo sem oferta anterior do SDR. Não desloque 13:00 para 13:30 por uma tabela genérica. Se o mesmo dia e horário aparecer em slots_raw, preserve a escolha e avance apenas nas pendências de qualificação; não abra um novo menu de horários. Disponibilidade não é aprovação nem agendamento. Se a opção estiver ausente, ofereça alternativas reais e aguarde nova escolha.';

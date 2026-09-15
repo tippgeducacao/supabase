@@ -3,6 +3,9 @@
 // Somente texto externo é aceito: tool_use/result e thinking só podem nascer do modelo.
 import { sanitizarHistorico, type Msg } from '../crm-agente-sdr/historico.ts';
 import type { Telemetria } from '../crm-agente-sdr/eventos.ts';
+import { avaliarEvidenciaSemGraduacao, bloqueioSemEvidenciaGraduacao } from '../crm-agente-sdr/evidenciaFormacao.ts';
+import { respostaDoEncerramento, toolConcluida, type Encerramento } from '../crm-agente-sdr/encerramento.ts';
+import { comPresenteNaDespedida } from '../crm-agente-sdr/escolaGratuita.ts';
 
 export const MAX_TURNOS_SIMULACAO = 100;
 export const MAX_CARACTERES_SIMULACAO = 200_000;
@@ -152,31 +155,66 @@ export async function executarSimulacao(entrada: EntradaSimulacao, deps: Depende
     transcript.push({ quem: 'lead', texto: msgLead, turno });
     const rodada = await deps.prepararRodada(messages, turno);
     agente = rodada.agente;
+    let encerrou = false;
     for (let volta = 0; volta < 6; volta++) {
-      const resp = await deps.chamarPrincipal({ ...rodada, messages: sanitizarHistorico(messages) });
+      const resp = await deps.chamarPrincipal({ ...rodada, tools: encerrou ? [] : rodada.tools, messages: sanitizarHistorico(messages) });
       chamadas.push({ turno, volta: volta + 1, agente, modelo: resp.model ?? null, usage: extrairUso(resp.usage), stop_reason: resp.stop_reason ?? null });
       const blocos = resp.content ?? [];
       const textoCru = blocos.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
       const texto = deps.humanizar(textoCru);
       const toolUses = blocos.filter((b): b is BlocoModelo & { id: string; name: string } =>
         b.type === 'tool_use' && typeof b.id === 'string' && typeof b.name === 'string');
+      const pausasBloqueadas = new Set(toolUses.filter((tu) => tu.name === 'pausa_ia'
+        && (tu.input as Record<string, unknown> | undefined)?.tipo === 'sem_graduacao'
+        && !avaliarEvidenciaSemGraduacao(messages).autorizada).map((tu) => tu.id));
       // Thinking permanece só na memória necessária para a cadeia ativa de tools.
-      messages.push({ role: 'assistant', content: blocos });
-      if (texto || texto !== textoCru) transcript.push({
+      if (blocos.length) messages.push({ role: 'assistant', content: blocos });
+      // 14/09/2026: texto junto de tool_use é intermediário, mesmo sem tags de
+      // raciocínio. Só a resposta final pode aparecer como fala do João no ensaio.
+      if (!toolUses.length && (texto || texto !== textoCru)) transcript.push({
         quem: 'joao', texto, turno,
         ...(texto !== textoCru ? { saida_filtrada: true, silenciado: !texto } : {}),
       });
       if (!toolUses.length) break;
 
       const results = [];
+      const toolsConcluidas: Encerramento[] = [];
       for (const tu of toolUses) {
-        const resultado = await deps.mockTool(tu.name, tu.input);
-        transcript.push({ quem: 'tool', nome: tu.name, input: tu.input, resultado, simulado: true, turno });
+        const bloqueadoPelaGuarda = pausasBloqueadas.has(tu.id);
+        const resultado = bloqueadoPelaGuarda ? JSON.stringify(bloqueioSemEvidenciaGraduacao(tu.id)) : await deps.mockTool(tu.name, tu.input);
+        let retornoTool: Record<string, unknown> = { resultado };
+        // Retorno estruturado do mock também pode recusar uma ação; tentar pausar
+        // não significa que ela foi concluída (mesmo contrato do executor real).
+        try {
+          const objeto = JSON.parse(resultado);
+          if (objeto && typeof objeto === 'object' && !Array.isArray(objeto)) retornoTool = objeto;
+        } catch { /* Mocks legados devolvem texto simples. */ }
+        const bloqueado = bloqueadoPelaGuarda || retornoTool.status === 'bloqueado';
+        transcript.push({ quem: 'tool', nome: tu.name, input: tu.input, resultado, simulado: true, turno, ...(bloqueado ? { bloqueado: true } : {}) });
         results.push({ type: 'tool_result', tool_use_id: tu.id, content: resultado });
+        if (!bloqueado && toolConcluida(retornoTool)) toolsConcluidas.push({ tool: tu.name, input: (tu.input ?? {}) as Record<string, unknown> });
       }
       messages.push({ role: 'user', content: results });
-      // Mantém o contrato legado: pausa encerra esta rodada, sem efetuar pausa real.
-      if (toolUses.some((tu) => tu.name === 'pausa_ia')) break;
+      encerrou ||= toolsConcluidas.some((tu) => ['pausa_ia', 'temporizador_proxima_turma', 'agendar_retorno'].includes(tu.tool));
+      // A despedida conhecida vem da mesma régua pura de produção, nunca do texto
+      // intermediário do modelo. Motivo desconhecido ganha outra volta para responder.
+      const encerramento = toolsConcluidas.find((tu) => respostaDoEncerramento(tu));
+      const despedida = encerramento ? respostaDoEncerramento(encerramento) : null;
+      if (despedida && toolsConcluidas.length === toolUses.length) {
+        const conversaPublicada = [
+          ...entrada.historico_inicial.map((m) => m.content),
+          ...transcript.filter((m) => m.quem === 'lead' || m.quem === 'joao').map((m) => String(m.texto ?? '')),
+        ].join('\n');
+        const comPresente = entrada.sem_presente_escola ? despedida : comPresenteNaDespedida(
+          despedida, encerramento!, conversaPublicada, entrada.esta_na_escola,
+        ).texto;
+        const textoFinal = deps.humanizar(comPresente);
+        if (textoFinal) {
+          transcript.push({ quem: 'joao', texto: textoFinal, turno });
+          messages.push({ role: 'assistant', content: [{ type: 'text', text: textoFinal }] });
+        }
+        break;
+      }
       if (volta === 5) limites.push({ turno, motivo: 'limite de 6 chamadas do agente atingido' });
     }
   }

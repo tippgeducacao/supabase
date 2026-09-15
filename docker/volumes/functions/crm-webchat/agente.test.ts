@@ -41,12 +41,14 @@ vi.mock('../crm-agente-sdr/tools.ts', () => ({
   executarTool: mocks.executarTool,
   montarToolResults: (outputs: unknown[]) => outputs,
 }));
-vi.mock('../crm-agente-sdr/saida.ts', () => ({
+vi.mock('../crm-agente-sdr/saida.ts', async (original) => ({
+  ...await original<typeof import('../crm-agente-sdr/saida')>(),
   humanizarTexto: (texto: string) => texto,
   fracionarResposta: async (texto: string) => [texto],
 }));
 
 let responderWebchat: typeof import('./agente').responderWebchat;
+let aberturaWebchat: typeof import('./agente').aberturaWebchat;
 let executarToolReal: typeof import('../crm-agente-sdr/tools').executarTool;
 beforeAll(async () => {
   vi.stubGlobal('Deno', { env: { get: (chave: string) => ({
@@ -57,7 +59,7 @@ beforeAll(async () => {
   })[chave] } });
   vi.stubGlobal('fetch', mocks.fetch);
   ({ executarTool: executarToolReal } = await vi.importActual<typeof import('../crm-agente-sdr/tools')>('../crm-agente-sdr/tools.ts'));
-  ({ responderWebchat } = await import('./agente'));
+  ({ responderWebchat, aberturaWebchat } = await import('./agente'));
 });
 afterAll(() => vi.unstubAllGlobals());
 
@@ -74,7 +76,7 @@ beforeEach(() => {
       const consulta = {
         eq: () => consulta,
         order: async () => ({ data: tabela === 'cursos'
-          ? [{ nome: 'PÓS | Sanidade Avícola' }, { nome: 'PÓS | Cannabis Medicinal' }]
+          ? [{ id: '00000000-0000-4000-8000-000000000003', nome: 'PÓS | Sanidade Avícola' }, { id: '00000000-0000-4000-8000-000000000004', nome: 'PÓS | Cannabis Medicinal' }]
           : [{ pos_graduacao: 'Sanidade Avícola', pode_fazer: 'Medicina Veterinária', parcialmente_aceitas: '', status: 'ativo' }],
         error: null }),
       };
@@ -119,7 +121,108 @@ function responderEnvio(body: unknown, status = 200) {
   mocks.fetch.mockResolvedValue(new Response(JSON.stringify(body), { status }));
 }
 
+describe('aberturaWebchat: canal final obrigatório', () => {
+  const mensagemFinal = (mensagem: string) => chamada('responder_ao_cliente', { mensagem }, 'resposta-local');
+
+  it('só publica o campo mensagem, mesmo com preâmbulo e thinking na mesma geração', async () => {
+    responderEnvio({ stop_reason: 'tool_use', content: [
+      { type: 'thinking', thinking: 'ANÁLISE NATIVA SINTÉTICA', signature: 'assinatura-teste' },
+      { type: 'text', text: 'Preciso decidir qual abertura oferecer ao visitante.' },
+      mensagemFinal('Oi, Visitante Teste, tudo bem? Qual área te interessa?'),
+    ] });
+    const chunks = await aberturaWebchat('Visitante Teste', null);
+    expect(chunks).toEqual(['Oi, Visitante Teste, tudo bem?', 'Qual área te interessa?']);
+    expect(chunks.join(' ')).not.toMatch(/ANÁLISE|Preciso decidir|assinatura/);
+    const pedido = JSON.parse(mocks.fetch.mock.calls[0][1].body);
+    expect(pedido.max_tokens).toBe(400);
+    expect(pedido.thinking).toEqual({ type: 'disabled' });
+    expect(pedido.tools).toHaveLength(1);
+    expect(pedido.tools[0]).toMatchObject({ name: 'responder_ao_cliente', strict: true });
+    expect(pedido.tool_choice).toEqual({ type: 'tool', name: 'responder_ao_cliente', disable_parallel_tool_use: true });
+    expect(mocks.executarTool).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { caso: 'texto livre', stop_reason: 'end_turn', content: [{ type: 'text', text: 'TEXTO LIVRE NÃO PUBLICÁVEL' }] },
+    { caso: 'campo com raciocínio', stop_reason: 'tool_use', content: [mensagemFinal('O lead ainda não escreveu. Vou decidir a abertura.')] },
+    { caso: 'tag truncada', stop_reason: 'tool_use', content: [mensagemFinal('<thinking>Preciso decidir.')] },
+    { caso: 'geração interrompida', stop_reason: 'max_tokens', content: [mensagemFinal('TEXTO PARCIAL NÃO PUBLICÁVEL')] },
+    { caso: 'negócio junto da resposta', stop_reason: 'tool_use', content: [mensagemFinal('TEXTO CONCORRENTE NÃO PUBLICÁVEL'), chamada('pausa_ia')] },
+    { caso: 'conteúdo inválido', stop_reason: 'tool_use', content: null },
+  ])('usa apenas fallback determinístico quando recebe $caso', async ({ caso: _caso, ...respostaModelo }) => {
+    responderEnvio(respostaModelo);
+    const chunks = await aberturaWebchat('Visitante Teste', null);
+    expect(chunks.join(' ')).toContain('qual área vc tá querendo');
+    expect(chunks.join(' ')).not.toMatch(/PUBLICÁVEL|lead|thinking|decidir/);
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+    expect(mocks.executarTool).not.toHaveBeenCalled();
+  });
+
+  it('silêncio explícito não é substituído pela abertura determinística', async () => {
+    responderEnvio({ stop_reason: 'tool_use', content: [mensagemFinal('')] });
+    expect(await aberturaWebchat('Visitante Teste', null)).toEqual([]);
+  });
+
+  it('resposta HTTP de erro não é aproveitada mesmo com campo final aparente', async () => {
+    responderEnvio({ stop_reason: 'tool_use', content: [mensagemFinal('TEXTO DO ERRO NÃO PUBLICÁVEL')] }, 400);
+    const chunks = await aberturaWebchat('Visitante Teste', null);
+    expect(chunks.join(' ')).toContain('qual área vc tá querendo');
+    expect(chunks.join(' ')).not.toContain('TEXTO DO ERRO');
+  });
+});
+
 describe('responderWebchat: encerramento completo', () => {
+  it.each(['silencio_explicito', 'bastidor_no_canal', 'falha_na_correcao', 'geracao_nao_concluida'])('canal vazio por %s não vira pergunta automática', async (motivo) => {
+    mocks.principal.mockResolvedValueOnce({ content: [], stop_reason: 'end_turn', canal_resposta: { motivo } });
+    const resposta = await responderWebchat('Visitante Teste', '5500000000000', 'Clínica de Bovinos', [
+      { role: 'user', text: 'Obrigado' },
+    ], 'qualificador');
+    expect(resposta.chunks).toEqual([]);
+    expect(mocks.executarTool).not.toHaveBeenCalled();
+    expect(mocks.principal).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['silencio_explicito', 'bastidor_no_canal'])('despedida confirmada permanece se a volta final fica vazia: %s', async (motivo) => {
+    mocks.principal.mockResolvedValue({ content: [], stop_reason: 'end_turn', canal_resposta: { motivo } });
+    const resposta = await rodar('pausa_ia', { tipo: 'nao_perturbe' });
+    expect(resposta.chunks[0]).toContain('agradeço sua preferência');
+    expect(resposta.chunks[1]).toContain(LINK_ESCOLA_GRATUITA);
+    expect(mocks.principal.mock.calls[1][0].tools).toEqual([]);
+  });
+
+  it('pausa de motivo desconhecido não libera outras ações na volta da resposta final', async () => {
+    const resposta = await rodar('pausa_ia', { motivo: 'situação específica' });
+    expect(mocks.principal).toHaveBeenCalledTimes(2);
+    expect(mocks.principal.mock.calls[1][0].tools).toEqual([]);
+    expect(resposta.chunks).toEqual(['seguimos por aqui.']);
+  });
+
+  it.each([
+    { status: 'bloqueado' }, { status: 'erro' }, { ok: false },
+    { resultado: 'Erro ao executar pausa_ia: indisponível' },
+  ])('pausa recusada ou falha não impõe despedida: %j', async (saidaTool) => {
+    mocks.executarTool.mockResolvedValueOnce(saidaTool);
+    const resposta = await rodar('pausa_ia', { tipo: 'nao_perturbe' });
+    expect(resposta.chunks).toEqual(['seguimos por aqui.']);
+    expect(mocks.principal.mock.calls[1][0].tools).not.toEqual([]);
+  });
+
+  it.each([false, true])('recusa sem graduação inventada sem executar pausa ou impor despedida (teste=%s)', async (modoTeste) => {
+    mocks.principal.mockResolvedValueOnce({ content: [
+      { type: 'text', text: 'Sem graduação não pode cursar a pós.' },
+      chamada('pausa_ia', { tipo: 'sem_graduacao', motivo: 'não atua em nenhuma área' }),
+    ] }).mockResolvedValueOnce({ content: [{ type: 'text', text: 'O que te interessou na aula?' }] });
+    const resposta = await responderWebchat('Visitante Teste', '5500000000000', 'Clínica de Bovinos', [
+      { role: 'assistant', text: 'Você atua em qual área?' },
+      { role: 'user', text: 'Nenhuma. Pretendo atuar em Qualidade.' },
+    ], 'validacao', 'lead-sintetico', 'pos', modoTeste, 'sessao-sintetica');
+    expect(mocks.executarTool).not.toHaveBeenCalled();
+    expect(mocks.fetch).not.toHaveBeenCalled();
+    expect(resposta.chunks).toEqual(['O que te interessou na aula?']);
+    expect(resposta.tools[0].resultado).toContain('Pausa e arquivamento NÃO executados');
+    expect(mocks.principal).toHaveBeenCalledTimes(2);
+  });
+
   it('pedido de humano recebe a transferência sem convite de despedida', async () => {
     const resposta = await rodar('pausa_ia', { motivo: 'Lead pediu atendimento humano' });
     expect(resposta.chunks).toEqual(['claro, já te passo pra alguém do time aqui.']);
@@ -427,8 +530,9 @@ describe('responderWebchat: elegibilidade isolada do harness', () => {
     } });
     expect(resposta.tools[1].resultado).toContain('RECUSADO');
     expect(mocks.escreverLead).not.toHaveBeenCalled();
-    expect(mocks.rpc).toHaveBeenCalledTimes(1);
-    expect(mocks.rpc).toHaveBeenCalledWith('fn_sdr_api_resolver_pos_graduacao', { p_valor: 'Cannabis Medicinal' });
+    // Correspondência exata já resolve o curso; a RPC serve aos nomes alternativos.
+    expect(resposta.tools[0].resultado).toContain('Interesse simulado: Cannabis Medicinal');
+    expect(mocks.rpc).not.toHaveBeenCalled();
     expect(mocks.fetch).not.toHaveBeenCalled();
   });
 

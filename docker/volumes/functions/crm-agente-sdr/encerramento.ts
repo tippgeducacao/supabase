@@ -5,8 +5,8 @@
 // (crm-webchat/agente.ts já importa '../crm-agente-sdr/escolaGratuita.ts'). Uma cópia por
 // agente vira divergência silenciosa na primeira vez que alguém ajustar só um lado.
 //
-// O que NÃO mora aqui: o TEXTO da despedida. Ele é do canal — o webchat tem o dele em
-// guardas.ts, o WhatsApp deixa o modelo escrever. Aqui é só a classificação.
+// Desde 14/09/2026, o texto dos encerramentos conhecidos também é compartilhado:
+// o preâmbulo da tool é interno, nunca uma despedida (incidente Adriana).
 
 /** Sinal de que uma tool de encerramento rodou nesta rodada. */
 export type Encerramento = { tool: string; input: Record<string, unknown> };
@@ -20,6 +20,43 @@ export type MotivoEncerramento =
   | 'proxima_turma'
   | 'cancelamento'
   | 'desinteresse';
+
+const DESPEDIDAS: Record<MotivoEncerramento, string> = {
+  sem_graduacao: 'nossas pós seguem o modelo lato sensu, que pede graduação completa pra matrícula. '
+    + 'fica à vontade pra nos procurar quando concluir, vai ser um prazer marcar essa conversa.',
+  humano: 'claro, já te passo pra alguém do time aqui.',
+  ligacao: 'beleza, já vou te ligar.',
+  aluno: 'esse convite era pra quem ainda não é aluno, desculpa a confusão. '
+    + 'vou te direcionar pra alguém do suporte, que cuida da sua turma.',
+  incompativel: 'nossas pós seguem o modelo lato sensu, que pede graduação completa compatível pra '
+    + 'matrícula. fica à vontade pra nos procurar futuramente, vai ser um prazer te ajudar.',
+  proxima_turma: 'fechado, deixo anotado pra te chamar quando abrir a próxima turma. obrigado!',
+  cancelamento: 'tranquilo, já vou verificar isso pra vc aqui.',
+  desinteresse: 'tranquilo, agradeço sua preferência pelo Grupo PPG e fico à disposição se precisar. 🙌',
+};
+
+export const DESPEDIDA_GENERICA = DESPEDIDAS.desinteresse;
+
+/** As tools legadas também devolvem falha no campo resultado, sem status. */
+export function toolConcluida(output: Record<string, unknown> | undefined): boolean {
+  if (!output || output.status === 'bloqueado' || output.status === 'erro' || output.ok === false) return false;
+  return !/^(?:Erro ao executar|Não consegui agendar)\b/i.test(String(output.resultado ?? ''));
+}
+
+export function despedidaDe(e: Encerramento | null): string | null {
+  if (!e) return null;
+  const motivo = motivoDoEncerramento(e);
+  return motivo ? DESPEDIDAS[motivo] : null;
+}
+
+/** Só usar DEPOIS de confirmar que a ferramenta concluiu, nunca pela intenção do modelo. */
+export function respostaDoEncerramento(e: Encerramento | null): string | null {
+  if (e?.tool === 'agendar_retorno' && e.input.tipo === 'formatura') {
+    return 'como a pós exige graduação concluída, não vou marcar a reunião agora. '
+      + 'deixo anotado pra te procurar quando estiver mais perto de se formar. bons estudos.';
+  }
+  return despedidaDe(e);
+}
 
 /**
  * Classifica o encerramento pelo que a tool recebeu. O `tipo` manda; o `motivo` é texto

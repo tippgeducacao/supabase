@@ -271,8 +271,11 @@ export const temPalavraProibida = (t: string) => PALAVRA_PROIBIDA.test(t);
 const TAGS = '(?:antml:)?(?:thinking|thought|thoughts|scratchpad|reasoning|reflection)';
 export function limparResposta(texto: string): string {
   let t = texto ?? '';
-  t = t.replace(new RegExp(`<${TAGS}[^>]*>[\\s\\S]*?</${TAGS}>`, 'gi'), '');
-  t = t.replace(new RegExp(`</?${TAGS}[^>]*>`, 'gi'), '');
+  t = t.replace(new RegExp(`<(${TAGS})\\b[^>]*>[\\s\\S]*?<\\/\\1\\s*>`, 'gi'), '');
+  // 14/09/2026: só tirar a tag órfã deixava o raciocínio inteiro à vista.
+  // Sem fechamento, descarta dali em diante; sem abertura, até o fechamento.
+  t = t.replace(new RegExp(`<${TAGS}\\b[^>]*>[\\s\\S]*$`, 'i'), '');
+  t = t.replace(new RegExp(`^[\\s\\S]*?<\\/${TAGS}\\s*>`, 'i'), '');
   return t.trim();
 }
 
