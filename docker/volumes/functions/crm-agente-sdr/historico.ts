@@ -4,11 +4,58 @@
 // conversation_history guarda o turno completo: texto, thinking, tool_use, tool_result).
 
 // deno-lint-ignore-file no-explicit-any
+import { contemBastidorEditorial } from './bastidorEditorial.ts';
+
 export type Msg = { role: 'user' | 'assistant'; content: string | any[] };
 
 export const MARCADOR_FOLLOWUP = '[INTERNAL_MARKER_FOLLOWUP_AUTO_IGNORE]';
 export const MARCADOR_ATENDIMENTO_HUMANO = '[ATENDIMENTO_HUMANO]';
 export const INICIO_HISTORICO_HUMANO = '[CONTEXTO DO ATENDIMENTO — início do histórico disponível; não é mensagem do lead. Os registros [ATENDIMENTO_HUMANO] a seguir são falas de vendedores, não respostas do lead.]';
+
+/** 15/09/2026, Márcio: um relatório publicado não pode ensinar o próximo turno
+ * a repetir o vazamento. Filtra só a projeção de leitura, preservando o registro
+ * original para auditoria, a autoria humana e os pares/assinaturas de ferramentas. */
+export function filtrarBastidorDoHistorico(brutas: readonly Msg[]): Msg[] {
+  const textoHumano = (texto: string) => texto.trimStart().startsWith(MARCADOR_ATENDIMENTO_HUMANO);
+  const textosDe = (m: Msg): string[] => typeof m.content === 'string' ? [m.content]
+    : Array.isArray(m.content) ? m.content.filter((b) => b?.type === 'text' && typeof b.text === 'string').map((b) => b.text) : [];
+  const textoDaIa = (m: Msg) => textosDe(m).filter((t) => !textoHumano(t)).join('\n');
+  const semTextoDaIa = (m: Msg): Msg[] => {
+    if (typeof m.content === 'string') return textoHumano(m.content) ? [m] : [];
+    if (!Array.isArray(m.content)) return [m];
+    const preservados = m.content.filter((b) => b?.type !== 'text' || (typeof b.text === 'string' && textoHumano(b.text)));
+    // Sem ação ou fala humana, não deixar só pensamento da resposta rejeitada.
+    // Com tool_use, conserva os blocos nativos assinados intactos.
+    if (!preservados.some((b) => b?.type === 'tool_use' || b?.type === 'text')) return [];
+    return [{ ...m, content: preservados }];
+  };
+  const limpas: Msg[] = [];
+  let sequenciaIa: Msg[] = [];
+  const concluirSequencia = () => {
+    // O webchat também persiste balões em mensagens separadas. O cabeçalho e
+    // a explicação precisam ser julgados juntos antes de qualquer fusão de roles.
+    const rejeitada = contemBastidorEditorial(sequenciaIa.map(textoDaIa).join('\n'));
+    limpas.push(...(rejeitada ? sequenciaIa.flatMap(semTextoDaIa) : sequenciaIa));
+    sequenciaIa = [];
+  };
+  for (const m of brutas) {
+    if (!m) continue;
+    const temHumano = m.role === 'assistant' && textosDe(m).some(textoHumano);
+    if (m.role !== 'assistant' || temHumano) {
+      concluirSequencia();
+      // Humanas são uma fronteira de autoria. Quando compartilham um array com
+      // texto de IA, somente esse texto pode ser retirado, nunca a fala humana.
+      limpas.push(...(temHumano && contemBastidorEditorial(textoDaIa(m)) ? semTextoDaIa(m) : [m]));
+    } else if (contemBastidorEditorial(textoDaIa(m))) {
+      // Quando uma mensagem já é identificável sozinha, não arrastar falas
+      // legítimas adjacentes para o descarte (ex.: próxima pergunta do atendente).
+      concluirSequencia();
+      limpas.push(...semTextoDaIa(m));
+    } else sequenciaIa.push(m);
+  }
+  concluirSequencia();
+  return limpas;
+}
 
 export async function carregarHistorico(supabase: any, remotejid: string): Promise<Msg[]> {
   // 08/09/2026: o PostgREST corta em 1.000 linhas sem erro. Com a memória humana,
@@ -33,7 +80,7 @@ export async function carregarHistorico(supabase: any, remotejid: string): Promi
       const mensagem = linha.conversation_history;
       if (mensagem?.role) historico.push(mensagem);
     }
-    if (linhas.length < tamanhoPagina) return historico;
+    if (linhas.length < tamanhoPagina) return filtrarBastidorDoHistorico(historico);
     ultimoId = linhas[linhas.length - 1].id;
   }
 }
@@ -52,7 +99,7 @@ export async function gravarMensagem(supabase: any, remotejid: string, msg: Msg)
 // garante primeira mensagem user e última mensagem user (sem prefill).
 export function limparParaRouter(brutas: Msg[]): Msg[] {
   const norm: { role: string; content: string }[] = [];
-  for (const m of brutas) {
+  for (const m of filtrarBastidorDoHistorico(brutas)) {
     if (!m || !m.role) continue;
     let texto = '';
     if (typeof m.content === 'string') {
@@ -92,6 +139,7 @@ export function limparParaRouter(brutas: Msg[]): Msg[] {
 // texto; tool_results soltos são reposicionados logo após seu tool_use; turnos
 // consecutivos do mesmo role são fundidos (tool_results primeiro no bloco).
 export function sanitizarHistorico(brutas: Msg[]): Msg[] {
+  brutas = filtrarBastidorDoHistorico(brutas);
   // Thinking de turnos ANTIGOS sai do replay: a API só exige os blocos de thinking no
   // turno assistant da cadeia de tools ATIVA (o último). Os antigos ENVENENAM o contexto
   // — thinking de dias atrás afirmando "Today is Thursday July 16" fez o agente insistir

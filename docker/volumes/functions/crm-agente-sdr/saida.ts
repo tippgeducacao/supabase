@@ -7,6 +7,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { CHUNKING_SYSTEM } from './prompts.ts';
 import type { CtxConversa } from './tools.ts';
+import { contemArtefatoAntml, contemAvaliacaoInterna } from './bastidorEditorial.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
 const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
@@ -56,7 +57,7 @@ export const RE_TAG_RACIOCINIO = /<\/?(?:antml:)?(?:thinking|thought|thoughts|sc
 const TAGS_RACIOCINIO = '(?:antml:)?(?:thinking|thoughts|thought|scratchpad|reasoning|reflection|analysis)';
 
 export function contemRaciocinioVazado(texto: string): boolean {
-  return RE_TAG_RACIOCINIO.test(texto ?? '');
+  return contemArtefatoAntml(texto) || RE_TAG_RACIOCINIO.test(texto ?? '');
 }
 
 export function removerRaciocinioVazado(texto: string): string {
@@ -265,7 +266,7 @@ const trechoEhMeta = (trecho: string): boolean => {
 };
 
 export function contemMeta(texto: string): boolean {
-  return trechosDe(texto).some(trechoEhMeta);
+  return contemAvaliacaoInterna(texto) || trechosDe(texto).some(trechoEhMeta);
 }
 
 // Remove o TRECHO que é relatório (grão do removerRaciocinioVazado): na maioria
@@ -298,6 +299,10 @@ export function removerLinhasMeta(texto: string): string {
 //   !                          → ponto
 // Hífen DENTRO de palavra (pós-graduação, segunda-feira) é preservado.
 export function humanizarTexto(texto: string): string {
+  // Márcio (15/09): </antml> isolado não delimita onde termina o bastidor.
+  // Rejeitar tudo antes do removedor evita resgatar uma avaliação como fala.
+  // Pares completos antml:thinking continuam com a regra anterior, abaixo.
+  if (contemArtefatoAntml(texto)) return '';
   let t = removerRaciocinioVazado(texto);
   // Bastidor sem delimitador torna o texto inteiro ambíguo: uma citação dentro
   // da análise pode parecer fala ao cliente. Regerar a mensagem é seguro;
@@ -431,7 +436,7 @@ export async function enviarResposta(
   pausada?: () => Promise<boolean>,
 ): Promise<void> {
   const textoLimpo = humanizarTexto(texto);
-  const raciocinioRemovido = RE_TAG_RACIOCINIO.test(texto);
+  const raciocinioRemovido = contemRaciocinioVazado(texto);
   const metaRemovida = contemMeta(texto);
   // Nada sobrou pro lead: ou era só raciocínio (<thinking> truncado por
   // max_tokens), ou era só relatório ao sistema ("sem nova mensagem do lead").
@@ -439,7 +444,9 @@ export async function enviarResposta(
   if (!textoLimpo) {
     tel?.registrar(metaRemovida && !raciocinioRemovido ? 'meta_descartada' : 'raciocinio_removido', {
       restou_vazio: true,
-      original: texto.length > 600 ? texto.slice(0, 600) + '…' : texto,
+      tamanho_original: texto.length,
+      artefato_antml: contemArtefatoAntml(texto) || undefined,
+      avaliacao_interna: contemAvaliacaoInterna(texto) || undefined,
     });
     return;
   }

@@ -6,7 +6,7 @@ import { INSTRUCAO_MEMORIA_HUMANA } from './memoriaHumana.ts';
 import { CATALOGOS_SPIN } from './spinCatalogos.ts';
 import { PROMPT_FOLLOWUP_SPIN } from './spinPrompt.ts';
 import { normalizarSpin, recuperarScoresSpin, selecionarSpin } from './spinRecuperacao.ts';
-import { MARCADOR_FOLLOWUP, type Msg } from './historico.ts';
+import { filtrarBastidorDoHistorico, MARCADOR_FOLLOWUP, type Msg } from './historico.ts';
 import { montarContextoTemporal } from './contexto.ts';
 import type { Telemetria } from './eventos.ts';
 
@@ -21,7 +21,7 @@ export type ResultadoSpin = {
 type DepsSpin = { modelo?: typeof chamarAnthropic; recuperar?: typeof recuperarScoresSpin };
 
 export function memoriaSpin(history: Msg[]): Msg[] {
-  return history.map(m => {
+  return filtrarBastidorDoHistorico(history).map(m => {
     const texto = typeof m.content === 'string' ? m.content : (m.content ?? []).flatMap(b => {
       if (b.type === 'text') return [b.text];
       if (b.type === 'tool_use') return [JSON.stringify({ ferramenta: b.name, parametros: b.input })];

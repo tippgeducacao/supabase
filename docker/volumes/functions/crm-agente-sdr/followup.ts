@@ -30,6 +30,7 @@ import {
   atualizarLead,
   buscarLead,
   carregarHistorico,
+  filtrarBastidorDoHistorico,
   gravarMensagem,
   INICIO_HISTORICO_HUMANO,
   MARCADOR_ATENDIMENTO_HUMANO,
@@ -167,7 +168,7 @@ export function montarMensagensFollowup(history: Msg[], tentativaAtual: number, 
   // turnos recentes); o nº da tentativa é contado FORA, no histórico COMPLETO, e
   // injetado abaixo. ⚠️ Cap de 16 (medido 2026-07-27): o cap de 40 NÃO mordia —
   // conversa típica tem <40 turnos e o input seguia em ~7,8k/chamada.
-  history = history.slice(-16);
+  history = filtrarBastidorDoHistorico(history).slice(-16);
   const norm: { role: 'user' | 'assistant'; content: string }[] = [];
   for (const m of history) {
     if (!m || !m.role) continue;

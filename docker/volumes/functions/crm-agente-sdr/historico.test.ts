@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buscarLead,
   carregarHistorico,
+  filtrarBastidorDoHistorico,
   INICIO_HISTORICO_HUMANO,
   jidsDoTelefone,
   limparParaRouter,
@@ -9,6 +10,83 @@ import {
   sanitizarHistorico,
   type Msg,
 } from './historico';
+
+describe('bastidor editorial fora da memória do modelo', () => {
+  const relatorio = '**Success**\n**Explanation:** Correctly identifies that the conversation should remain silent.';
+  const vazamento = '</antml>*\n' + relatorio;
+
+  it('remove a fala contaminada do principal e router, conservando as perguntas do cliente', () => {
+    const origem: Msg[] = [
+      { role: 'user', content: 'Recebi uma mensagem estranha.' },
+      { role: 'assistant', content: vazamento },
+      { role: 'user', content: 'Você pode explicar?' },
+    ];
+    const antes = structuredClone(origem);
+    for (const replay of [filtrarBastidorDoHistorico(origem), sanitizarHistorico(origem), limparParaRouter(origem)]) {
+      expect(JSON.stringify(replay)).not.toContain('Explanation');
+      expect(JSON.stringify(replay)).toContain('Você pode explicar?');
+    }
+    expect(origem).toEqual(antes);
+  });
+
+  it('preserva a citação feita pelo cliente e pelo vendedor humano com suas autorias', () => {
+    const origem: Msg[] = [
+      { role: 'user', content: 'Você me enviou: ' + vazamento },
+      { role: 'assistant', content: '[ATENDIMENTO_HUMANO] Vou conferir o erro: ' + vazamento },
+      { role: 'assistant', content: [{ type: 'text', text: '[ATENDIMENTO_HUMANO] Correção do atendimento.' }] },
+    ];
+    expect(filtrarBastidorDoHistorico(origem)).toEqual(origem);
+  });
+
+  it('reconhece avaliação dividida em blocos sem mexer no par de tools ou assinatura ativa', () => {
+    const pensamento = { type: 'thinking', thinking: 'privado', signature: 'assinatura-imutavel' };
+    const ferramenta = { type: 'tool_use', id: 'consulta-1', name: 'consulta_disponibilidade', input: {} };
+    const retorno = { type: 'tool_result', tool_use_id: 'consulta-1', content: '15h disponível' };
+    const origem: Msg[] = [
+      { role: 'user', content: 'Pode verificar o horário?' },
+      { role: 'assistant', content: [pensamento, { type: 'text', text: '**Success**' }, ferramenta,
+        { type: 'text', text: '**Explanation:** The action was completed correctly.' }] },
+      { role: 'user', content: [retorno] },
+    ];
+    expect(sanitizarHistorico(origem)).toEqual([
+      origem[0], { role: 'assistant', content: [pensamento, ferramenta] }, origem[2],
+    ]);
+    expect(origem[1].content).toHaveLength(4);
+  });
+
+  it('não conserva pensamento sozinho da resposta textual rejeitada', () => {
+    expect(filtrarBastidorDoHistorico([{ role: 'assistant', content: [
+      { type: 'thinking', thinking: 'privado', signature: 'assinatura' }, { type: 'text', text: vazamento },
+    ] }])).toEqual([]);
+  });
+
+  it('retira avaliação repartida entre balões antes de os normalizadores reunirem as mensagens', () => {
+    const origem: Msg[] = [
+      { role: 'user', content: 'Olá' },
+      { role: 'assistant', content: '**Success**' },
+      { role: 'assistant', content: [{ type: 'text', text: '**Explanation:** The action was completed correctly.' }] },
+      { role: 'user', content: 'Pode continuar?' },
+    ];
+    expect(filtrarBastidorDoHistorico(origem)).toEqual([origem[0], origem[3]]);
+    for (const replay of [sanitizarHistorico(origem), limparParaRouter(origem)]) {
+      expect(JSON.stringify(replay)).not.toMatch(/Success|Explanation/);
+      expect(JSON.stringify(replay)).toContain('Pode continuar?');
+    }
+  });
+
+  it('não reúne falas da IA através de uma intervenção humana ou fala do cliente', () => {
+    for (const fronteira of [
+      { role: 'assistant' as const, content: '[ATENDIMENTO_HUMANO] O tema do curso foi alterado.' },
+      { role: 'user' as const, content: 'Agora quero falar de outro assunto.' },
+    ]) {
+      const origem: Msg[] = [
+        { role: 'assistant', content: 'Success' }, fronteira,
+        { role: 'assistant', content: 'Explanation: este é o título do documento pedido.' },
+      ];
+      expect(filtrarBastidorDoHistorico(origem)).toEqual(origem);
+    }
+  });
+});
 
 // Supabase de mentira: guarda o filtro que recebeu e devolve as linhas combinadas.
 function supabaseFake(linhas: Array<Record<string, unknown>>) {
@@ -183,6 +261,15 @@ describe('carregarHistorico paginado', () => {
     const { client, consultas } = historicoPaginadoFake(criarLinhas(1000));
     expect(await carregarHistorico(client, remoto)).toHaveLength(1000);
     expect(consultas).toHaveLength(2);
+  });
+
+  it('filtra só a projeção do banco sem alterar os registros de auditoria', async () => {
+    const linhas = criarLinhas(3);
+    linhas[1].conversation_history = { role: 'assistant', content: '</antml parameter>' };
+    const antes = structuredClone(linhas);
+    const { client } = historicoPaginadoFake(linhas);
+    expect(await carregarHistorico(client, remoto)).toEqual([linhas[0].conversation_history, linhas[2].conversation_history]);
+    expect(linhas).toEqual(antes);
   });
 });
 
