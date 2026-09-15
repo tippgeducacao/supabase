@@ -3,6 +3,7 @@ import * as jspdfMod from "jspdf";
 import { autoTable } from "jspdf-autotable";
 import {
   eadComoAulas,
+  listaDeAulasDoModulo,
   marcaDoCurso,
   nomeArquivoAscii,
   nomeArquivoWhatsapp,
@@ -111,11 +112,31 @@ describe("renderCronogramaAlunoPdf (edge)", () => {
     expect(texto).not.toContain("19:00 às 22:00");
   });
 
-  it("módulo gravado (EAD) sai no mês, sem dia, com a ementa das aulas", () => {
+  it("módulo gravado (EAD) sai no mês, sem dia, com as aulas uma por linha", () => {
     const { texto } = gerar();
     expect(texto).toContain("No mês");
-    expect(texto).toContain("Módulo 03 · Bem-estar animal");
-    expect(texto).toContain("Módulo gravado (EAD). Aulas: Etologia; Manejo.");
+    // só o NOME do módulo: a banda do mês já se chama "MÓDULO <MÊS>" (diretor, 15/09/2026)
+    expect(texto).toContain("Bem-estar animal");
+    expect(texto).not.toContain("Módulo 03 ·");
+    expect(texto).toContain("Módulo gravado (EAD),");
+    // uma aula por linha, numerada, e nunca mais o parágrafo com ";"
+    expect(texto).toContain("Aula 1 - Etologia");
+    expect(texto).toContain("Aula 2 - Manejo");
+    expect(texto).not.toContain("Etologia; Manejo");
+  });
+
+  it("não numera duas vezes a aula que já veio numerada do cadastro", () => {
+    expect(listaDeAulasDoModulo(["Aula 1 - História da Cannabis", "Aula 2 - Legislação"]))
+      .toBe("Aula 1 - História da Cannabis\nAula 2 - Legislação");
+    expect(listaDeAulasDoModulo(["Etologia", "  Manejo  "])).toBe("Aula 1 - Etologia\nAula 2 - Manejo");
+    expect(listaDeAulasDoModulo([" ", null as unknown as string])).toBe("");
+    expect(listaDeAulasDoModulo(null)).toBe("");
+  });
+
+  it("módulo sem nome cadastrado ainda identifica o módulo pelo número", () => {
+    const [linha] = eadComoAulas([{ modulo_numero: 7, modulo_nome: null, data_liberacao_planejada: "2026-12-01", aulas: null }]);
+    expect(linha.titulo).toBe("Módulo 07");
+    expect(linha.ementa).toBe("Módulo gravado (EAD), liberado na plataforma neste mês.");
   });
 
   it("práticos: bloco próprio no fim, tarja de semipresencial, praça por cidade e sem sessão anterior ao início", () => {

@@ -104,20 +104,44 @@ export function marcaDoCurso(marca: string | null | undefined): Marca {
 }
 
 /**
+ * As aulas de um módulo gravado, UMA POR LINHA ("Aula 1 - ...", "Aula 2 - ..."). Antes saíam num
+ * parágrafo só, separadas por ";", e ninguém achava nada dentro da célula (diretor, 15/09/2026).
+ * A RPC já devolve os títulos ordenados por `aula_numero`: curso que cadastrou o título com o
+ * número na frente ("Aula 3 - Farmacodinâmica") sai como está, e curso que cadastrou só o assunto
+ * ("Etologia") ganha o "Aula N" pela posição. Nunca numera duas vezes.
+ */
+export function listaDeAulasDoModulo(aulas: string[] | null | undefined): string {
+  return (aulas ?? [])
+    .map((t) => String(t ?? "").replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .map((t, i) => (/^aula\s*\d/i.test(t) ? t : `Aula ${i + 1} - ${t}`))
+    .join("\n");
+}
+
+/**
  * Módulos gravados (EAD) como linhas do cronograma: 1 linha por módulo, no mês de liberação (o
  * PDF agrupa por mês e escreve "No mês" em vez do dia). Mesmo mapeamento dos dois chamadores do
  * front (TurmaDetalhePage e BlocoTurmas), sem o travessão na ementa.
+ *
+ * A coluna AULA traz só o NOME do módulo: o "Módulo 03 ·" na frente brigava com a banda do mês,
+ * que já se chama "MÓDULO SETEMBRO 2026", e o aluno lia duas numerações de módulo diferentes na
+ * mesma tabela (diretor, 15/09/2026). Número sem nome cadastrado ainda vira "Módulo 03", que é
+ * melhor do que célula vazia.
  */
 export function eadComoAulas(rows: EadCronogramaRow[] | null | undefined): CronogramaAlunoAula[] {
-  return (rows ?? []).map((r) => ({
-    data: r.data_liberacao_planejada,
-    horario: "Plataforma",
-    titulo: `Módulo ${String(r.modulo_numero ?? "").padStart(2, "0")} · ${r.modulo_nome ?? ""}`.trim(),
-    ementa: Array.isArray(r.aulas) && r.aulas.length
-      ? `Módulo gravado (EAD). Aulas: ${r.aulas.join("; ")}.`
-      : "Módulo gravado (EAD), disponibilizado na plataforma neste mês.",
-    tipo_aula: "gravado",
-  }));
+  return (rows ?? []).map((r) => {
+    const numero = r.modulo_numero == null ? "" : String(r.modulo_numero).padStart(2, "0");
+    const lista = listaDeAulasDoModulo(r.aulas);
+    return {
+      data: r.data_liberacao_planejada,
+      horario: "Plataforma",
+      titulo: String(r.modulo_nome ?? "").trim() || (numero ? `Módulo ${numero}` : "Módulo gravado"),
+      ementa: lista
+        ? `Módulo gravado (EAD), liberado na plataforma neste mês:\n${lista}`
+        : "Módulo gravado (EAD), liberado na plataforma neste mês.",
+      tipo_aula: "gravado",
+    };
+  });
 }
 
 /**
