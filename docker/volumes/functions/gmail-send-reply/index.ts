@@ -1,6 +1,8 @@
 // gmail-send-reply: responde a uma thread pelo Gmail da caixa
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { ensureToken, base64UrlEncode, validateEmailList, friendlyGmailError, isTokenRevokedError, markCaixaTokenRevoked, isScopeInsufficientError, markCaixaEscopoInsuficiente, encodeHeaderUtf8, encodeDisplayName } from '../_shared/gmail.ts';
+import { headersDeMensagemGmail } from '../_shared/emailMessageId.ts';
+import { resolverHeadersRespostaGmail } from './threadHeaders.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -42,7 +44,8 @@ Deno.serve(async (req) => {
       .from('email_mensagens')
       .select('*')
       .eq('thread_id', thread_id)
-      .order('enviado_em', { ascending: false })
+      .order('enviado_em', { ascending: false, nullsFirst: false })
+      .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle();
 
@@ -68,10 +71,31 @@ Deno.serve(async (req) => {
     cc = ccCheck.ok;
     if (!to.length) throw new Error('Sem destinatário válido para responder. Informe o "Para" manualmente.');
 
-    const inReplyTo = lastMsg?.in_reply_to_format || (lastMsg ? `<${lastMsg.gmail_message_id}@mail.gmail.com>` : null);
-    const references = lastMsg?.references_header
-      ? `${lastMsg.references_header} ${inReplyTo || ''}`.trim()
-      : (inReplyTo || '');
+    let token: string;
+    try {
+      token = await ensureToken(admin, thread.caixa.integ);
+    } catch (e) {
+      if (isTokenRevokedError(e)) await markCaixaTokenRevoked(admin, thread.caixa.id);
+      throw e;
+    }
+    const buscarMetadata = async (gmailId: string) => {
+      const params = new URLSearchParams({ format: 'metadata' });
+      params.append('metadataHeaders', 'Message-ID');
+      params.append('metadataHeaders', 'References');
+      const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(gmailId)}?${params}`, {
+        headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) throw new Error('Não foi possível consultar o cabeçalho original no Gmail.');
+      const data = await res.json();
+      return data.payload;
+    };
+    const { inReplyTo, references } = await resolverHeadersRespostaGmail(lastMsg, {
+      buscar: buscarMetadata,
+      salvar: async (id, valores) => {
+        const { error } = await admin.from('email_mensagens').update(valores).eq('id', id).eq('thread_id', thread_id);
+        if (error) throw new Error('Não foi possível registrar o cabeçalho da mensagem original.');
+      },
+    });
 
     const atts = Array.isArray(attachments) ? attachments : [];
     const baseHeaders = [
@@ -81,7 +105,7 @@ Deno.serve(async (req) => {
       `Subject: ${encodeHeaderUtf8(subj)}`,
       'MIME-Version: 1.0',
       inReplyTo ? `In-Reply-To: ${inReplyTo}` : null,
-      references ? `References: ${references}` : null,
+      references ? `References: ${references.replace(/ /g, '\r\n ')}` : null,
     ].filter(Boolean);
 
     let raw: string;
@@ -108,14 +132,6 @@ Deno.serve(async (req) => {
     }
     const rawEncoded = base64UrlEncode(raw);
 
-    let token: string;
-    try {
-      token = await ensureToken(admin, thread.caixa.integ);
-    } catch (e) {
-      if (isTokenRevokedError(e)) await markCaixaTokenRevoked(admin, thread.caixa.id);
-      throw e;
-    }
-
     const sendRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -130,10 +146,14 @@ Deno.serve(async (req) => {
       throw sendErr;
     }
 
-    // Insere localmente
-    await admin.from('email_mensagens').insert({
+    // Registra imediatamente o aceite. Metadata não pode atrasar esta resposta
+    // e provocar timeout/reenvio de um e-mail que o Google já recebeu.
+    const { error: erroRegistro } = await admin.from('email_mensagens').insert({
       thread_id,
       gmail_message_id: sendJson.id,
+      message_id: null,
+      in_reply_to: inReplyTo.slice(1, -1),
+      references_header: references,
       from_email: fromEmail,
       from_nome: fromNome,
       to_emails: to.map(e => ({ email: e, name: '' })),
@@ -146,6 +166,7 @@ Deno.serve(async (req) => {
       enviado_por_user_id: user.id,
       labels: ['SENT'],
     });
+    if (erroRegistro) console.warn('gmail-send-reply: envio aceito; registro local aguarda sincronizacao');
 
     const nowIso = new Date().toISOString();
     await admin.from('email_threads').update({
@@ -155,7 +176,20 @@ Deno.serve(async (req) => {
       updated_at: nowIso,
     }).eq('id', thread_id);
 
-    return new Response(JSON.stringify({ success: true, gmail_id: sendJson.id }), {
+    const runtime = (globalThis as unknown as { EdgeRuntime?: { waitUntil: (promessa: Promise<unknown>) => void } }).EdgeRuntime;
+    if (runtime) runtime.waitUntil((async () => {
+      try {
+        const messageId = headersDeMensagemGmail(await buscarMetadata(sendJson.id)).messageId;
+        if (!messageId) return;
+        const { error } = await admin.from('email_mensagens').update({ message_id: messageId })
+          .eq('gmail_message_id', sendJson.id).eq('thread_id', thread_id);
+        if (error) console.warn('gmail-send-reply: Message-ID pendente de sincronizacao');
+      } catch { console.warn('gmail-send-reply: Message-ID pendente de sincronizacao'); }
+    })());
+
+    return new Response(JSON.stringify({ success: true, gmail_id: sendJson.id,
+      ...(erroRegistro ? { sincronizacao_pendente: true } : {}),
+    }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   } catch (e) {

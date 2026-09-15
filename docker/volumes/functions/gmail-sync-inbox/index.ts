@@ -17,6 +17,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { ensureToken, parsePayload, parseHeaders, parseAddress, parseAddressList, isTokenRevokedError, markCaixaTokenRevoked, markCaixaTransient, isScopeInsufficientError, markCaixaEscopoInsuficiente } from '../_shared/gmail.ts';
 import { diferencaPorLinha, emLotes, LOTE_FILTRO_IN } from '../_shared/emailReconciliacao.ts';
+import { normalizarMessageId } from '../_shared/emailMessageId.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -342,7 +343,7 @@ async function syncCaixa(admin: any, caixaId: string, forceInitial: boolean, soz
     const toList = parseAddressList(headers['to']);
     const ccList = parseAddressList(headers['cc']);
     const subject = headers['subject'] || '(sem assunto)';
-    const messageIdHeader = headers['message-id'] || null;
+    const messageIdHeader = normalizarMessageId(headers['message-id']);
     const inReplyTo = headers['in-reply-to'] || null;
     const refs = headers['references'] || null;
     const dateHeader = headers['date'] ? new Date(headers['date']).toISOString() : new Date(parseInt(msg.internalDate || '0')).toISOString();
@@ -419,6 +420,7 @@ async function syncCaixa(admin: any, caixaId: string, forceInitial: boolean, soz
       .insert({
         thread_id: threadId,
         gmail_message_id: mid,
+        message_id: messageIdHeader,
         from_email: fromP.email,
         from_nome: fromP.name,
         to_emails: toList,
