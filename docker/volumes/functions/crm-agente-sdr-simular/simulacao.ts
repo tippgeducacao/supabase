@@ -9,7 +9,11 @@ import { comPresenteNaDespedida } from '../crm-agente-sdr/escolaGratuita.ts';
 
 export const MAX_TURNOS_SIMULACAO = 100;
 export const MAX_CARACTERES_SIMULACAO = 200_000;
-export type Persona = 'validacao' | 'qualificador' | 'campanha_direta';
+import type { AulaParaPrompt } from '../crm-agente-sdr/prompts-aula.ts';
+
+// 16/09/2026: 'aula' = persona da aula gratuita (PRD — Persona por disparo). No harness
+// ela substitui a abertura como a campanha direta; o fechamento segue com o qualificador.
+export type Persona = 'validacao' | 'qualificador' | 'campanha_direta' | 'aula';
 export type AgenteRouter = 'agente_validacao' | 'agente_qualificador';
 export type MensagemTextual = { role: 'user' | 'assistant'; content: string };
 /** 14/09/2026: o lead responde por OUTRO número da PPGVET (trocaDeNumero.ts). Só o 1º turno recebe a nota. */
@@ -39,6 +43,8 @@ export type EntradaSimulacao = {
   esta_na_escola: boolean;
   prompt_extra: string;
   troca_de_numero: TrocaDeNumeroSimulada | null;
+  /** Dados da aula do convite (persona 'aula'); o "quando ocorre" é calculado pelo relógio real. */
+  aula: AulaParaPrompt | null;
 };
 
 export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
@@ -48,7 +54,25 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
   const modo = body.modo ?? 'principal';
   if (modo !== 'principal' && modo !== 'followup') throw new Error('modo inválido');
   const persona = body.persona ?? 'campanha_direta';
-  if (typeof persona !== 'string' || !['validacao', 'qualificador', 'campanha_direta'].includes(persona)) throw new Error('persona inválida');
+  if (typeof persona !== 'string' || !['validacao', 'qualificador', 'campanha_direta', 'aula'].includes(persona)) throw new Error('persona inválida');
+  let aulaSimulada: AulaParaPrompt | null = null;
+  if (body.aula !== undefined && body.aula !== null) {
+    const a = body.aula as Record<string, unknown>;
+    if (!a || typeof a !== 'object' || Array.isArray(a)) throw new Error('aula deve ser um objeto');
+    if (typeof a.titulo !== 'string' || !a.titulo.trim()) throw new Error('aula.titulo deve conter texto não vazio');
+    if (typeof a.inicio_em !== 'string' || Number.isNaN(new Date(a.inicio_em).getTime())) throw new Error('aula.inicio_em deve ser uma data ISO válida');
+    const opcional = (v: unknown, campo: string): string | null => {
+      if (v === undefined || v === null) return null;
+      if (typeof v !== 'string') throw new Error(`aula.${campo} deve ser texto`);
+      return v;
+    };
+    aulaSimulada = {
+      titulo: a.titulo, inicio_em: a.inicio_em, tema: opcional(a.tema, 'tema'), link: opcional(a.link, 'link'),
+      certificado_instrucoes: opcional(a.certificado_instrucoes, 'certificado_instrucoes'),
+      monitor_nome: opcional(a.monitor_nome, 'monitor_nome'), curso_nome: opcional(a.curso_nome, 'curso_nome'),
+    };
+  }
+  if (persona === 'aula' && !aulaSimulada) throw new Error('persona aula exige o objeto aula');
   const mensagens = body.mensagens ?? (modo === 'followup' ? [] : undefined);
   if (!Array.isArray(mensagens) || (modo === 'principal' && !mensagens.length)) throw new Error('mensagens[] obrigatório');
   if (body.historico_inicial !== undefined && !Array.isArray(body.historico_inicial)) throw new Error('historico_inicial deve ser um array');
@@ -117,6 +141,7 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
     esta_na_escola: body.esta_na_escola === true,
     prompt_extra: texto(body.prompt_extra, 'prompt_extra').trim(),
     troca_de_numero: trocaDeNumero,
+    aula: aulaSimulada,
   };
 }
 

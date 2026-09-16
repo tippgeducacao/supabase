@@ -16,6 +16,7 @@ import { pausaVigente } from './pausa.ts';
 import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO } from './prompts.ts';
 import { AGENTE_RECONTATO, montarDossieRecontato } from './prompts-recontato.ts';
 import { AGENTE_CAMPANHA_DIRETA } from './prompts-campanha-direta.ts';
+import { AGENTE_AULA, type AulaParaPrompt, montarVarsAula } from './prompts-aula.ts';
 import { comBlocoDaEscola, comLinkPedido, comPresenteNaDespedida, jaTemOPresente, LINK_ESCOLA_GRATUITA } from './escolaGratuita.ts';
 import { respostaDoEncerramento, toolConcluida, type Encerramento } from './encerramento.ts';
 import { comContinuidadeWebchat } from './continuidadeWebchat.ts';
@@ -290,11 +291,43 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
 
   // Contexto do lead + temporal (mesma montagem do node "normalizador").
   const formacaoNormalizada = encontrarFormacao(lead?.formacao_academica ?? '');
-  const vars = {
+  const vars: Record<string, string> = {
     nome: extrairPrimeiroNome(lead?.nome),
     curso_interesse_original: lead?.curso_interesse_original ?? '',
     pergunta_formacao: montarPerguntaFormacao(formacaoNormalizada),
   };
+  // PERSONA AULA (16/09/2026, PRD — Persona por disparo): o disparo grava `contexto_campanha`
+  // no lead do SDR. Com persona 'aula' e aula cadastrada em crm_aulas, a ABERTURA usa o
+  // prompt da aula com os dados dela (quando ocorre, link, pós vinculada); o fechamento
+  // segue com o qualificador, pelo mesmo router e ratchet. Lead sem contexto = tudo como antes.
+  // Falha ao carregar a aula NÃO cala o agente: cai na persona padrão e registra o motivo.
+  const campanha = (lead?.contexto_campanha ?? null) as { persona?: string; aula_id?: string } | null;
+  let aulaDaCampanha: AulaParaPrompt | null = null;
+  if (campanha?.persona === 'aula' && campanha.aula_id) {
+    try {
+      const { data, error } = await supabase
+        .from('crm_aulas')
+        .select('titulo, tema, inicio_em, link, certificado_instrucoes, monitor_nome, cursos(nome)')
+        .eq('id', campanha.aula_id)
+        .eq('ativo', true)
+        .maybeSingle();
+      if (error) throw new Error(error.message);
+      if (data) {
+        aulaDaCampanha = {
+          titulo: data.titulo, tema: data.tema ?? null, inicio_em: data.inicio_em, link: data.link ?? null,
+          certificado_instrucoes: data.certificado_instrucoes ?? null, monitor_nome: data.monitor_nome ?? null,
+          curso_nome: data.cursos?.nome ?? null,
+        };
+      } else {
+        tel.registrar('persona_aula_sem_aula', { aula_id: campanha.aula_id });
+      }
+    } catch (e) {
+      console.error('[crm-agente-sdr] aula da campanha não carregou; persona padrão:', e);
+      tel.registrar('persona_aula_sem_aula', { aula_id: campanha.aula_id, erro: String((e as Error)?.message ?? e) });
+    }
+  }
+  // Na aula, a pós do lead é a pós VINCULADA à aula (vazia quando a aula não tem pós).
+  if (aulaDaCampanha) Object.assign(vars, montarVarsAula(aulaDaCampanha));
   // O nome volta AQUI, a cada turno, e não só no cabeçalho do prompt (ver notaDoNome).
   const contextoTemporal = montarContextoTemporal() + notaDoNome(vars.nome) + notaDoCurso(vars.curso_interesse_original);
 
@@ -309,9 +342,13 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   // zerava a persona pra 'qualificador' — o número de anúncio rodava o prompt de validação
   // padrão, sem pedir nome/formação (visto em 2026-07-25). É a MESMA armadilha que já
   // tinha derrubado a conta/lead/oportunidade do ctx (caso Ananda).
+  // 'aula' (16/09/2026) = lead com contexto_campanha de aula e aula carregada acima: mesma
+  // dupla validação×qualificador da validação, só que a abertura usa o prompt da aula.
+  // O no-show (recontato) continua vencendo: é um processo em andamento, com dossiê.
   const personaDoNumero = doUltimoCom('agente_ia_persona');
   const persona = lead?.modo_recontato === true || personaDoNumero === 'recontato'
     ? 'recontato'
+    : aulaDaCampanha ? 'aula'
     : personaDoNumero === 'campanha_direta' ? 'campanha_direta' : 'qualificador';
   const ehCampanha = persona === 'campanha_direta';
   // Só o modo 'ativo' muda comportamento; 'sombra' registra o que faria. Recontato tem missão
@@ -422,11 +459,14 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       persona,
     }, Date.now() - inicioRouter);
     // (campanha_direta não cai aqui — tem branch próprio, sem router na abertura)
+    // Persona aula: a abertura é o prompt da aula com as tools de `agente_aula` (as mesmas
+    // 9 da validação); o fechamento é o qualificador de sempre.
+    const abrirComAula = persona === 'aula' && agenteAtual !== 'agente_qualificador';
     promptAgente = renderPrompt(
-      agenteAtual === 'agente_qualificador' ? AGENTE_QUALIFICADOR : AGENTE_VALIDACAO,
+      agenteAtual === 'agente_qualificador' ? AGENTE_QUALIFICADOR : abrirComAula ? AGENTE_AULA : AGENTE_VALIDACAO,
       vars,
     );
-    tools = await carregarTools(supabase, agenteAtual);
+    tools = await carregarTools(supabase, abrirComAula ? 'agente_aula' : agenteAtual);
   }
   // PRESENTE DA ESCOLA (2026-08-05): conversa que acaba sem reunião leva o convite da
   // biblioteca gratuita junto da despedida. Apensado AQUI, no ponto único onde o prompt

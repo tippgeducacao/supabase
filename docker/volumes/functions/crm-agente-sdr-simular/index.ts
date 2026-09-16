@@ -18,6 +18,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3';
 import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO } from '../crm-agente-sdr/prompts.ts';
 import { AGENTE_CAMPANHA_DIRETA } from '../crm-agente-sdr/prompts-campanha-direta.ts';
+import { AGENTE_AULA, montarVarsAula } from '../crm-agente-sdr/prompts-aula.ts';
 import { carregarTools, chamarAgentePrincipal, chamarRouter, MODELO_AGENTE } from '../crm-agente-sdr/agente.ts';
 import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoCurso, notaDoNome, renderPrompt } from '../crm-agente-sdr/contexto.ts';
 import { comBlocoDaEscola, comPresenteEscola } from '../crm-agente-sdr/escolaGratuita.ts';
@@ -97,6 +98,12 @@ async function mockTool(nome: string, input: any, mocks: any): Promise<string> {
       if (input?.conteudo === 'valor') return JSON.stringify(montarRetornoInformacoes(true, {
         data: { curso: input?.curso_escolhido ?? null, valor_integral: 'R$ 4.200,00' },
       }, 'valor', 'harness-consulta-valor'));
+      // 16/09/2026, persona aula: aula sem pós manda o PORTFÓLIO da PPGVET (PRD —
+      // Persona por disparo). O executor real ainda não tem esse conteúdo; o mock
+      // devolve o contrato esperado para o ensaio não confundir portfólio com cronograma.
+      if (input?.conteudo === 'portfolio') {
+        return 'Portfólio da PPGVET (PDF com todas as pós) enviado ao lead no WhatsApp. Pergunte qual área chamou a atenção dele.';
+      }
       return `Cronograma enviado ao lead no WhatsApp (conteudo="${input?.conteudo ?? '?'}"). Valor integral: R$ 4.200,00.`;
     case 'verificar_compatibilidade_curso': {
       const m = mocks?.compatibilidade ?? 'aprovado';
@@ -247,7 +254,10 @@ Deno.serve(async (req) => {
   try {
     const resultado = await executarSimulacao(entrada, {
       prepararRodada: async (messages, turno) => {
+        // 16/09/2026: 'aula' abre com o prompt próprio e fecha com o qualificador (igual à
+        // campanha direta); o router é consultado como na validação.
         let agente = entrada.persona === 'campanha_direta' ? 'agente_campanha_direta'
+          : entrada.persona === 'aula' ? 'agente_aula'
           : entrada.persona === 'qualificador' ? 'agente_qualificador' : 'agente_validacao';
         // TROCA DE NÚMERO (14/09/2026): mesma nota e mesma exceção do ratchet da produção
         // (crm-agente-sdr/index.ts), só na 1ª rodada — depois o João já falou por este número.
@@ -281,16 +291,22 @@ Deno.serve(async (req) => {
             }
           }
           agenteAtual = anterior === 'agente_qualificador' && !ratchetIgnorado ? anterior : decidiu;
-          agente = campanha && agenteAtual === 'agente_validacao' ? 'agente_campanha_direta' : agenteAtual;
+          agente = campanha && agenteAtual === 'agente_validacao' ? 'agente_campanha_direta'
+            : entrada.persona === 'aula' && agenteAtual === 'agente_validacao' ? 'agente_aula' : agenteAtual;
           routers.push({ turno, anterior, decidiu, efetivo: agenteAtual, consultado: consultar, fallback,
             ...(notaTroca ? { troca_numero: true, ratchet_ignorado: ratchetIgnorado } : {}),
             ...(consultar ? { modelo: modeloRouter, usage: usoRouter } : {}) });
         }
         const promptBase = agente === 'agente_campanha_direta' ? AGENTE_CAMPANHA_DIRETA
+          : agente === 'agente_aula' ? AGENTE_AULA
           : agente === 'agente_qualificador' ? AGENTE_QUALIFICADOR : AGENTE_VALIDACAO;
+        // Persona aula: as vars da aula (quando ocorre, link, pós vinculada) vêm do objeto
+        // `aula` da entrada; o curso do lead é a pós vinculada, vazia quando a aula não tem pós.
+        const varsAula = entrada.aula ? montarVarsAula(entrada.aula) : {};
         const vars = {
+          ...varsAula,
           nome: extrairPrimeiroNome(estado.nome),
-          curso_interesse_original: entrada.curso,
+          curso_interesse_original: entrada.aula ? (varsAula.curso_interesse_original ?? '') : entrada.curso,
           pergunta_formacao: montarPerguntaFormacao(encontrarFormacao(estado.formacao)),
         };
         let promptAgente = renderPrompt(promptBase, vars);
@@ -299,7 +315,9 @@ Deno.serve(async (req) => {
         if (entrada.esta_na_escola) promptAgente = comBlocoDaEscola(promptAgente, true);
         else if (!entrada.sem_presente_escola) promptAgente = comPresenteEscola(promptAgente);
         if (entrada.prompt_extra) promptAgente += `\n\n${entrada.prompt_extra}`;
-        const agenteTools = entrada.agente_override || agente;
+        // agente_aula ainda não tem linha própria em lista_tools_claude: usa as tools da
+        // validação (que já incluem atualizar_dados_lead), como o PRD prevê.
+        const agenteTools = entrada.agente_override || (agente === 'agente_aula' ? 'agente_validacao' : agente);
         let tools = await toolsDe(agenteTools);
         if (entrada.usar_router && !entrada.agente_override && entrada.persona === 'campanha_direta' && agente === 'agente_qualificador') {
           const extras = (await toolsDe('agente_campanha_direta')).filter((t) => t?.name === 'atualizar_dados_lead');
