@@ -846,7 +846,9 @@ async function processarInbound(payload: any): Promise<void> {
     if (!(await lockClaim(remotejid))) return; // quem segura o lock drena o buffer
 
     try {
-      const delaySegundos = await carregarDelaySegundos();
+      // 16/09/2026: telefone da allowlist de teste (crm_agente_sdr_config.teste_telefones) roda
+      // SEM debounce, para o harness real não esperar 45 s por turno. Produção segue o config.
+      const delaySegundos = (await permitidoNoTeste(remotejid.replace(/\D/g, ''))) ? 0 : await carregarDelaySegundos();
       const renovar = lockRenovar(remotejid);
       // Drena até esvaziar: cada lote espera o silêncio do debounce antes de
       // processar; mensagens que chegarem durante a rodada entram na próxima.
