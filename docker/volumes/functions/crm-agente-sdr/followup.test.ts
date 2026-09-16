@@ -4,14 +4,12 @@ import { describe, expect, it, vi } from 'vitest';
 // chamar provedor de IA, banco ou WhatsApp para verificar a autoria do histórico.
 vi.mock('./agente.ts', () => ({ chamarAnthropic: vi.fn(), MODELO_AGENTE: 'modelo-teste' }));
 vi.mock('./saida.ts', () => ({ enviarResposta: vi.fn() }));
-vi.mock('./spinFollowup.ts', () => ({ gerarFollowupSpin: vi.fn(), reservarAbordagemSpin: vi.fn() }));
 vi.mock('./eventos.ts', () => ({ criarTelemetria: () => ({ rodadaId: 'teste-retorno', registrar: vi.fn() }), resumir: (valor: unknown) => valor }));
 
 import { montarMensagensFollowup, processarFollowupLead, retencaoPendente, retornoPendente } from './followup';
 import { INICIO_HISTORICO_HUMANO, MARCADOR_FOLLOWUP, type Msg } from './historico';
 import { mensagemPreparada } from './historicoEntradaPausa';
 import { chamarAnthropic } from './agente';
-import { gerarFollowupSpin } from './spinFollowup';
 import { enviarResposta } from './saida';
 
 describe('memória humana na janela de contexto do follow-up', () => {
@@ -120,7 +118,7 @@ describe('espera pela escolha de quando retomar o contato', () => {
     expect(retornoPendente([])).toBe(false);
   });
 
-  it('o worker silencia antes de clássico ou SPIN, sem consumir toque ou alterar o lead', async () => {
+  it('o worker silencia antes de gerar a retomada, sem consumir toque ou alterar o lead', async () => {
     vi.clearAllMocks();
     const lead = { remotejid: '5511999990001@s.whatsapp.net', iniciar_atendimento: true,
       followup_ativado: true, pausa_ia: false, timestamp_mensagem: new Date(Date.now() - 20 * 60000).toISOString() };
@@ -146,7 +144,6 @@ describe('espera pela escolha de quando retomar o contato', () => {
     };
     expect(await processarFollowupLead(banco, lead, 1)).toBe(false);
     expect(chamarAnthropic).not.toHaveBeenCalled();
-    expect(gerarFollowupSpin).not.toHaveBeenCalled();
     expect(enviarResposta).not.toHaveBeenCalled();
     expect(alterar).not.toHaveBeenCalled();
   });

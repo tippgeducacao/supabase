@@ -18,10 +18,16 @@
 // timestamp_mensagem): 15min · 1h · 2h · 4h · 7h · 12h · 23h. Todos DENTRO das
 // 24h da janela do Meta — texto livre fora disso a Meta rejeita (erro 131047),
 // é a esteira de template que assume.
+//
+// 16/09/2026: a geração SPIN por pós (spinFollowup.ts, de 11/09) foi RETIRADA — nas
+// fases de pendência ela repetia a mesma pergunta em todo toque (145 leads / 330
+// toques redundantes em 7 dias). O gerador voltou a ser só o clássico
+// (prompts-followup.ts). Ficaram do período: seleção via RPC
+// crm_sdr_followup_candidatos (filtro V2), o checkpoint `interrompido` e a contagem
+// de partes aceitas. Ver docs/IA e Copilotos.md.
 
 // deno-lint-ignore-file no-explicit-any
 import { FOLLOWUP_SYSTEM } from './prompts-followup.ts';
-import { gerarFollowupSpin, reservarAbordagemSpin } from './spinFollowup.ts';
 import { chamarAnthropic, MODELO_AGENTE } from './agente.ts';
 import { extrairPrimeiroNome, montarContextoTemporal } from './contexto.ts';
 import { INSTRUCAO_MEMORIA_HUMANA } from './memoriaHumana.ts';
@@ -252,7 +258,7 @@ export function retencaoPendente(history: Msg[]): boolean {
 
 // 11/09/2026: após uma ausência, perguntar quando podemos chamar cria uma
 // espera por resposta, não uma oportunidade de cutucar 15 minutos depois. O
-// silêncio vale para as duas gerações da janela aberta (clássica e SPIN), sem
+// silêncio vale para a geração da janela aberta, sem
 // pausar a IA, desligar a cadência ou consumir o toque. A resposta real do lead
 // libera a avaliação normal. Meet e retorno com data já combinada são outros fluxos.
 export function retornoPendente(history: Msg[]): boolean {
@@ -409,10 +415,8 @@ export async function processarFollowupLead(supabase: any, leadSel: any, stageSe
     const telefone = String(remotejid).split('@')[0];
     const contaLead = await contaDoLead(supabase, telefone, { direcao: 'inbound' });
     const contextoMateriais = await carregarStatusMateriais(supabase, { telefone, waAccountId: contaLead });
-    const spin = await gerarFollowupSpin(supabase, lead, history, contextoMateriais, tel);
-    const { message, final_answer } = spin.ativo
-      ? spin : await gerarFollowup(supabase, lead, stage, tel, history, contextoMateriais);
-    // Classificar e gerar leva tempo: uma resposta, pausa ou reunião no intervalo
+    const { message, final_answer } = await gerarFollowup(supabase, lead, stage, tel, history, contextoMateriais);
+    // Gerar leva tempo: uma resposta, pausa ou reunião no intervalo
     // cancela esta retomada. Não consumir o toque da conversa que acabou de reabrir.
     const interrompido = async () => {
       const atual = await buscarLead(supabase, remotejid);
@@ -427,19 +431,11 @@ export async function processarFollowupLead(supabase: any, leadSel: any, stageSe
       return false;
     }
     if (!message) {
-      // Revalida também o silêncio: não avançar a régua de uma conversa que
-      // recebeu resposta enquanto o classificador estava trabalhando.
+      // Modelo julgou que não cabe follow agora: consome o toque pra não reavaliar
+      // todo tick (o checkpoint acima garante que o lead não respondeu no meio).
       await atualizarLead(supabase, remotejid, { follow_up: followUpDoStage(stage) });
       tel.registrar('followup_pulado', { motivo: 'mensagem_vazia', stage, final_answer });
       return false;
-    }
-    if (spin.ativo) {
-      const cfg = await supabase.from('crm_sdr_spin_config').select('ativo').eq('id', 1).maybeSingle();
-      if (cfg.error || cfg.data?.ativo !== true) return false;
-      if (!(await reservarAbordagemSpin(supabase, remotejid, spin))) {
-        tel.registrar('followup_pulado', { motivo: 'abordagem_ja_reservada_ou_memoria_indisponivel', stage });
-        return false;
-      }
     }
 
     // Com 2+ números qualificadores em produção, o texto livre TEM que sair pelo
@@ -466,17 +462,13 @@ export async function processarFollowupLead(supabase: any, leadSel: any, stageSe
       tel.registrar(tipo, dados, duracao, erro);
     } };
     await enviarResposta(ctx, message, lockRenovar(supabase, remotejid), telemetriaEnvio, interrompido);
-    if (spin.meta?.abordagem_id) {
-      await supabase.from('crm_sdr_spin_memoria').update({ estado: partesAceitas ? 'enviado' : 'falhou' })
-        .eq('remotejid', remotejid).eq('curso_slug', spin.meta.curso_slug).eq('abordagem_id', spin.meta.abordagem_id);
-    }
     if (!partesAceitas) {
-      tel.registrar('followup_pulado', { motivo: 'nenhuma_parte_aceita', stage, spin: spin.meta });
+      tel.registrar('followup_pulado', { motivo: 'nenhuma_parte_aceita', stage });
       return false;
     }
     // Fala do follow no histórico (pro próximo toque detectar o estilo usado).
     await gravarMensagem(supabase, remotejid, { role: 'assistant', content: [{ type: 'text', text: message }] });
-    tel.registrar('followup_enviado', { stage, final_answer, conta: contaLead, message: resumir(message, 300), spin: spin.meta });
+    tel.registrar('followup_enviado', { stage, final_answer, conta: contaLead, message: resumir(message, 300) });
     return true;
   } catch (e) {
     tel.registrar('erro', { onde: 'processarFollowupLead', remotejid }, undefined, (e as Error).message);

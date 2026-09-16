@@ -11,7 +11,6 @@ const SEM_TAG = '**Success**\n\n**Explanation:** ' + EXPLICACAO;
 let saida: typeof import('./saida');
 let chamarAgentePrincipal: typeof import('./agente').chamarAgentePrincipal;
 let montarMensagensFollowup: typeof import('./followup').montarMensagensFollowup;
-let memoriaSpin: typeof import('./spinFollowup').memoriaSpin;
 const transporte = vi.fn();
 beforeAll(async () => {
   vi.stubGlobal('Deno', { env: { get: (chave: string) => chave === 'AGENTE_SDR_MODEL' ? 'modelo-sintetico' : '' } });
@@ -19,7 +18,6 @@ beforeAll(async () => {
   saida = await import('./saida');
   ({ chamarAgentePrincipal } = await import('./agente'));
   ({ montarMensagensFollowup } = await import('./followup'));
-  ({ memoriaSpin } = await import('./spinFollowup'));
 });
 beforeEach(() => {
   transporte.mockReset();
@@ -89,30 +87,6 @@ describe('a avaliação antiga não é reintroduzida pelas esteiras de follow-up
     expect(transporte).not.toHaveBeenCalled();
   });
 
-  it('memória SPIN remove relatório preservando ferramenta, argumentos e resultado no papel original', () => {
-    const input = { curso_escolhido: 'Sanidade Avícola', data_desejada: '2026-09-16' };
-    const retorno = JSON.stringify({ status: 'consultado', slots: [{ horario: '15:00', vendedor_id: 'monitor-sintetico' }] });
-    const historico: Msg[] = [
-      { role: 'assistant', content: humano },
-      { role: 'user', content: cliente },
-      { role: 'assistant', content: [
-        { type: 'text', text: INCIDENTE },
-        { type: 'thinking', thinking: 'PENSAMENTO_ASSINADO_SINTETICO', signature: 'ASSINATURA_SINTETICA' },
-        { type: 'tool_use', id: 'consulta-1', name: 'consulta_disponibilidade', input },
-      ] },
-      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'consulta-1', content: retorno }] },
-    ];
-    const original = structuredClone(historico);
-    const projetado = memoriaSpin(historico);
-    expect(JSON.stringify(projetado)).not.toContain(EXPLICACAO);
-    expect(JSON.stringify(projetado)).not.toContain('PENSAMENTO_ASSINADO_SINTETICO');
-    expect(projetado).toContainEqual({ role: 'assistant', content: humano });
-    expect(projetado).toContainEqual({ role: 'user', content: cliente });
-    expect(projetado).toContainEqual({ role: 'assistant', content: JSON.stringify({ ferramenta: 'consulta_disponibilidade', parametros: input }) });
-    expect(projetado).toContainEqual({ role: 'user', content: retorno });
-    expect(historico).toEqual(original);
-    expect(transporte).not.toHaveBeenCalled();
-  });
 });
 
 function respostaModelo(mensagem: string, tokensEntrada = 10) {
