@@ -517,6 +517,58 @@ Deno.serve(async (req) => {
       auth: { persistSession: false },
     });
 
+    // ── FAIXA SILENCIOSA DE ENSAIO (16/09/2026) ──────────────────────────────────
+    // Telefone em crm_agente_sdr_config.teste_telefones_silenciosos é um lead SINTÉTICO do
+    // harness real do João (scripts/teste-agente/testar-aula-real.mjs): NADA sai para a
+    // Meta/Uazapi. A mensagem é gravada como outbound com status 'simulado', então o
+    // espelho do SAC e a memória do agente continuam iguais aos de um envio real, e o
+    // card nasce em SAC - Testes IA. Fail-open: erro ao ler a lista = envio normal.
+    // Compara pelos 8 últimos dígitos, como a allowlist de teste do agente.
+    try {
+      const { data: cfgSil } = await admin
+        .from("crm_agente_sdr_config")
+        .select("teste_telefones_silenciosos")
+        .eq("id", 1)
+        .maybeSingle();
+      const silenciosos: string[] = Array.isArray(cfgSil?.teste_telefones_silenciosos) ? cfgSil.teste_telefones_silenciosos : [];
+      const sufixo = String(to).replace(/\D/g, "").slice(-8);
+      if (sufixo && silenciosos.some((t) => String(t).replace(/\D/g, "").slice(-8) === sufixo)) {
+        const nowSil = new Date().toISOString();
+        const waMsgIdSil = `simulado-${crypto.randomUUID()}`;
+        const conteudoSil = tipo === "template"
+          ? (String(conteudo ?? "").trim() || `[template] ${template_name}`)
+          : String(conteudo ?? "").trim() || (anexo_url ? `[${tipo}] ${filename ?? anexo_url}` : `[${tipo}]`);
+        const { error: silErr } = await admin.from("crm_whatsapp_messages").insert({
+          wa_account_id: wa_account_id ?? null,
+          wa_conexao_id: wa_conexao_id ?? null,
+          lead_id: lead_id ?? null,
+          oportunidade_id: oportunidade_id ?? null,
+          telefone: to,
+          direcao: "outbound",
+          tipo,
+          conteudo: conteudoSil,
+          template_name: tipo === "template" ? template_name : null,
+          anexos: anexo_url ? [{ url: anexo_url, filename: filename ?? null, mime_type: mime_type ?? null }] : [],
+          wa_message_id: waMsgIdSil,
+          status_entrega: "simulado",
+          metadata: { origem: origem ?? "ia", simulado: true, ensaio: "faixa_silenciosa", template_lang: template_lang ?? null },
+        });
+        if (silErr) console.error("[crm-whatsapp-send] faixa silenciosa: insert erro:", silErr.message);
+        if (tipo === "template") {
+          const remoteJidSil = `${canonicalConversationPhone(telefone)}@s.whatsapp.net`;
+          await admin.from("cliente_ppg_mensagens_sdr").insert({
+            remotejid: remoteJidSil,
+            conversation_history: { role: "assistant", content: conteudoSil },
+            timestamp: nowSil,
+          });
+        }
+        console.log(`[crm-whatsapp-send] faixa silenciosa: ${tipo} para ${to} gravado sem envio (${waMsgIdSil})`);
+        return json({ success: true, wa_message_id: waMsgIdSil, sent_at: nowSil, wa_account_id: wa_account_id ?? null, simulado: true });
+      }
+    } catch (e) {
+      console.error("[crm-whatsapp-send] faixa silenciosa: falha ao consultar a lista, seguindo com envio normal:", e);
+    }
+
     // Origem da mensagem (colore o chat): 'humano' quando a chamada vem de um USUÁRIO
     // logado (atendente no CRM). O agente João e automações chamam com o SERVICE_ROLE
     // (Bearer) — esses NÃO são humano. Detecta pelo JWT do header, então vale pra
