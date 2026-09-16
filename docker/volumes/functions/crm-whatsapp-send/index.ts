@@ -550,10 +550,15 @@ Deno.serve(async (req) => {
           template_name: tipo === "template" ? template_name : null,
           anexos: anexo_url ? [{ url: anexo_url, filename: filename ?? null, mime_type: mime_type ?? null }] : [],
           wa_message_id: waMsgIdSil,
-          status_entrega: "simulado",
+          // status_entrega tem CHECK (sent|delivered|read|failed): o "simulado" fica no metadata
+          // e no prefixo do wa_message_id. (1ª versão gravava 'simulado' e o insert caía calado.)
+          status_entrega: "sent",
           metadata: { origem: origem ?? "ia", simulado: true, ensaio: "faixa_silenciosa", template_lang: template_lang ?? null },
         });
-        if (silErr) console.error("[crm-whatsapp-send] faixa silenciosa: insert erro:", silErr.message);
+        if (silErr) {
+          console.error("[crm-whatsapp-send] faixa silenciosa: insert erro:", silErr.message);
+          return json({ error: `faixa silenciosa: ${silErr.message}` }, 422);
+        }
         if (tipo === "template") {
           const remoteJidSil = `${canonicalConversationPhone(telefone)}@s.whatsapp.net`;
           await admin.from("cliente_ppg_mensagens_sdr").insert({
