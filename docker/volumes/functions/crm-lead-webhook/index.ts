@@ -786,7 +786,12 @@ Deno.serve(async (req) => {
       console.error("[crm-lead-webhook] resolver curso falhou:", e?.message);
     }
   }
-  const cursoParaAgente = cursoCanonico ?? inCurso;
+  // 16/09/2026: valor que o resolvedor NÃO reconhece só chega ao agente se parecer curso.
+  // "Cadastrado por:Fulano" / "Cadastro Para aquecimento" são anotações do cadastro e
+  // viraram "pós em Cadastrado por:Derick" na fala do João (2.548 leads com isso no agente).
+  // O cru continua em leads.curso_interesse (auditoria); só o contexto do agente fica limpo.
+  const ehAnotacaoDeCadastro = (v: string) => /^\s*cadastr/i.test(v) || /aquecimento/i.test(v);
+  const cursoParaAgente = cursoCanonico ?? (inCurso && !ehAnotacaoDeCadastro(inCurso) ? inCurso : null);
 
   // Criação Automática (config.criacaoAutomatica) — valores default p/ NOVO lead.
   // Opt-in (habilitada). NÃO altera a regra de criar/não-criar: só preenche campos

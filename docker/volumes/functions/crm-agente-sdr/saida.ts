@@ -8,6 +8,7 @@
 import { CHUNKING_SYSTEM } from './prompts.ts';
 import type { CtxConversa } from './tools.ts';
 import { contemArtefatoAntml, contemAvaliacaoInterna } from './bastidorEditorial.ts';
+import { limparTagsDoCanal } from './canalResposta.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
 const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
@@ -435,7 +436,10 @@ export async function enviarResposta(
   tel?: { registrar: (tipo: string, dados?: Record<string, unknown>, duracaoMs?: number, erro?: string) => void },
   pausada?: () => Promise<boolean>,
 ): Promise<void> {
-  const textoLimpo = humanizarTexto(texto);
+  // Rótulo da tool (</mensagem>) vazando no texto: fora antes de tudo (16/09/2026).
+  const semTagDoCanal = limparTagsDoCanal(texto);
+  const tagCanalRemovida = semTagDoCanal !== texto.trim();
+  const textoLimpo = humanizarTexto(semTagDoCanal);
   const raciocinioRemovido = contemRaciocinioVazado(texto);
   const metaRemovida = contemMeta(texto);
   // Nada sobrou pro lead: ou era só raciocínio (<thinking> truncado por
@@ -454,6 +458,7 @@ export async function enviarResposta(
   tel?.registrar('resposta_chunks', {
     total: chunks.length,
     sanitizado: textoLimpo !== texto,
+    tag_canal_removida: tagCanalRemovida || undefined,
     raciocinio_removido: raciocinioRemovido || undefined,
     meta_removida: metaRemovida || undefined,
     // balão único proposital (link crítico: reunião ou presente da Escola) — não

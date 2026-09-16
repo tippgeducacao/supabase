@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  avaliarCanalResposta, NOME_TOOL_RESPOSTA, normalizarRespostaCanal,
+  avaliarCanalResposta, limparTagsDoCanal, NOME_TOOL_RESPOSTA, normalizarRespostaCanal,
   somarUsoModelo, TOOL_RESPONDER_AO_CLIENTE,
 } from './canalResposta';
 import type { Msg } from './historico';
@@ -199,5 +199,21 @@ describe('normalização defensiva do contrato', () => {
     const bruto = { ...modelo([final()]), pensamento: 'PRIVADO' };
     expect(normalizarRespostaCanal(bruto, avaliarCanalResposta(bruto, () => false))).not.toHaveProperty('pensamento');
     expect(somarUsoModelo({ input_tokens: 3, pensamento: 'PRIVADO', output_tokens: NaN }, { input_tokens: 5 })).toEqual({ input_tokens: 8 });
+  });
+});
+
+// 15-16/09/2026: 21 mensagens a 17 leads saíram com "</mensagem>" no fim (caso Andressa).
+describe('rótulo da tool vazando no campo mensagem', () => {
+  it('remove </mensagem> e variantes, sem tocar em texto legítimo', () => {
+    expect(limparTagsDoCanal('me confirma que já procuro um encaixe pra hj?</mensagem>')).toBe('me confirma que já procuro um encaixe pra hj?');
+    expect(limparTagsDoCanal('<mensagem>oi</ mensagem >')).toBe('oi');
+    expect(limparTagsDoCanal('</MENSAGEM>\n')).toBe('');
+    expect(limparTagsDoCanal('a mensagem chegou? me avisa')).toBe('a mensagem chegou? me avisa');
+  });
+  it('o canal entrega a fala limpa e trata só a tag como silêncio', () => {
+    expect(avaliarCanalResposta(modelo([final('me confirma que topa?</mensagem>')]), () => false))
+      .toEqual({ tipo: 'resposta', mensagem: 'me confirma que topa?', motivo: 'resposta_validada' });
+    expect(avaliarCanalResposta(modelo([final('</mensagem>')]), () => false))
+      .toEqual({ tipo: 'resposta', mensagem: '', motivo: 'silencio_explicito' });
   });
 });

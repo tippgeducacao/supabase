@@ -32,6 +32,14 @@ export type DecisaoCanal =
 const ehObjeto = (valor: unknown): valor is Record<string, unknown> =>
   valor !== null && typeof valor === 'object' && !Array.isArray(valor);
 
+// 15-16/09/2026: 21 mensagens a 17 leads saíram com "</mensagem>" no fim (caso Andressa).
+// O modelo fecha o parâmetro da tool como se fosse XML e o rótulo vaza dentro do campo.
+// A tag nunca é fala ao cliente: sai antes da validação (e de novo na saída, por garantia).
+const RE_TAG_CANAL = /<\s*\/?\s*mensagem\b[^<>]*>/gi;
+export function limparTagsDoCanal(texto: string): string {
+  return texto.replace(RE_TAG_CANAL, '').trim();
+}
+
 /** O detector semântico é o mesmo da saída; o protocolo continua testável sem Deno. */
 export function avaliarCanalResposta(
   resposta: RespostaModelo,
@@ -77,7 +85,7 @@ export function avaliarCanalResposta(
     || Object.keys(input).length !== 1 || typeof input.mensagem !== 'string') {
     return { tipo: 'corrigir', motivo: 'mensagem_invalida' };
   }
-  const mensagem = input.mensagem.trim();
+  const mensagem = limparTagsDoCanal(input.mensagem);
   if (contemBastidor(mensagem)) return { tipo: 'corrigir', motivo: 'bastidor_no_canal' };
   return { tipo: 'resposta', mensagem, motivo: mensagem ? 'resposta_validada' : 'silencio_explicito' };
 }

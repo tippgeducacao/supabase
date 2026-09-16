@@ -67,3 +67,12 @@ describe('curso do cadastro no contexto de qualquer persona', () => {
     expect(nota).toContain('não invente um curso');
   });
 });
+
+// 16/09/2026 (caso Andressa): "PISCICULTURA" no cadastro era tema de aula, não uma pós.
+describe('curso do cadastro que não é uma pós', () => {
+  it('avisa que o valor pode ser tema de aula e exige o catálogo antes de dizer "pós em"', () => {
+    const nota = notaDoCurso('PISCICULTURA');
+    expect(nota).toContain('tema de aula');
+    expect(nota).toContain('consulta_pos_disponiveis');
+  });
+});
