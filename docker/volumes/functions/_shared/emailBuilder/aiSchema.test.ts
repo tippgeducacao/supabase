@@ -62,10 +62,25 @@ describe("schema de saída estruturada do editor de e-mails", () => {
     bloco("texto", { texto: "Texto" }, { padding: 24 }),
     bloco("texto", { texto: "Texto" }, { fontSize: "24px" }),
     bloco("texto", { texto: "Texto" }, { tamanhoFonte: "24" }),
-    bloco("texto", { texto: "Texto" }, { largura: "expression(alert(1))" }),
+    bloco("texto", { texto: "Texto" }, { margem: 10 }),
     bloco("texto", { texto: "Texto" }, {}, { fonte: "Arial; color:red" }),
   ])("rejeita tipo, campo ou estilo fora da allowlist", item => {
     expect(validarSchema(proposta([item]))).toBe(false);
+  });
+
+  // O schema confere FORMA; o conteúdo de medida, cor e URL é conferido no validador
+  // (ver o cabeçalho de aiSchema.ts). `largura` é string livre no schema como `corTexto`
+  // já era — quem barra `expression(...)` é `validarDocumentoIA`.
+  it.each([
+    "expression(alert(1))",
+    "javascript:alert(1)",
+    "180",
+    "180em",
+    "-40px",
+  ])("validarDocumentoIA recusa largura inválida: %s", largura => {
+    const item = bloco("imagem", { src: "https://example.com/a.png", alt: "A" }, { largura });
+    expect(validarSchema(proposta([item])), "o schema não confere conteúdo de medida").toBe(true);
+    expect(() => validarDocumentoIA(proposta([item]).documento)).toThrow();
   });
 
   it("exige objetos de estilo explícitos, sem forçar overrides", () => {
@@ -132,7 +147,9 @@ describe("schema de saída estruturada do editor de e-mails", () => {
       if (schema.$defs) Object.values(schema.$defs as Record<string, Record<string, unknown>>).forEach(visitar);
     }
     visitar(SCHEMA_RESULTADO_EMAIL_IA as Record<string, unknown>);
-    expect(opcionais).toBe(19);
+    // 20 desde 17/09/2026: `largura` entrou em estilo_bloco para o modelo conseguir
+    // dimensionar imagem. Mexeu no schema? Confira o número e atualize de propósito.
+    expect(opcionais).toBe(20);
     expect(opcionais).toBeLessThanOrEqual(24);
     expect(unioes).toBe(0);
     expect(JSON.stringify(SCHEMA_RESULTADO_EMAIL_IA).length).toBeLessThan(16000);

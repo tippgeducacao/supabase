@@ -372,3 +372,125 @@ describe("robustez", () => {
     expect(html).toContain("background-color:#000000");
   });
 });
+
+/**
+ * Largura e centralização de imagem — a suíte não tinha UMA asserção sobre isso, e foi
+ * exatamente aí que o defeito nasceu e sobreviveu: o atributo `width` valia sempre a
+ * largura do container menos o padding GLOBAL, ignorando o padding real da linha, o
+ * `larguraPct` da coluna e a largura pedida no bloco. Relato do usuário em 17/09/2026:
+ * "algumas imagens estavam fora do centro ou cortadas".
+ */
+describe("imagem: largura honesta e centralização", () => {
+  const IMG: Bloco = { id: "i1", tipo: "imagem", props: { src: "https://e/x.png", alt: "Arte" } };
+  const largura = (html: string) => Number(html.match(/<img[^>]*\bwidth="(\d+)"/)?.[1]);
+  const estiloImg = (html: string) => html.match(/<img[^>]*style="([^"]*)"/)?.[1] ?? "";
+
+  it("imagem sem largura ocupa a largura útil da linha", () => {
+    // 600 de container menos o padding padrão (24 + 24).
+    const { html } = compilarDocumento(doc([IMG]));
+    expect(largura(html)).toBe(552);
+  });
+
+  it("o atributo width respeita a largura pedida — é o que o Outlook obedece", () => {
+    const { html } = compilarDocumento(doc([{ ...IMG, estilo: { largura: "180px" } }]));
+    expect(largura(html)).toBe(180);
+    expect(estiloImg(html)).toContain("max-width:180px");
+  });
+
+  it("imagem mais estreita que a célula recebe margin auto: display:block ignora text-align", () => {
+    const { html } = compilarDocumento(doc([{ ...IMG, estilo: { largura: "180px", alinhamento: "center" } }]));
+    expect(estiloImg(html)).toContain("margin:0 auto");
+  });
+
+  it("alinhamento left não ganha margem automática", () => {
+    const { html } = compilarDocumento(doc([{ ...IMG, estilo: { largura: "180px", alinhamento: "left" } }]));
+    expect(estiloImg(html)).not.toContain("margin:0 auto");
+  });
+
+  it("largura em porcentagem vira pixels da célula, não do container", () => {
+    const { html } = compilarDocumento(doc([{ ...IMG, estilo: { largura: "50%" } }]));
+    expect(largura(html)).toBe(276);
+  });
+
+  it("imagem em coluna de 1/3 não pede a largura do container inteiro", () => {
+    // Sem isto o Outlook empurra a tabela de 600px para ~1656px e corta o e-mail.
+    const d: DocumentoEmail = {
+      ...docVazio(),
+      linhas: [{
+        id: "l1",
+        colunas: [1, 2, 3].map((n) => ({ id: `c${n}`, larguraPct: 33, blocos: [{ ...IMG, id: `i${n}` }] })),
+      }],
+    };
+    const { html } = compilarDocumento(d);
+    expect(largura(html)).toBe(182);
+  });
+
+  it("linha sem padding lateral deixa a imagem usar o container inteiro", () => {
+    // O caso do banner: antes travava em 552 dentro de 600 e sobrava branco à direita.
+    const d: DocumentoEmail = {
+      ...docVazio(),
+      linhas: [linha([IMG], { estilo: { padding: { topo: 0, direita: 0, baixo: 0, esquerda: 0 } } })],
+    };
+    const { html } = compilarDocumento(d);
+    expect(largura(html)).toBe(600);
+  });
+
+  it("padding da coluna e do bloco também descontam da largura", () => {
+    const d: DocumentoEmail = {
+      ...docVazio(),
+      linhas: [{
+        id: "l1",
+        colunas: [{
+          id: "c1", larguraPct: 100,
+          estilo: { padding: { topo: 0, direita: 20, baixo: 0, esquerda: 20 } },
+          blocos: [{ ...IMG, estilo: { padding: { topo: 0, direita: 6, baixo: 0, esquerda: 6 } } }],
+        }],
+      }],
+    };
+    // 600 - 48 (linha) - 40 (coluna) - 12 (bloco)
+    const { html } = compilarDocumento(d);
+    expect(largura(html)).toBe(500);
+  });
+
+  it("largura pedida maior que a célula é limitada, nunca estoura a tabela", () => {
+    const { html } = compilarDocumento(doc([{ ...IMG, estilo: { largura: "800px" } }]));
+    expect(largura(html)).toBe(552);
+  });
+});
+
+describe("botão: centralização que sobrevive ao Outlook", () => {
+  const BOTAO: Bloco = { id: "bt", tipo: "botao", props: { texto: "Ir", href: "https://e/x" } };
+
+  it("centralizado ganha align além de margin — Word posiciona tabela por atributo", () => {
+    const { html } = compilarDocumento(doc([{ ...BOTAO, estilo: { alinhamento: "center" } }]));
+    expect(html).toMatch(/<table[^>]*align="center"[^>]*style="[^"]*margin:0 auto/);
+  });
+
+  it("alinhado à esquerda não recebe align", () => {
+    const { html } = compilarDocumento(doc([BOTAO]));
+    expect(html).not.toMatch(/<table[^>]*align="left"/);
+  });
+});
+
+describe("ordem das linhas com fundo sangrado", () => {
+  const txtBloco = (t: string): Bloco => ({ id: `b-${t}`, tipo: "texto", props: { texto: t } });
+
+  it("faixa sangrada no meio do e-mail não sobe para antes do corpo", () => {
+    // Antes as sangradas eram acumuladas à parte e emitidas TODAS antes do container:
+    // um documento [hero, corpo, faixa, rodapé] saía [hero, faixa, corpo, rodapé].
+    const d: DocumentoEmail = {
+      ...docVazio(),
+      linhas: [
+        { ...linha([txtBloco("HERO")], { corFundoExterna: "#111111" }), id: "l1" },
+        { ...linha([txtBloco("CORPO")]), id: "l2" },
+        { ...linha([txtBloco("FAIXA")], { corFundoExterna: "#222222" }), id: "l3" },
+        { ...linha([txtBloco("RODAPE")]), id: "l4" },
+      ],
+    };
+    const { html } = compilarDocumento(d);
+    const pos = (t: string) => html.indexOf(t);
+    expect(pos("HERO")).toBeLessThan(pos("CORPO"));
+    expect(pos("CORPO")).toBeLessThan(pos("FAIXA"));
+    expect(pos("FAIXA")).toBeLessThan(pos("RODAPE"));
+  });
+});

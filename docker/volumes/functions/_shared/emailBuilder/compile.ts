@@ -96,6 +96,27 @@ function borda(e: EstiloBloco["borda"]): string | null {
   return `${e.largura}px ${e.estilo ?? "solid"} ${e.cor ?? "#000000"}`;
 }
 
+/** Recuo lateral somado — o que o padding come da largura disponível. */
+function recuoLateral(e: Espacamento | undefined): number {
+  return (e?.esquerda ?? 0) + (e?.direita ?? 0);
+}
+
+/**
+ * Largura de EXIBIÇÃO da imagem, em pixels, limitada ao espaço que a célula oferece.
+ *
+ * Existe porque o atributo `width` do `<img>` é o que o motor do Word (Outlook)
+ * obedece — CSS ele ignora. Se o atributo não disser a verdade, a imagem sai com o
+ * tamanho errado só lá, e uma imagem de 552px dentro de uma coluna de 184px empurra
+ * a tabela inteira e corta o e-mail.
+ */
+function larguraImagem(pedida: string | undefined, disponivel: number): number {
+  if (!pedida || pedida === "auto") return disponivel;
+  const m = String(pedida).match(/^(\d+(?:\.\d+)?)(px|%)$/);
+  if (!m) return disponivel;
+  const n = Number(m[1]);
+  return Math.max(1, Math.min(disponivel, Math.round(m[2] === "%" ? disponivel * n / 100 : n)));
+}
+
 /** Aplica merge tags quando há dados; senão devolve o texto como está. */
 function txt(valor: string | undefined, o: OpcoesCompilacao, escapar = true): string {
   const v = valor ?? "";
@@ -153,7 +174,11 @@ function compilarBotao(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao): string {
   const alinha = e.alinhamento ?? "left";
 
   return [
+    // `align` além do `margin`: o motor do Word posiciona TABELA por atributo e
+    // ignora `margin:0 auto`. Sem ele o botão "centralizado" encosta à esquerda no
+    // Outlook desktop, desalinhado do resto que centraliza por text-align.
     `<table role="presentation" border="0" cellpadding="0" cellspacing="0"`,
+    attr("align", alinha === "left" ? null : alinha),
     ` style="${css([["margin", alinha === "center" ? "0 auto" : alinha === "right" ? "0 0 0 auto" : "0"]])}">`,
     `<tr><td style="${tdEstilo}">`,
     `<a${attr("href", href)}${attr("target", b.props.alvo ?? "_blank")} style="${aEstilo}">${esc(txt(b.props.texto, o, false))}</a>`,
@@ -174,25 +199,33 @@ function compilarLink(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao): string {
   return `<div style="${wrap}"><a${attr("href", href)}${attr("target", b.props.alvo ?? "_blank")} style="${estilo}">${esc(txt(b.props.texto, o, false))}</a></div>`;
 }
 
-function compilarImagem(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao): string {
+function compilarImagem(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao, disponivel: number): string {
   const e = b.estilo ?? {};
   const src = txt(b.props.src, o, false);
   // alt SEMPRE: imagem bloqueada é o padrão em muitos clientes corporativos.
   const alt = esc(txt(b.props.alt, o, false) || "");
-  const larguraMax = g.larguraContainer - (g.paddingPadrao.esquerda ?? 0) - (g.paddingPadrao.direita ?? 0);
+  // `disponivel` vem da cadeia linha → coluna → bloco. Antes esta conta usava o
+  // padding GLOBAL e ignorava larguraPct: imagem em coluna de 33% recebia o atributo
+  // width do container inteiro, e imagem em linha sem padding lateral ficava presa a
+  // uma largura menor que a célula, sobrando branco de um lado só.
+  const alvo = larguraImagem(e.largura, disponivel);
+  const alinhamento = e.alinhamento ?? "center";
   const estilo = css([
     // display:block mata o gap fantasma abaixo da imagem (descendente de linha-base).
     ["display", "block"],
     ["width", e.largura ?? "100%"],
-    ["max-width", px(larguraMax)],
+    ["max-width", px(alvo)],
     ["height", e.altura ?? "auto"],
+    // `display:block` NÃO obedece o text-align do pai: sem margem automática, toda
+    // imagem mais estreita que a célula encosta à esquerda, em qualquer cliente.
+    ["margin", alinhamento === "center" ? "0 auto" : alinhamento === "right" ? "0 0 0 auto" : null],
     ["border-radius", px(e.raio)],
     ["outline", "none"],
     ["text-decoration", "none"],
     ["-ms-interpolation-mode", "bicubic"],
   ]);
   // border="0" evita a moldura azul do Outlook quando a imagem está dentro de link.
-  const img = `<img${attr("src", src)} alt="${alt}" border="0"${attr("width", larguraMax)} style="${estilo}" />`;
+  const img = `<img${attr("src", src)} alt="${alt}" border="0"${attr("width", alvo)} style="${estilo}" />`;
 
   const conteudo = b.tipo === "imagem-link" || b.props.href
     ? `<a${attr("href", prepararHref(txt(b.props.href, o, false), o))}${attr("target", b.props.alvo ?? "_blank")}>${img}</a>`
@@ -200,7 +233,7 @@ function compilarImagem(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao): string {
   return `<div style="${css([["text-align", e.alinhamento ?? "center"]])}">${conteudo}</div>`;
 }
 
-function compilarVideo(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao): string {
+function compilarVideo(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao, disponivel: number): string {
   // E-mail não roda player: vira thumbnail clicável para o destino real.
   const thumb: Bloco = {
     ...b,
@@ -225,7 +258,7 @@ function compilarVideo(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao): string {
   ]);
 
   return [
-    compilarImagem(thumb, g, o),
+    compilarImagem(thumb, g, o, disponivel),
     `<div style="${css([["text-align", "center"], ["padding-top", "8px"]])}">`,
     `<a${attr("href", href)}${attr("target", b.props.alvo ?? "_blank")} style="${chamada}">${rotulo}</a>`,
     `</div>`,
@@ -274,7 +307,7 @@ function compilarHtml(b: Bloco, o: OpcoesCompilacao): string {
   return txt(b.props.html, o, false);
 }
 
-function compilarDinamico(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao): string {
+function compilarDinamico(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao, disponivel: number): string {
   // Bloco dinâmico é açúcar: monta a tag a partir de `variavel` + `fallback` e
   // delega para o bloco concreto equivalente.
   const tag = b.props.variavel
@@ -284,7 +317,7 @@ function compilarDinamico(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao): string 
     return compilarTexto({ ...b, tipo: "texto", props: { ...b.props, texto: tag } }, g, o);
   }
   if (b.tipo === "imagem-dinamica") {
-    return compilarImagem({ ...b, tipo: "imagem", props: { ...b.props, src: tag } }, g, o);
+    return compilarImagem({ ...b, tipo: "imagem", props: { ...b.props, src: tag } }, g, o, disponivel);
   }
   if (b.tipo === "link-dinamico") {
     return compilarLink({ ...b, tipo: "link", props: { ...b.props, href: tag } }, g, o);
@@ -293,15 +326,15 @@ function compilarDinamico(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao): string 
   return compilarHtml({ ...b, props: { ...b.props, html: b.props.html ?? tag } }, o);
 }
 
-function compilarBloco(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao): string {
+function compilarBloco(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao, disponivel: number): string {
   switch (b.tipo) {
     case "texto":
     case "texto-composto": return compilarTexto(b, g, o);
     case "botao": return compilarBotao(b, g, o);
     case "link": return compilarLink(b, g, o);
     case "imagem":
-    case "imagem-link": return compilarImagem(b, g, o);
-    case "video": return compilarVideo(b, g, o);
+    case "imagem-link": return compilarImagem(b, g, o, disponivel);
+    case "video": return compilarVideo(b, g, o, disponivel);
     case "separador": return compilarSeparador(b);
     case "lista": return compilarLista(b, g, o);
     case "espacador": return compilarEspacador(b);
@@ -309,7 +342,7 @@ function compilarBloco(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao): string {
     case "texto-dinamico":
     case "imagem-dinamica":
     case "link-dinamico":
-    case "html-dinamico": return compilarDinamico(b, g, o);
+    case "html-dinamico": return compilarDinamico(b, g, o, disponivel);
     default: {
       // Bloco desconhecido (documento de versão futura) é PULADO, nunca quebra o
       // envio — melhor um e-mail sem um bloco do que nenhum e-mail.
@@ -364,7 +397,9 @@ function alvosMobile(tipo: Bloco["tipo"], classe: string): { texto: string; caix
   }
 }
 
-function compilarColuna(c: Coluna, g: GlobaisDoc, o: OpcoesCompilacao, empilha: boolean): string {
+function compilarColuna(c: Coluna, g: GlobaisDoc, o: OpcoesCompilacao, empilha: boolean, dispLinha: number): string {
+  // Espaço real desta célula: a fatia da linha menos o próprio padding da coluna.
+  const dispColuna = Math.max(1, Math.floor(dispLinha * (c.larguraPct ?? 100) / 100) - recuoLateral(c.estilo?.padding));
   const blocos = c.blocos
     // Visível em QUALQUER dispositivo entra na saída: um bloco só-mobile nasce
     // escondido e a media query o revela. Antes o filtro era só `desktop`, e marcar
@@ -386,7 +421,8 @@ function compilarColuna(c: Coluna, g: GlobaisDoc, o: OpcoesCompilacao, empilha: 
       const classes = [classeBloco(b.id), naCaixa && !e.corTexto ? "forcar-cor" : ""]
         .filter(Boolean).join(" ");
       const attrEstilo = estiloWrap ? ` style="${estiloWrap}"` : "";
-      return `<div class="${classes}"${attrEstilo}>${compilarBloco(b, g, o)}</div>`;
+      const dispBloco = Math.max(1, dispColuna - recuoLateral(e.padding));
+      return `<div class="${classes}"${attrEstilo}>${compilarBloco(b, g, o, dispBloco)}</div>`;
     })
     .join("");
 
@@ -409,7 +445,10 @@ function compilarColuna(c: Coluna, g: GlobaisDoc, o: OpcoesCompilacao, empilha: 
 function compilarLinha(l: Linha, g: GlobaisDoc, o: OpcoesCompilacao): string {
   if (l.oculto) return "";
   const empilha = l.empilharMobile !== false;
-  const colunas = l.colunas.map((c) => compilarColuna(c, g, o, empilha)).join("");
+  // O conteúdo sempre vive dentro do container central, inclusive na linha sangrada:
+  // a tabela externa é 100% mas a interna tem max-width igual ao container.
+  const dispLinha = Math.max(1, g.larguraContainer - recuoLateral(l.estilo?.padding ?? g.paddingPadrao));
+  const colunas = l.colunas.map((c) => compilarColuna(c, g, o, empilha, dispLinha)).join("");
 
   const estiloInterno = css([
     ["background-color", l.estilo?.corFundo],
@@ -601,22 +640,31 @@ export function compilarDocumento(
 ): ResultadoCompilacao {
   const g = { ...GLOBAIS_PADRAO, ...(doc.globais ?? {}) };
 
-  const linhasSimples: string[] = [];
-  const linhasSangradas: string[] = [];
-  for (const l of doc.linhas ?? []) {
-    const out = compilarLinha(l, g, opcoes);
-    if (!out) continue;
-    (l.corFundoExterna ? linhasSangradas : linhasSimples).push(out);
-  }
-
-  // Linha com fundo sangrado sai FORA do container central (ela é o container dela).
-  const corpoContainer = linhasSimples.length
-    ? `<table role="presentation" border="0" cellpadding="0" cellspacing="0" class="container" width="${g.larguraContainer}" style="${css([
+  // Linha com fundo sangrado sai FORA do container central (ela é o container dela),
+  // mas NA ORDEM em que foi escrita. Antes as sangradas eram acumuladas numa lista à
+  // parte e emitidas TODAS antes do container: uma faixa de destaque no meio ou no fim
+  // do e-mail subia para antes do corpo, e o texto chegava fora de ordem no envio.
+  // Agora as linhas comuns são agrupadas em containers consecutivos e cada sangrada
+  // fecha o container aberto, sai sozinha, e a próxima comum abre um container novo.
+  const partes: string[] = [];
+  let acumulado: string[] = [];
+  const fecharContainer = () => {
+    if (!acumulado.length) return;
+    partes.push(`<table role="presentation" border="0" cellpadding="0" cellspacing="0" class="container" width="${g.larguraContainer}" style="${css([
       ["width", px(g.larguraContainer)],
       ["max-width", px(g.larguraContainer)],
       ["background-color", g.corFundo],
-    ])}">${linhasSimples.join("")}</table>`
-    : "";
+    ])}">${acumulado.join("")}</table>`);
+    acumulado = [];
+  };
+  for (const l of doc.linhas ?? []) {
+    const out = compilarLinha(l, g, opcoes);
+    if (!out) continue;
+    if (l.corFundoExterna) { fecharContainer(); partes.push(out); continue; }
+    acumulado.push(out);
+  }
+  fecharContainer();
+  const corpoContainer = partes.join("");
 
   const preheader = doc.preheader
     ? `<div style="display:none;font-size:1px;color:${g.corFundo};line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden">${esc(txt(doc.preheader, opcoes, false))}</div>`
@@ -664,7 +712,6 @@ ${preheader}
 <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="${css([["background-color", g.corFundoPagina]])}">
 <tr><td align="center" style="${css([["padding", "24px 8px"]])}">
 <!--[if mso]><table role="presentation" border="0" cellpadding="0" cellspacing="0" width="${g.larguraContainer}"><tr><td><![endif]-->
-${linhasSangradas.join("")}
 ${corpoContainer}
 ${rodape}
 <!--[if mso]></td></tr></table><![endif]-->

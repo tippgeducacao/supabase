@@ -60,6 +60,10 @@ const DEFINICOES: Record<string, Schema> = {
     pesoFonte: numero("Peso de 100 a 900; 400 normal e 700 negrito."),
     alinhamento: opcoes(["left", "center", "right", "justify"]),
     padding: ref("padding"), raio: numero("Pixels de 0 a 60."),
+    // Sem isto o modelo NÃO conseguia dimensionar imagem nenhuma: toda imagem saía
+    // ocupando a largura útil inteira, e uma logo de 180px centralizada era
+    // inalcançável pela ferramenta. `validarDocumentoIA` já aceitava o campo.
+    largura: texto("Somente imagem/imagem-link/video: largura de exibição em \"180px\" ou \"60%\" da coluna. Omita para ocupar a largura inteira. Combine com alinhamento \"center\" para centralizar."),
   }, []),
   // Padding explícito (zeros quando não desejado) evita mais escolhas opcionais.
   estilo_area: objeto({ corFundo: COR, padding: ref("padding") }, ["padding"]),
@@ -89,7 +93,7 @@ DEFINICOES.bloco = {
     tipo: opcoes(["texto", "botao", "link", "lista", "imagem", "imagem-link", "video", "separador", "espacador"]),
     props: ref("props"), estilo: ref("estilo_bloco"), estiloMobile: ref("estilo_bloco"),
   }),
-  description: "Bloco nativo com props específicas do seu tipo. estilo/estiloMobile:{} herdam os globais. Fonte/altura de linha vêm dos globais; imagens usam largura responsiva automática. Sem IDs, HTML, CSS customizado ou extras.",
+  description: "Bloco nativo com props específicas do seu tipo. estilo/estiloMobile:{} herdam os globais. Fonte e altura de linha vêm dos globais. Imagem sem largura ocupa a coluna inteira; para uma logo ou selo, declare largura em px e alinhamento center. Sem IDs, HTML, CSS customizado ou extras.",
 };
 DEFINICOES.coluna = objeto({
   larguraPct: numero("Porcentagem positiva; colunas da mesma linha somam 100."),
