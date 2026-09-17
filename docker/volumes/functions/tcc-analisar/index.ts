@@ -275,7 +275,7 @@ Deno.serve(async (req) => {
       // Exceção aprendida: termo que a equipe já descartou vezes bastante não volta a
       // aparecer. É o que impede a lista de encher de nome de fármaco e de espécie a cada
       // TCC — e o que faz a ferramenta continuar sendo lida no terceiro mês.
-      if (termo && excecoes.has(termo)) {
+      if (a.tipo !== "gramatica" && termo && excecoes.has(termo)) {
         descartadosPorExcecao++;
         continue;
       }
