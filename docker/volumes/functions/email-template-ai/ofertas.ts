@@ -36,7 +36,7 @@ export async function resolverOfertaEmailIA(cliente: SupabaseClient, selecao: { 
 
 function erroGravacao(error: { code?: string } | null): void {
   if (!error) return;
-  if (error.code === "40001" || error.code === "23505") throw new ErroOfertaEmailIA(409, "OFFER_CONFLICT", "A oferta mudou em outra edição. Atualize a lista e confira a versão atual antes de salvar novamente.");
+  if (error.code === "PT409" || error.code === "40001" || error.code === "23505") throw new ErroOfertaEmailIA(409, "OFFER_CONFLICT", "A oferta mudou em outra edição. Atualize a lista e confira a versão atual antes de salvar novamente.");
   if (error.code === "42501") throw new ErroOfertaEmailIA(403, "OFFER_FORBIDDEN", "Sua conta mudou ou não tem permissão para aprovar ofertas.");
   if (error.code?.startsWith("22") || error.code?.startsWith("23")) throw new ErroOfertaEmailIA(400, "INVALID_OFFER", "Confira curso ativo, condições e validade futura da oferta.");
   throw new ErroOfertaEmailIA(503, "OFFERS_UNAVAILABLE", "Não foi possível gravar a oferta. Seus dados foram preservados; atualize a lista antes de tentar novamente.");
