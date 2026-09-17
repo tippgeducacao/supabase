@@ -9,6 +9,10 @@
 // uma função que tentasse tudo de uma vez morreria no timeout. Quem repete o laço é o
 // front, que ganha a barra de progresso de graça e consegue retomar de onde parou.
 //
+// Filtra pelo DICIONÁRIO DE EXCEÇÕES antes de devolver: termo que a equipe já descartou
+// vezes bastante (tcc_excecoes.ativa) não volta a aparecer. Sem isso a lista enche de nome
+// de fármaco e de espécie a cada TCC, e no terceiro mês ninguém mais lê.
+//
 // Desenho: docs/superpowers/specs/2026-09-16-correcao-tcc-design.md
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 
@@ -92,13 +96,18 @@ const FERRAMENTA = {
         items: {
           type: "object",
           additionalProperties: false,
-          required: ["tipo", "pagina", "trecho", "sugestao", "explicacao"],
+          required: ["tipo", "pagina", "trecho", "termo", "sugestao", "explicacao"],
           properties: {
             tipo: { type: "string", enum: ["ortografia", "gramatica"] },
             pagina: { type: "integer", description: "Número da página onde o trecho está." },
             trecho: {
               type: "string",
               description: "Cópia LITERAL do texto recebido, 3 a 12 palavras.",
+            },
+            termo: {
+              type: "string",
+              description:
+                "A PALAVRA (ou expressão de duas palavras) que está errada, sozinha, como aparece no texto. É por ela que a equipe cria exceção permanente para termo técnico.",
             },
             sugestao: { type: "string", description: "Como deveria ficar. Curto." },
             explicacao: {
@@ -115,6 +124,41 @@ const FERRAMENTA = {
 interface PaginaEntrada {
   numero: number;
   texto: string;
+}
+
+/**
+ * Chave do dicionário de exceções: sem acento, sem caixa, sem pontuação de borda.
+ *
+ * `Anaplasma`, `anaplasma` e `ANAPLASMA,` têm que colidir — senão a mesma exceção precisa
+ * ser criada três vezes e o dicionário nunca converge.
+ */
+function normalizarTermo(bruto: string): string {
+  return bruto
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Os termos que a equipe já mandou ignorar de vez. */
+async function carregarExcecoes(
+  sb: ReturnType<typeof createClient>,
+): Promise<Set<string>> {
+  const { data, error } = await sb
+    .from("tcc_excecoes")
+    .select("termo")
+    .eq("ativa", true)
+    .limit(5000);
+
+  // Falha ao ler o dicionário NÃO derruba a análise: pior resultado é a lista vir com o
+  // ruído que ela teria antes de existir exceção nenhuma.
+  if (error) {
+    console.error("[tcc-analisar] excecoes:", error.message);
+    return new Set();
+  }
+  return new Set((data ?? []).map((l) => String(l.termo)));
 }
 
 Deno.serve(async (req) => {
@@ -142,7 +186,10 @@ Deno.serve(async (req) => {
     }
 
     const admin = createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
-    const apiKey = await chaveAnthropic(admin);
+    const [apiKey, excecoes] = await Promise.all([
+      chaveAnthropic(admin),
+      carregarExcecoes(admin),
+    ]);
 
     const corpo = paginas
       .map((p) => `--- PÁGINA ${p.numero} ---\n${String(p.texto ?? "").slice(0, 12_000)}`)
@@ -209,6 +256,7 @@ Deno.serve(async (req) => {
     const porPagina = new Map(paginas.map((p) => [p.numero, String(p.texto ?? "")]));
     const apontamentos = [];
     let descartadosPorTrecho = 0;
+    let descartadosPorExcecao = 0;
 
     for (const a of brutos) {
       const texto = porPagina.get(Number(a?.pagina));
@@ -223,10 +271,20 @@ Deno.serve(async (req) => {
         descartadosPorTrecho++;
         continue;
       }
+      const termo = normalizarTermo(String(a?.termo ?? ""));
+      // Exceção aprendida: termo que a equipe já descartou vezes bastante não volta a
+      // aparecer. É o que impede a lista de encher de nome de fármaco e de espécie a cada
+      // TCC — e o que faz a ferramenta continuar sendo lida no terceiro mês.
+      if (termo && excecoes.has(termo)) {
+        descartadosPorExcecao++;
+        continue;
+      }
+
       apontamentos.push({
         tipo: a.tipo === "gramatica" ? "gramatica" : "ortografia",
         pagina: Number(a.pagina),
         trecho,
+        termo,
         sugestao: String(a.sugestao ?? ""),
         explicacao: String(a.explicacao ?? ""),
       });
@@ -237,6 +295,9 @@ Deno.serve(async (req) => {
       // Devolvido de propósito: é o termômetro do prompt. Se subir, o modelo voltou a
       // reescrever o trecho em vez de copiar, e o prompt precisa de conserto.
       descartados_por_trecho: descartadosPorTrecho,
+      // Quantos o dicionário de exceções filtrou. Serve para a equipe ver o dicionário
+      // trabalhando — sem isso ele é invisível e ninguém confia que está ligado.
+      descartados_por_excecao: descartadosPorExcecao,
       modelo: data?.model ?? MODELO,
       uso: data?.usage ?? null,
     });
