@@ -903,17 +903,24 @@ Deno.serve(async (req) => {
       const ehOgg = /audio\/ogg/i.test(String(mime_type ?? "")) || /\.ogg(\?|$)/i.test(docUrl);
       let audioObj: Record<string, unknown> = { link: docUrl };
       if (ehOgg) {
-        try {
-          const mediaId = await metaUploadMedia(phoneNumberId, accessToken, docUrl, "audio/ogg", docFilename || "audio.ogg");
-          audioObj = { id: mediaId, voice: true };
-        } catch (e) {
-          // Origem 4xx: o áudio não existe mais — por link a Meta falha do mesmo jeito.
-          if (e instanceof OrigemMidiaIndisponivel) {
-            return await abortarPorAnexoMorto(admin, accountId, docUrl, docFilename, e.status);
-          }
-          console.warn("[crm-whatsapp-send] upload OGG /media falhou, usando link:", e instanceof Error ? e.message : e);
-          audioObj = { link: docUrl, voice: true };
+        // ⚠️ Pelo CACHE de media_id, como documento/imagem/vídeo (17/09/2026). Até aqui o
+        // áudio chamava `metaUploadMedia` direto: baixava o OGG do storage e subia pra Meta
+        // A CADA envio. No 1:1 ninguém notava; no envio em lote do SAC 2.0 o MESMO áudio ia
+        // para dezenas de pessoas e cada uma pagava o upload inteiro — medido: 32 áudios em
+        // 140,96 s (4,32 s por mensagem), com a tela do atendente esperando. Agora é 1 upload
+        // por (arquivo × número) e o resto reusa o id. Áudio gravado na conversa tem URL
+        // única: custa 1 select + 1 upsert a mais, e nada muda no resultado.
+        // Se a Meta recusar o id, a rede de segurança lá embaixo (`mediaIdUsado`) invalida
+        // o cache e refaz por link — que mantém o `voice: true`.
+        const midiaAud = await resolverMediaId(
+          admin, phoneNumberId, accessToken, docUrl, "audio/ogg", docFilename || "audio.ogg",
+        );
+        // Origem 4xx: o áudio não existe mais — por link a Meta falha do mesmo jeito.
+        if (midiaAud.origemMorta) {
+          return await abortarPorAnexoMorto(admin, accountId, docUrl, docFilename, midiaAud.origemMorta);
         }
+        mediaIdUsado = midiaAud.mediaId;
+        audioObj = mediaIdUsado ? { id: mediaIdUsado, voice: true } : { link: docUrl, voice: true };
       }
       waPayload = {
         messaging_product: "whatsapp",
