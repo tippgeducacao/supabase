@@ -87,6 +87,9 @@ let ANTHROPIC_KEY = Deno.env.get('AGENTE_ALUNO_ANTHROPIC_KEY')
 // O modelo de verdade vem de `onb_agente_config.modelo`: o Dokploy reverte env, e modelo
 // aposentado dá 404 sem retry (foi o que emudeceu o João em 15/06). Isto é só a reserva.
 // ⚠️ Sonnet 5 recusa temperature e budget_tokens com 400: nada de sampling aqui.
+/** Quantas vezes a oferta espera a conversa respirar antes de sair de qualquer jeito. */
+const MAX_ADIAMENTOS_DA_OFERTA = 3;
+
 const MODELO_RESERVA = Deno.env.get('AGENTE_ALUNO_MODEL') ?? 'claude-sonnet-5';
 
 const PERSONA = 'aluno';
@@ -500,17 +503,27 @@ function mimeDaMidia(url: string, cabecalho: string | null): string {
 async function enviar(
   conta: string, telefone: string, texto: string, leadId: string | null, opId: string,
   midia: Midia | null = null,
+  ehEntregaDePasso = false,
 ): Promise<{ espera: number; bloqueio: string | null; filaId: string | null; canceladas: string[] }> {
   const espera = esperaSorteada();
   const quando = new Date(Date.now() + espera * 1000).toISOString();
 
   // Se o aluno escreveu de novo antes da resposta sair, esta aqui já considerou tudo: a
   // pendente é substituída, para ele não receber duas respostas parecidas em seguida.
+  //
+  // ⚠️ MENOS A ENTREGA DE UM PASSO. Matheus, 17/09/2026: ele disse "Sim" às 10:56:32, o vídeo da
+  // Adriane entrou na fila às 10:56:45 e foi CANCELADO às 10:56:56 — porque ele digitou mais duas
+  // mensagens ("Por mensagem ou video", "??") e o turno seguinte substituiu a pendente. Ele
+  // perguntou "por mensagem ou vídeo?" JUSTAMENTE porque o vídeo tinha sumido.
+  //
+  // Conversa e entrega são coisas diferentes: uma é papo, a outra é o conteúdo que ele pediu.
+  // Duas respostas parecidas em seguida é chato; perder o vídeo que ele pediu é falha.
   const { data: canceladas } = await supabase.from('crm_mensagens_agendadas')
     .update({ status: 'cancelado', erro_detalhe: 'Substituída por uma resposta mais nova do assistente pedagógico.' })
     .eq('oportunidade_id', opId)
     .eq('criado_por_nome', AUTOR)
     .eq('status', 'agendado')
+    .eq('entrega_de_passo', false)
     .select('id');
 
   const { data: linha, error } = await supabase.from('crm_mensagens_agendadas').insert({
@@ -527,6 +540,7 @@ async function enviar(
       : {}),
     enviar_em: quando,
     status: 'agendado',
+    entrega_de_passo: ehEntregaDePasso,
   }).select('id, status, erro_detalhe').maybeSingle();
   if (error) throw new Error(`fila crm_mensagens_agendadas: ${error.message}`);
   const bloqueio = linha?.status === 'cancelado'
@@ -1068,6 +1082,57 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
         await evento('acelerada:sem_convite', { ...rastro, motivo: rot.motivo ?? null });
         return;
       }
+
+      // ── A OFERTA NÃO ATROPELA UMA RESPOSTA QUE JÁ ESTÁ NA FILA ─────────────
+      // rayanne, 16/09: ela escreveu quatro mensagens às 09:46-09:47, a resposta a elas foi
+      // redigida às 09:47:54 e estava NA FILA (com o atraso humano) quando a oferta disparou às
+      // 09:49. O turno da oferta respondeu a ela — e a substituição trocou a resposta pendente
+      // pela dele. A oferta foi gasta sem nunca ter sido feita, e travou a vaga por 20 h.
+      //
+      // ⚠️ O SINAL É A FILA, NÃO "INBOUND SEM RESPOSTA". A primeira versão deste gate olhava
+      // `semResposta.some(inbound)` e a revisão adversarial mostrou que aquilo mataria a acelerada
+      // inteira: o gatilho da oferta é o TOQUE NO BOTÃO, e o assistente fica calado diante dele de
+      // propósito (ver o comentário do `botaoDaVez`, logo abaixo). Toda oferta nasceria adiada,
+      // para sempre. Reação e figurinha (`pulado:reacao`) têm o mesmo efeito — a rayanne, que
+      // motivou o conserto, teria travado por causa de um ❤️.
+      //
+      // Resposta ENFILEIRADA é o estado exato da colisão: existe fala dela que o assistente já
+      // redigiu e que ainda não saiu. Aí sim a oferta espera a conversa respirar.
+      const { data: pendentes } = await supabase
+        .from('crm_mensagens_agendadas')
+        .select('id')
+        .eq('oportunidade_id', aluno.oportunidade_id)
+        .eq('criado_por_nome', AUTOR)
+        .eq('status', 'agendado')
+        .limit(1);
+      if (pendentes?.length) {
+        // Teto de adiamentos: sem ele, quem conversa muito nunca receberia a oferta e ela ficaria
+        // empurrando o próprio prazo de morte junto (o `expira_em` é preservado de propósito).
+        const { data: of } = await supabase
+          .from('onb_acelerada_ofertas')
+          .select('adiamentos')
+          .eq('oportunidade_id', aluno.oportunidade_id)
+          .maybeSingle();
+        const jaAdiada = Number(of?.adiamentos ?? 0);
+        if (jaAdiada < MAX_ADIAMENTOS_DA_OFERTA) {
+          await supabase.from('onb_acelerada_ofertas')
+            .update({
+              status: 'agendada',
+              oferecer_em: new Date(Date.now() + 10 * 60_000).toISOString(),
+              oferecida_em: null,
+              adiamentos: jaAdiada + 1,
+              motivo: 'adiada: havia resposta dele na fila',
+              atualizada_em: new Date().toISOString(),
+            })
+            .eq('oportunidade_id', aluno.oportunidade_id)
+            .eq('status', 'oferecida');
+          await evento('acelerada:oferta_adiada', { ...rastro, adiamentos: jaAdiada + 1 });
+          return;
+        }
+        // Estourou o teto: melhor oferecer agora do que nunca. A substituição pode comer a
+        // resposta pendente, mas o aluno recebe o convite — e isso fica no log.
+        await evento('acelerada:oferta_forcada', { ...rastro, adiamentos: jaAdiada });
+      }
     }
 
     // O que o botão pede, dito ao modelo com o link já na mão. Botão antigo que o estado já
@@ -1539,6 +1604,8 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
 
     const envio = await enviar(
       conta, telefone, resposta, aluno.lead_id, aluno.oportunidade_id, entregaMidia,
+      // Entrega de passo é intocável pela substituição: ver o comentário em `enviar`.
+      entregaPendente,
     );
     // DESFAZER antes de MARCAR, sempre: as duas mexem no mesmo carimbo, e na ordem trocada a
     // pergunta da resposta cancelada ficaria contada para sempre (o desfazer não a acharia).
