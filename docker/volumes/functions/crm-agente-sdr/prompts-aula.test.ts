@@ -86,8 +86,12 @@ describe("AGENTE_AULA composto a partir do João de vendas", () => {
   it("gancho novo em todo o prompt, inclusive nas seções herdadas", () => {
     expect(AGENTE_AULA).toContain("estamos em fechamento do primeiro lote promocional");
     expect(AGENTE_AULA).toContain("eu gostaria de te apresentar essa condição");
-    expect(AGENTE_AULA).not.toMatch(/secretaria liberou/i);
-    expect(AGENTE_AULA).not.toMatch(/condição especial/i);
+    // As expressões antigas só podem aparecer na linha que as PROÍBE.
+    const semAProibicao = AGENTE_AULA.split("\n").filter((l) => !l.startsWith("⛔ **O nome da oferta")).join("\n");
+    expect(semAProibicao).not.toMatch(/secretaria liberou/i);
+    expect(semAProibicao).not.toMatch(/condição especial/i);
+    expect(AGENTE_AULA).toContain("NÃO existem nesta conversa");
+    expect(AGENTE_AULA).toContain("Preço NÃO tem troca");
     expect(AGENTE_AULA).toContain("encaixe pra ainda hoje");
   });
 

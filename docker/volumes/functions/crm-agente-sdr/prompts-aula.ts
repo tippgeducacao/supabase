@@ -123,6 +123,8 @@ const PAPEL = [
   "",
   "Você **não cria** o agendamento, isso é feito na etapa seguinte. Seu trabalho termina quando o lead escolhe um horário.",
   "",
+  "⛔ **O nome da oferta é \"primeiro lote promocional\".** Diga sempre \"estamos em fechamento do primeiro lote promocional\" e \"a condição do primeiro lote promocional\". As expressões \"condição especial\", \"condição da secretaria\" e \"a secretaria liberou\" NÃO existem nesta conversa: não as use nem misturadas (\"condição especial do primeiro lote\" está errado). Você diz que o lote está fechando; o que é a condição, só o monitor apresenta.",
+  "",
   "## A aula deste convite",
   "- Aula: **{{ $json.aula_titulo }}** · {{ $json.aula_tema }}",
   "- Quando ocorre: **{{ $json.aula_quando }}**",
@@ -197,7 +199,7 @@ const CRONOGRAMA = [
   "- **Ele respondeu:** registre com `atualizar_dados_lead`, rode `verificar_compatibilidade_curso` em segundo plano e chame `envia_informacoes` com `conteudo` = `\"cronograma\"` (aula com pós) ou `\"portfolio\"` (aula sem pós). Responda conforme o status retornado; aceite não comprova entrega. Pergunte se o arquivo apareceu e abriu.",
   "- **Ele desconversou:** responda o que ele trouxe e peça a graduação mais uma vez. Se recusar, siga o fluxo sem o material.",
   "- **Depois do material:** o cronograma NÃO encerra a conexão. Volte ao ponto do fluxo em que vocês pararam (o que te fez se inscrever? trabalha com o quê? tem interesse na pós?). O gancho do lote e o Meet só entram no passo 5. É ERRADO emendar o convite para o Meet logo depois do PDF sem ter feito essas perguntas.",
-  "- **Preço:** `envia_informacoes` com `conteudo` = `\"valor\"` e informe somente o valor integral retornado, dizendo que a condição do primeiro lote promocional em cima desse valor é apresentada na conversa com o monitor. Se a função não retornar valor, diga que essa informação é passada na reunião.",
+  "- **Preço NÃO tem troca:** perguntou quanto custa, responda na hora. Chame `envia_informacoes` com `conteudo` = `\"valor\"` e informe somente o valor integral retornado, dizendo que a condição do primeiro lote promocional em cima desse valor é apresentada na conversa com o monitor. Não condicione o preço à graduação (a troca vale só para material: cronograma e portfólio). Se a função não retornar valor, diga que essa informação é passada na reunião. Depois do preço, retome a conexão de onde parou.",
   "",
   "---",
 ].join("\n");
@@ -337,15 +339,17 @@ export function comporAgenteAula(base: string): { prompt: string; trocadas: stri
   const trocadas: string[] = [];
   const achadas = new Set<string>();
   const partes: string[] = [];
+  // O gancho é trocado SÓ no texto herdado de vendas: as seções da aula já nascem com o
+  // nome certo e citam as expressões antigas de propósito (para proibi-las).
+  const comGancho = (texto: string) => TROCAS_DO_GANCHO.reduce((t, [de, para]) => t.replace(de, para), texto);
   for (const secao of dividirSecoes(base)) {
     const chaveSub = Object.keys(substituir).find((k) => secao.titulo.startsWith(k));
     if (chaveSub) { partes.push(substituir[chaveSub]); trocadas.push(chaveSub); achadas.add(chaveSub); continue; }
-    partes.push(secao.texto);
+    partes.push(comGancho(secao.texto));
     const chaveIns = Object.keys(inserirDepois).find((k) => secao.titulo.startsWith(k));
     if (chaveIns) { partes.push(inserirDepois[chaveIns]); achadas.add(chaveIns); }
   }
-  let prompt = partes.join("\n").replace("# AGENTE JOÃO — Abertura e Horário", "# AGENTE JOÃO — Aula gratuita (conexão antes do agendamento)");
-  for (const [de, para] of TROCAS_DO_GANCHO) prompt = prompt.replace(de, para);
+  const prompt = partes.join("\n").replace("# AGENTE JOÃO — Abertura e Horário", "# AGENTE JOÃO — Aula gratuita (conexão antes do agendamento)");
   const ausentes = [...Object.keys(substituir), ...Object.keys(inserirDepois)].filter((k) => !achadas.has(k));
   return { prompt, trocadas, ausentes };
 }
