@@ -5,8 +5,8 @@
 // (cobranca-3c-listas, alimentado pelo SprintHub): a logica e outra.
 //
 //   POST ?acao=atualizar   o BOTAO do funil. Le os tres funis, tira bloqueado
-//                          (permanente ou temporario), poe na lista quem entrou e
-//                          tira quem saiu. Corpo: { exec_id } — a tela acompanha o
+//                          (permanente ou temporario), APAGA a lista anterior e
+//                          sobe uma nova. Corpo: { exec_id } — a tela acompanha o
 //                          progresso lendo cob_semi_3c_execucoes por esse id.
 //   POST ?acao=atualizar&dry=1   so conta, nao toca no 3C
 //   POST ?acao=faxina      cron das 18:00 BRT: apaga TODA lista da campanha
@@ -271,66 +271,47 @@ async function atualizar(cfg: Record<string, unknown>, execId: string, dry: bool
   }
   await marcar(execId, { ...contagem, fase: 'Conferindo a lista no 3C' })
 
-  // A lista do dia: reusa a de hoje se ela ainda vive no 3C; senao nasce outra.
-  const nomeLista = `${PREFIXO_LISTA} ${hojeBRT()}`
+  // CADA CLIQUE REFAZ A LISTA: apaga a anterior e sobe uma nova, do zero (pedido do
+  // Gustavo, 17/09/2026). Nao existe atualizacao incremental — o que vale e sempre a
+  // foto dos funis na hora do clique.
+  const agora = new Date().toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' })
+  const nomeLista = `${PREFIXO_LISTA} ${hojeBRT()} ${agora}`
   const listas = await listarListas(campanha)
-  const viva = listas.find((l) => String(l.id) === String(cfg.lista_atual_id ?? '') && String(l.name ?? l.nome ?? '') === nomeLista)
-    ?? listas.find((l) => String(l.name ?? l.nome ?? '') === nomeLista)
 
-  let jaNaLista = new Map<string, string>() // canon -> telefone
-  if (viva) {
-    const { data: itens } = await supabase.from('cob_semi_3c_itens').select('canon, telefone').eq('lista_id', String(viva.id))
-    jaNaLista = new Map((itens ?? []).map((i: { canon: string; telefone: string }) => [i.canon, i.telefone]))
-  }
-
-  const elegiveisPorCanon = new Map(elegiveis.map((p) => [p.canon, p]))
-  const novos = elegiveis.filter((p) => !jaNaLista.has(p.canon))
-  const saem = [...jaNaLista.entries()].filter(([canon]) => !elegiveisPorCanon.has(canon))
-  const jaEstavam = elegiveis.length - novos.length
+  const { data: anteriores } = await supabase.from('cob_semi_3c_itens').select('canon')
+  const naAnterior = new Set((anteriores ?? []).map((i: { canon: string }) => i.canon))
+  const canonsDeAgora = new Set(elegiveis.map((p) => p.canon))
+  const novos = elegiveis
+  const jaEstavam = 0
+  // quem estava na lista anterior e nao volta nesta (quitou, saiu do funil, bloqueou)
+  const sairam = [...naAnterior].filter((c) => !canonsDeAgora.has(c)).length
 
   if (dry) {
     await marcar(execId, {
-      status: 'ok', fase: 'Simulação', entraram: novos.length, sairam: saem.length, ja_estavam: jaEstavam,
-      na_lista: jaEstavam + novos.length, terminado_em: new Date().toISOString(),
-      detalhe: { dry: true, cards: regua.cards, amostra: novos.slice(0, 5) },
+      status: 'ok', fase: 'Simulação', entraram: novos.length, sairam, ja_estavam: 0,
+      na_lista: novos.length, terminado_em: new Date().toISOString(),
+      detalhe: { dry: true, cards: regua.cards, listas_que_seriam_apagadas: listas.length, amostra: novos.slice(0, 5) },
     })
-    return { dry: true, ...contagem, entrariam: novos.length, sairiam: saem.length, ja_estavam: jaEstavam }
+    return { dry: true, ...contagem, entrariam: novos.length, sairiam: sairam, listas_que_seriam_apagadas: listas.length }
   }
-
-  let listaId: string
-  if (viva) {
-    listaId = String(viva.id)
-  } else {
-    // Sobra de lista velha na campanha (faxina que falhou) dividiria a discagem.
-    for (const l of listas) await api('DELETE', `/campaigns/${campanha}/lists/${l.id}`)
-    await supabase.from('cob_semi_3c_itens').delete().neq('canon', '')
-    listaId = await criarLista(campanha, nomeLista)
-    await supabase.from('cob_semi_3c_config').update({
-      lista_atual_id: listaId, lista_atual_nome: nomeLista,
-      lista_atual_criada_em: new Date().toISOString(), atualizado_em: new Date().toISOString(),
-    }).eq('id', 1)
-  }
-  await marcar(execId, { lista_id: listaId, lista_nome: nomeLista, ja_estavam: jaEstavam })
 
   const avisos: string[] = []
 
-  // 1) tira quem saiu do funil ou foi bloqueado depois de entrar
-  let sairam = 0
-  if (saem.length > 0) {
-    await marcar(execId, { fase: 'Tirando quem saiu ou foi bloqueado' })
-    for (let i = 0; i < saem.length; i += POR_LOTE) {
-      const fatia = saem.slice(i, i + POR_LOTE)
-      // campo no SINGULAR, valor em ARRAY, resposta 204
-      const r = await api('DELETE', `/campaigns/${campanha}/mailing/delete`, { phone: fatia.map(([, tel]) => tel) })
-      if (r.ok || r.status === 204) {
-        await supabase.from('cob_semi_3c_itens').delete().in('canon', fatia.map(([canon]) => canon))
-        sairam += fatia.length
-      } else {
-        avisos.push(`remocao: HTTP ${r.status} ${r.texto.slice(0, 150)}`)
-      }
-    }
-    await marcar(execId, { sairam })
+  // 1) apaga a lista anterior (todas as que houver na campanha)
+  await marcar(execId, { fase: 'Apagando a lista anterior' })
+  for (const l of listas) {
+    const r = await api('DELETE', `/campaigns/${campanha}/lists/${l.id}`)
+    // Lista velha viva dividiria a discagem com a nova e ligaria para quem ja saiu.
+    if (!(r.ok || r.status === 204)) throw new Error(`nao consegui apagar a lista anterior (${l.id}): HTTP ${r.status} ${r.texto.slice(0, 150)}`)
   }
+  await supabase.from('cob_semi_3c_itens').delete().neq('canon', '')
+
+  const listaId = await criarLista(campanha, nomeLista)
+  await supabase.from('cob_semi_3c_config').update({
+    lista_atual_id: listaId, lista_atual_nome: nomeLista,
+    lista_atual_criada_em: new Date().toISOString(), atualizado_em: new Date().toISOString(),
+  }).eq('id', 1)
+  await marcar(execId, { lista_id: listaId, lista_nome: nomeLista, sairam })
 
   // 2) poe quem entrou
   let entraram = 0
@@ -382,7 +363,7 @@ async function atualizar(cfg: Record<string, unknown>, execId: string, dry: bool
     status: falhouTudo ? 'erro' : 'ok',
     fase: falhouTudo ? 'O 3C recusou o envio' : 'Lista atualizada',
     erro: avisos.length ? avisos.join(' | ') : null,
-    detalhe: { cards: regua.cards, pessoas: regua.pessoas, lista_criada_agora: !viva, lotes },
+    detalhe: { cards: regua.cards, pessoas: regua.pessoas, listas_apagadas: listas.length, lotes },
     terminado_em: new Date().toISOString(),
   })
   return resultado
