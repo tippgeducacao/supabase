@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { expandirVariaveis, renderizarTags } from "../_shared/emailBuilder/mergeTags.ts";
 
 const teste = vi.hoisted(() => ({
   handler: null as ((req: Request) => Promise<Response>) | null,
@@ -136,8 +137,33 @@ describe("email-send acionado pelo webhook", () => {
   });
 
   it("preserva a renderização dos testes de e-mail já existentes", async () => {
+    // Mudou de propósito em 17/09/2026: o valor da variável passa a ser ESCAPADO no
+    // corpo HTML, como o caminho de webhook já fazia em `renderizacaoWebhook.ts` e como
+    // a prévia do construtor sempre fez. `Ana &amp; João` renderiza "Ana & João" no
+    // cliente — o que muda é que um contato chamado `<b>` deixa de injetar markup.
+    // Conferido no banco antes de mexer: dos 774 envios com modelo, nenhum corpo
+    // renderizado trazia tag HTML vinda de variável.
     await enviar("teste");
-    expect(teste.enviar.mock.calls[0][0].html).toContain("Ana & João");
+    expect(teste.enviar.mock.calls[0][0].html).toContain("Ana &amp; João");
     expect(teste.enviar.mock.calls[0][0].html).not.toContain("Descadastrar deste tipo");
+  });
+
+  it("tag com filtro chega resolvida ao destinatário, não crua", async () => {
+    // O defeito que motivou a troca do motor: o prompt do sistema ENSINA a IA a escrever
+    // `{{contato.primeiro_nome | fallback:"Olá"}}`, o regex antigo (`[\w.]+`) não casava
+    // filtro nenhum, e a campanha entregava a chave literal. Já havia modelo de
+    // marketing salvo assim, pronto para disparo.
+    const corpo = '<p>Olá {{contato.primeiro_nome | fallback:&quot;pessoa&quot;}}</p>';
+    expect(renderizarTags(corpo, expandirVariaveis({ nome: "Ana Paula" }), { escapar: true }))
+      .toBe("<p>Olá Ana</p>");
+    expect(renderizarTags(corpo, expandirVariaveis({}), { escapar: true }))
+      .toBe("<p>Olá pessoa</p>");
+  });
+
+  it("modelo legado sem filtro continua idêntico", async () => {
+    // Os 29 modelos do funil de TCC usam `{{nome}}` raso e esperam tag não resolvida
+    // saindo LITERAL. Quebrar isso estragaria e-mail que a Secretaria manda todo dia.
+    expect(renderizarTags("Olá {{nome_aluno}}, TCC {{titulo_tcc}}", expandirVariaveis({ nome_aluno: "João" })))
+      .toBe("Olá João, TCC {{titulo_tcc}}");
   });
 });

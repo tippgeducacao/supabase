@@ -52,10 +52,23 @@ function dividirForaDeAspas(entrada: string): string[] {
   return partes.map((p) => p.trim()).filter((p) => p.length > 0);
 }
 
+/**
+ * Tira as aspas do valor de um filtro.
+ *
+ * Aceita também a forma ESCAPADA (`&quot;…&quot;`, `&#39;…&#39;`) porque o compilador
+ * escapa o texto do bloco depois de a tag já estar montada: o `corpo_html` gravado
+ * guarda `fallback:&quot;Olá&quot;`, e sem isto o fallback chegava ao destinatário com
+ * as aspas visíveis — `Olá "Olá",`. Conserta os modelos já salvos sem reescrever HTML.
+ */
 function tirarAspas(v: string): string {
   const t = v.trim();
   if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) {
     return t.slice(1, -1).replace(/\\(["'])/g, "$1");
+  }
+  for (const entidade of ["&quot;", "&#39;", "&apos;"]) {
+    if (t.length > entidade.length * 2 - 1 && t.startsWith(entidade) && t.endsWith(entidade)) {
+      return t.slice(entidade.length, -entidade.length);
+    }
   }
   return t;
 }
@@ -259,4 +272,51 @@ export function validarTags(texto: string, caminhosValidos: string[]): ProblemaT
     }
   }
   return problemas;
+}
+
+/** Chaves que nunca viram caminho: poluir o protótipo por merge tag não é opção. */
+const CHAVES_PROIBIDAS = new Set(["__proto__", "prototype", "constructor"]);
+
+/**
+ * Monta a bag ANINHADA a partir da bag plana que os envios entregam.
+ *
+ * Os três caminhos de envio montam variáveis rasas — a campanha manda
+ * `{...contato_metadata, nome, email}`, o webhook manda
+ * `{nome, primeiro_nome, email, telefone, curso}` mais o que cada integração mapeia à
+ * mão (hoje 40 delas mapeiam a chave plana `"contato.primeiro_nome"`). Os modelos, por
+ * outro lado, são escritos com o catálogo aninhado (`{{contato.primeiro_nome}}`).
+ *
+ * Aqui os dois se encontram: chave plana com ponto vira caminho, a chave rasa original
+ * continua valendo para os 29 modelos legados do funil de TCC, e os apelidos mais
+ * comuns ganham atalho — `{{contato.primeiro_nome}}` resolve mesmo quando o envio só
+ * mandou `nome`.
+ */
+export function expandirVariaveis(vars: Record<string, unknown>): Record<string, unknown> {
+  const saida: Record<string, unknown> = { ...vars };
+  for (const [chave, valor] of Object.entries(vars)) {
+    if (!chave.includes(".")) continue;
+    const partes = chave.split(".");
+    if (partes.some(p => !p || CHAVES_PROIBIDAS.has(p))) continue;
+    let atual = saida;
+    for (const parte of partes.slice(0, -1)) {
+      if (typeof atual[parte] !== "object" || atual[parte] === null) atual[parte] = {};
+      atual = atual[parte] as Record<string, unknown>;
+    }
+    atual[partes[partes.length - 1]] = valor;
+  }
+
+  const texto = (v: unknown) => (typeof v === "string" && v.trim() ? v : undefined);
+  const ramo = (nome: string) => {
+    if (typeof saida[nome] !== "object" || saida[nome] === null) saida[nome] = {};
+    return saida[nome] as Record<string, unknown>;
+  };
+  const contato = ramo("contato");
+  contato.nome ??= texto(vars.nome);
+  contato.primeiro_nome ??= texto(vars.primeiro_nome) ?? texto(vars.nome)?.split(/\s+/)[0];
+  contato.email ??= texto(vars.email);
+  contato.telefone ??= texto(vars.telefone) ?? texto(vars.whatsapp);
+  contato.cidade ??= texto(vars.cidade);
+  ramo("curso").nome ??= texto(vars.curso);
+  ramo("turma").nome ??= texto(vars.turma);
+  return saida;
 }

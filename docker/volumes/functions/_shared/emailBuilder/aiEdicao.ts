@@ -239,7 +239,13 @@ export function revisarComercialEmailIA(documento: DocumentoEmail, referencias =
       if (!fonte.includes(normalizar(m[0]))) adicionar("prazo", m[0], "Data, prazo ou urgência sem correspondência nas referências fornecidas. Confirme antes de enviar.");
     }
     for (const frase of texto.split(/(?<=[.!?])\s+|\n/)) {
-      if (/garanti[dr]|100\s*%|resultado[s]? (?:cert[oa]s?|comprovad[oa]s?)|melhor do (?:brasil|mercado)|reconhecid[oa].{0,20}\bMEC\b|sem risco|emprego garantido/i.test(frase)) adicionar("promessa", frase, "Promessa ou afirmação comercial exige comprovação e revisão humana, mesmo quando aparece no material de referência.");
+      if (/garanti[dr]|resultado[s]? (?:cert[oa]s?|comprovad[oa]s?)|melhor do (?:brasil|mercado)|reconhecid[oa].{0,20}\bMEC\b|sem risco|emprego garantido/i.test(frase)) adicionar("promessa", frase, "Promessa ou afirmação comercial exige comprovação e revisão humana, mesmo quando aparece no material de referência.");
+      // "100%" ganha a MESMA excecao por referencia que preco e prazo ja tinham: era a
+      // unica promessa sem saida, e "100% online" e fato de catalogo, nao superlativo.
+      // Garantia, MEC e resultado comprovado seguem sem excecao, de proposito.
+      for (const m of frase.matchAll(/\b100\s*%/g)) {
+        if (!fonte.includes(normalizar(m[0]))) adicionar("promessa", m[0], "Afirmacao de totalidade sem correspondencia nas referencias fornecidas. Confirme antes de enviar.");
+      }
     }
   }
   for (const href of links) {

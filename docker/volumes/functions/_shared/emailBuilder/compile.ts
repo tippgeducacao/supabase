@@ -84,16 +84,30 @@ function px(v: number | string | null | undefined): string | null {
   return typeof v === "number" ? `${v}px` : String(v);
 }
 
-function padding(e: Espacamento | undefined, padraoZero = true): string | null {
-  if (!e) return padraoZero ? null : null;
+function padding(e: Espacamento | undefined, manterZero = false): string | null {
+  if (!e) return null;
   const t = e.topo ?? 0, d = e.direita ?? 0, b = e.baixo ?? 0, l = e.esquerda ?? 0;
-  if (!t && !d && !b && !l) return null;
+  // Fora da media query, padding todo-zero é o mesmo que não declarar — some para não
+  // engordar o HTML. DENTRO dela precisa sair: "no celular, tira a folga lateral" é o
+  // ajuste mais pedido, e descartá-lo fazia o override não existir.
+  if (!t && !d && !b && !l && !manterZero) return null;
   return `${t}px ${d}px ${b}px ${l}px`;
 }
 
 function borda(e: EstiloBloco["borda"]): string | null {
   if (!e || !e.largura) return null;
   return `${e.largura}px ${e.estilo ?? "solid"} ${e.cor ?? "#000000"}`;
+}
+
+/**
+ * O padding do bloco vai no wrapper — MENOS no botão.
+ *
+ * O botão é uma tabela com o padding na própria `<td>` (Outlook engole padding em `<a>`),
+ * então repetir no wrapper dobrava a folga: 40px fora do botão MAIS 40px dentro. Em
+ * coluna estreita isso quebrava o rótulo em duas linhas sem motivo.
+ */
+function paddingNoWrapper(tipo: Bloco["tipo"]): boolean {
+  return tipo !== "botao";
 }
 
 /** Recuo lateral somado — o que o padding come da largura disponível. */
@@ -133,6 +147,8 @@ function compilarTexto(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao): string {
     ["font-size", px(e.tamanhoFonte ?? g.tamanhoFonte)],
     ["font-weight", e.pesoFonte ?? null],
     ["line-height", e.alturaLinha ?? g.alturaLinha],
+    // Sem esta dica o Outlook usa a entrelinha do Word e ignora o line-height.
+    ["mso-line-height-rule", "exactly"],
     ["color", e.corTexto ?? g.corTexto],
     ["text-align", e.alinhamento ?? "left"],
     // `margin:0` porque o default do cliente varia e vira espaçamento aleatório.
@@ -173,13 +189,19 @@ function compilarBotao(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao): string {
   ]);
   const alinha = e.alinhamento ?? "left";
 
+  // Largura do botão: o pedido mais comum é "ocupa a linha inteira", e a propriedade
+  // era declarável e sumia calada. Vai no atributo TAMBÉM porque o Outlook ignora
+  // width no CSS de tabela.
+  // `validarDocumentoIA` já normalizou para "Npx", "N%" ou "auto".
+  const largura = px(e.largura);
   return [
     // `align` além do `margin`: o motor do Word posiciona TABELA por atributo e
     // ignora `margin:0 auto`. Sem ele o botão "centralizado" encosta à esquerda no
     // Outlook desktop, desalinhado do resto que centraliza por text-align.
     `<table role="presentation" border="0" cellpadding="0" cellspacing="0"`,
     attr("align", alinha === "left" ? null : alinha),
-    ` style="${css([["margin", alinha === "center" ? "0 auto" : alinha === "right" ? "0 0 0 auto" : "0"]])}">`,
+    attr("width", largura && largura.endsWith("%") ? largura : largura ? parseInt(largura, 10) : null),
+    ` style="${css([["width", largura], ["margin", alinha === "center" ? "0 auto" : alinha === "right" ? "0 0 0 auto" : "0"]])}">`,
     `<tr><td style="${tdEstilo}">`,
     `<a${attr("href", href)}${attr("target", b.props.alvo ?? "_blank")} style="${aEstilo}">${esc(txt(b.props.texto, o, false))}</a>`,
     `</td></tr></table>`,
@@ -192,6 +214,7 @@ function compilarLink(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao): string {
   const estilo = css([
     ["font-family", e.fonte ?? g.fonte],
     ["font-size", px(e.tamanhoFonte ?? g.tamanhoFonte)],
+    ["font-weight", e.pesoFonte ?? null],
     ["color", e.corTexto ?? g.corLink],
     ["text-decoration", "underline"],
   ]);
@@ -223,6 +246,11 @@ function compilarImagem(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao, disponivel
     ["outline", "none"],
     ["text-decoration", "none"],
     ["-ms-interpolation-mode", "bicubic"],
+    // Com imagem bloqueada — padrão em cliente corporativo — o alt herda a fonte
+    // serifada minúscula do cliente. Estes três fazem dele um texto legível.
+    ["font-family", g.fonte],
+    ["font-size", px(Math.max(12, g.tamanhoFonte - 2))],
+    ["color", g.corTexto],
   ]);
   // border="0" evita a moldura azul do Outlook quando a imagem está dentro de link.
   const img = `<img${attr("src", src)} alt="${alt}" border="0"${attr("width", alvo)} style="${estilo}" />`;
@@ -230,7 +258,9 @@ function compilarImagem(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao, disponivel
   const conteudo = b.tipo === "imagem-link" || b.props.href
     ? `<a${attr("href", prepararHref(txt(b.props.href, o, false), o))}${attr("target", b.props.alvo ?? "_blank")}>${img}</a>`
     : img;
-  return `<div style="${css([["text-align", e.alinhamento ?? "center"]])}">${conteudo}</div>`;
+  // `corFundo` vira o prato atrás da imagem: é o que salva PNG transparente em modo
+  // escuro, e era declarável no schema sem chegar a lugar nenhum.
+  return `<div style="${css([["text-align", e.alinhamento ?? "center"], ["background-color", e.corFundo]])}">${conteudo}</div>`;
 }
 
 function compilarVideo(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao, disponivel: number): string {
@@ -253,7 +283,8 @@ function compilarVideo(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao, disponivel:
   const chamada = css([
     ["font-family", b.estilo?.fonte ?? g.fonte],
     ["font-size", px(b.estilo?.tamanhoFonte ?? 14)],
-    ["color", g.corLink],
+    ["font-weight", b.estilo?.pesoFonte ?? null],
+    ["color", b.estilo?.corTexto ?? g.corLink],
     ["text-decoration", "underline"],
   ]);
 
@@ -269,7 +300,9 @@ function compilarSeparador(b: Bloco): string {
   const e = b.estilo ?? {};
   // <hr> renderiza diferente em cada cliente; uma <td> com border-top é previsível.
   const estilo = css([
-    ["border-top", `${e.borda?.largura ?? b.props.espessura ?? 1}px ${e.borda?.estilo ?? "solid"} ${e.borda?.cor ?? "#e4e4e7"}`],
+    // `corTexto` é o único caminho do modelo até a cor da linha: `borda` não está no
+    // schema do provedor. Sem isto, separador colorido era impossível de pedir.
+    ["border-top", `${e.borda?.largura ?? b.props.espessura ?? 1}px ${e.borda?.estilo ?? "solid"} ${e.borda?.cor ?? e.corTexto ?? "#e4e4e7"}`],
     ["font-size", "0"],
     ["line-height", "0"],
   ]);
@@ -282,8 +315,11 @@ function compilarLista(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao): string {
   const estilo = css([
     ["font-family", e.fonte ?? g.fonte],
     ["font-size", px(e.tamanhoFonte ?? g.tamanhoFonte)],
+    ["font-weight", e.pesoFonte ?? null],
     ["line-height", e.alturaLinha ?? g.alturaLinha],
+    ["mso-line-height-rule", "exactly"],
     ["color", e.corTexto ?? g.corTexto],
+    ["text-align", e.alinhamento ?? null],
     ["margin", "0"],
     ["padding-left", "20px"],
   ]);
@@ -297,7 +333,8 @@ function compilarEspacador(b: Bloco): string {
   // `estilo.altura` antes de `props.altura`: é por ela que o override de mobile passa
   // ("no celular esse respiro é menor"), que é o ajuste mais pedido no espaçador.
   const h = b.estilo?.altura ?? b.props.altura ?? 24;
-  return `<table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%"><tr><td style="${css([["height", px(h)], ["font-size", "0"], ["line-height", "0"]])}">&nbsp;</td></tr></table>`;
+  // `corFundo` faz o respiro virar faixa de cor — era declarável e sumia calado.
+  return `<table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%"><tr><td style="${css([["height", px(h)], ["background-color", b.estilo?.corFundo], ["font-size", "0"], ["line-height", "0"]])}">&nbsp;</td></tr></table>`;
 }
 
 function compilarHtml(b: Bloco, o: OpcoesCompilacao): string {
@@ -409,7 +446,7 @@ function compilarColuna(c: Coluna, g: GlobaisDoc, o: OpcoesCompilacao, empilha: 
       const e = b.estilo ?? {};
       const naCaixa = caixaNoWrapper(b.tipo);
       const estiloWrap = css([
-        ["padding", padding(e.padding)],
+        ["padding", paddingNoWrapper(b.tipo) ? padding(e.padding) : null],
         ["background-color", naCaixa ? e.corFundo : null],
         ["border", naCaixa ? borda(e.borda) : null],
         ["border-radius", naCaixa ? px(e.raio) : null],
@@ -508,9 +545,10 @@ function regrasMobile(doc: DocumentoEmail): string {
 
         const { texto, caixa } = alvosMobile(b.tipo, classe);
 
-        // O padding do desktop é escrito no wrapper; o de mobile precisa mirar lá.
-        const wrapper = cssImportante([["padding", padding(m.padding)]]);
-        if (wrapper) regras.push(`.${classe}{${wrapper}}`);
+        // O padding do desktop é escrito no wrapper; o de mobile precisa mirar lá —
+        // e no botão o padding mora na `<td>`, então a regra segue o mesmo alvo.
+        const wrapper = cssImportante([["padding", padding(m.padding, true)]]);
+        if (wrapper) regras.push(`${paddingNoWrapper(b.tipo) ? `.${classe}` : `.${classe} td`}{${wrapper}}`);
 
         const tipografia = cssImportante([
           ["font-family", m.fonte],
@@ -527,6 +565,9 @@ function regrasMobile(doc: DocumentoEmail): string {
           ["border", borda(m.borda)],
           ["border-radius", px(m.raio)],
           ["width", m.largura],
+          // Sem `max-width` ao lado, o inline do DESKTOP continua limitando e o override
+          // de mobile é escrito, enviado e não tem efeito nenhum.
+          ["max-width", m.largura],
           ["height", m.altura],
         ]);
         if (box) regras.push(`${caixa}{${box}}`);
@@ -562,7 +603,11 @@ function estiloCabecalho(g: GlobaisDoc, doc: DocumentoEmail): string {
        e inline vence folha de estilo — mirar só o wrapper não teria efeito. */
     @media (prefers-color-scheme:dark){
       .forcar-cor,.forcar-cor>*{color:${g.corTexto}!important}
-      .forcar-fundo{background-color:${g.corFundo}!important}
+      /* .forcar-fundo esta no BODY: tem que valer a cor da PAGINA. Usar a cor do
+         container pintava a pagina inteira de branco no modo escuro, o oposto do que
+         a regra existe para fazer. O container tem classe propria. */
+      .forcar-fundo{background-color:${g.corFundoPagina}!important}
+      .container{background-color:${g.corFundo}!important}
     }
     ${doc.cssCustomizado ?? ""}
   `.trim();
@@ -666,8 +711,11 @@ export function compilarDocumento(
   fecharContainer();
   const corpoContainer = partes.join("");
 
+  // O enchimento invisível no fim impede o cliente de emendar o começo do corpo (o alt
+  // do logo, normalmente) na prévia da caixa de entrada, logo depois do texto que
+  // alguém escreveu com cuidado. Espaço de largura zero: não é lido nem exibido.
   const preheader = doc.preheader
-    ? `<div style="display:none;font-size:1px;color:${g.corFundo};line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden">${esc(txt(doc.preheader, opcoes, false))}</div>`
+    ? `<div style="display:none;font-size:1px;color:${g.corFundo};line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden">${esc(txt(doc.preheader, opcoes, false))}${"&#8204;&nbsp;".repeat(60)}</div>`
     : "";
 
   const pixel = opcoes.pixelUrl

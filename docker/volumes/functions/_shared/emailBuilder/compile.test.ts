@@ -494,3 +494,79 @@ describe("ordem das linhas com fundo sangrado", () => {
     expect(pos("FAIXA")).toBeLessThan(pos("RODAPE"));
   });
 });
+
+/**
+ * Estilo declarado que NÃO chegava ao HTML.
+ *
+ * O schema do provedor tem um `estilo_bloco` único para os nove tipos (uma união por
+ * tipo estourou a gramática do Claude na API real), então o modelo pode declarar
+ * qualquer propriedade em qualquer bloco. Oito combinações legítimas passavam pelo
+ * validador e sumiam caladas: a IA pedia, a pessoa lia "negrito no link" na proposta,
+ * e o e-mail saía sem negrito. Medido em 17/09/2026 compilando com e sem cada
+ * propriedade e comparando o HTML.
+ */
+describe("estilo declarado chega ao HTML", () => {
+  const doOnly = (b: Bloco) => compilarDocumento(doc([b])).html;
+
+  it("link aceita negrito", () => {
+    const b: Bloco = { id: "l", tipo: "link", props: { texto: "Ver", href: "https://e/x" }, estilo: { pesoFonte: 700 } };
+    expect(doOnly(b)).toContain("font-weight:700");
+  });
+
+  it("lista aceita negrito e alinhamento", () => {
+    const b: Bloco = { id: "li", tipo: "lista", props: { itens: ["um"] }, estilo: { pesoFonte: 700, alinhamento: "center" } };
+    const html = doOnly(b);
+    expect(html).toContain("font-weight:700");
+    expect(html).toContain("text-align:center");
+  });
+
+  it("botão aceita largura, e ela vai no atributo — Outlook ignora width no CSS de tabela", () => {
+    const b: Bloco = { id: "bt", tipo: "botao", props: { texto: "Ir", href: "https://e/x" }, estilo: { largura: "100%" } };
+    const html = doOnly(b);
+    expect(html).toContain("width:100%");
+    expect(html).toMatch(/<table[^>]*width="100%"/);
+  });
+
+  it("botão com largura em px sai com atributo numérico", () => {
+    const b: Bloco = { id: "bt", tipo: "botao", props: { texto: "Ir", href: "https://e/x" }, estilo: { largura: "320px" } };
+    expect(doOnly(b)).toMatch(/<table[^>]*width="320"/);
+  });
+
+  it("imagem aceita cor de fundo — o prato atrás de PNG transparente", () => {
+    // Sem isso, logo colorida com fundo transparente some no modo escuro do cliente.
+    const b: Bloco = { id: "i", tipo: "imagem", props: { src: "https://e/a.png", alt: "A" }, estilo: { corFundo: "#ffffff" } };
+    expect(doOnly(b)).toContain("background-color:#ffffff");
+  });
+
+  it("espaçador aceita cor de fundo — o respiro vira faixa", () => {
+    const b: Bloco = { id: "e", tipo: "espacador", props: { altura: 20 }, estilo: { corFundo: "#edf3f2" } };
+    expect(doOnly(b)).toContain("background-color:#edf3f2");
+  });
+
+  it("separador aceita cor da linha por corTexto", () => {
+    // `borda` não existe no schema do provedor: sem isto o modelo não tem NENHUM
+    // caminho até a cor do separador.
+    const b: Bloco = { id: "s", tipo: "separador", props: { espessura: 2 }, estilo: { corTexto: "#b955a1" } };
+    expect(doOnly(b)).toContain("border-top:2px solid #b955a1");
+  });
+
+  it("borda explícita ainda ganha de corTexto no separador", () => {
+    const b: Bloco = { id: "s", tipo: "separador", props: {}, estilo: { corTexto: "#b955a1", borda: { largura: 3, cor: "#193e3b" } } };
+    expect(doOnly(b)).toContain("border-top:3px solid #193e3b");
+  });
+
+  it("vídeo aceita cor e peso na chamada", () => {
+    const b: Bloco = { id: "v", tipo: "video", props: { thumbnail: "https://e/a.png", alt: "A", href: "https://e/v" }, estilo: { corTexto: "#00706a", pesoFonte: 700 } };
+    const html = doOnly(b);
+    expect(html).toContain("color:#00706a");
+    expect(html).toContain("font-weight:700");
+  });
+
+  it("estilo sem sentido para o tipo continua sem efeito, e não quebra", () => {
+    // Honrar `pesoFonte` num espaçador seria pior que ignorar. O contrato avisa o
+    // modelo pela descrição do schema; aqui só garantimos que não explode.
+    const b: Bloco = { id: "e", tipo: "espacador", props: { altura: 10 }, estilo: { pesoFonte: 700, corTexto: "#ff0000" } };
+    expect(() => doOnly(b)).not.toThrow();
+    expect(doOnly(b)).not.toContain("font-weight:700");
+  });
+});

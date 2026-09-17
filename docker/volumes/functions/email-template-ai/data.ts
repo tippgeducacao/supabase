@@ -131,7 +131,7 @@ export async function resolverContextoEmailIA(cliente: SupabaseClient, valor: un
     if (!curso) indisponivelSelecionada("curso", selecao.curso_id, "Curso selecionado", "O curso selecionado não está mais disponível no catálogo ativo.");
     else {
       const [playbooks, links, cadastro] = await Promise.all([
-        consultarLista(cliente.from("comercial_curso_playbook").select("definicao,descricao_detalhada,publico_alvo,habilidades,objetivos_profissionais,professores_destaques").eq("curso_id", curso.id).eq("ativo", true).order("versao", { ascending: false }).limit(1)),
+        consultarLista(cliente.from("comercial_curso_playbook").select("definicao,descricao_detalhada,publico_alvo,habilidades,objetivos_profissionais,professores_destaques,modulos_duracao,formato_aulas,dores_limitacoes").eq("curso_id", curso.id).eq("ativo", true).order("versao", { ascending: false }).limit(1)),
         listarPaginado((inicio, fim) => cliente.from("comercial_curso_links").select("titulo,url,tipo,descricao").eq("curso_id", curso.id).eq("ativo", true).order("ordem").order("id").range(inicio, fim)),
         curso.curso_id ? consultarUm(cliente.from("cursos").select("id,nome").eq("id", curso.curso_id).eq("ativo", true).maybeSingle()) : Promise.resolve(null),
       ]);
@@ -145,6 +145,11 @@ export async function resolverContextoEmailIA(cliente: SupabaseClient, valor: un
       if (playbook) adicionar("playbook", selecao.curso_id, `Playbook: ${curso.nome}`, [
         ["Definição", playbook.definicao], ["Conteúdo", playbook.descricao_detalhada, 5000], ["Público", playbook.publico_alvo],
         ["Habilidades", playbook.habilidades], ["Objetivos profissionais", playbook.objetivos_profissionais], ["Professores", playbook.professores_destaques],
+        // Carga horária e formato das aulas são o que todo e-mail de curso precisa dizer
+        // e ficavam de fora: sem eles a IA não tinha como responder "quanto dura" e
+        // "como assisto" a não ser inventando. Preenchidos em 10 de 10 playbooks ativos.
+        ["Carga horária e módulos", playbook.modulos_duracao], ["Formato das aulas", playbook.formato_aulas],
+        ["Dores do público", playbook.dores_limitacoes],
       ]);
       const linksUsados = links.filter(link => urlLink(link.url)).slice(0, 50).map(link => `${texto(link.titulo, 160)} (${link.tipo}): ${urlLink(link.url)}`).join("\n");
       if (linksUsados) adicionar("links", selecao.curso_id, `Links cadastrados: ${curso.nome}`, [["Links cadastrados", linksUsados, MAX_CARACTERES_FONTES_EMAIL_IA]]);

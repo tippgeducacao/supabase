@@ -18,6 +18,7 @@ import { buscarSupressao, supressaoSeAplica } from "../_shared/supressao.ts";
 import { conferirConsultaIdempotente, permiteNovaChaveIdempotente, respostaEnvioExistente } from "./idempotencia.ts";
 import { emailEhMarketing, renderizarEmailWebhook } from "./renderizacaoWebhook.ts";
 import { resolverModeloCampanhaAB } from "./campanhaAB.ts";
+import { expandirVariaveis, renderizarTags } from "../_shared/emailBuilder/mergeTags.ts";
 import { respostaOpcoesCampanhas } from "../_shared/emailCampanhasCapacidades.ts";
 import { autorizarEnvioEmail, conferirContaEnvioEmail, ErroAcessoEnvioEmail } from "../_shared/emailSendAuth.ts";
 
@@ -50,8 +51,23 @@ interface SendPayload {
   usuario_esperado?: string;
 }
 
-function renderTemplate(s: string, vars: Record<string, string>): string {
-  return s.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_m, k) => (vars[k] ?? `{{${k}}}`));
+/**
+ * Renderiza as merge tags do envio pelo MOTOR COMPARTILHADO, o mesmo que a prévia do
+ * construtor usa.
+ *
+ * Antes daqui morava um regex de uma linha, `/\{\{\s*([\w.]+)\s*\}\}/`, que não
+ * casa tag com filtro. E o prompt do sistema ENSINA a IA a escrever
+ * `{{contato.primeiro_nome | fallback:"Olá"}}` — então a prévia mostrava "Olá Ana" e a
+ * campanha entregava a chave crua ao destinatário. Já havia um modelo de marketing
+ * salvo assim, pronto para disparo.
+ *
+ * `naoResolvida: "literal"` preserva exatamente o comportamento antigo para os 29
+ * modelos legados do funil de TCC: tag sem valor continua saindo como `{{nome}}`.
+ * Escapamos só o HTML — assunto é cabeçalho e o corpo de texto é text/plain —, que é a
+ * mesma régua do caminho de webhook em `renderizacaoWebhook.ts`.
+ */
+function renderTemplate(s: string, dados: Record<string, unknown>, html = false): string {
+  return renderizarTags(s, dados, { escapar: html, naoResolvida: "literal" });
 }
 
 function base64url(input: string | Uint8Array): string {
@@ -234,9 +250,11 @@ Deno.serve(async (req) => {
         });
       }
     } else {
-      assunto = renderTemplate(assunto, vars);
-      corpoHtml = renderTemplate(corpoHtml, vars);
-      if (corpoTexto) corpoTexto = renderTemplate(corpoTexto, vars);
+      // A bag do envio é PLANA; os modelos são escritos com o catálogo aninhado.
+      const dados = expandirVariaveis(vars);
+      assunto = renderTemplate(assunto, dados);
+      corpoHtml = renderTemplate(corpoHtml, dados, true);
+      if (corpoTexto) corpoTexto = renderTemplate(corpoTexto, dados);
     }
 
     // Resolve remetente -> caixa Gmail
