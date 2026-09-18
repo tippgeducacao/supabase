@@ -171,8 +171,26 @@ Deno.serve(async (req) => {
           try { await provider.deleteInstance(t.server, t.token); }
           catch (e) { console.error("[wa-uazapi-admin] deleteInstance falhou:", e instanceof Error ? e.message : String(e)); }
         }
-        await admin.from("wa_conexoes").delete().eq("id", conexaoId); // cascade apaga o secret
-        return json({ ok: true, conexao_id: conexaoId, deleted: true });
+        // 2026-09-18: linha COM histórico não sai do banco — sac_conversas aponta pra ela
+        // (FK NO ACTION) e SET NULL colidiria no único por linha do SAC. O delete falhava
+        // com 23503, o erro era ignorado e a tela dizia "excluída" com o card ainda lá.
+        // Com histórico a linha é ARQUIVADA (ativo=false, sem token); sem histórico, apagada.
+        const [conv, msg] = await Promise.all([
+          admin.from("sac_conversas").select("id").eq("wa_conexao_id", conexaoId).limit(1),
+          admin.from("crm_whatsapp_messages").select("id").eq("wa_conexao_id", conexaoId).limit(1),
+        ]);
+        if (conv.error || msg.error) return json({ error: `falha ao checar histórico: ${(conv.error ?? msg.error)?.message}` }, 500);
+        if (!conv.data?.length && !msg.data?.length) {
+          const { error: delErr } = await admin.from("wa_conexoes").delete().eq("id", conexaoId); // cascade apaga o secret
+          if (!delErr) return json({ ok: true, conexao_id: conexaoId, deleted: true });
+          if (delErr.code !== "23503" && delErr.code !== "23505") return json({ error: `falha ao excluir: ${delErr.message}` }, 500);
+        }
+        const { data: arquivada, error: arqErr } = await admin.from("wa_conexoes")
+          .update({ ativo: false, status_conexao: "desconectado", qrcode: null, paircode: null })
+          .eq("id", conexaoId).select("id").maybeSingle();
+        if (arqErr || !arquivada) return json({ error: `falha ao excluir: ${arqErr?.message ?? "conexão não encontrada"}` }, arqErr ? 500 : 404);
+        await admin.from("wa_conexoes_secrets").delete().eq("conexao_id", conexaoId);
+        return json({ ok: true, conexao_id: conexaoId, deleted: true, arquivada: true });
       }
 
       default:
