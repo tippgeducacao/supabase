@@ -61,9 +61,12 @@ Seu apontamento vai ser lido por uma pessoa da equipe pedagógica, que aceita ou
 
 O QUE APONTAR
 - Erro de grafia (palavra escrita errada).
-- Concordância verbal e nominal.
+- Concordância verbal e nominal (sujeito plural com verbo no singular e vice-versa; "a integração ... podem" → "pode").
+- ORAÇÕES COORDENADAS SEM CONECTIVO: vírgula + verbo no lugar de "e", gerúndio ou conjunção. É regra institucional (item 6.1) e é o erro mais comum nestes trabalhos. Exemplos: "cresceu de maneira significativa, abriu espaço para..." (falta "e" antes de "abriu" ou "abrindo"); "toma decisões de forma isolada, favorece a visão..." (falta "e" ou "favorecendo"). Aponte como "gramatica", com a sugestão do conectivo ou do gerúndio.
+- Vírgula entre sujeito e verbo ("O estudo de caso, demonstrou...").
 - Crase indevida ou faltando.
 - Regência e pontuação que mudam o sentido.
+- Mistura de tempo ou modo verbal na mesma sequência ("convertam ... e garantem" → "garantam").
 - Repetição de palavra colada ("de de", "que que").
 
 O QUE NÃO APONTAR, NUNCA
