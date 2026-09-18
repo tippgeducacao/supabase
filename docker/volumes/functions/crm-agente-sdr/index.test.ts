@@ -8,7 +8,7 @@ const fronteiras = vi.hoisted(() => ({
   pausaNoDebounce: false,
   executar: vi.fn(), tools: vi.fn(), gravar: vi.fn(), historico: vi.fn(),
   humanizar: vi.fn(), horarios: vi.fn(), conversa: vi.fn(),
-  sincronizarAudio: vi.fn(), provedorOpenai: vi.fn(), lunaTelefones: [] as string[],
+  sincronizarAudio: vi.fn(), provedorOpenai: vi.fn(), lunaTelefones: [] as string[], lunaDelay: 0 as number | null,
 }));
 vi.mock('https://esm.sh/@supabase/supabase-js@2.50.3', () => ({
   createClient: () => ({ from: fronteiras.from, rpc: fronteiras.rpc }),
@@ -73,6 +73,7 @@ beforeEach(() => {
   fronteiras.buffer = [];
   fronteiras.pausaNoDebounce = false;
   fronteiras.lunaTelefones = [];
+  fronteiras.lunaDelay = 0;
   fronteiras.sincronizarAudio.mockResolvedValue({ estado: 'pronto', esperouMs: 0, pendentes: 0 });
   fronteiras.buscarLead.mockResolvedValue({ ...leadAtivo });
   fronteiras.prepararMensagem.mockResolvedValue({ mensagem: payload.conteudo });
@@ -84,7 +85,7 @@ beforeEach(() => {
   });
   fronteiras.from.mockImplementation((tabela: string) => {
     if (tabela === 'crm_agente_sdr_config') return {
-      select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { teste_telefones: [], luna_telefones: fronteiras.lunaTelefones }, error: null }) }) }),
+      select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { teste_telefones: [], luna_telefones: fronteiras.lunaTelefones, luna_delay_segundos: fronteiras.lunaDelay }, error: null }) }) }),
     };
     if (tabela === 'crm_pipeline_settings') return {
       select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { agente_sdr_delay_segundos: 0 }, error: null }) }) }),
@@ -421,6 +422,35 @@ describe('SDR: texto de ferramenta nunca vira despedida', () => {
     expect(fronteiras.registrar).toHaveBeenCalledWith('provedor_ia_fallback', expect.objectContaining({ de: 'openai', para: 'anthropic' }));
     expect(fronteiras.registrar.mock.calls.some(([tipo]) => tipo === 'erro')).toBe(false);
     expect(fronteiras.enviar).toHaveBeenCalledOnce();
+  });
+
+  it('canário da Luna usa o debounce DELE, não o zero do telefone de teste nem os 45 s da produção', async () => {
+    fronteiras.lunaTelefones = ['5511999990001'];
+    fronteiras.lunaDelay = 5;
+    fronteiras.provedorOpenai.mockReturnValue(luna);
+    fronteiras.chamarPrincipal.mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'certo.' }] });
+    // Com debounce > 0 o agente mede o silêncio do buffer (consulta com .limit). A última
+    // mensagem aqui "chegou" há 1 minuto: o silêncio já passou, então o teste não dorme.
+    const base = fronteiras.from.getMockImplementation()!;
+    fronteiras.from.mockImplementation((tabela: string) => {
+      const t = base(tabela);
+      if (tabela !== 'crm_agente_sdr_buffer') return t;
+      return { ...t, select: (colunas: string) => colunas === 'criado_em'
+        ? { eq: () => ({ order: () => ({ limit: () => ({ maybeSingle: async () => ({ data: { criado_em: new Date(Date.now() - 60_000).toISOString() }, error: null }) }) }) }) }
+        : t.select(colunas) };
+    });
+    await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
+    // O que o teste trava é QUAL debounce foi escolhido — é ele que vai para a telemetria.
+    expect(fronteiras.registrar).toHaveBeenCalledWith('debounce', expect.objectContaining({ config_s: 5 }), expect.any(Number));
+    expect(fronteiras.enviar).toHaveBeenCalledOnce();
+  });
+
+  it('quem NÃO está no canário segue a regra de sempre (aqui: config da produção = 0, sem evento de debounce)', async () => {
+    fronteiras.lunaTelefones = ['5546000000000'];
+    fronteiras.lunaDelay = 5;
+    fronteiras.chamarPrincipal.mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'certo.' }] });
+    await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
+    expect(fronteiras.registrar.mock.calls.some(([tipo]) => tipo === 'debounce')).toBe(false);
   });
 
   it('canário listado mas sem chave da OpenAI no ambiente: fica no Claude', async () => {

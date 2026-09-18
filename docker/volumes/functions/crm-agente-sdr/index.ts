@@ -227,6 +227,27 @@ async function provedorDoLead(telefone: string): Promise<ProvedorIA | null> {
   }
 }
 
+// Debounce do canário da Luna (pedido do usuário, 18/09/2026): quem está em `luna_telefones`
+// espera `luna_delay_segundos` (5 s por padrão) em vez dos 45 s da produção — rápido para
+// testar no próprio WhatsApp, mas sem o zero dos telefones de teste, que faz cada mensagem
+// virar uma rodada e a 2ª atropelar a geração da 1ª. `null` = não é do canário (ou erro de
+// leitura): vale a regra de sempre.
+async function delayDoCanarioLuna(telefone: string): Promise<number | null> {
+  try {
+    const { data, error } = await supabase.from('crm_agente_sdr_config').select('luna_telefones, luna_delay_segundos').eq('id', 1).maybeSingle();
+    if (error) return null;
+    const lista: string[] = data?.luna_telefones ?? [];
+    const sub8 = String(telefone).replace(/\D/g, '').slice(-8);
+    if (!sub8 || !lista.some((t) => String(t).replace(/\D/g, '').slice(-8) === sub8)) return null;
+    // `Number(null)` é 0: valor ausente não pode virar "sem debounce" por acidente.
+    const bruto = data?.luna_delay_segundos;
+    const v = bruto == null ? NaN : Number(bruto);
+    return Number.isFinite(v) && v >= 0 && v <= 120 ? v : 5;
+  } catch {
+    return null;
+  }
+}
+
 // Tools da vez. Na campanha direta a ABERTURA usa a persona própria (que tem a
 // atualizar_dados_lead); no FECHAMENTO o qualificador segue idêntico ao dos outros
 // números, só ganhando a atualizar_dados_lead — o lead pode corrigir o nome lá também.
@@ -914,7 +935,9 @@ async function processarInbound(payload: any): Promise<void> {
     try {
       // 16/09/2026: telefone da allowlist de teste (crm_agente_sdr_config.teste_telefones) roda
       // SEM debounce, para o harness real não esperar 45 s por turno. Produção segue o config.
-      const delaySegundos = (await permitidoNoTeste(remotejid.replace(/\D/g, ''))) ? 0 : await carregarDelaySegundos();
+      // 18/09/2026: o canário da Luna tem o debounce DELE (vence a regra do telefone de teste).
+      const delaySegundos = (await delayDoCanarioLuna(remotejid.replace(/\D/g, '')))
+        ?? ((await permitidoNoTeste(remotejid.replace(/\D/g, ''))) ? 0 : await carregarDelaySegundos());
       const renovar = lockRenovar(remotejid);
       // Drena até esvaziar: cada lote espera o silêncio do debounce antes de
       // processar; mensagens que chegarem durante a rodada entram na próxima.
