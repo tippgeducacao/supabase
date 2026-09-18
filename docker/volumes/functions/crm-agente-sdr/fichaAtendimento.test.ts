@@ -5,9 +5,11 @@ import {
   bloqueioCronograma,
   contarObjecaoNaJornada,
   detectarPedidoDeCronograma,
+  deveMarcarPergunta,
   grupoDoCadastro,
   montarBlocoFicha,
   registrarBloqueioNaJornada,
+  registrarPerguntaNaJornada,
   type Jornada,
 } from './fichaAtendimento';
 
@@ -82,13 +84,34 @@ describe('perguntou uma vez e o lead insistiu', () => {
     const a = avaliarFicha({ cadastro: 'Sou formado em outra área', jornada, inicioRodada });
     expect(a.jaPerguntou).toBe(true);
     expect(a.liberaCronograma).toBe(true);
-    expect(a.proximoPasso).toContain('insistiu');
+    expect(a.proximoPasso).toContain('já perguntou uma vez');
   });
   it('bloqueio na MESMA rodada continua bloqueando (o modelo não pode insistir sozinho)', () => {
     const jornada: Jornada = { cronograma: { bloqueios: 1, bloqueado_em: '2026-09-19T14:00:05.000Z' } };
     const a = avaliarFicha({ cadastro: 'Sou formado em outra área', jornada, inicioRodada });
     expect(a.jaPerguntou).toBe(false);
     expect(a.liberaCronograma).toBe(false);
+  });
+  it('a rodada em que a ficha mostrou FALTA COLETAR com pedido pendente conta como a pergunta', () => {
+    const entrada = { cadastro: 'Sou formado em outra área', jornada: { cronograma: { pedido_em: '2026-09-19T13:58:00.000Z', pedido_por: 'botao' as const } }, inicioRodada };
+    const a = avaliarFicha(entrada);
+    expect(deveMarcarPergunta(entrada, a)).toBe(true);
+    // marcada NESTA rodada: ainda não conta (o modelo vai perguntar agora)
+    const marcada = registrarPerguntaNaJornada(entrada.jornada, new Date('2026-09-19T14:00:01Z'));
+    expect(avaliarFicha({ ...entrada, jornada: marcada }).jaPerguntou).toBe(false);
+    // na rodada seguinte, o lead insistiu sem responder: libera
+    const depois = avaliarFicha({ ...entrada, jornada: marcada, inicioRodada: '2026-09-19T14:03:00.000Z' });
+    expect(depois.jaPerguntou).toBe(true);
+    expect(depois.liberaCronograma).toBe(true);
+    expect(deveMarcarPergunta({ ...entrada, jornada: marcada, inicioRodada: '2026-09-19T14:03:00.000Z' }, depois)).toBe(false);
+  });
+  it('sem pedido pendente (nada pedido, ou já enviado depois do pedido) não marca pergunta', () => {
+    const base = { cadastro: 'Sou formado em outra área', inicioRodada };
+    expect(deveMarcarPergunta({ ...base, jornada: {} }, avaliarFicha({ ...base, jornada: {} }))).toBe(false);
+    const enviado: Jornada = { cronograma: { pedido_em: '2026-09-19T13:00:00.000Z', enviado_em: '2026-09-19T13:01:00.000Z' } };
+    expect(deveMarcarPergunta({ ...base, jornada: enviado }, avaliarFicha({ ...base, jornada: enviado }))).toBe(false);
+    const pediuDeNovo: Jornada = { cronograma: { pedido_em: '2026-09-19T13:05:00.000Z', enviado_em: '2026-09-19T13:01:00.000Z' } };
+    expect(deveMarcarPergunta({ ...base, jornada: pediuDeNovo }, avaliarFicha({ ...base, jornada: pediuDeNovo }))).toBe(true);
   });
   it('registrarBloqueioNaJornada conta e carimba', () => {
     const j = registrarBloqueioNaJornada(registrarBloqueioNaJornada({}, new Date('2026-09-19T14:00:00Z')), new Date('2026-09-19T14:05:00Z'));

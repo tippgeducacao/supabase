@@ -33,8 +33,8 @@ import { VERSAO_MEMORIA_HUMANA } from '../crm-agente-sdr/memoriaHumana.ts';
 import { montarRetornoInformacoes } from '../crm-agente-sdr/envioMateriais.ts';
 import { comNotaNoContexto, comNotaParaRouter, notaTrocaDeNumero, sinalInerte } from '../crm-agente-sdr/trocaDeNumero.ts';
 import {
-  aplicarColetaNaJornada, avaliarFicha, bloqueioCronograma, contarObjecaoNaJornada, detectarPedidoDeCronograma,
-  INSTRUCAO_TEMPO_FICHA, montarBlocoFicha, registrarBloqueioNaJornada, registrarEnvioNaJornada, type Jornada,
+  aplicarColetaNaJornada, avaliarFicha, bloqueioCronograma, contarObjecaoNaJornada, detectarPedidoDeCronograma, deveMarcarPergunta,
+  INSTRUCAO_TEMPO_FICHA, montarBlocoFicha, registrarBloqueioNaJornada, registrarEnvioNaJornada, registrarPerguntaNaJornada, type Jornada,
 } from '../crm-agente-sdr/fichaAtendimento.ts';
 import { executarFollowupSimulado, executarSimulacao, extrairUso, MAX_CARACTERES_SIMULACAO, validarEntradaSimulacao, type AgenteRouter } from './simulacao.ts';
 
@@ -315,9 +315,12 @@ Deno.serve(async (req) => {
           const ultima = messages[messages.length - 1];
           const textoLead = typeof ultima?.content === 'string' ? ultima.content : '';
           const pedido = detectarPedidoDeCronograma([{ tipo: entrada.mocks?.botao_cronograma === true && turno === 1 ? 'button' : 'text', mensagem: textoLead }]);
-          if (pedido && !fichaSim.jornada.cronograma?.pedido_em) {
+          if (pedido) {
             fichaSim.jornada = { ...fichaSim.jornada, cronograma: { ...(fichaSim.jornada.cronograma ?? {}), pedido_em: new Date().toISOString(), pedido_por: pedido } };
           }
+          // Espelho da produção: a rodada em que a ficha mostra FALTA COLETAR com pedido pendente é a pergunta.
+          const entradaFicha = { cadastro: fichaSim.cadastro, jornada: fichaSim.jornada, inicioRodada: fichaSim.inicioRodada };
+          if (deveMarcarPergunta(entradaFicha, avaliarFicha(entradaFicha))) fichaSim.jornada = registrarPerguntaNaJornada(fichaSim.jornada);
         }
         const notaTroca = troca ? notaTrocaDeNumero(
           { ...sinalInerte('conta-atual-simulada', 1, 'trocou'), trocou: true, contaAnterior: 'conta-anterior-simulada',

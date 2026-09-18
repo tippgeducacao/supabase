@@ -37,6 +37,8 @@ export type Jornada = {
     /** Quantas vezes o envio foi recusado por falta de dado. */
     bloqueios?: number;
     bloqueado_em?: string;
+    /** A rodada em que a ficha mostrou FALTA COLETAR com pedido pendente: a pergunta foi feita ali. */
+    coleta_perguntada_em?: string;
   };
   /** tipo_objecao → quantas vezes a base foi consultada. */
   objecoes?: Record<string, number>;
@@ -95,15 +97,19 @@ export function avaliarFicha(e: EntradaFicha): AvaliacaoFicha {
     }
   }
   const cr = e.jornada.cronograma ?? {};
-  const jaPerguntou = (cr.bloqueios ?? 0) > 0 && !!cr.bloqueado_em
-    && (!e.inicioRodada || cr.bloqueado_em < e.inicioRodada);
+  // "Pergunta uma vez" (decisão do usuário): conta como perguntado tanto a recusa da tool numa
+  // rodada anterior quanto a rodada anterior em que a ficha já mostrou FALTA COLETAR com o
+  // pedido pendente (o modelo pergunta sem chamar a tool — caso vago-insiste do harness).
+  const anterior = (iso?: string) => !!iso && (!e.inicioRodada || iso < e.inicioRodada);
+  const jaPerguntou = ((cr.bloqueios ?? 0) > 0 && anterior(cr.bloqueado_em)) || anterior(cr.coleta_perguntada_em);
   const liberaCronograma = !semGraduacao && (falta.length === 0 || jaPerguntou);
   const proximoPasso = semGraduacao
     ? 'Não envie o cronograma: ele disse que não tem graduação. Siga o encerramento previsto para esse caso.'
     : falta.length === 0
       ? 'Nada falta: se ele pedir o cronograma, chame envia_informacoes.'
       : jaPerguntou
-        ? 'Você já perguntou e ele insistiu sem responder: pode enviar o cronograma assim mesmo e seguir.'
+        ? 'Você já perguntou uma vez. Se ele pedir o cronograma de novo sem responder, chame envia_informacoes assim mesmo e siga; '
+          + 'se ele responder, registre com atualizar_dados_lead antes de enviar.'
         : `Antes de enviar o cronograma, diga "claro, te envio aqui" e pergunte, numa frase só: ${falta.join(' e ')}. `
           + 'Só depois da resposta chame envia_informacoes.';
   return { grupo, profissao, faltaParaCronograma: falta, semGraduacao, jaPerguntou, liberaCronograma, proximoPasso };
@@ -131,6 +137,7 @@ export function montarBlocoFicha(e: EntradaFicha, a: AvaliacaoFicha): string {
     ? `enviado${horaBr(cr.enviado_em)}`
     : cr.pedido_em
       ? `pedido ${cr.pedido_por === 'botao' ? 'pelo botão do template' : 'em texto'}${horaBr(cr.pedido_em)} · ainda não enviado`
+        + (a.jaPerguntou ? ' · coleta já perguntada uma vez' : '')
       : 'não pedido';
   const objecoes = Object.entries(e.jornada.objecoes ?? {})
     .map(([tipo, n]) => `${tipo.replace(/^objecao_|^pergunta_/, '')} ${n}x`).join(', ') || 'nenhuma';
@@ -209,6 +216,17 @@ export function contarObjecaoNaJornada(j: Jornada, tipo: string): Jornada {
   const t = texto(tipo);
   if (!t) return j;
   return { ...j, objecoes: { ...(j.objecoes ?? {}), [t]: ((j.objecoes ?? {})[t] ?? 0) + 1 } };
+}
+
+/** Há pedido de cronograma pendente e a ficha vai mostrar FALTA COLETAR: o modelo pergunta nesta rodada. */
+export function deveMarcarPergunta(e: EntradaFicha, a: AvaliacaoFicha): boolean {
+  const cr = e.jornada.cronograma ?? {};
+  const pendente = Boolean(cr.pedido_em) && (!cr.enviado_em || String(cr.pedido_em) > String(cr.enviado_em));
+  return pendente && a.faltaParaCronograma.length > 0 && !a.jaPerguntou && !a.semGraduacao;
+}
+
+export function registrarPerguntaNaJornada(j: Jornada, agora = new Date()): Jornada {
+  return { ...j, cronograma: { ...(j.cronograma ?? {}), coleta_perguntada_em: agora.toISOString() } };
 }
 
 export function registrarBloqueioNaJornada(j: Jornada, agora = new Date()): Jornada {

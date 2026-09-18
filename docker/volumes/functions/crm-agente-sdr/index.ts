@@ -25,7 +25,7 @@ import { atualizarAgenteComRatchet, atualizarLead, avaliarFimDoHistorico, buscar
 import { carregarTools, chamarAgentePrincipal, chamarRouter, provedorOpenai, type MetadadosRespostaRouter, type ProvedorIA } from './agente.ts';
 import { type CtxConversa, executarTool, montarToolResults } from './tools.ts';
 import { carregarStatusMateriais } from './envioMateriais.ts';
-import { carregarFicha, detectarPedidoDeCronograma, registrarNaJornada } from './fichaAtendimento.ts';
+import { carregarFicha, detectarPedidoDeCronograma, deveMarcarPergunta, registrarNaJornada, registrarPerguntaNaJornada } from './fichaAtendimento.ts';
 import { prepararMensagem } from './midia.ts';
 import { persistirEntradasDoLote, registrarEntrada } from './historicoEntradaPausa.ts';
 import { aguardarAudiosDoHistorico, contarAudiosPendentes } from './sincronizacaoAudio.ts';
@@ -725,6 +725,12 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
           objecoes: ficha.entrada.jornada.objecoes ?? null, cronograma: ficha.entrada.jornada.cronograma ?? null,
           proximo_passo: ficha.avaliacao.proximoPasso,
         });
+        // "Pergunta uma vez": a rodada em que a ficha mostra FALTA COLETAR com pedido pendente É a
+        // pergunta. Na próxima, se ele insistir sem responder, a trava libera (jaPerguntou).
+        if (deveMarcarPergunta(ficha.entrada, ficha.avaliacao)) {
+          try { await registrarNaJornada(supabase, telefone, (j) => registrarPerguntaNaJornada(j)); }
+          catch (e) { console.error('[crm-agente-sdr] jornada (pergunta):', (e as Error)?.message ?? e); }
+        }
       } else {
         // Leitura falhou: a volta segue sem a ficha (e sem a instrução dela). Não é erro da
         // rodada — o lead é respondido do mesmo jeito; fica visível no Debug como estado.
