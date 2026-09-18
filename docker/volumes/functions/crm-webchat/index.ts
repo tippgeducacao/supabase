@@ -30,6 +30,10 @@ import { semearHistoricoWhatsApp } from "./continuidade.ts";
 import { WEBCHAT_TEMPLATE_CONTINUIDADE, WEBCHAT_WA_ACCOUNT_ID, WHATSAPP_REENVIO_COOLDOWN_MIN } from "./agente.ts";
 import { fraseConviteWhatsapp } from "./frases.ts";
 import { pushParaSessao } from "../_shared/webchatPush.ts";
+// Transcrição de áudio: o MESMO módulo Gemini do botão do SAC e da fila do SDR.
+import { transcreverGemini } from "../crm-transcrever-audio/gemini.ts";
+import { resolverGemini } from "../crm-transcrever-audio/configuracao.ts";
+import { codigoErroSeguro } from "../crm-transcrever-audio/erros.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -49,9 +53,9 @@ const MAX_AUDIOS_POR_CHAT = 4; // teto de áudios por conversa (decisão diretor
 // ~3MB de payload ≈ ~2,2MB de áudio ≈ >1min de webm/opus — suficiente pra nota de voz.
 const MAX_BODY_AUDIO = 3_000_000;
 
-// Whisper (OpenAI) — mesma chave/modelo do crm-transcrever-audio / midia.ts (já no container).
-const OPENAI_KEY = Deno.env.get("AGENTE_SDR_OPENAI_KEY") ?? Deno.env.get("OPENAI_API_KEY") ?? "";
-const WHISPER_MODEL = Deno.env.get("OPENAI_TRANSCRIBE_MODEL") ?? "whisper-1";
+// Transcrição = SÓ Gemini (18/09/2026). Nota de voz do chat tem ≤ ~2,2 MB: o Gemini responde
+// em poucos segundos; o prazo só impede a requisição de ficar pendurada.
+const PRAZO_TRANSCRICAO_MS = 30_000;
 
 // Chave pública VAPID do Web Push (é PÚBLICA — o popup de opt-in a busca daqui pra subscrever).
 const VAPID_PUBLIC = Deno.env.get("WEBCHAT_VAPID_PUBLIC") ?? "";
@@ -178,7 +182,7 @@ async function turnstileOk(token: string, ip: string): Promise<boolean> {
   }
 }
 
-// ── áudio (Whisper) ────────────────────────────────────────────────────────────
+// ── áudio (Gemini) ─────────────────────────────────────────────────────────────
 function b64ToBytes(b64: string): Uint8Array {
   const limpo = b64.includes(",") ? b64.slice(b64.indexOf(",") + 1) : b64; // tira "data:...;base64,"
   const bin = atob(limpo);
@@ -187,7 +191,7 @@ function b64ToBytes(b64: string): Uint8Array {
   return bytes;
 }
 
-// Espelho do extDoMime do crm-transcrever-audio/midia.ts (Whisper exige nome com extensão).
+// Extensão do arquivo no Storage, a partir do mime DETECTADO.
 function extDoMime(mime: string): string {
   const m = (mime || "").toLowerCase();
   if (m.includes("ogg") || m.includes("opus")) return "ogg";
@@ -224,28 +228,23 @@ function detectarMimeAudio(b: Uint8Array): string | null {
   return null;
 }
 
-// Transcreve via OpenAI Whisper (mesmo endpoint/modelo do crm-transcrever-audio). Best-effort:
-// falha → "" (a mensagem entra como "[áudio]" e o João segue conduzindo).
-async function transcreverWhisper(bytes: Uint8Array, mime: string): Promise<string> {
-  if (!OPENAI_KEY) return "";
+// Transcreve SÓ pelo Gemini: mesmo módulo e mesma chave do crm-transcrever-audio (a Google
+// ativa de `ai_api_keys`; ambiente como alternativa). Nenhum áudio vai para a OpenAI e não
+// existe provedor de reserva (18/09/2026). Best-effort: falha ou silêncio → "" (a mensagem
+// entra como "[áudio]" e o João segue conduzindo).
+async function transcreverAudioChat(bytes: Uint8Array, mime: string): Promise<string> {
   try {
-    const form = new FormData();
-    form.append("file", new Blob([bytes], { type: mime }), `audio.${extDoMime(mime)}`);
-    form.append("model", WHISPER_MODEL);
-    form.append("language", "pt");
-    const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${OPENAI_KEY}` },
-      body: form,
-    });
-    const j = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      console.error(`[crm-webchat] whisper HTTP ${res.status}: ${j?.error?.message ?? "falha"}`);
+    const gemini = await resolverGemini(supabase, (nome) => Deno.env.get(nome));
+    if (!gemini) {
+      console.error("[crm-webchat] transcrição: sem chave Google configurada");
       return "";
     }
-    return String(j?.text ?? "").trim();
+    const dados = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+    const { texto } = await transcreverGemini(dados, mime, gemini, AbortSignal.timeout(PRAZO_TRANSCRICAO_MS), fetch);
+    return texto;
   } catch (e) {
-    console.error(`[crm-webchat] whisper: ${(e as Error).message}`);
+    // Só o código: o erro cru do provedor pode trazer URL ou credencial.
+    console.error(`[crm-webchat] transcrição gemini: ${codigoErroSeguro(e)}`);
     return "";
   }
 }
@@ -622,7 +621,7 @@ async function acaoEnviar(body: Record<string, unknown>, canal: "publico" | "tes
     .update({ ultima_atividade: new Date().toISOString() })
     .eq("id", sessaoId);
 
-  // A resposta do João roda numa 2ª requisição (acao 'responder') — Whisper/LLM pesados numa
+  // A resposta do João roda numa 2ª requisição (acao 'responder') — transcrição/LLM pesados numa
   // requisição só estouravam o limite de CPU do edge. O widget chama 'responder' na sequência.
   return json({ ok: true, mensagem_id: msg.id });
 }
@@ -731,7 +730,7 @@ async function acaoTesteResponder(body: Record<string, unknown>, req: Request) {
   return acaoResponder(body, "teste");
 }
 
-// Áudio do lead: base64 → Storage (whatsapp-anexos/webchat) → Whisper → vira a mensagem
+// Áudio do lead: base64 → Storage (whatsapp-anexos/webchat) → Gemini → vira a mensagem
 // inbound (conteudo=transcrição, anexos=[áudio]) → o João responde ao que foi falado.
 async function acaoAudio(body: Record<string, unknown>, req: Request) {
   const sessaoId = texto(body.sessao_id, 40);
@@ -778,8 +777,8 @@ async function acaoAudio(body: Record<string, unknown>, req: Request) {
     console.error(`[crm-webchat] storage: ${(e as Error).message}`);
   }
 
-  // transcreve (Whisper); vazio → "[áudio]" (a conversa segue mesmo sem transcrição)
-  const transcricao = await transcreverWhisper(bytes, mimeReal);
+  // transcreve (Gemini); vazio → "[áudio]" (a conversa segue mesmo sem transcrição)
+  const transcricao = await transcreverAudioChat(bytes, mimeReal);
   const conteudo = transcricao || "[áudio]";
   const anexos = url ? [{ tipo: "audio", mime_type: mimeReal, url, url_storage: url }] : [];
 
@@ -970,7 +969,7 @@ async function acaoLevarParaWhatsapp(body: Record<string, unknown>, req: Request
 /**
  * ÁUDIO DO ATENDENTE no chat do site (fase 4).
  *
- * O caminho de ida já existia: o lead grava, o widget toca, o Whisper transcreve. Faltava a
+ * O caminho de ida já existia: o lead grava, o widget toca, o Gemini transcreve. Faltava a
  * volta — o atendente só podia escrever. Num chat onde a pessoa acabou de mandar um áudio,
  * responder por texto é uma assimetria que ela percebe.
  *
@@ -1025,7 +1024,7 @@ async function acaoAtendenteAudio(body: Record<string, unknown>, req: Request) {
     return json({ ok: false, erro: "falha_no_upload" }, 500);
   }
 
-  const transcricao = await transcreverWhisper(bytes, mimeReal);
+  const transcricao = await transcreverAudioChat(bytes, mimeReal);
   const conteudo = transcricao || "[áudio]";
   const anexos = [{ tipo: "audio", mime_type: mimeReal, url, url_storage: url }];
 

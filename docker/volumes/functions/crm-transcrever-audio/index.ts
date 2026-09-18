@@ -1,5 +1,5 @@
 // crm-transcrever-audio
-// OpenAI primeiro; Gemini cobre falha, limite, timeout ou transcrição vazia.
+// Só Gemini (18/09/2026): nenhum áudio passa pela OpenAI e não há provedor de reserva.
 // O mesmo caminho atende três chamadores, e NENHUM deles envia mensagem:
 //   1. botão do SAC          (POST com mensagem_id e JWT de atendente)
 //   2. memória humana do SDR (?mode=historico-sdr, saída humana da linha comercial)
@@ -24,8 +24,6 @@ const corsHeaders = {
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const OPENAI_KEY = Deno.env.get("AGENTE_SDR_OPENAI_KEY") ?? Deno.env.get("OPENAI_API_KEY") ?? "";
-const MODELO = Deno.env.get("OPENAI_TRANSCRIBE_MODEL") ?? "whisper-1";
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -45,7 +43,7 @@ Deno.serve(async (req) => {
     configuracao ??= resolverGemini(admin, nome => Deno.env.get(nome));
     const gemini = await configuracao;
     const tel = criarTelemetria(admin, 'crm-transcrever-audio');
-    return transcreverAudio(url, mime, { chave: OPENAI_KEY, modelo: MODELO, gemini,
+    return transcreverAudio(url, mime, { gemini,
       registrar: evento => tel.registrar('transcricao_audio_' + evento.fase, evento) });
   };
 

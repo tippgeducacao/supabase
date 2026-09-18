@@ -6,7 +6,7 @@
 //
 // ⚠️ As chaves vêm do BANCO (`ai_api_keys`), não do env. As do container são placeholders
 // inválidos de 11 e 12 caracteres, e foi isso que matou o `gt-ai-transcribe` e o
-// `crm-transcrever-audio` (esse último ainda pede uma OPENAI_API_KEY que não existe aqui).
+// `crm-transcrever-audio` (que desde 18/09/2026 também é só Gemini, com a chave do banco).
 //
 // O texto que sai daqui é RASCUNHO. Quem entrevistou lê e corrige antes de salvar: nenhuma
 // decisão sobre uma pessoa sai de um resumo automático que ninguém leu.

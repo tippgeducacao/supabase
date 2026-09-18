@@ -1,16 +1,15 @@
-// Transcrição de áudio CURTO (comando/recado do dono): OpenAI Whisper e, se ele falhar,
-// Gemini inline com a chave Google do banco (ai_api_keys) — mesmo desenho de 2 provedores
-// do crm-agente-sdr/midia.ts. Antes o Whisper era o ÚNICO caminho: com a chave OpenAI do
-// container morta, TODO áudio caía em "Tive um problema pra processar esse áudio" (11/09).
-// Reunião LONGA (áudio grande) NÃO passa aqui — vai pro pipeline Gemini em background
-// (transcricao.ts). Whisper tem teto ~25MB.
+// Transcrição de áudio CURTO (comando/recado do dono): SÓ Gemini inline, com a chave Google
+// do banco (ai_api_keys). Nenhum áudio vai para a OpenAI e não há provedor de reserva
+// (18/09/2026) — a OpenAI já recusava a chave do container com 429 desde 11/09 e o Whisper
+// saiu de vez. Reunião LONGA (áudio grande) NÃO passa aqui — vai pro pipeline Gemini em
+// background (transcricao.ts).
 
-const MAX_BYTES = 24 * 1024 * 1024;
 // Inline no generateContent: o request inteiro tem teto de ~20MB e o base64 infla 33%.
-const MAX_BYTES_GEMINI_INLINE = 14 * 1024 * 1024;
+// É também a fronteira curto × reunião do index.ts: acima disto o áudio vai para a fila.
+export const MAX_BYTES_AUDIO_CURTO = 14 * 1024 * 1024;
 const GEMINI_MODEL = Deno.env.get("ASSIST_GEMINI_MODEL") || "gemini-2.5-flash";
 
-/** Extensão a partir do mime (o Whisper detecta o formato pelo nome do arquivo). */
+/** Extensão a partir do mime (nome do arquivo no Storage da fila de reunião). */
 export function extDeMime(mime: string): string {
   const m = (mime || "").toLowerCase();
   if (m.includes("mp4") || m.includes("m4a") || m.includes("aac")) return "m4a";
@@ -29,28 +28,6 @@ export async function googleKey(admin: any): Promise<string | null> {
   return data?.api_key ?? null;
 }
 
-async function viaWhisper(bytes: Uint8Array, mime: string): Promise<string> {
-  const key = Deno.env.get("AGENTE_SDR_OPENAI_KEY") || Deno.env.get("OPENAI_API_KEY");
-  if (!key) throw new Error("sem chave OpenAI");
-
-  const form = new FormData();
-  form.append("file", new Blob([bytes], { type: mime || "audio/ogg" }), `audio.${extDeMime(mime)}`);
-  form.append("model", Deno.env.get("OPENAI_TRANSCRIBE_MODEL") || "whisper-1");
-  form.append("language", "pt");
-
-  const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${key}` },
-    body: form,
-  });
-  const json = await res.json().catch(() => ({}));
-  // Só o CÓDIGO do erro: a mensagem da OpenAI traz a chave mascarada e este texto vai pro chat.
-  if (!res.ok) throw new Error(`${res.status} ${json?.error?.code || json?.error?.type || ""}`.trim());
-  const texto = String(json.text || "").trim();
-  if (!texto) throw new Error("transcrição vazia");
-  return texto;
-}
-
 function base64(bytes: Uint8Array): string {
   let bin = "";
   const chunk = 0x8000; // fatia p/ não estourar o limite de argumentos do fromCharCode
@@ -59,7 +36,7 @@ function base64(bytes: Uint8Array): string {
 }
 
 async function viaGemini(admin: any, bytes: Uint8Array, mime: string): Promise<string> {
-  if (bytes.length > MAX_BYTES_GEMINI_INLINE) throw new Error("áudio grande demais p/ envio inline");
+  if (bytes.length > MAX_BYTES_AUDIO_CURTO) throw new Error("áudio grande demais p/ envio inline");
   const key = await googleKey(admin);
   if (!key) throw new Error("sem chave Google");
   // "audio/ogg; codecs=opus" (nota de voz do WhatsApp) → "audio/ogg": o mime_type do Gemini não leva parâmetro.
@@ -95,18 +72,10 @@ async function viaGemini(admin: any, bytes: Uint8Array, mime: string): Promise<s
 }
 
 export async function transcreverBytes(admin: any, bytes: Uint8Array, mime: string): Promise<string> {
-  if (bytes.length > MAX_BYTES) throw new Error("áudio muito longo para transcrição rápida");
-  let erroWhisper = "";
   try {
-    return await viaWhisper(bytes, mime);
+    return await viaGemini(admin, bytes, mime);
   } catch (e) {
-    erroWhisper = (e as Error).message;
-  }
-  try {
-    const texto = await viaGemini(admin, bytes, mime);
-    console.warn(`[assistente] whisper falhou (${erroWhisper}); transcrito pelo Gemini`);
-    return texto;
-  } catch (e) {
-    throw new Error(`whisper ${erroWhisper} · gemini ${(e as Error).message}`);
+    // O prefixo vai para o "Motivo técnico" do chat: diz qual provedor falhou.
+    throw new Error(`gemini ${(e as Error).message}`);
   }
 }

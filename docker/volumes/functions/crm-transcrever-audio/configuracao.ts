@@ -2,11 +2,12 @@ import { type ConfigGemini, MODELO_GEMINI_TRANSCRICAO } from './gemini.ts';
 
 // A tela Configuração IA é a fonte preferencial; ambiente atende instalações
 // legadas ou indisponibilidade temporária do banco. Não imprime a credencial.
+// Sem interruptor: o Gemini é o único provedor de transcrição, então desligá-lo
+// (`CRM_AUDIO_GEMINI_FALLBACK=false`, de quando ele era reserva) desligaria o áudio inteiro.
 export async function resolverGemini(
   banco: { from: (tabela: string) => any }, // eslint-disable-line @typescript-eslint/no-explicit-any
   env: (nome: string) => string | undefined,
 ): Promise<ConfigGemini | null> {
-  if (env('CRM_AUDIO_GEMINI_FALLBACK') === 'false') return null;
   let chave = '';
   try {
     const r = await banco.from('ai_api_keys').select('api_key').eq('provider', 'google').eq('is_active', true)

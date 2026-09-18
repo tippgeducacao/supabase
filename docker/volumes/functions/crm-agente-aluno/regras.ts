@@ -394,7 +394,7 @@ export function primeiroNome(nome: unknown): string {
  *
  * ÁUDIO, desde 12/09/2026: o sistema transcreve. Quem transcreve é a fila
  * `onb_agente_audio_fila` (a mesma `crm-transcrever-audio` do botão do SAC e da memória do
- * João, Whisper com Gemini de reserva), e o texto pronto chega aqui pela `metadata` da
+ * João, só Gemini desde 18/09/2026), e o texto pronto chega aqui pela `metadata` da
  * mensagem. Com transcrição, o modelo recebe o que ele FALOU e responde o conteúdo; sem ela,
  * continua valendo o caminho antigo, que é avisar numa frase e passar para a equipe.
  *

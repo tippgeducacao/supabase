@@ -10,13 +10,15 @@ import {
   type Ctx,
 } from "./db.ts";
 import { carregarLinha, enviarTexto, baixarImagem, baixarAudioBytes, baixarVideoBytes, baixarDocumento, type LinhaWa } from "./wa.ts";
-import { transcreverBytes } from "./transcrever.ts";
+import { MAX_BYTES_AUDIO_CURTO, transcreverBytes } from "./transcrever.ts";
 import { enfileirarTranscricao, enfileirarReuniaoAudio, processarTranscricoes } from "./transcricao.ts";
 import { processarAgendaEntrevistas } from "./entrevistas.ts";
 import { pensar } from "./brain.ts";
 
-// Áudio maior que isto = REUNIÃO → pipeline Gemini em background (Whisper tem teto ~25MB).
-const LIMITE_WHISPER = 20 * 1024 * 1024;
+// Áudio maior que isto = REUNIÃO → pipeline Gemini em background. A fronteira é o teto do
+// envio inline ao Gemini (14 MB ≈ mais de 1h de nota de voz): sem o Whisper, um áudio entre
+// 14 e 20 MB não teria quem o transcrevesse na hora.
+const LIMITE_AUDIO_CURTO = MAX_BYTES_AUDIO_CURTO;
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -55,7 +57,7 @@ Deno.serve(async (req) => {
 
   // ⚠️ BUMPE esta string a cada deploy: é o ÚNICO jeito de confirmar, de fora, que a versão
   // nova já está servindo (o edge-runtime serve o worker antigo por ~1 min após o push).
-  if (req.method === "GET") return new Response("assistente-interno ok · build 20260911b", { headers: cors });
+  if (req.method === "GET") return new Response("assistente-interno ok · build 20260918a", { headers: cors });
 
   // Autenticação do webhook (anti-spoofing): se ASSIST_WEBHOOK_SECRET estiver setado, exige ?k igual.
   // O número declarado no payload NÃO é autenticação (quem POSTa controla msg.fromDigits).
@@ -123,7 +125,7 @@ async function processarMensagem(admin: any, linha: LinhaWa | null, msg: any) {
         await enviar(admin, linha, msg.fromDigits, c, "Esse áudio é grande demais (mais de ~2h) 😅. Me manda em partes que eu transcrevo cada uma.");
         return;
       }
-      if (bytes.length > LIMITE_WHISPER) {
+      if (bytes.length > LIMITE_AUDIO_CURTO) {
         // REUNIÃO (áudio longo) → 2 jobs em background (resumo + transcrição verbatim). Não segue pro cérebro.
         await enfileirarReuniaoAudio(admin, { canon: c, numero: msg.fromDigits, linhaId: linha.id ?? null, bytes, mime });
         await atualizarConteudoInbound(admin, claim.id, "[áudio de reunião — transcrevendo]", "audio");

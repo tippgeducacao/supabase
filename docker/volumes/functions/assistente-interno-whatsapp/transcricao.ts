@@ -1,6 +1,6 @@
 // Pipeline de TRANSCRIÇÃO + RESUMO DE REUNIÃO (áudio longo) — substitui o Plaud.
 // Fila (assistente_transcricoes) + worker chamado por cron. Usa o Gemini File API
-// (aguenta áudio de horas; o Whisper tem teto ~25MB e o inline do Gemini ~20MB).
+// (aguenta áudio de horas; o envio inline do Gemini tem teto de ~20MB).
 // Roda em BACKGROUND porque a transcrição leva minutos (webhook não pode segurar).
 //
 // ⚠️ REUNIÃO EM ÁUDIO = DOIS JOBS encadeados (mesmo upload no bucket/Gemini):
@@ -608,7 +608,7 @@ async function entregar(admin: any, linha: LinhaWa | null, job: any, resultado: 
 }
 
 // ── Gemini File API ──────────────────────────────────────────────────────────
-// (googleKey mora em transcrever.ts — o áudio curto também usa o Gemini como reserva do Whisper.)
+// (googleKey mora em transcrever.ts — o áudio curto usa a mesma chave, também só no Gemini.)
 
 /** Gera o texto a partir de um arquivo JÁ enviado ao Gemini (passo 2 do worker). */
 async function gerarComGemini(
