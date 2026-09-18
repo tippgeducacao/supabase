@@ -31,7 +31,7 @@ export function extrairPrimeiroNome(nomeCompleto: string | null | undefined): st
   return nomeCompleto.trim().split(' ')[0];
 }
 
-const FORMACOES_OFICIAIS = [
+export const FORMACOES_OFICIAIS = [
   'Medicina Veterinária', 'Agronomia', 'Zootecnia', 'Biologia',
   'Engenharia de Alimentos', 'Engenharia de Produção', 'Administração',
   'Direito', 'Estudante', 'Outra área', 'Sem formação superior',

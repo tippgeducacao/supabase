@@ -32,6 +32,10 @@ import { gerarFollowup } from '../crm-agente-sdr/followup.ts';
 import { VERSAO_MEMORIA_HUMANA } from '../crm-agente-sdr/memoriaHumana.ts';
 import { montarRetornoInformacoes } from '../crm-agente-sdr/envioMateriais.ts';
 import { comNotaNoContexto, comNotaParaRouter, notaTrocaDeNumero, sinalInerte } from '../crm-agente-sdr/trocaDeNumero.ts';
+import {
+  aplicarColetaNaJornada, avaliarFicha, bloqueioCronograma, contarObjecaoNaJornada, detectarPedidoDeCronograma,
+  INSTRUCAO_TEMPO_FICHA, montarBlocoFicha, registrarBloqueioNaJornada, registrarEnvioNaJornada, type Jornada,
+} from '../crm-agente-sdr/fichaAtendimento.ts';
 import { executarFollowupSimulado, executarSimulacao, extrairUso, MAX_CARACTERES_SIMULACAO, validarEntradaSimulacao, type AgenteRouter } from './simulacao.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
@@ -73,12 +77,19 @@ async function resolverPos(alvo: string): Promise<string> {
     `Daqui em diante use "${nomeConversa}" em TODAS as chamadas.`;
 }
 
+// Ficha do atendimento simulada: mesma régua pura da produção (fichaAtendimento.ts), estado em
+// memória. `mocks.cadastro` = resposta do formulário da LP ("Sou formado em outra área", "Médico
+// Veterinário (a)", "Na faculdade do 1º ao 8º período"…); `mocks.botao_cronograma: true` faz a
+// 1ª mensagem do lead valer como clique no botão do template.
+type FichaSimulada = { jornada: Jornada; cadastro: string | null; inicioRodada: string };
+
 // Retornos plausíveis das tools — texto no MESMO espírito dos executores reais
 // (tools.ts), porque é o texto que guia a próxima decisão do modelo.
-async function mockTool(nome: string, input: any, mocks: any): Promise<string> {
+async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimulada | null = null): Promise<string> {
   switch (nome) {
     case 'atualizar_dados_lead': {
-      const partes = ['nome', 'formacao', 'tempo_formacao']
+      if (ficha) ficha.jornada = aplicarColetaNaJornada(ficha.jornada, input ?? {});
+      const partes = ['nome', 'formacao', 'tempo_formacao', 'area_atuacao', 'atua_na_area', 'graduacao_concluida']
         .filter((k) => input?.[k]).map((k) => `${k}="${input[k]}"`);
       return partes.length
         ? `Registrado no cadastro: ${partes.join(', ')}. NUNCA comente com o lead que registrou os dados.`
@@ -98,6 +109,17 @@ async function mockTool(nome: string, input: any, mocks: any): Promise<string> {
       if (input?.conteudo === 'valor') return JSON.stringify(montarRetornoInformacoes(true, {
         data: { curso: input?.curso_escolhido ?? null, valor_integral: 'R$ 4.200,00' },
       }, 'valor', 'harness-consulta-valor'));
+      // Ficha: espelho da trava do executor real — sem o dado da coleta o cronograma não sai;
+      // bloqueio em turno anterior + lead insistiu ⇒ libera.
+      if (ficha) {
+        const a = avaliarFicha({ cadastro: ficha.cadastro, jornada: ficha.jornada, inicioRodada: ficha.inicioRodada });
+        if (!a.liberaCronograma) {
+          if ((ficha.jornada.cronograma?.bloqueado_em ?? '') < ficha.inicioRodada) ficha.jornada = registrarBloqueioNaJornada(ficha.jornada);
+          const { id: _id, ...recusa } = bloqueioCronograma('', a);
+          return JSON.stringify(recusa);
+        }
+        ficha.jornada = registrarEnvioNaJornada(ficha.jornada);
+      }
       // 16/09/2026, persona aula: aula sem pós manda o PORTFÓLIO da PPGVET (PRD —
       // Persona por disparo). O executor real ainda não tem esse conteúdo; o mock
       // devolve o contrato esperado para o ensaio não confundir portfólio com cronograma.
@@ -191,8 +213,12 @@ async function mockTool(nome: string, input: any, mocks: any): Promise<string> {
           + '— pergunte a graduação ANTES de confirmar qualquer horário, porque ela ainda pode reprovar.'
         : lista;
     }
-    case 'consulta_objecoes':
+    case 'consulta_objecoes': {
+      if (ficha) ficha.jornada = contarObjecaoNaJornada(ficha.jornada, String(input?.tipo_objecao ?? ''));
+      // Com a ficha, a quebra de TEMPO é a mesma instrução do executor real (com gatilho, sem material).
+      if (ficha && input?.tipo_objecao === 'objecao_tempo') return `resposta_objecao: ${JSON.stringify(INSTRUCAO_TEMPO_FICHA)}`;
       return 'resposta_objecao: "a conversa com o monitor é rápida, uns 15 minutos, e é onde vc vê a condição especial". Adapte ao contexto e reconduza pro agendamento.';
+    }
     case 'pausa_ia':
       // Espelha o executor real: tipo="nao_perturbe" arquiva o lead (opt-out).
       return input?.tipo === 'nao_perturbe'
@@ -252,6 +278,16 @@ Deno.serve(async (req) => {
 
   // Todo estado é local à chamada: NÃO usar atualizarLead/ratchet de banco neste harness.
   const estado = { nome: entrada.nome_lead, formacao: entrada.formacao_academica };
+  const fichaSim: FichaSimulada | null = entrada.ficha ? {
+    jornada: {},
+    cadastro: String(entrada.mocks?.cadastro ?? entrada.formacao_academica ?? '').trim() || null,
+    inicioRodada: new Date().toISOString(),
+  } : null;
+  const blocoDaFicha = () => {
+    if (!fichaSim) return undefined;
+    const entradaFicha = { cadastro: fichaSim.cadastro, jornada: fichaSim.jornada, inicioRodada: fichaSim.inicioRodada };
+    return montarBlocoFicha(entradaFicha, avaliarFicha(entradaFicha));
+  };
   let agenteAtual: AgenteRouter = entrada.agente_atual ?? 'agente_validacao';
   const routers: Record<string, unknown>[] = [];
   const cacheTools = new Map<string, any[]>();
@@ -272,6 +308,17 @@ Deno.serve(async (req) => {
         // TROCA DE NÚMERO (14/09/2026): mesma nota e mesma exceção do ratchet da produção
         // (crm-agente-sdr/index.ts), só na 1ª rodada — depois o João já falou por este número.
         const troca = turno === 1 ? entrada.troca_de_numero : null;
+        // Ficha: novo turno = nova rodada (o bloqueio do turno anterior passa a contar como
+        // "já perguntou"); o pedido de cronograma do lead fica anotado antes de o modelo falar.
+        if (fichaSim) {
+          fichaSim.inicioRodada = new Date().toISOString();
+          const ultima = messages[messages.length - 1];
+          const textoLead = typeof ultima?.content === 'string' ? ultima.content : '';
+          const pedido = detectarPedidoDeCronograma([{ tipo: entrada.mocks?.botao_cronograma === true && turno === 1 ? 'button' : 'text', mensagem: textoLead }]);
+          if (pedido && !fichaSim.jornada.cronograma?.pedido_em) {
+            fichaSim.jornada = { ...fichaSim.jornada, cronograma: { ...(fichaSim.jornada.cronograma ?? {}), pedido_em: new Date().toISOString(), pedido_por: pedido } };
+          }
+        }
         const notaTroca = troca ? notaTrocaDeNumero(
           { ...sinalInerte('conta-atual-simulada', 1, 'trocou'), trocou: true, contaAnterior: 'conta-anterior-simulada',
             gapMin: troca.gap_min ?? 90,
@@ -333,13 +380,14 @@ Deno.serve(async (req) => {
           const extras = (await toolsDe('agente_campanha_direta')).filter((t) => t?.name === 'atualizar_dados_lead');
           tools = [...tools, ...extras];
         }
-        return { agente: agenteTools, promptAgente, contextoTemporal: comNotaNoContexto(montarContextoTemporal() + notaDoNome(vars.nome) + notaDoCurso(vars.curso_interesse_original), notaTroca), tools };
+        return { agente: agenteTools, promptAgente, contextoTemporal: comNotaNoContexto(montarContextoTemporal() + notaDoNome(vars.nome) + notaDoCurso(vars.curso_interesse_original), notaTroca), tools, comFicha: Boolean(fichaSim) };
       },
       chamarPrincipal: (opts: Parameters<typeof chamarAgentePrincipal>[0]) => chamarAgentePrincipal({ ...opts, provedor: provedorAlternativo }),
       humanizar: humanizarTexto,
+      fichaDaVolta: blocoDaFicha,
       mockTool: async (nome, input) => {
         const dados = input as Record<string, unknown>;
-        const resposta = await mockTool(nome, dados, entrada.mocks);
+        const resposta = await mockTool(nome, dados, entrada.mocks, fichaSim);
         if (nome === 'atualizar_dados_lead') {
           if (typeof dados?.nome === 'string') estado.nome = dados.nome;
           if (typeof dados?.formacao === 'string') estado.formacao = dados.formacao;
@@ -347,7 +395,11 @@ Deno.serve(async (req) => {
         return resposta;
       },
     });
-    return json({ ...resultado, modelo: MODELO_AGENTE, provedor: entrada.provedor, esforco: provedorAlternativo?.formato === 'openai' ? provedorAlternativo.esforco : null, usar_router: entrada.usar_router, routers, memoria_versao: VERSAO_MEMORIA_HUMANA });
+    return json({
+      ...resultado, modelo: MODELO_AGENTE, provedor: entrada.provedor, esforco: provedorAlternativo?.formato === 'openai' ? provedorAlternativo.esforco : null,
+      usar_router: entrada.usar_router, routers, memoria_versao: VERSAO_MEMORIA_HUMANA,
+      ...(fichaSim ? { ficha: { cadastro: fichaSim.cadastro, jornada: fichaSim.jornada } } : {}),
+    });
   } catch {
     // Não devolver body cru de falha da API nem histórico/credenciais em logs.
     return json({ error: 'falha na simulação; nenhuma ação comercial foi executada' }, 502);

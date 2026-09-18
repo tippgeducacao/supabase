@@ -49,6 +49,8 @@ export type EntradaSimulacao = {
   provedor: 'anthropic' | 'deepseek' | 'openai';
   /** Nível de raciocínio do provedor openai nesta simulação (compara high × xhigh no mesmo deploy). */
   esforco: string | null;
+  /** Liga a ficha do atendimento (canário): bloco + instrução + trava do cronograma no mock. */
+  ficha: boolean;
 };
 
 export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
@@ -109,7 +111,7 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
     if (Object.keys(m).some((k) => k !== 'role' && k !== 'content')) throw new Error('histórico aceita somente role e content');
     return { role: m.role, content: texto(m.content, 'content', true) };
   });
-  for (const campo of ['usar_router', 'sem_presente_escola', 'esta_na_escola']) {
+  for (const campo of ['usar_router', 'sem_presente_escola', 'esta_na_escola', 'ficha']) {
     if (body[campo] !== undefined && typeof body[campo] !== 'boolean') throw new Error(`${campo} deve ser booleano`);
   }
   if (body.agente_atual != null && body.agente_atual !== 'agente_validacao' && body.agente_atual !== 'agente_qualificador') {
@@ -154,6 +156,7 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
     aula: aulaSimulada,
     provedor,
     esforco: esforco as string | null,
+    ficha: body.ficha === true,
   };
 }
 
@@ -169,14 +172,18 @@ export function extrairUso(usage: unknown): Record<string, number> {
 }
 
 type BlocoModelo = { type: string; text?: string; id?: string; name?: string; input?: unknown; [campo: string]: unknown };
-type Rodada = { promptAgente: string; contextoTemporal: string; tools: unknown[]; agente: string };
+type Rodada = { promptAgente: string; contextoTemporal: string; tools: unknown[]; agente: string; comFicha?: boolean };
 export type DependenciasSimulacao = {
   prepararRodada: (messages: Msg[], turno: number) => Promise<Rodada>;
-  chamarPrincipal: (opts: { promptAgente: string; contextoTemporal: string; tools: unknown[]; messages: Msg[] }) => Promise<{
+  chamarPrincipal: (opts: {
+    promptAgente: string; contextoTemporal: string; tools: unknown[]; messages: Msg[]; contextoFicha?: string; comFicha?: boolean;
+  }) => Promise<{
     content?: BlocoModelo[]; model?: string; usage?: unknown; stop_reason?: string;
   }>;
   mockTool: (nome: string, input: unknown) => Promise<string>;
   humanizar: (texto: string) => string;
+  /** Ficha do atendimento da VOLTA (não do turno): a tool da volta anterior pode ter mudado a coleta, como na produção. */
+  fichaDaVolta?: () => string | undefined;
 };
 
 export async function executarSimulacao(entrada: EntradaSimulacao, deps: DependenciasSimulacao) {
@@ -194,7 +201,11 @@ export async function executarSimulacao(entrada: EntradaSimulacao, deps: Depende
     agente = rodada.agente;
     let encerrou = false;
     for (let volta = 0; volta < 6; volta++) {
-      const resp = await deps.chamarPrincipal({ ...rodada, tools: encerrou ? [] : rodada.tools, messages: sanitizarHistorico(messages) });
+      const contextoFicha = deps.fichaDaVolta?.();
+      const resp = await deps.chamarPrincipal({
+        ...rodada, tools: encerrou ? [] : rodada.tools, messages: sanitizarHistorico(messages),
+        ...(contextoFicha ? { contextoFicha } : {}),
+      });
       chamadas.push({ turno, volta: volta + 1, agente, modelo: resp.model ?? null, usage: extrairUso(resp.usage), stop_reason: resp.stop_reason ?? null });
       const blocos = resp.content ?? [];
       const textoCru = blocos.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();

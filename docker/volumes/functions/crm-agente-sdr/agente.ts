@@ -10,6 +10,7 @@ import { INSTRUCAO_EVENTOS } from './instrucaoEventos.ts';
 import { descreverToolsSdr } from './descricoesTools.ts';
 import { respostaParaFalhaCatalogo } from './falhaCatalogo.ts';
 import { INSTRUCAO_FATOS_DO_LEAD } from './fatosLead.ts';
+import { INSTRUCAO_FICHA } from './fichaAtendimento.ts';
 import { contemMeta, contemRaciocinioVazado } from './saida.ts';
 import {
   avaliarCanalResposta, INSTRUCAO_CANAL_RESPOSTA, NOME_TOOL_RESPOSTA,
@@ -149,6 +150,9 @@ export async function chamarAgentePrincipal(opts: {
   promptAgente: string;
   contextoTemporal: string;
   contextoEntregaMateriais?: string;
+  /** Ficha do atendimento (canário): bloco no fim da última mensagem + instrução estática no system. */
+  contextoFicha?: string;
+  comFicha?: boolean;
   messages: Msg[];
   tools: any[];
   /** null/ausente = Anthropic. */
@@ -165,6 +169,9 @@ export async function chamarAgentePrincipal(opts: {
     { type: 'text', text: INSTRUCAO_FATOS_DO_LEAD },
     { type: 'text', text: INSTRUCAO_DISPONIBILIDADE_CONTATO },
     { type: 'text', text: INSTRUCAO_EVENTOS },
+    // Ficha do atendimento (canário): bloco ESTÁTICO, só para quem tem a ficha — o prefixo
+    // desse lead é outro, mas continua idêntico entre as voltas e as rodadas dele.
+    ...(opts.comFicha ? [{ type: 'text', text: INSTRUCAO_FICHA }] : []),
     { type: 'text', text: INSTRUCAO_CANAL_RESPOSTA, cache_control: { type: 'ephemeral' } },
   ];
 
@@ -214,6 +221,8 @@ export async function chamarAgentePrincipal(opts: {
     if (opts.contextoEntregaMateriais) {
       blocos.push({ type: 'text', text: opts.contextoEntregaMateriais });
     }
+    // Ficha do atendimento: estado determinístico, relido a cada volta, fora do cache.
+    if (opts.contextoFicha) blocos.push({ type: 'text', text: opts.contextoFicha });
     ult.content = blocos;
   }
 

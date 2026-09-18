@@ -25,6 +25,7 @@ import { atualizarAgenteComRatchet, atualizarLead, avaliarFimDoHistorico, buscar
 import { carregarTools, chamarAgentePrincipal, chamarRouter, provedorOpenai, type MetadadosRespostaRouter, type ProvedorIA } from './agente.ts';
 import { type CtxConversa, executarTool, montarToolResults } from './tools.ts';
 import { carregarStatusMateriais } from './envioMateriais.ts';
+import { carregarFicha, detectarPedidoDeCronograma, registrarNaJornada } from './fichaAtendimento.ts';
 import { prepararMensagem } from './midia.ts';
 import { persistirEntradasDoLote, registrarEntrada } from './historicoEntradaPausa.ts';
 import { aguardarAudiosDoHistorico, contarAudiosPendentes } from './sincronizacaoAudio.ts';
@@ -299,6 +300,9 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       (await contaDoLead(supabase, telefone, { direcao: 'inbound', incluirRecontato: true })),
     leadId: doUltimoCom('lead_id'),
     oportunidadeId: doUltimoCom('oportunidade_id'),
+    // Ficha do atendimento (19/09/2026) acompanha o canário da Luna — o "novo agente" do
+    // usuário: só esse lead tem a ficha, a instrução e a trava do cronograma (fichaAtendimento.ts).
+    ...(provedor ? { ficha: { inicioRodada: new Date(inicioRodada).toISOString() } } : {}),
   };
 
   let lead = await buscarLead(supabase, remotejid);
@@ -308,6 +312,21 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   if (!lead) {
     await criarLead(supabase, remotejid);
     lead = await buscarLead(supabase, remotejid);
+  }
+  // Ficha (canário): o clique em "Receber Cronograma" (936 em 30 dias) ou o pedido em texto fica
+  // anotado na jornada ANTES de o modelo falar — é o que a ficha usa para cobrar a coleta.
+  if (ctx.ficha) {
+    const pedido = detectarPedidoDeCronograma(itens);
+    if (pedido) {
+      try {
+        await registrarNaJornada(supabase, telefone, (j) => ({
+          ...j, cronograma: { ...(j.cronograma ?? {}), pedido_em: new Date().toISOString(), pedido_por: pedido },
+        }));
+        tel.registrar('cronograma_pedido', { por: pedido });
+      } catch (e) {
+        tel.registrar('erro', { onde: 'jornada_cronograma_pedido' }, undefined, String((e as Error)?.message ?? e));
+      }
+    }
   }
   // Reabriu a conversa: atualiza o relógio âncora e ZERA o estágio de follow-up
   // (se o lead esfriar de novo, a cadência recomeça do 1º toque — igual ao n8n,
@@ -691,10 +710,27 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
 
   // Loop agêntico: igual ao n8n, o histórico é relido do banco a cada volta.
   for (let rodada = 0; rodada < MAX_RODADAS_TOOLS; rodada++) {
-    const [historico, contextoEntregaMateriais] = await Promise.all([
+    const [historico, contextoEntregaMateriais, ficha] = await Promise.all([
       carregarHistorico(supabase, remotejid),
       carregarStatusMateriais(supabase, ctx),
+      // Relida a cada volta: a tool da volta anterior pode ter preenchido a coleta.
+      ctx.ficha ? carregarFicha(supabase, ctx) : Promise.resolve(null),
     ]);
+    if (ctx.ficha && rodada === 0) {
+      if (ficha) {
+        tel.registrar('ficha_atendimento', {
+          grupo: ficha.avaliacao.grupo, cadastro: ficha.entrada.cadastro,
+          falta: ficha.avaliacao.faltaParaCronograma, libera_cronograma: ficha.avaliacao.liberaCronograma,
+          ja_perguntou: ficha.avaliacao.jaPerguntou, coleta: ficha.entrada.jornada.coleta ?? null,
+          objecoes: ficha.entrada.jornada.objecoes ?? null, cronograma: ficha.entrada.jornada.cronograma ?? null,
+          proximo_passo: ficha.avaliacao.proximoPasso,
+        });
+      } else {
+        // Leitura falhou: a volta segue sem a ficha (e sem a instrução dela). Não é erro da
+        // rodada — o lead é respondido do mesmo jeito; fica visível no Debug como estado.
+        tel.registrar('ficha_atendimento', { disponivel: false, motivo: 'leitura falhou; a volta seguiu sem a ficha' });
+      }
+    }
     let messages = sanitizarHistorico(historico);
     // Só na 1ª volta: depois de uma tool o último turno é sempre o tool_result (user).
     if (rodada === 0) {
@@ -718,6 +754,9 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     const pedidoPrincipal = {
       promptAgente,
       contextoEntregaMateriais,
+      // Sem o bloco (leitura falhou), a instrução também fica de fora: ela aponta para ele.
+      contextoFicha: ficha?.texto,
+      comFicha: Boolean(ficha),
       // Encerramento vence reação: a despedida é o que importa nessa volta.
       contextoTemporal: encerrouPorTool
         ? `${contextoComMateriais}\n\n${instrucaoEncerramento}`

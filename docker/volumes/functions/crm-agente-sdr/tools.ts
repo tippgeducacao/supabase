@@ -30,6 +30,10 @@ import {
   type ContextoElegibilidade, iniciarAvaliacao, finalizarAvaliacao, consultarAprovacao,
   recusaElegibilidade, VERSAO_REGRA_ELEGIBILIDADE,
 } from './elegibilidadeAgendamento.ts';
+import {
+  aplicarColetaNaJornada, bloqueioCronograma, carregarFicha, contarObjecaoNaJornada, INSTRUCAO_TEMPO_FICHA,
+  registrarBloqueioNaJornada, registrarEnvioNaJornada, registrarNaJornada,
+} from './fichaAtendimento.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
 const SDR_API_URL = (Deno.env.get('AGENTE_SDR_SDRAPI_URL') ?? `${SUPABASE_URL}/functions/v1/sdr-api`).replace(/\/$/, '');
@@ -58,6 +62,8 @@ export type CtxConversa = ContextoElegibilidade & {
   enviosMateriais?: Map<string, Record<string, unknown>>;
   /** Histórico real da rodada; argumentos de ferramentas não são prova de formação. */
   historicoConversa?: Msg[];
+  /** Ficha do atendimento (canário): presente ⇒ trava do cronograma, contagem de objeções e coleta na jornada. */
+  ficha?: { inicioRodada: string } | null;
 };
 
 function sdrApi(path: string, init: RequestInit = {}): Promise<Response> {
@@ -776,9 +782,15 @@ function filtroDaObjecao(input: any): Record<string, string> {
   return TIPOS_OBJECAO.has(tipo) ? { tipo_objecao: tipo } : {};
 }
 
-async function consultaObjecoes(supabase: any, input: any, toolUseId: string) {
+async function consultaObjecoes(supabase: any, input: any, toolUseId: string, ctx?: CtxConversa) {
   try {
     const filtro = filtroDaObjecao(input);
+    // Ficha (canário): a objeção tratada fica contada na jornada — a ficha mostra "tempo 1x",
+    // e o modelo não repete a mesma quebra. Falha aqui não derruba a consulta.
+    if (ctx?.ficha && filtro.tipo_objecao) {
+      try { await registrarNaJornada(supabase, ctx.telefone, (j) => contarObjecaoNaJornada(j, filtro.tipo_objecao)); }
+      catch (e) { console.error('[crm-agente-sdr] jornada (objeção):', (e as Error)?.message ?? e); }
+    }
     // Modalidade e existência são fatos por curso. A base legada dizia que a
     // maioria das pós tem semi, contrariando a regra comercial de 10/09/2026.
     if (filtro.tipo_objecao === 'pergunta_modalidade') {
@@ -829,7 +841,8 @@ async function consultaObjecoes(supabase: any, input: any, toolUseId: string) {
     // recuperação correta reproduzia esses erros. A revisão só é usada DEPOIS
     // de recuperar a categoria certa; indisponibilidade continua sendo falha.
     const referenciasRevisadas: Record<string, string> = {
-      objecao_tempo: 'Reconheça a rotina e a falta de tempo informadas, sem minimizar. A referência desta base para a conversa com o monitor é cerca de 10 minutos; não transforme isso em 15, 20 ou outra duração. Pergunte se existe um período viável para conversar; não prometa atendimento fora dos horários disponíveis, não julgue dedicação, não compare reunião com estudar e não invente carga horária da pós. Se ele realmente não puder agora, combine um retorno conforme o prazo que ele escolher.',
+      // Canário da ficha: a mesma quebra, com o gatilho de ação e sem oferecer material (fichaAtendimento.ts).
+      objecao_tempo: ctx?.ficha ? INSTRUCAO_TEMPO_FICHA : 'Reconheça a rotina e a falta de tempo informadas, sem minimizar. A referência desta base para a conversa com o monitor é cerca de 10 minutos; não transforme isso em 15, 20 ou outra duração. Pergunte se existe um período viável para conversar; não prometa atendimento fora dos horários disponíveis, não julgue dedicação, não compare reunião com estudar e não invente carga horária da pós. Se ele realmente não puder agora, combine um retorno conforme o prazo que ele escolher.',
       pergunta_condicao: 'As condições comerciais são apresentadas na conversa com o monitor. Se o lead relatou dificuldade financeira, acolha isso antes do convite. Não prometa que a condição cabe no orçamento, que foi criada para quem está sem dinheiro, ou que há bolsa/desconto específico. Não invente prazo de lote ou urgência. Pergunte se ele quer conhecer as condições; só depois do aceite consulte disponibilidade.',
     };
     return { resposta_objecao: resposta ? (referenciasRevisadas[filtro.tipo_objecao] ?? resposta) : 'CONFIANCA_BAIXA', id: toolUseId,
@@ -1096,8 +1109,26 @@ async function atualizarDadosLead(supabase: any, input: any, ctx: CtxConversa, t
   // o campo era descartado — a resposta de "já é formado? quando conclui?" se perdia.
   // A RPC guarda esse dado desde sempre; era só o handler que não repassava.
   const tempoFormacao = String(input?.tempo_formacao ?? '').trim();
+  // Ficha (canário, 19/09/2026): área de atuação, "atua na área da pós" e "graduação concluída"
+  // vivem na jornada — é o que a ficha mostra e o que libera o cronograma. Só a tabela da
+  // OpenAI oferece esses campos; o Claude segue mandando os três de sempre.
+  const areaAtuacao = String(input?.area_atuacao ?? '').trim();
+  const temCampoDaFicha = Boolean(areaAtuacao || input?.atua_na_area || input?.graduacao_concluida);
+  if (!nome && !formacao && !tempoFormacao && !temCampoDaFicha) {
+    return sair('Nada a atualizar: chame esta função só quando o lead informar o nome, a graduação, quando conclui a graduação ou a área em que atua.');
+  }
+  let registroFicha = '';
+  if (ctx.ficha && (formacao || tempoFormacao || temCampoDaFicha)) {
+    try {
+      await registrarNaJornada(supabase, ctx.telefone, (j) => aplicarColetaNaJornada(j, input ?? {}));
+      if (areaAtuacao && !ctx.modoTeste) await atualizarLead(supabase, ctx.remotejid, { situacao_trabalho_atual: areaAtuacao });
+      if (areaAtuacao) registroFicha = ` Área de atuação "${areaAtuacao}" anotada.`;
+    } catch (e) {
+      console.error(`[crm-agente-sdr] jornada (coleta): ${(e as Error)?.message ?? e}`);
+    }
+  }
   if (!nome && !formacao && !tempoFormacao) {
-    return sair('Nada a atualizar: chame esta função só quando o lead informar o nome, a graduação ou quando conclui a graduação.');
+    return sair(`Registrado.${registroFicha} NUNCA comente com o lead que registrou ou salvou os dados dele.`);
   }
 
   const { data, error } = await supabase.rpc('crm_agente_atualizar_dados_lead', {
@@ -1118,7 +1149,7 @@ async function atualizarDadosLead(supabase: any, input: any, ctx: CtxConversa, t
 
   const partes = [nome ? `nome "${nome}"` : null, formacao ? `graduação "${formacao}"` : null].filter(Boolean);
   return sair(
-    `Registrado no cadastro: ${partes.join(' e ')}. ` +
+    `Registrado no cadastro: ${partes.join(' e ')}.${registroFicha} ` +
     (nome ? `Use "${nome.split(' ')[0]}" ao falar com o lead (minúsculo, no máximo duas vezes na conversa). ` : '') +
     (formacao ? 'Isto NÃO checa elegibilidade: rode verificar_compatibilidade_curso para isso. ' : '') +
     'NUNCA comente com o lead que registrou ou salvou os dados dele.',
@@ -1138,7 +1169,7 @@ export async function executarTool(
       case 'confirmar_agendamento': return await confirmarAgendamento(supabase, input, ctx, id);
       case 'remarcar_agendamento': return await remarcarAgendamento(supabase, input, ctx, id);
       case 'verificar_compatibilidade_curso': return await verificarCompatibilidade(supabase, input, ctx, id);
-      case 'consulta_objecoes': return await consultaObjecoes(supabase, input, id);
+      case 'consulta_objecoes': return await consultaObjecoes(supabase, input, id, ctx);
       case 'envia_informacoes': {
         if (input?.conteudo === 'valor') return await enviaInformacoes(supabase, input, ctx, id);
         const chave = String(input?.curso_escolhido ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
@@ -1148,6 +1179,20 @@ export async function executarTool(
           ...anterior, id, reutilizado_nesta_rodada: true,
           resultado: `${anterior.resultado} Esta tentativa já ocorreu nesta rodada. Não houve novo envio. Se precisa apenas do preço, consulte conteudo="valor".`,
         };
+        // Ficha (canário, 19/09/2026): sem o dado da coleta o cronograma NÃO sai — a recusa diz o
+        // que perguntar. Bloqueio em rodada ANTERIOR + lead insistiu ⇒ libera (decisão do usuário:
+        // pergunta uma vez, não segura o material). Ficha indisponível ⇒ envia como sempre.
+        if (ctx.ficha) {
+          const ficha = await carregarFicha(supabase, ctx);
+          if (ficha && !ficha.avaliacao.liberaCronograma) {
+            const jaBloqueouNestaRodada = (ficha.entrada.jornada.cronograma?.bloqueado_em ?? '') >= ctx.ficha.inicioRodada;
+            if (!jaBloqueouNestaRodada) {
+              try { await registrarNaJornada(supabase, ctx.telefone, (j) => registrarBloqueioNaJornada(j)); }
+              catch (e) { console.error('[crm-agente-sdr] jornada (bloqueio):', (e as Error)?.message ?? e); }
+            }
+            return bloqueioCronograma(id, ficha.avaliacao);
+          }
+        }
         let retorno: Record<string, unknown>;
         try { retorno = await enviaInformacoes(supabase, input ?? {}, ctx, id); }
         catch {
@@ -1157,6 +1202,10 @@ export async function executarTool(
           } }, input?.conteudo ?? 'cronograma', id);
         }
         ctx.enviosMateriais.set(chave, retorno);
+        if (ctx.ficha && retorno?.cronograma_enviado === true) {
+          try { await registrarNaJornada(supabase, ctx.telefone, (j) => registrarEnvioNaJornada(j)); }
+          catch (e) { console.error('[crm-agente-sdr] jornada (envio):', (e as Error)?.message ?? e); }
+        }
         return retorno;
       }
       case 'pausa_ia': return await pausaIa(supabase, input, ctx, id);
