@@ -164,6 +164,19 @@ async function listarTodas(deps: DependenciasRecuperacaoLista, caminho: string):
   throw new Error('3C: limite de páginas de listas excedido')
 }
 
+/**
+ * Inventário COMPLETO das listas de uma campanha, com as mesmas garantias da recuperação
+ * (paginação conferida, coleção que não mudou durante a leitura). A renovação noturna só
+ * apaga a partir de um inventário inteiro: página truncada não autoriza apagar nada.
+ */
+export async function listarListasDaCampanha(
+  campanhaId: string, deps: DependenciasRecuperacaoLista,
+): Promise<Array<{ id: string; nome: string; estoque: number }>> {
+  if (!identificador(campanhaId)) throw new Error('3C: campanha inválida')
+  const listas = await listarTodas(deps, `/campaigns/${encodeURIComponent(campanhaId)}/lists`)
+  return listas.map((l) => ({ id: l.id, nome: l.nome, estoque: l.estoque }))
+}
+
 function maisRecente(listas: ListaRemota[]): ListaRemota | undefined {
   return [...listas].sort((a, b) => b.criadaEm.localeCompare(a.criadaEm)
     || b.id.localeCompare(a.id, undefined, { numeric: true }))[0]

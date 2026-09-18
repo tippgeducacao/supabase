@@ -23,9 +23,13 @@
 //   POST ?acao=expurgar                                    -> tira quem não passa mais
 //   POST ?acao=manter&recorte=resultado_reuniao             -> expurga antes de abastecer
 //   POST ?limite=500                                       -> sobrescreve o limite da linha
+//   POST ?acao=renovar                                     -> renovação NOTURNA das campanhas de pós:
+//                                                             apaga TODAS as listas da campanha mais
+//                                                             atrasada; o abastecimento recria e reenvia
+//   POST ?acao=renovar&lista=<uuid>[&dry=1]                -> uma campanha específica / só simula
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0'
-import { recuperarListaAutomatica } from './recuperacao-lista.ts'
+import { listarListasDaCampanha, recuperarListaAutomatica } from './recuperacao-lista.ts'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -239,6 +243,60 @@ async function expurgar(cfg: ListaCfg, limite: number, dry: boolean, renovarLeas
   })
 }
 
+// ------------------------------------------------------------------ renovar ----
+// RENOVAÇÃO NOTURNA das campanhas de pós (pedido do José, 18/09/2026): "muitas vezes os
+// usuários reprocessam as listas e apagam a lista automática; ressubindo toda vez as listas
+// de pós vai consertar isso". Às 23:00 cada campanha de pós fica SEM LISTA NENHUMA —
+// automática, manual ou de reprocessamento — e amanhece com a automática completa.
+//
+// Esta ação só APAGA. Quem reconstrói é o motor que já existia: a próxima sincronização
+// comprova que a lista salva sumiu, recria a `auto | <nome>`, libera o estoque daquela lista
+// (`threec_mailing_lista_substituir`) e reenvia quem AINDA passa na régua, 1.000 por rodada.
+// Por isso não há segunda régua aqui, nem mexida no histórico local.
+//
+// ⚠️ SÓ `grupo_segmento`. Novo Lead SDR (outra function), Orgânico/Indicação (`origem`) e
+// as filas de reunião (`resultado_reuniao`) NÃO entram — o escopo já custou caro em 09/09.
+const RECORTE_RENOVAVEL = 'grupo_segmento'
+
+async function renovar(cfg: ListaCfg, dry: boolean, renovarLease?: RenovarLease): Promise<Response> {
+  if (cfg.recorte !== RECORTE_RENOVAVEL) {
+    return json({ ok: false, campanha: cfg.nome, error: 'renovação noturna vale só para campanhas de pós (grupo_segmento)' }, 400)
+  }
+  let listas: Array<{ id: string; nome: string; estoque: number }>
+  try {
+    listas = await listarListasDaCampanha(cfg.campanha_id, { api: api3c, renovarLease })
+  } catch (err) {
+    // Inventário incerto não autoriza apagar: a campanha fica para a próxima invocação.
+    if (!dry) await registrar(cfg.id, 'expurgar', {}, `renovação: ${String(err)}`, { renovacao_noturna: true })
+    return json({ ok: false, campanha: cfg.nome, etapa: 'inventario', detail: String(err) }, 502)
+  }
+  if (dry) return json({ ok: true, dry: true, campanha: cfg.nome, listas_que_seriam_apagadas: listas })
+
+  const apagadas: typeof listas = []
+  const falhas: string[] = []
+  for (const l of listas) {
+    try {
+      await renovarLease?.()
+      const resp = await api3c(`/campaigns/${encodeURIComponent(cfg.campanha_id)}/lists/${encodeURIComponent(l.id)}`, { method: 'DELETE' })
+      if (resp.status >= 200 && resp.status < 300) apagadas.push(l)
+      else falhas.push(`lista ${l.id}: HTTP ${resp.status}`)
+    } catch (err) {
+      falhas.push(`lista ${l.id}: ${String(err)}`)
+      if (err instanceof LeasePerdido) break
+    }
+  }
+  // Só marca a noite como feita se NÃO sobrou lista: com falha, a próxima invocação tenta de novo.
+  if (falhas.length === 0) {
+    const { error } = await supabase.from('threec_mailing_listas')
+      .update({ ultima_renovacao_em: new Date().toISOString() }).eq('id', cfg.id)
+    if (error) falhas.push(`marcar renovação: ${error.message}`)
+  }
+  await registrar(cfg.id, 'expurgar', { removidos: 0 },
+    falhas.length ? `renovação: ${falhas.slice(0, 3).join(' | ')}` : undefined,
+    { renovacao_noturna: true, listas_apagadas: apagadas, contatos_nas_listas: apagadas.reduce((t, l) => t + l.estoque, 0) })
+  return json({ ok: falhas.length === 0, campanha: cfg.nome, listas_apagadas: apagadas, falhas: falhas.slice(0, 3) })
+}
+
 // --------------------------------------------------------------- sincronizar ----
 async function sincronizar(cfg: ListaCfg, limite: number | null, dry: boolean, renovarLease?: RenovarLease, tokenLease?: string): Promise<Response> {
   let recuperacao: Awaited<ReturnType<typeof recuperarListaAutomatica>> | undefined
@@ -438,7 +496,7 @@ async function handler(req: Request): Promise<Response> {
 
   const url = new URL(req.url)
   const acao = (url.searchParams.get('acao') ?? 'sincronizar').toLowerCase()
-  if (!['sincronizar', 'expurgar', 'manter'].includes(acao)) return json({ error: 'acao invalida' }, 400)
+  if (!['sincronizar', 'expurgar', 'manter', 'renovar'].includes(acao)) return json({ error: 'acao invalida' }, 400)
   const qLista = url.searchParams.get('lista')
   const qRecorte = url.searchParams.get('recorte')?.trim()
   const qLimite = Number(url.searchParams.get('limite') ?? '') || null
@@ -451,12 +509,21 @@ async function handler(req: Request): Promise<Response> {
   let q = supabase.from('threec_mailing_listas').select(campos)
   q = qLista ? q.eq('id', qLista) : q.eq('ativo', true)
   if (qRecorte) q = q.eq('recorte', qRecorte)
+  if (acao === 'renovar') {
+    // Fila da NOITE: só pós, e só quem ainda não foi renovada nas últimas 12 h (o cron roda
+    // 30 min seguidos; sem isto a campanha recém-recriada seria apagada de novo).
+    q = q.eq('recorte', RECORTE_RENOVAVEL)
+    if (!qLista) {
+      const corte = new Date(Date.now() - 12 * 3_600_000).toISOString()
+      q = q.or(`ultima_renovacao_em.is.null,ultima_renovacao_em.lt.${corte}`)
+    }
+  }
   const { data: linhas, error: eCfg } = await q
-    .order(colunaFila, { ascending: true, nullsFirst: true })
+    .order(acao === 'renovar' ? 'ultima_renovacao_em' : colunaFila, { ascending: true, nullsFirst: true })
     .limit(1)
   if (eCfg) return json({ error: 'falha ao ler a config', detail: eCfg.message }, 500)
   const cfg = (linhas ?? [])[0] as ListaCfg | undefined
-  if (!cfg) return json({ ok: true, skip: 'nenhuma campanha ativa em threec_mailing_listas' })
+  if (!cfg) return json({ ok: true, skip: acao === 'renovar' ? 'todas as campanhas de pós já foram renovadas nesta noite' : 'nenhuma campanha ativa em threec_mailing_listas' })
 
   // A simulação não disputa lease nem altera fila/histórico. Cron dedicado e geral
   // podem alcançar a mesma lista: a posse é por token, não pela origem da chamada.
@@ -483,6 +550,7 @@ async function handler(req: Request): Promise<Response> {
   } : undefined
 
   try {
+    if (acao === 'renovar') return await renovar(cfg, dry, renovarLease)
     if (acao !== 'manter') return await executarAcao(cfg, acao as 'expurgar' | 'sincronizar', qLimite, dry, renovarLease, token ?? undefined)
     const respostaExpurgo = await executarAcao(cfg, 'expurgar', qLimite, dry, renovarLease, token ?? undefined)
     const resultadoExpurgo = await respostaExpurgo.json()
