@@ -19,7 +19,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3';
 import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO } from '../crm-agente-sdr/prompts.ts';
 import { AGENTE_CAMPANHA_DIRETA } from '../crm-agente-sdr/prompts-campanha-direta.ts';
 import { AGENTE_AULA, montarVarsAula } from '../crm-agente-sdr/prompts-aula.ts';
-import { carregarTools, chamarAgentePrincipal, chamarRouter, MODELO_AGENTE } from '../crm-agente-sdr/agente.ts';
+import { carregarTools, chamarAgentePrincipal, chamarRouter, MODELO_AGENTE, provedorDeepseek, provedorOpenai } from '../crm-agente-sdr/agente.ts';
 import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoCurso, notaDoNome, renderPrompt } from '../crm-agente-sdr/contexto.ts';
 import { comBlocoDaEscola, comPresenteEscola } from '../crm-agente-sdr/escolaGratuita.ts';
 import {
@@ -231,11 +231,20 @@ Deno.serve(async (req) => {
     return json({ error: e instanceof SyntaxError ? 'payload inválido' : (e as Error).message }, 400);
   }
 
+  // Provedor desta simulação: vai como ARGUMENTO de cada chamada (nada de estado global, então
+  // duas simulações com provedores diferentes podem rodar ao mesmo tempo sem se misturar).
+  let provedorAlternativo = entrada.provedor === 'deepseek' ? provedorDeepseek()
+    : entrada.provedor === 'openai' ? provedorOpenai() : null;
+  if (provedorAlternativo?.formato === 'openai' && entrada.esforco) provedorAlternativo = { ...provedorAlternativo, esforco: entrada.esforco };
+  if (entrada.provedor !== 'anthropic' && !provedorAlternativo) {
+    return json({ error: `chave do provedor ${entrada.provedor} ausente no ambiente` }, 400);
+  }
+
   if (entrada.modo === 'followup') {
     try {
       // Não passar supabase real: a geração recebe um banco bloqueado e telemetria
       // em memória. Nenhuma função da esteira, elegibilidade, lock ou envio é chamada.
-      return json({ ...(await executarFollowupSimulado(entrada, { gerar: gerarFollowup, humanizar: humanizarTexto })), modelo: MODELO_AGENTE, memoria_versao: VERSAO_MEMORIA_HUMANA });
+      return json({ ...(await executarFollowupSimulado(entrada, { gerar: gerarFollowup, humanizar: humanizarTexto })), modelo: MODELO_AGENTE, provedor: entrada.provedor, esforco: provedorAlternativo?.formato === 'openai' ? provedorAlternativo.esforco : null, memoria_versao: VERSAO_MEMORIA_HUMANA });
     } catch {
       return json({ error: 'falha na simulação de followup; nenhuma ação comercial foi executada' }, 502);
     }
@@ -247,7 +256,8 @@ Deno.serve(async (req) => {
   const routers: Record<string, unknown>[] = [];
   const cacheTools = new Map<string, any[]>();
   const toolsDe = async (agente: string) => {
-    if (!cacheTools.has(agente)) cacheTools.set(agente, await carregarTools(supabase, agente));
+    // provedor openai ⇒ lê lista_tools_openai (a mesma tabela que a produção usará)
+    if (!cacheTools.has(agente)) cacheTools.set(agente, await carregarTools(supabase, agente, provedorAlternativo));
     return cacheTools.get(agente)!;
   };
 
@@ -285,7 +295,7 @@ Deno.serve(async (req) => {
               decidiu = await chamarRouter(limparParaRouter(comNotaParaRouter(messages, notaTroca)), (resposta) => {
                 usoRouter = extrairUso(resposta.usage);
                 modeloRouter = resposta.model ?? MODELO_AGENTE;
-              });
+              }, provedorAlternativo);
             } catch {
               fallback = true;
             }
@@ -325,7 +335,7 @@ Deno.serve(async (req) => {
         }
         return { agente: agenteTools, promptAgente, contextoTemporal: comNotaNoContexto(montarContextoTemporal() + notaDoNome(vars.nome) + notaDoCurso(vars.curso_interesse_original), notaTroca), tools };
       },
-      chamarPrincipal: chamarAgentePrincipal,
+      chamarPrincipal: (opts: Parameters<typeof chamarAgentePrincipal>[0]) => chamarAgentePrincipal({ ...opts, provedor: provedorAlternativo }),
       humanizar: humanizarTexto,
       mockTool: async (nome, input) => {
         const dados = input as Record<string, unknown>;
@@ -337,7 +347,7 @@ Deno.serve(async (req) => {
         return resposta;
       },
     });
-    return json({ ...resultado, modelo: MODELO_AGENTE, usar_router: entrada.usar_router, routers, memoria_versao: VERSAO_MEMORIA_HUMANA });
+    return json({ ...resultado, modelo: MODELO_AGENTE, provedor: entrada.provedor, esforco: provedorAlternativo?.formato === 'openai' ? provedorAlternativo.esforco : null, usar_router: entrada.usar_router, routers, memoria_versao: VERSAO_MEMORIA_HUMANA });
   } catch {
     // Não devolver body cru de falha da API nem histórico/credenciais em logs.
     return json({ error: 'falha na simulação; nenhuma ação comercial foi executada' }, 502);

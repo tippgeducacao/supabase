@@ -22,7 +22,7 @@ import { respostaDoEncerramento, toolConcluida, type Encerramento } from './ence
 import { comContinuidadeWebchat } from './continuidadeWebchat.ts';
 import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoCurso, notaDoNome, renderPrompt } from './contexto.ts';
 import { atualizarAgenteComRatchet, atualizarLead, avaliarFimDoHistorico, buscarLead, carregarHistorico, comEntradaPendente, criarLead, excluirDadosLead, gravarMensagem, limparParaRouter, sanitizarHistorico } from './historico.ts';
-import { carregarTools, chamarAgentePrincipal, chamarRouter } from './agente.ts';
+import { carregarTools, chamarAgentePrincipal, chamarRouter, provedorOpenai, type MetadadosRespostaRouter, type ProvedorIA } from './agente.ts';
 import { type CtxConversa, executarTool, montarToolResults } from './tools.ts';
 import { carregarStatusMateriais } from './envioMateriais.ts';
 import { prepararMensagem } from './midia.ts';
@@ -206,16 +206,37 @@ async function permitidoNoTeste(telefone: string): Promise<boolean> {
   return lista.some((t) => String(t).replace(/\D/g, '').slice(-8) === sub8);
 }
 
+// ── Qual modelo atende ESTE lead ─────────────────────────────────────────────
+// Canário da GPT-5.6 Luna (18/09/2026): só os telefones listados em
+// `crm_agente_sdr_config.luna_telefones` saem pela OpenAI; todo o resto segue na Anthropic.
+// Falha fechada para o lado SEGURO: sem chave, com erro de leitura ou coluna ausente, o lead
+// fica no Claude — trocar de modelo nunca pode ser o motivo de alguém ficar sem resposta.
+// Escopo do canário: router + loop principal + correção do canal. Matriz de elegibilidade
+// (verificar_compatibilidade_curso) e follow-up continuam na Anthropic nesta fase.
+async function provedorDoLead(telefone: string): Promise<ProvedorIA | null> {
+  try {
+    const { data, error } = await supabase.from('crm_agente_sdr_config').select('luna_telefones').eq('id', 1).maybeSingle();
+    if (error) return null;
+    const lista: string[] = data?.luna_telefones ?? [];
+    if (!lista.length) return null;
+    const sub8 = String(telefone).replace(/\D/g, '').slice(-8);
+    if (!lista.some((t) => String(t).replace(/\D/g, '').slice(-8) === sub8)) return null;
+    return provedorOpenai();
+  } catch {
+    return null;
+  }
+}
+
 // Tools da vez. Na campanha direta a ABERTURA usa a persona própria (que tem a
 // atualizar_dados_lead); no FECHAMENTO o qualificador segue idêntico ao dos outros
 // números, só ganhando a atualizar_dados_lead — o lead pode corrigir o nome lá também.
 // ⚠️ Ordem estável: os extras entram sempre no fim (a ordem das tools compõe o
 // prefixo do prompt cache; ordem variável = cache miss silencioso).
-async function toolsDaVez(agenteEfetivo: string, ehCampanha: boolean): Promise<any[]> {
-  if (!ehCampanha) return await carregarTools(supabase, agenteEfetivo);
-  if (agenteEfetivo === 'agente_validacao') return await carregarTools(supabase, 'agente_campanha_direta');
-  const base = await carregarTools(supabase, agenteEfetivo);
-  const extras = (await carregarTools(supabase, 'agente_campanha_direta'))
+async function toolsDaVez(agenteEfetivo: string, ehCampanha: boolean, provedor: ProvedorIA | null): Promise<any[]> {
+  if (!ehCampanha) return await carregarTools(supabase, agenteEfetivo, provedor);
+  if (agenteEfetivo === 'agente_validacao') return await carregarTools(supabase, 'agente_campanha_direta', provedor);
+  const base = await carregarTools(supabase, agenteEfetivo, provedor);
+  const extras = (await carregarTools(supabase, 'agente_campanha_direta', provedor))
     .filter((t: any) => t?.name === 'atualizar_dados_lead');
   return [...base, ...extras];
 }
@@ -247,6 +268,9 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   const doUltimoCom = (campo: string): any =>
     [...itens].reverse().find((i: any) => i?.[campo] != null)?.[campo] ?? null;
   const telefone = String(remotejid).split('@')[0];
+  // `let`: se o provedor alternativo falhar no meio da rodada, o resto dela volta para o Claude.
+  let provedor = await provedorDoLead(telefone);
+  if (provedor) tel.registrar('provedor_ia', { provedor: provedor.nome, modelo: provedor.formato === 'openai' ? provedor.modelo : null, motivo: 'canario_luna_telefones' });
   const ctx: CtxConversa = {
     remotejid,
     telefone,
@@ -376,6 +400,19 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       persona,
     });
   }
+  // O router é uma chamada paga como as outras (1 por rodada, histórico inteiro): sem
+  // este registro o painel "Uso de IA" ficava ~US$ 40 abaixo da fatura num dia de pico
+  // (15/09/2026). `volta: 0` + `agente: 'router'` separam do loop principal.
+  const registrarUsoRouter = (m: MetadadosRespostaRouter) => tel.registrar('llm_chamada', {
+    volta: 0,
+    agente: 'router',
+    provedor: provedor?.nome ?? 'anthropic',
+    modelo: m.model ?? null,
+    tokens_entrada: m.usage?.input_tokens ?? null,
+    tokens_saida: m.usage?.output_tokens ?? null,
+    cache_lido: m.usage?.cache_read_input_tokens ?? null,
+    cache_escrito: m.usage?.cache_creation_input_tokens ?? null,
+  });
   let promptAgente: string;
   let tools: any[];
   // A nota vai no bloco de contexto temporal: relido a cada volta, fora do prefixo cacheado.
@@ -385,7 +422,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   if (persona === 'recontato') {
     agenteEfetivo = 'agente_recontato';
     promptAgente = renderPrompt(AGENTE_RECONTATO, vars);
-    tools = await carregarTools(supabase, 'agente_recontato');
+    tools = await carregarTools(supabase, 'agente_recontato', provedor);
     const dossie = montarDossieRecontato(lead?.contexto_recontato);
     if (dossie) contextoEfetivo = `${contextoTemporal}\n\n${dossie}`;
     tel.registrar('router_decisao', {
@@ -412,7 +449,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     const inicioRouter = Date.now();
     if (consultarRouter) {
       try {
-        decidiu = await chamarRouter(limparParaRouter(comNotaParaRouter(await carregarHistorico(supabase, remotejid), notaTroca)));
+        decidiu = await chamarRouter(limparParaRouter(comNotaParaRouter(await carregarHistorico(supabase, remotejid), notaTroca)), registrarUsoRouter, provedor);
         if (decidiu === 'agente_qualificador') agenteAtual = 'agente_qualificador';
       } catch (e) {
         console.error('[crm-agente-sdr] router (campanha direta) falhou, mantendo a abertura:', e);
@@ -434,14 +471,14 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       agenteAtual === 'agente_qualificador' ? AGENTE_QUALIFICADOR : AGENTE_CAMPANHA_DIRETA,
       vars,
     );
-    tools = await toolsDaVez(agenteAtual, true);
+    tools = await toolsDaVez(agenteAtual, true, provedor);
   } else {
     // Router (em erro, mantém o agente atual — não derruba a conversa).
     let proximo: 'agente_validacao' | 'agente_qualificador';
     const inicioRouter = Date.now();
     let routerFallback = false;
     try {
-      proximo = await chamarRouter(limparParaRouter(comNotaParaRouter(await carregarHistorico(supabase, remotejid), notaTroca)));
+      proximo = await chamarRouter(limparParaRouter(comNotaParaRouter(await carregarHistorico(supabase, remotejid), notaTroca)), registrarUsoRouter, provedor);
     } catch (e) {
       console.error('[crm-agente-sdr] router falhou, mantendo agente atual:', e);
       routerFallback = true;
@@ -466,7 +503,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       agenteAtual === 'agente_qualificador' ? AGENTE_QUALIFICADOR : abrirComAula ? AGENTE_AULA : AGENTE_VALIDACAO,
       vars,
     );
-    tools = await carregarTools(supabase, abrirComAula ? 'agente_aula' : agenteAtual);
+    tools = await carregarTools(supabase, abrirComAula ? 'agente_aula' : agenteAtual, provedor);
   }
   // PRESENTE DA ESCOLA (2026-08-05): conversa que acaba sem reunião leva o convite da
   // biblioteca gratuita junto da despedida. Apensado AQUI, no ponto único onde o prompt
@@ -657,7 +694,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     const contextoComMateriais = contextoEfetivo;
     const instrucaoEncerramento = retornoPorFormatura ? INSTRUCAO_POS_RETORNO : INSTRUCAO_POS_PAUSA;
     const inicioLlm = Date.now();
-    const resp = await chamarAgentePrincipal({
+    const pedidoPrincipal = {
       promptAgente,
       contextoEntregaMateriais,
       // Encerramento vence reação: a despedida é o que importa nessa volta.
@@ -670,7 +707,21 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       // A ação terminal já concluiu: esta volta só pode redigir a resposta.
       // Não permitir pausar/arquivar/agendar outra vez para tentar escrever o adeus.
       tools: encerrouPorTool ? [] : tools,
-    });
+    };
+    let resp: any;
+    try {
+      resp = await chamarAgentePrincipal({ ...pedidoPrincipal, provedor });
+    } catch (e) {
+      // Provedor alternativo fora do ar (ou recusando o pedido) NÃO pode calar o João: a volta
+      // é refeita no Claude e o resto da rodada fica nele. As tools são as mesmas — a tabela
+      // da OpenAI já guarda o texto efetivo, no mesmo contrato interno.
+      if (!provedor) throw e;
+      // O motivo vai em `dados`, não em `erro`: a rodada foi RECUPERADA, e erro preenchido a
+      // pintaria de vermelho na tela de Debug mesmo com o lead respondido.
+      tel.registrar('provedor_ia_fallback', { de: provedor.nome, para: 'anthropic', volta: rodada + 1, motivo: String((e as Error)?.message ?? e).slice(0, 500) });
+      provedor = null;
+      resp = await chamarAgentePrincipal({ ...pedidoPrincipal, provedor: null });
+    }
     // OUTPUT da IA (não o prompt): o que o modelo gerou nesta volta — raciocínio
     // (thinking), resposta crua (text) e as tools que ELA decidiu chamar.
     const blocosResp = (resp.content ?? []) as any[];
@@ -681,6 +732,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       .map((b) => ({ nome: b.name, input: resumir(b.input, 600) }));
     tel.registrar('llm_chamada', {
       volta: rodada + 1,
+      provedor: provedor?.nome ?? 'anthropic',
       agente: agenteEfetivo,
       modelo: resp.model ?? null,
       stop_reason: resp.stop_reason ?? null,

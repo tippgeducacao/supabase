@@ -136,7 +136,10 @@ describe('fronteira entre raciocínio, ações e mensagem ao cliente', () => {
     const resposta = await chamarAgentePrincipal(opts);
     expect(resposta.content).toEqual([texto('Olá, pode contar comigo.')]);
     expect(transporte).toHaveBeenCalledTimes(2);
-    expect(pedido(1).tools).toEqual([{ ...TOOL_RESPONDER_AO_CLIENTE, cache_control: { type: 'ephemeral' } }]);
+    // Prefixo de cache: tools idênticas e o system original intacto antes do bloco extra.
+    expect(pedido(1).tools).toEqual(pedido(0).tools);
+    expect(pedido(1).system.slice(0, pedido(0).system.length)).toEqual(pedido(0).system);
+    expect(pedido(1).system).toHaveLength(pedido(0).system.length + 1);
     expect(pedido(1).tool_choice).toEqual({ type: 'tool', name: NOME_TOOL_RESPOSTA, disable_parallel_tool_use: true });
     expect(pedido(1).thinking).toEqual({ type: 'disabled' });
     expect(pedido(1).messages).toEqual(pedido(0).messages);
@@ -171,6 +174,16 @@ describe('fronteira entre raciocínio, ações e mensagem ao cliente', () => {
     expect(transporte).toHaveBeenCalledTimes(2);
   });
 
+  it('correção mantém o catálogo no pedido (cache) e nunca devolve ferramenta de negócio', async () => {
+    const negocio = { type: 'tool_use', id: 'negocio-1', name: 'pausa_ia', input: {} };
+    responder(modelo([texto('TEXTO SEM CANAL')], 'end_turn'), modelo([negocio]));
+    const resposta = await chamarAgentePrincipal({ ...entrada(), tools: [{ name: 'pausa_ia' }] });
+    expect(pedido(1).tools).toEqual([{ name: 'pausa_ia' }, { ...TOOL_RESPONDER_AO_CLIENTE, cache_control: { type: 'ephemeral' } }]);
+    expect(pedido(1).tools).toEqual(pedido(0).tools);
+    expect(pedido(1).tool_choice).toEqual({ type: 'tool', name: NOME_TOOL_RESPOSTA, disable_parallel_tool_use: true });
+    expect((resposta.content ?? []).some((bloco: { type: string }) => bloco.type === 'tool_use')).toBe(false);
+  });
+
   it('substitui homônima do catálogo e limita o cache sem mutar o chamador', async () => {
     responder(modelo([final()]));
     const opts = {
@@ -191,6 +204,42 @@ describe('fronteira entre raciocínio, ações e mensagem ao cliente', () => {
     expect(JSON.stringify(pedido()).match(/"cache_control"/g)).toHaveLength(3);
     expect(pedido().thinking).toEqual({ type: 'adaptive' });
     expect(opts).toEqual(copia);
+  });
+});
+
+describe('provedor é argumento da chamada, nunca estado global', () => {
+  const deepseek = { nome: 'deepseek', formato: 'anthropic' as const, base: 'https://api.deepseek.com/anthropic', chave: 'chave-sintetica' };
+
+  it('sem provedor a chamada vai para a Anthropic; com ele, muda só base e chave', async () => {
+    responder(modelo([final()]), modelo([final()]));
+    await chamarAgentePrincipal(entrada());
+    expect(transporte.mock.calls[0][0]).toBe('https://api.anthropic.com/v1/messages');
+    await chamarAgentePrincipal({ ...entrada(), provedor: deepseek });
+    expect(transporte.mock.calls[1][0]).toBe('https://api.deepseek.com/anthropic/v1/messages');
+    expect((transporte.mock.calls[1][1] as RequestInit).headers).toMatchObject({ 'x-api-key': 'chave-sintetica' });
+    expect(pedido(1)).toEqual(pedido(0));
+  });
+
+  it('dois leads ao mesmo tempo, cada um no seu provedor: uma chamada não contamina a outra', async () => {
+    responder(modelo([final()]), modelo([final()]), modelo([final()]));
+    await Promise.all([
+      chamarAgentePrincipal({ ...entrada(), provedor: deepseek }),
+      chamarAgentePrincipal(entrada()),
+    ]);
+    await chamarAgentePrincipal(entrada());
+    const urls = transporte.mock.calls.map(([url]) => url).sort();
+    expect(urls).toEqual([
+      'https://api.anthropic.com/v1/messages', 'https://api.anthropic.com/v1/messages',
+      'https://api.deepseek.com/anthropic/v1/messages',
+    ]);
+  });
+
+  it('a correção do canal sai pelo MESMO provedor da chamada original', async () => {
+    responder(modelo([texto('TEXTO SEM CANAL')], 'end_turn'), modelo([final('Olá')]));
+    await chamarAgentePrincipal({ ...entrada(), provedor: deepseek });
+    expect(transporte.mock.calls.map(([url]) => url)).toEqual([
+      'https://api.deepseek.com/anthropic/v1/messages', 'https://api.deepseek.com/anthropic/v1/messages',
+    ]);
   });
 });
 

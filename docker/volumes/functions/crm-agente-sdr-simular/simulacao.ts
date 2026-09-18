@@ -45,6 +45,10 @@ export type EntradaSimulacao = {
   troca_de_numero: TrocaDeNumeroSimulada | null;
   /** Dados da aula do convite (persona 'aula'); o "quando ocorre" é calculado pelo relógio real. */
   aula: AulaParaPrompt | null;
+  /** Quem responde nesta simulação. 'deepseek' usa o endpoint compatível; a produção não tem essa chave. */
+  provedor: 'anthropic' | 'deepseek' | 'openai';
+  /** Nível de raciocínio do provedor openai nesta simulação (compara high × xhigh no mesmo deploy). */
+  esforco: string | null;
 };
 
 export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
@@ -55,6 +59,12 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
   if (modo !== 'principal' && modo !== 'followup') throw new Error('modo inválido');
   const persona = body.persona ?? 'campanha_direta';
   if (typeof persona !== 'string' || !['validacao', 'qualificador', 'campanha_direta', 'aula'].includes(persona)) throw new Error('persona inválida');
+  const provedor = body.provedor ?? 'anthropic';
+  if (provedor !== 'anthropic' && provedor !== 'deepseek' && provedor !== 'openai') throw new Error('provedor inválido');
+  const esforco = body.esforco ?? null;
+  if (esforco !== null && (provedor !== 'openai' || !['none', 'low', 'medium', 'high', 'xhigh', 'max'].includes(esforco as string))) {
+    throw new Error('esforco só vale com provedor openai: none, low, medium, high, xhigh ou max');
+  }
   let aulaSimulada: AulaParaPrompt | null = null;
   if (body.aula !== undefined && body.aula !== null) {
     const a = body.aula as Record<string, unknown>;
@@ -142,6 +152,8 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
     prompt_extra: texto(body.prompt_extra, 'prompt_extra').trim(),
     troca_de_numero: trocaDeNumero,
     aula: aulaSimulada,
+    provedor,
+    esforco: esforco as string | null,
   };
 }
 

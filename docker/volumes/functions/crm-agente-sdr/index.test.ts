@@ -8,7 +8,7 @@ const fronteiras = vi.hoisted(() => ({
   pausaNoDebounce: false,
   executar: vi.fn(), tools: vi.fn(), gravar: vi.fn(), historico: vi.fn(),
   humanizar: vi.fn(), horarios: vi.fn(), conversa: vi.fn(),
-  sincronizarAudio: vi.fn(),
+  sincronizarAudio: vi.fn(), provedorOpenai: vi.fn(), lunaTelefones: [] as string[],
 }));
 vi.mock('https://esm.sh/@supabase/supabase-js@2.50.3', () => ({
   createClient: () => ({ from: fronteiras.from, rpc: fronteiras.rpc }),
@@ -20,6 +20,7 @@ vi.mock('./historico.ts', async (original) => ({
 }));
 vi.mock('./agente.ts', () => ({
   carregarTools: fronteiras.tools, chamarAgentePrincipal: fronteiras.chamarPrincipal, chamarRouter: fronteiras.chamarRouter,
+  provedorOpenai: fronteiras.provedorOpenai,
 }));
 vi.mock('./tools.ts', () => ({ executarTool: fronteiras.executar, montarToolResults: (outputs: { id: string }[]) => outputs.map((o) => ({
   type: 'tool_result', tool_use_id: o.id, content: JSON.stringify(o),
@@ -71,6 +72,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   fronteiras.buffer = [];
   fronteiras.pausaNoDebounce = false;
+  fronteiras.lunaTelefones = [];
   fronteiras.sincronizarAudio.mockResolvedValue({ estado: 'pronto', esperouMs: 0, pendentes: 0 });
   fronteiras.buscarLead.mockResolvedValue({ ...leadAtivo });
   fronteiras.prepararMensagem.mockResolvedValue({ mensagem: payload.conteudo });
@@ -82,7 +84,7 @@ beforeEach(() => {
   });
   fronteiras.from.mockImplementation((tabela: string) => {
     if (tabela === 'crm_agente_sdr_config') return {
-      select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { teste_telefones: [] }, error: null }) }) }),
+      select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { teste_telefones: [], luna_telefones: fronteiras.lunaTelefones }, error: null }) }) }),
     };
     if (tabela === 'crm_pipeline_settings') return {
       select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { agente_sdr_delay_segundos: 0 }, error: null }) }) }),
@@ -379,6 +381,54 @@ describe('SDR: texto de ferramenta nunca vira despedida', () => {
     await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
     expect(fronteiras.chamarPrincipal.mock.calls[0][0].messages).toEqual([{ role: 'user', content: 'Pode retirar' }]);
     expect(fronteiras.registrar.mock.calls.some(([tipo]) => ['entrada_reapresentada', 'humano_respondeu_antes'].includes(tipo))).toBe(false);
+  });
+
+  // Canário da GPT-5.6 Luna: só o telefone listado em crm_agente_sdr_config.luna_telefones.
+  const luna = { nome: 'openai', formato: 'openai', base: 'https://api.openai.com', chave: 'k', modelo: 'gpt-5.6-luna', esforco: 'high' };
+
+  it('lead fora do canário segue no Claude: provedor nulo no principal e nas tools', async () => {
+    fronteiras.lunaTelefones = ['5546000000000'];
+    fronteiras.provedorOpenai.mockReturnValue(luna);
+    fronteiras.chamarPrincipal.mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'certo.' }] });
+    await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
+    expect(fronteiras.chamarPrincipal.mock.calls[0][0].provedor).toBeNull();
+    expect(fronteiras.tools).toHaveBeenCalledWith(expect.anything(), 'agente_recontato', null);
+    expect(fronteiras.registrar.mock.calls.some(([tipo]) => tipo === 'provedor_ia')).toBe(false);
+  });
+
+  it('lead do canário (casado pelos 8 últimos dígitos) sai pela Luna: tools da tabela da OpenAI e telemetria com o provedor', async () => {
+    fronteiras.lunaTelefones = ['+55 (11) 9999-0001'];
+    fronteiras.provedorOpenai.mockReturnValue(luna);
+    fronteiras.chamarPrincipal.mockResolvedValueOnce({ stop_reason: 'end_turn', model: 'gpt-5.6-luna', content: [{ type: 'text', text: 'certo.' }] });
+    await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
+    expect(fronteiras.chamarPrincipal.mock.calls[0][0].provedor).toEqual(luna);
+    expect(fronteiras.tools).toHaveBeenCalledWith(expect.anything(), 'agente_recontato', luna);
+    expect(fronteiras.registrar).toHaveBeenCalledWith('provedor_ia', expect.objectContaining({ provedor: 'openai', modelo: 'gpt-5.6-luna' }));
+    expect(fronteiras.registrar).toHaveBeenCalledWith('llm_chamada', expect.objectContaining({ provedor: 'openai' }), expect.any(Number));
+    expect(fronteiras.enviar).toHaveBeenCalledOnce();
+  });
+
+  it('Luna fora do ar não cala o João: a volta é refeita no Claude e o lead recebe a resposta', async () => {
+    fronteiras.lunaTelefones = ['5511999990001'];
+    fronteiras.provedorOpenai.mockReturnValue(luna);
+    fronteiras.chamarPrincipal
+      .mockRejectedValueOnce(new Error('OpenAI: HTTP 503: upstream'))
+      .mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'certo.' }] });
+    await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
+    expect(fronteiras.chamarPrincipal).toHaveBeenCalledTimes(2);
+    expect(fronteiras.chamarPrincipal.mock.calls[0][0].provedor).toEqual(luna);
+    expect(fronteiras.chamarPrincipal.mock.calls[1][0].provedor).toBeNull();
+    expect(fronteiras.registrar).toHaveBeenCalledWith('provedor_ia_fallback', expect.objectContaining({ de: 'openai', para: 'anthropic' }));
+    expect(fronteiras.registrar.mock.calls.some(([tipo]) => tipo === 'erro')).toBe(false);
+    expect(fronteiras.enviar).toHaveBeenCalledOnce();
+  });
+
+  it('canário listado mas sem chave da OpenAI no ambiente: fica no Claude', async () => {
+    fronteiras.lunaTelefones = ['5511999990001'];
+    fronteiras.provedorOpenai.mockReturnValue(null);
+    fronteiras.chamarPrincipal.mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'certo.' }] });
+    await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
+    expect(fronteiras.chamarPrincipal.mock.calls[0][0].provedor).toBeNull();
   });
 
   it('canal bloqueado não envia nem persiste assistant vazio', async () => {

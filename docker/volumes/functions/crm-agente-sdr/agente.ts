@@ -15,33 +15,75 @@ import {
   avaliarCanalResposta, INSTRUCAO_CANAL_RESPOSTA, NOME_TOOL_RESPOSTA,
   normalizarRespostaCanal, somarUsoModelo, TOOL_RESPONDER_AO_CLIENTE,
 } from './canalResposta.ts';
+import { paraPedidoOpenai, paraRespostaAnthropic } from './provedorOpenai.ts';
 
 const ANTHROPIC_KEY = Deno.env.get('AGENTE_SDR_ANTHROPIC_KEY') ?? Deno.env.get('ANTHROPIC_API_KEY') ?? '';
 // Override por env se um dia mudar. ⚠️ Sonnet 5: budget_tokens e temperature≠default
 // dão 400 — as chamadas abaixo usam thinking adaptive/disabled e nenhum sampling param.
 export const MODELO_AGENTE = Deno.env.get('AGENTE_SDR_MODEL') ?? 'claude-sonnet-5';
 
-export async function chamarAnthropic(body: Record<string, unknown>, extraHeaders: Record<string, string> = {}): Promise<any> {
+// ── Provedor da chamada ─────────────────────────────────────────────────────
+// `null` = Anthropic (o padrão de sempre). O provedor é um ARGUMENTO de cada chamada,
+// nunca estado do módulo: a mesma instância da edge atende vários leads ao mesmo tempo,
+// e um "provedor atual" global faria a conversa de um lead sair pelo modelo de outro.
+//  · formato 'anthropic' = endpoint compatível (ex.: DeepSeek em /anthropic): mesmo corpo,
+//    outra base e outra chave; `cache_control` e `anthropic-beta` são ignorados do lado de lá.
+//  · formato 'openai' = o pedido é TRADUZIDO para a Responses API (provedorOpenai.ts) e a
+//    resposta volta no formato da Anthropic; quem chama não percebe a diferença.
+export type ProvedorIA =
+  | { nome: string; formato: 'anthropic'; base: string; chave: string }
+  | { nome: string; formato: 'openai'; base: string; chave: string; modelo: string; esforco: string };
+export function provedorDeepseek(): ProvedorIA | null {
+  const chave = Deno.env.get('AGENTE_SDR_DEEPSEEK_KEY') ?? '';
+  return chave ? { nome: 'deepseek', formato: 'anthropic', base: 'https://api.deepseek.com/anthropic', chave } : null;
+}
+// Esforço 'high' por padrão: é o nível em que a Luna empata com o Sonnet 5 (high) no
+// índice da Artificial Analysis; o padrão da OpenAI ('medium') fica abaixo.
+export function provedorOpenai(): ProvedorIA | null {
+  const chave = Deno.env.get('AGENTE_SDR_OPENAI_KEY') ?? '';
+  if (!chave) return null;
+  return {
+    nome: 'openai', formato: 'openai', base: 'https://api.openai.com', chave,
+    modelo: Deno.env.get('AGENTE_SDR_OPENAI_MODEL') || 'gpt-5.6-luna',
+    esforco: Deno.env.get('AGENTE_SDR_OPENAI_EFFORT') || 'high',
+  };
+}
+
+export async function chamarAnthropic(
+  body: Record<string, unknown>,
+  extraHeaders: Record<string, string> = {},
+  provedor: ProvedorIA | null = null,
+): Promise<any> {
+  const alternativo = provedor;
+  const base = alternativo?.base ?? 'https://api.anthropic.com';
+  const chave = alternativo?.chave ?? ANTHROPIC_KEY;
+  const openai = alternativo?.formato === 'openai' ? alternativo : null;
   // retryOnFail do n8n: 5 tentativas, 3s entre elas.
   let ultimoErro = '';
   for (let tentativa = 1; tentativa <= 5; tentativa++) {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': ANTHROPIC_KEY,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-        ...extraHeaders,
-      },
-      body: JSON.stringify(body),
-    });
-    if (res.ok) return await res.json();
+    const res = openai
+      ? await fetch(`${base}/v1/responses`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${chave}`, 'content-type': 'application/json' },
+        body: JSON.stringify(paraPedidoOpenai(body, openai)),
+      })
+      : await fetch(`${base}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          'x-api-key': chave,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+          ...extraHeaders,
+        },
+        body: JSON.stringify(body),
+      });
+    if (res.ok) return openai ? paraRespostaAnthropic(await res.json()) : await res.json();
     ultimoErro = `HTTP ${res.status}: ${await res.text()}`;
     // 4xx (exceto 429) não melhora com retry.
     if (res.status >= 400 && res.status < 500 && res.status !== 429) break;
     if (tentativa < 5) await new Promise((r) => setTimeout(r, 3000));
   }
-  throw new Error(`Anthropic: ${ultimoErro}`);
+  throw new Error(`${alternativo?.nome === 'openai' ? 'OpenAI' : alternativo?.nome ?? 'Anthropic'}: ${ultimoErro}`);
 }
 
 // ── Router: decide validação × qualificador (tool forçada, sem thinking) ─────
@@ -52,6 +94,7 @@ export type MetadadosRespostaRouter = { model?: string; usage?: Record<string, u
 export async function chamarRouter(
   historicoLimpo: Msg[],
   aoResponder?: (metadados: MetadadosRespostaRouter) => void,
+  provedor: ProvedorIA | null = null,
 ): Promise<'agente_validacao' | 'agente_qualificador'> {
   const resp = await chamarAnthropic({
     model: MODELO_AGENTE,
@@ -78,7 +121,7 @@ export async function chamarRouter(
       },
     }],
     tool_choice: { type: 'tool', name: 'router_output' },
-  }, { 'anthropic-beta': 'structured-outputs-2025-11-13' });
+  }, { 'anthropic-beta': 'structured-outputs-2025-11-13' }, provedor);
 
   // O harness observa modelo/uso sem receber conteúdo ou pensamento do router.
   aoResponder?.({ model: resp.model, usage: resp.usage });
@@ -108,6 +151,8 @@ export async function chamarAgentePrincipal(opts: {
   contextoEntregaMateriais?: string;
   messages: Msg[];
   tools: any[];
+  /** null/ausente = Anthropic. */
+  provedor?: ProvedorIA | null;
 }): Promise<any> {
   const falhaCatalogo = respostaParaFalhaCatalogo(opts.messages);
   if (falhaCatalogo) return {
@@ -182,18 +227,22 @@ export async function chamarAgentePrincipal(opts: {
     messages,
     tools,
   };
-  const resposta = await chamarAnthropic(pedido);
+  const provedor = opts.provedor ?? null;
+  const resposta = await chamarAnthropic(pedido, {}, provedor);
   const contemBastidor = (texto: string) => contemRaciocinioVazado(texto) || contemMeta(texto);
   const decisao = avaliarCanalResposta(resposta, contemBastidor, false, ferramentasDisponiveis);
   if (decisao.tipo !== 'corrigir') return normalizarRespostaCanal(resposta, decisao);
 
-  // Uma única correção, só em memória: não grava rascunho/reinstrução, não executa
-  // ações e não dá ao modelo ferramentas que poderiam repetir um efeito de negócio.
+  // Uma única correção, só em memória: não grava rascunho/reinstrução e não executa
+  // ações — o tool_choice forçado (sem paralelismo) só deixa sair responder_ao_cliente.
+  // ⚠️ CUSTO: as `tools` ficam IDÊNTICAS às do pedido original. Elas são a posição 0 do
+  // prefixo de cache: reduzir a lista aqui invalidava tools + prompt + histórico e
+  // regravava ~33k tokens a 1,25x em 16–24% das chamadas (US$ 35–55 só em 15/09/2026).
+  // O bloco extra do system vem DEPOIS do breakpoint, então tools + prompt são lidos.
   try {
     const corrigida = await chamarAnthropic({
       ...pedido,
       thinking: { type: 'disabled' },
-      tools: [{ ...TOOL_RESPONDER_AO_CLIENTE, cache_control: { type: 'ephemeral' } }],
       tool_choice: { type: 'tool', name: NOME_TOOL_RESPOSTA, disable_parallel_tool_use: true },
       system: [...system, {
         type: 'text',
@@ -205,9 +254,9 @@ export async function chamarAgentePrincipal(opts: {
           + 'Consulta de informação não significa envio de mensagem. Preserve os fatos confirmados; '
           + 'não invente valores, condições ou ações realizadas. '
           + 'Não mencione esta correção nem descreva raciocínio, decisões ou ações internas. '
-          + 'Use mensagem vazia quando o contexto pedir silêncio. Nenhuma ferramenta de negócio está disponível nesta correção.',
+          + 'Use mensagem vazia quando o contexto pedir silêncio. Nenhuma ferramenta de negócio pode ser chamada nesta correção.',
       }],
-    });
+    }, {}, provedor);
     return normalizarRespostaCanal({
       ...corrigida, usage: somarUsoModelo(resposta.usage, corrigida.usage),
     }, avaliarCanalResposta(corrigida, contemBastidor, true), decisao.motivo);
@@ -218,7 +267,26 @@ export async function chamarAgentePrincipal(opts: {
 }
 
 // ── Tools do agente: mesma fonte do n8n (tabela lista_tools_claude) ─────────
-export async function carregarTools(supabase: any, agente: string): Promise<any[]> {
+export async function carregarTools(supabase: any, agente: string, provedor: ProvedorIA | null = null): Promise<any[]> {
+  // OpenAI tem a SUA tabela (lista_tools_openai), no formato nativo da Responses API. O modelo
+  // recebe exatamente a linha: `descreverToolsSdr` NÃO roda aqui, de propósito — o que está
+  // na tabela é o que ele lê. Por dentro o agente fala um contrato só (name/description/
+  // input_schema), então a linha é convertida na entrada e o tradutor a devolve na saída.
+  if (provedor?.formato === 'openai') {
+    const { data, error } = await supabase
+      .from('lista_tools_openai')
+      .select('tool')
+      .eq('type', 'ppg')
+      .eq('agente', agente)
+      .order('id');
+    if (error) throw new Error(`carregarTools (openai): ${error.message}`);
+    const tools = (data ?? []).map((r: any) => r.tool).filter(Boolean);
+    // Tabela vazia para a persona NÃO vira "agente sem ferramentas" em silêncio.
+    if (!tools.length) throw new Error(`carregarTools (openai): nenhuma tool para ${agente} em lista_tools_openai`);
+    return tools.map((t: any) => ({
+      name: t.name, description: t.description ?? '', input_schema: t.parameters, ...(t.strict === true ? { strict: true } : {}),
+    }));
+  }
   // ORDER BY estável: a ordem das tools entra no prefixo de cache — ordem variável
   // entre chamadas = prefixo diferente = cache miss silencioso.
   const { data, error } = await supabase
