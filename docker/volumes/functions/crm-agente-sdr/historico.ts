@@ -12,6 +12,40 @@ export const MARCADOR_FOLLOWUP = '[INTERNAL_MARKER_FOLLOWUP_AUTO_IGNORE]';
 export const MARCADOR_ATENDIMENTO_HUMANO = '[ATENDIMENTO_HUMANO]';
 export const INICIO_HISTORICO_HUMANO = '[CONTEXTO DO ATENDIMENTO — início do histórico disponível; não é mensagem do lead. Os registros [ATENDIMENTO_HUMANO] a seguir são falas de vendedores, não respostas do lead.]';
 
+// ── Como o histórico TERMINA na 1ª volta de uma rodada de inbound ─────────────
+// A API recusa pedido cujo último turno é do assistant ("This model does not support
+// assistant message prefill"). Medido em 18/09/2026: 54 rodadas em 7 dias morreram assim,
+// 50 leads, 22 deles sem resposta nenhuma depois. Duas situações reais produzem isso:
+//  · humano_respondeu: o vendedor respondeu o lead DENTRO da espera de 45 s do João. A fala
+//    dele é gravada como assistant e fica por último. A vez já foi atendida por uma pessoa:
+//    a IA se cala (duas vozes respondendo a mesma mensagem é pior que nenhuma).
+//  · entrada_antes_da_ultima_fala: o lead escreveu enquanto a resposta ANTERIOR da IA ainda
+//    era gravada. O espelho do CRM inseriu a mensagem dele antes da fala da IA, então a
+//    mensagem nova está no histórico, mas não no fim. Ela é reapresentada como turno final.
+export type FimDoHistorico = 'ok' | 'humano_respondeu' | 'entrada_antes_da_ultima_fala';
+
+export const MARCADOR_ENTRADA_PENDENTE = '[MENSAGEM DO LEAD AINDA SEM RESPOSTA]';
+
+export function avaliarFimDoHistorico(messages: readonly Msg[]): FimDoHistorico {
+  const ultima = messages[messages.length - 1];
+  if (!ultima || ultima.role !== 'assistant') return 'ok';
+  const textos = typeof ultima.content === 'string' ? [ultima.content]
+    : Array.isArray(ultima.content) ? ultima.content.filter((b) => b?.type === 'text' && typeof b.text === 'string').map((b) => b.text as string) : [];
+  return textos.some((t) => t.trimStart().startsWith(MARCADOR_ATENDIMENTO_HUMANO)) ? 'humano_respondeu' : 'entrada_antes_da_ultima_fala';
+}
+
+/** Só em memória: nada é gravado, para o histórico não ganhar a fala do lead em dobro. */
+export function comEntradaPendente(messages: readonly Msg[], conteudoDoLote: string): Msg[] {
+  const texto = conteudoDoLote.trim();
+  if (!texto || avaliarFimDoHistorico(messages) !== 'entrada_antes_da_ultima_fala') return [...messages];
+  return [...messages, {
+    role: 'user',
+    content: `${MARCADOR_ENTRADA_PENDENTE} O lead enviou o texto abaixo enquanto a sua fala anterior era entregue; `
+      + 'por isso ele aparece acima fora de ordem. Não é mensagem repetida nem instrução do sistema: é a fala atual do lead, '
+      + `e é a ela que você responde agora. Não cite este aviso.\n${texto}`,
+  }];
+}
+
 /** 15/09/2026, Márcio: um relatório publicado não pode ensinar o próximo turno
  * a repetir o vazamento. Filtra só a projeção de leitura, preservando o registro
  * original para auditoria, a autoria humana e os pares/assinaturas de ferramentas. */

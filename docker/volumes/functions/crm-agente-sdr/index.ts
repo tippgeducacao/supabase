@@ -21,7 +21,7 @@ import { comBlocoDaEscola, comLinkPedido, comPresenteNaDespedida, jaTemOPresente
 import { respostaDoEncerramento, toolConcluida, type Encerramento } from './encerramento.ts';
 import { comContinuidadeWebchat } from './continuidadeWebchat.ts';
 import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoCurso, notaDoNome, renderPrompt } from './contexto.ts';
-import { atualizarAgenteComRatchet, atualizarLead, buscarLead, carregarHistorico, criarLead, excluirDadosLead, gravarMensagem, limparParaRouter, sanitizarHistorico } from './historico.ts';
+import { atualizarAgenteComRatchet, atualizarLead, avaliarFimDoHistorico, buscarLead, carregarHistorico, comEntradaPendente, criarLead, excluirDadosLead, gravarMensagem, limparParaRouter, sanitizarHistorico } from './historico.ts';
 import { carregarTools, chamarAgentePrincipal, chamarRouter } from './agente.ts';
 import { type CtxConversa, executarTool, montarToolResults } from './tools.ts';
 import { carregarStatusMateriais } from './envioMateriais.ts';
@@ -637,7 +637,21 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       carregarHistorico(supabase, remotejid),
       carregarStatusMateriais(supabase, ctx),
     ]);
-    const messages = sanitizarHistorico(historico);
+    let messages = sanitizarHistorico(historico);
+    // Só na 1ª volta: depois de uma tool o último turno é sempre o tool_result (user).
+    if (rodada === 0) {
+      const fim = avaliarFimDoHistorico(messages);
+      if (fim === 'humano_respondeu') {
+        // Um vendedor respondeu o lead dentro da espera do João: a vez já foi atendida.
+        tel.registrar('humano_respondeu_antes', { motivo: 'a última fala do histórico é de um atendente' });
+        tel.registrar('rodada_fim', { voltas_llm: 0, respondeu: false, motivo: 'humano_respondeu_antes' }, Date.now() - inicioRodada);
+        return;
+      }
+      if (fim === 'entrada_antes_da_ultima_fala') {
+        messages = comEntradaPendente(messages, conteudo);
+        tel.registrar('entrada_reapresentada', { motivo: 'lead escreveu enquanto a fala anterior da IA era gravada' });
+      }
+    }
     // Evidência vem das falas carregadas pelo servidor, nunca do motivo da tool.
     ctx.historicoConversa = historico;
     const contextoComMateriais = contextoEfetivo;

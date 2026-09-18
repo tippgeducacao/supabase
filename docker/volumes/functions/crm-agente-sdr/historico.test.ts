@@ -316,3 +316,41 @@ describe('memória humana no replay e no router', () => {
     expect(replay).toEqual([mensagem]);
   });
 });
+
+describe('como o histórico termina (pedido nunca pode acabar num turno do assistant)', () => {
+  it('termina na fala do lead ou num tool_result: segue sem mexer', async () => {
+    const { avaliarFimDoHistorico, comEntradaPendente } = await import('./historico');
+    const normal = [{ role: 'assistant' as const, content: 'oi' }, { role: 'user' as const, content: 'quero saber' }];
+    expect(avaliarFimDoHistorico(normal)).toBe('ok');
+    expect(avaliarFimDoHistorico([])).toBe('ok');
+    expect(avaliarFimDoHistorico([{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'x' }] }])).toBe('ok');
+    expect(comEntradaPendente(normal, 'quero saber')).toEqual(normal);
+  });
+
+  it('última fala é de um vendedor: humano_respondeu (em string ou em bloco de texto)', async () => {
+    const { avaliarFimDoHistorico } = await import('./historico');
+    expect(avaliarFimDoHistorico([{ role: 'user', content: 'caro' }, { role: 'assistant', content: '[ATENDIMENTO_HUMANO] Suéli · beleza' }])).toBe('humano_respondeu');
+    expect(avaliarFimDoHistorico([{ role: 'user', content: 'caro' }, { role: 'assistant', content: [{ type: 'text', text: '  [ATENDIMENTO_HUMANO] Welinton · oi' }] }])).toBe('humano_respondeu');
+  });
+
+  it('última fala é da IA: a mensagem do lote volta como último turno, sem mutar a entrada', async () => {
+    const { avaliarFimDoHistorico, comEntradaPendente, MARCADOR_ENTRADA_PENDENTE } = await import('./historico');
+    const historico = [{ role: 'user' as const, content: 'Sim' }, { role: 'assistant' as const, content: [{ type: 'text', text: 'qual pós?' }] }];
+    const copia = structuredClone(historico);
+    expect(avaliarFimDoHistorico(historico)).toBe('entrada_antes_da_ultima_fala');
+    const saida = comEntradaPendente(historico, '  Sim  ');
+    expect(saida).toHaveLength(3);
+    expect(saida[2].role).toBe('user');
+    expect(String(saida[2].content).startsWith(MARCADOR_ENTRADA_PENDENTE)).toBe(true);
+    expect(String(saida[2].content).endsWith('\nSim')).toBe(true);
+    expect(avaliarFimDoHistorico(saida)).toBe('ok');
+    expect(historico).toEqual(copia);
+  });
+
+  it('lote sem texto não inventa turno; citar o marcador humano no meio da fala da IA não conta como vendedor', async () => {
+    const { avaliarFimDoHistorico, comEntradaPendente } = await import('./historico');
+    const fimIa = [{ role: 'user' as const, content: 'oi' }, { role: 'assistant' as const, content: 'olá' }];
+    expect(comEntradaPendente(fimIa, '   ')).toEqual(fimIa);
+    expect(avaliarFimDoHistorico([{ role: 'assistant', content: 'como o [ATENDIMENTO_HUMANO] disse' }])).toBe('entrada_antes_da_ultima_fala');
+  });
+});

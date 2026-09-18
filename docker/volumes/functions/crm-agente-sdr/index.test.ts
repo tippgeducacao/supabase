@@ -341,6 +341,46 @@ describe('SDR: texto de ferramenta nunca vira despedida', () => {
     expect(fronteiras.registrar.mock.calls.some(([tipo]) => tipo === 'despedida_deterministica')).toBe(false);
   });
 
+  // 18/09/2026: 54 rodadas em 7 dias morreram com "This model does not support assistant
+  // message prefill" — o histórico chegava à API terminando num turno do assistant.
+  it('vendedor respondeu dentro da espera do João: a IA se cala, sem chamar o modelo nem dar erro', async () => {
+    fronteiras.historico.mockResolvedValue([
+      { role: 'user', content: 'Está muito fora do meu orçamento!' },
+      { role: 'assistant', content: '[ATENDIMENTO_HUMANO] Suéli · 2026-09-18 11:33:46 UTC Ah, beleza então.' },
+    ]);
+    await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
+    expect(fronteiras.chamarPrincipal).not.toHaveBeenCalled();
+    expect(fronteiras.enviar).not.toHaveBeenCalled();
+    expect(fronteiras.registrar).toHaveBeenCalledWith('humano_respondeu_antes', expect.anything());
+    expect(fronteiras.registrar).toHaveBeenCalledWith('rodada_fim', expect.objectContaining({ respondeu: false, motivo: 'humano_respondeu_antes' }), expect.any(Number));
+    expect(fronteiras.registrar.mock.calls.some(([tipo]) => tipo === 'erro')).toBe(false);
+  });
+
+  it('lead escreveu enquanto a fala anterior da IA era gravada: a mensagem é reapresentada como último turno', async () => {
+    fronteiras.historico.mockResolvedValue([
+      { role: 'user', content: 'Sou veterinária formada.' },
+      { role: 'assistant', content: [{ type: 'text', text: 'show, qual pós te interessa?' }] },
+    ]);
+    fronteiras.chamarPrincipal.mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'perfeito, já vejo isso.' }] });
+    await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
+    expect(fronteiras.chamarPrincipal).toHaveBeenCalledOnce();
+    const enviadas = fronteiras.chamarPrincipal.mock.calls[0][0].messages;
+    expect(enviadas.at(-1).role).toBe('user');
+    expect(enviadas.at(-1).content).toContain('[MENSAGEM DO LEAD AINDA SEM RESPOSTA]');
+    expect(enviadas.at(-1).content).toContain(payload.conteudo);
+    expect(fronteiras.registrar).toHaveBeenCalledWith('entrada_reapresentada', expect.anything());
+    // nada disso vai para o banco: o histórico não ganha a fala do lead em dobro
+    expect(fronteiras.gravar.mock.calls.some(([, , m]) => String(m.content).includes('AINDA SEM RESPOSTA'))).toBe(false);
+    expect(fronteiras.enviar).toHaveBeenCalledOnce();
+  });
+
+  it('histórico que termina na fala do lead segue igual: nenhum turno extra, nenhum evento novo', async () => {
+    fronteiras.chamarPrincipal.mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'certo.' }] });
+    await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
+    expect(fronteiras.chamarPrincipal.mock.calls[0][0].messages).toEqual([{ role: 'user', content: 'Pode retirar' }]);
+    expect(fronteiras.registrar.mock.calls.some(([tipo]) => ['entrada_reapresentada', 'humano_respondeu_antes'].includes(tipo))).toBe(false);
+  });
+
   it('canal bloqueado não envia nem persiste assistant vazio', async () => {
     fronteiras.chamarPrincipal.mockResolvedValueOnce({ content: [], stop_reason: 'end_turn', canal_resposta: { motivo: 'bastidor_no_canal' } });
     await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
