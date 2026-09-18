@@ -43,12 +43,25 @@ describe('grupo do cadastro (resposta do formulário da LP)', () => {
 });
 
 describe('o que falta coletar antes do cronograma', () => {
-  it('cadastro vago sem nada dito: graduação e área, com o script que NOMEIA o cronograma', () => {
-    const a = avaliarFicha({ cadastro: 'Sou formado em outra área', jornada: {} });
+  it('cadastro vago sem nada dito, com pedido pendente: graduação e área, com o script que NOMEIA o cronograma', () => {
+    const jornada: Jornada = { cronograma: { pedido_em: '2026-09-19T13:00:00.000Z', pedido_por: 'botao' } };
+    const a = avaliarFicha({ cadastro: 'Sou formado em outra área', jornada });
     expect(a.faltaParaCronograma).toEqual(['qual é a graduação dele', 'em que área ele atua hoje']);
     expect(a.liberaCronograma).toBe(false);
+    expect(a.pedidoPendente).toBe(true);
     expect(a.proximoPasso).toContain(SCRIPT_ANTES_DO_CRONOGRAMA);
     expect(SCRIPT_ANTES_DO_CRONOGRAMA).toContain('cronograma');
+    expect(montarBlocoFicha({ cadastro: 'Sou formado em outra área', jornada }, a)).toContain('FALTA COLETAR antes de enviar o cronograma: qual é a graduação dele');
+  });
+  it('sem pedido pendente o script da coleta NÃO aparece (18/09: "sou gestor de uma fazenda" virou "claro, te mando o cronograma…")', () => {
+    const entrada = { cadastro: 'Uber', jornada: {} };
+    const a = avaliarFicha(entrada);
+    expect(a.pedidoPendente).toBe(false);
+    expect(a.proximoPasso).not.toContain(SCRIPT_ANTES_DO_CRONOGRAMA);
+    expect(a.proximoPasso).toContain('Sem pedido de material');
+    const bloco = montarBlocoFicha(entrada, a);
+    expect(bloco).not.toContain('FALTA COLETAR');
+    expect(bloco).toContain('Se ele pedir o cronograma, coletar antes: qual é a graduação dele e em que área ele atua hoje');
   });
   it('cadastro vago com graduação e área ditas: libera', () => {
     const jornada: Jornada = { coleta: { graduacao: 'Agronomia', area_atuacao: 'venda de insumos' } };
@@ -60,9 +73,11 @@ describe('o que falta coletar antes do cronograma', () => {
     expect(avaliarFicha({ cadastro: null, jornada: {} }).faltaParaCronograma).toHaveLength(2);
   });
   it('profissão nomeada: só falta saber se já é formado', () => {
-    const a = avaliarFicha({ cadastro: 'Médico Veterinário (a)', jornada: {} });
+    const jornada: Jornada = { cronograma: { pedido_em: '2026-09-19T13:00:00.000Z', pedido_por: 'botao' } };
+    const a = avaliarFicha({ cadastro: 'Médico Veterinário (a)', jornada });
     expect(a.faltaParaCronograma).toEqual(['se ele já é formado em Medicina Veterinária (graduação concluída)']);
     expect(a.graduacaoConcluida).toBe(false);
+    expect(a.proximoPasso).toContain('se ele já é formado em Medicina Veterinária');
   });
   it('profissão nomeada e ficou claro que atua: não pergunta e conta como formado', () => {
     const a = avaliarFicha({ cadastro: 'Zootecnista', jornada: { coleta: { atua_na_area: 'sim' } } });

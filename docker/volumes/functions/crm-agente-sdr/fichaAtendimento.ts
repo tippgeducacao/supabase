@@ -70,6 +70,8 @@ export type AvaliacaoFicha = {
   graduacaoConcluida: boolean;
   jaPerguntou: boolean;
   liberaCronograma: boolean;
+  /** Há pedido de cronograma ainda não atendido. Sem ele, o script da coleta não aparece. */
+  pedidoPendente: boolean;
   /** Cronograma já enviado, graduação concluída e a ficha ainda não sabe se ele tem pós. */
   perguntarPos: boolean;
   proximoPasso: string;
@@ -120,7 +122,13 @@ export function avaliarFicha(e: EntradaFicha): AvaliacaoFicha {
   const jaPerguntou = ((cr.bloqueios ?? 0) > 0 && anterior(cr.bloqueado_em)) || anterior(cr.coleta_perguntada_em);
   const liberaCronograma = !semGraduacao && (falta.length === 0 || jaPerguntou);
   const enviadoDepoisDoPedido = Boolean(cr.enviado_em) && (!cr.pedido_em || String(cr.enviado_em) >= String(cr.pedido_em));
+  // Uma recusa da tool também prova que houve pedido (o modelo tentou enviar).
+  const bloqueadoDepoisDoEnvio = (cr.bloqueios ?? 0) > 0 && (!cr.enviado_em || String(cr.bloqueado_em ?? '') > String(cr.enviado_em));
+  const pedidoPendente = (Boolean(cr.pedido_em) && !enviadoDepoisDoPedido) || bloqueadoDepoisDoEnvio;
   const perguntarPos = enviadoDepoisDoPedido && graduacaoConcluida && !c.possui_pos && !cr.pos_perguntada_em;
+  // Sem pedido pendente o script da coleta NÃO aparece: a Luna copiava "claro, te mando o
+  // cronograma…" numa mensagem em que ninguém tinha pedido nada (harness, 18/09, "sou gestor de
+  // uma fazenda" → "claro, te mando o cronograma… qual é a sua graduação?").
   const proximoPasso = semGraduacao
     ? 'Não envie o cronograma: ele disse que não tem graduação. Siga o encerramento previsto para esse caso.'
     : perguntarPos
@@ -130,12 +138,15 @@ export function avaliarFicha(e: EntradaFicha): AvaliacaoFicha {
         ? enviadoDepoisDoPedido
           ? 'Cronograma já enviado. Quando ele confirmar que abriu, reconduza para a reunião com a 2ª abordagem e a frase CONVITE DE AGENDA.'
           : 'Nada falta: se ele pedir o cronograma, chame envia_informacoes.'
-        : jaPerguntou
-          ? 'Você já perguntou uma vez. Se ele pedir o cronograma de novo sem responder, chame envia_informacoes assim mesmo e siga; '
-            + 'se ele responder, registre com atualizar_dados_lead antes de enviar.'
-          : `Antes de enviar o cronograma, diga "${SCRIPT_ANTES_DO_CRONOGRAMA}" e pergunte, numa frase só: ${falta.join(' e ')}. `
-            + 'Só depois da resposta chame envia_informacoes.';
-  return { grupo, profissao, faltaParaCronograma: falta, semGraduacao, graduacaoConcluida, jaPerguntou, liberaCronograma, perguntarPos, proximoPasso };
+        : !pedidoPendente
+          ? 'Sem pedido de material: siga a conversa normal (abordagem e convite). '
+            + `Só se ele pedir o cronograma, antes de enviar pergunte, numa frase só: ${falta.join(' e ')}.`
+          : jaPerguntou
+            ? 'Você já perguntou uma vez. Se ele pedir o cronograma de novo sem responder, chame envia_informacoes assim mesmo e siga; '
+              + 'se ele responder, registre com atualizar_dados_lead antes de enviar.'
+            : `Antes de enviar o cronograma, diga "${SCRIPT_ANTES_DO_CRONOGRAMA}" e pergunte, numa frase só: ${falta.join(' e ')}. `
+              + 'Só depois da resposta chame envia_informacoes.';
+  return { grupo, profissao, faltaParaCronograma: falta, semGraduacao, graduacaoConcluida, jaPerguntou, liberaCronograma, pedidoPendente, perguntarPos, proximoPasso };
 }
 
 const NOME_GRUPO: Record<GrupoCadastro, string> = {
@@ -175,10 +186,13 @@ export function montarBlocoFicha(e: EntradaFicha, a: AvaliacaoFicha): string {
     + `Elegibilidade: ${eleg} · Reunião: ${e.agendado ? 'marcada' : 'não marcada'}\n`
     // Com o envio liberado (já perguntou uma vez), a linha diz "nada": a Luna obedece a "FALTA
     // COLETAR" ao pé da letra e repetia a pergunta três vezes (harness, 18/09) se a lista ficasse.
-    + `FALTA COLETAR antes de enviar o cronograma: ${
-      !a.faltaParaCronograma.length ? 'nada'
-        : a.liberaCronograma ? `nada — você já perguntou uma vez (${a.faltaParaCronograma.join(' e ')} segue sem resposta) e o envio está liberado`
-        : a.faltaParaCronograma.join(' e ')}\n`
+    // A linha "FALTA COLETAR" só existe com pedido pendente: é o gatilho do script no INSTRUCAO_FICHA.
+    + (a.pedidoPendente
+      ? `FALTA COLETAR antes de enviar o cronograma: ${
+        !a.faltaParaCronograma.length ? 'nada'
+          : a.liberaCronograma ? `nada — você já perguntou uma vez (${a.faltaParaCronograma.join(' e ')} segue sem resposta) e o envio está liberado`
+          : a.faltaParaCronograma.join(' e ')}\n`
+      : `Se ele pedir o cronograma, coletar antes: ${a.faltaParaCronograma.length ? a.faltaParaCronograma.join(' e ') : 'nada'}\n`)
     + `PRÓXIMO PASSO: ${a.proximoPasso}`;
 }
 
