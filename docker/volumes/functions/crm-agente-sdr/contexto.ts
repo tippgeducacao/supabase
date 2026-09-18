@@ -329,6 +329,23 @@ Essas janelas não são disponibilidade confirmada nem programação de aula ou 
 ${blocoElegibilidadeFormatura()}`;
 }
 
+// ── Convite de agenda (19/09/2026, canário) ─────────────────────────────────
+// "procuro um encaixe pra ainda hoje?" só quando ainda dá hoje. Depois do último horário do
+// dia (ou no domingo), o convite aponta para o próximo dia com atendimento. Calculado em
+// código porque o modelo copiava "ainda hoje" dos exemplos do prompt, inclusive às 21h.
+export function fraseConviteAgenda(agora: { dia: number; hora: number; minuto: number } = agoraBrasilia()): string {
+  const status = verificarDisponibilidade(agora.dia, agora.hora, agora.minuto);
+  // Intervalo do almoço ainda é "hoje": a tarde vem depois.
+  if (status.disponivel || status.mensagem.startsWith('⏰')) return 'procuro um encaixe pra ainda hoje?';
+  const proximo = proximoDiaAtendimento(agora.dia);
+  if (proximo.startsWith('amanhã')) return 'procuro um encaixe pra amanhã cedo, no primeiro horário?';
+  return `procuro um encaixe pra ${proximo.split(' a partir')[0]} cedo, no primeiro horário?`;
+}
+
+export function blocoConviteAgenda(agora?: { dia: number; hora: number; minuto: number }): string {
+  return `**CONVITE DE AGENDA (copie esta frase, sem mudar uma palavra, para fechar qualquer convite de reunião): "${fraseConviteAgenda(agora)}"**`;
+}
+
 // ── pergunta_formacao + render de placeholders dos prompts ──────────────────
 
 const FORMACOES_VAGAS = ['Estudante', 'Outra área', 'Sem formação superior'];

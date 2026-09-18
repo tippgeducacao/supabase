@@ -16,6 +16,10 @@
 // (Médico Veterinário, Zootecnista, Engenheiro de Alimentos…) ≈ 38%; estudante ≈ 13%.
 // E 75% dos leads do SDR com formação vazia TÊM a resposta do formulário no CRM — por isso a
 // ficha lê `leads.profissao` direto, não a cópia do agente.
+//
+// Os scripts abaixo são copiados quase ao pé da letra pela Luna (teste real de 18/09, 16:54:
+// "claro, te envio aqui" saiu sem dizer O QUE seria enviado). Por isso cada frase nomeia o
+// material e já traz a pergunta inteira.
 import { encontrarFormacao, FORMACOES_OFICIAIS } from './contexto.ts';
 import { jidsDoTelefone } from './historico.ts';
 import { phoneVariants } from '../crm-whatsapp-send/telefoneConversa.ts';
@@ -27,6 +31,9 @@ export type ColetaJornada = {
   tempo_formacao?: string;
   area_atuacao?: string;
   atua_na_area?: 'sim' | 'nao';
+  /** Depois do cronograma, quando a graduação está concluída: ele já tem alguma pós? */
+  possui_pos?: 'sim' | 'nao';
+  qual_pos?: string;
   atualizado_em?: string;
 };
 export type Jornada = {
@@ -37,8 +44,10 @@ export type Jornada = {
     /** Quantas vezes o envio foi recusado por falta de dado. */
     bloqueios?: number;
     bloqueado_em?: string;
-    /** A rodada em que a ficha mostrou FALTA COLETAR com pedido pendente: a pergunta foi feita ali. */
+    /** Rodada em que o João de fato perguntou a coleta (texto enviado com a pergunta). */
     coleta_perguntada_em?: string;
+    /** Rodada em que o João perguntou se ele já possui pós. */
+    pos_perguntada_em?: string;
   };
   /** tipo_objecao → quantas vezes a base foi consultada. */
   objecoes?: Record<string, number>;
@@ -50,7 +59,7 @@ export type EntradaFicha = {
   jornada: Jornada;
   agendado?: boolean;
   elegibilidade?: { decisao: string; motivo?: string | null } | null;
-  /** Início desta rodada (ISO). Bloqueio ANTERIOR a ele = "já perguntou e o lead insistiu". */
+  /** Início desta rodada (ISO). Marca ANTERIOR a ele = "já perguntou e o lead insistiu". */
   inicioRodada?: string | null;
 };
 export type AvaliacaoFicha = {
@@ -58,13 +67,19 @@ export type AvaliacaoFicha = {
   profissao: string | null;
   faltaParaCronograma: string[];
   semGraduacao: boolean;
+  graduacaoConcluida: boolean;
   jaPerguntou: boolean;
   liberaCronograma: boolean;
+  /** Cronograma já enviado, graduação concluída e a ficha ainda não sabe se ele tem pós. */
+  perguntarPos: boolean;
   proximoPasso: string;
 };
 
 const VAGAS = new Set(['Outra área', 'Sem formação superior']);
 const RE_ESTUDANTE = /faculdade|per[ií]odo|semestre|cursando|estudante|gradua(?:ndo|nda)/i;
+
+export const SCRIPT_ANTES_DO_CRONOGRAMA = 'claro, te mando o cronograma completo da pós por aqui';
+export const SCRIPT_PERGUNTA_POS = 'chegou o arquivo pra vc? e me diz, vc já possui alguma pós-graduação?';
 
 /** Em que grupo o cadastro do formulário coloca o lead. Decide QUAL pergunta vem antes do cronograma. */
 export function grupoDoCadastro(cadastro: string | null | undefined): { grupo: GrupoCadastro; profissao: string | null } {
@@ -84,35 +99,43 @@ export function avaliarFicha(e: EntradaFicha): AvaliacaoFicha {
   const { grupo, profissao } = grupoDoCadastro(e.cadastro);
   const c = e.jornada.coleta ?? {};
   const semGraduacao = c.graduacao_concluida === 'nao';
+  const disseFormado = c.graduacao_concluida === 'sim' || /formad/i.test(texto(c.tempo_formacao));
   const falta: string[] = [];
   if (!semGraduacao) {
     if (grupo === 'vago' || grupo === 'desconhecido') {
       if (!texto(c.graduacao)) falta.push('qual é a graduação dele');
       if (!texto(c.area_atuacao) && c.atua_na_area !== 'sim') falta.push('em que área ele atua hoje');
     } else if (grupo === 'profissao') {
-      const formado = c.graduacao_concluida === 'sim' || /formad/i.test(texto(c.tempo_formacao));
-      if (!formado && c.atua_na_area !== 'sim') falta.push(`se ele já é formado em ${profissao} (graduação concluída)`);
+      if (!disseFormado && c.atua_na_area !== 'sim') falta.push(`se ele já é formado em ${profissao} (graduação concluída)`);
     } else if (grupo === 'estudante') {
       if (!texto(c.tempo_formacao) && c.graduacao_concluida !== 'sim') falta.push('quando ele conclui a graduação (mês e ano)');
     }
   }
+  // Graduação concluída: disse que é formado, ou (profissão nomeada) ficou claro que atua nela.
+  const graduacaoConcluida = !semGraduacao && (disseFormado || (grupo === 'profissao' && c.atua_na_area === 'sim'));
   const cr = e.jornada.cronograma ?? {};
-  // "Pergunta uma vez" (decisão do usuário): conta como perguntado tanto a recusa da tool numa
-  // rodada anterior quanto a rodada anterior em que a ficha já mostrou FALTA COLETAR com o
-  // pedido pendente (o modelo pergunta sem chamar a tool — caso vago-insiste do harness).
+  // "Pergunta uma vez" (decisão do usuário): conta a recusa da tool numa rodada anterior e a
+  // rodada anterior em que o João DE FATO perguntou a coleta (marcada depois do envio, pelo texto).
   const anterior = (iso?: string) => !!iso && (!e.inicioRodada || iso < e.inicioRodada);
   const jaPerguntou = ((cr.bloqueios ?? 0) > 0 && anterior(cr.bloqueado_em)) || anterior(cr.coleta_perguntada_em);
   const liberaCronograma = !semGraduacao && (falta.length === 0 || jaPerguntou);
+  const enviadoDepoisDoPedido = Boolean(cr.enviado_em) && (!cr.pedido_em || String(cr.enviado_em) >= String(cr.pedido_em));
+  const perguntarPos = enviadoDepoisDoPedido && graduacaoConcluida && !c.possui_pos && !cr.pos_perguntada_em;
   const proximoPasso = semGraduacao
     ? 'Não envie o cronograma: ele disse que não tem graduação. Siga o encerramento previsto para esse caso.'
-    : falta.length === 0
-      ? 'Nada falta: se ele pedir o cronograma, chame envia_informacoes.'
-      : jaPerguntou
-        ? 'Você já perguntou uma vez. Se ele pedir o cronograma de novo sem responder, chame envia_informacoes assim mesmo e siga; '
-          + 'se ele responder, registre com atualizar_dados_lead antes de enviar.'
-        : `Antes de enviar o cronograma, diga "claro, te envio aqui" e pergunte, numa frase só: ${falta.join(' e ')}. `
-          + 'Só depois da resposta chame envia_informacoes.';
-  return { grupo, profissao, faltaParaCronograma: falta, semGraduacao, jaPerguntou, liberaCronograma, proximoPasso };
+    : perguntarPos
+      ? `O cronograma foi enviado: pergunte "${SCRIPT_PERGUNTA_POS}" e registre a resposta com atualizar_dados_lead (possui_pos e qual_pos). `
+        + 'A resposta não muda nada: em seguida reconduza para a reunião com a 2ª abordagem e a frase CONVITE DE AGENDA.'
+      : falta.length === 0
+        ? enviadoDepoisDoPedido
+          ? 'Cronograma já enviado. Quando ele confirmar que abriu, reconduza para a reunião com a 2ª abordagem e a frase CONVITE DE AGENDA.'
+          : 'Nada falta: se ele pedir o cronograma, chame envia_informacoes.'
+        : jaPerguntou
+          ? 'Você já perguntou uma vez. Se ele pedir o cronograma de novo sem responder, chame envia_informacoes assim mesmo e siga; '
+            + 'se ele responder, registre com atualizar_dados_lead antes de enviar.'
+          : `Antes de enviar o cronograma, diga "${SCRIPT_ANTES_DO_CRONOGRAMA}" e pergunte, numa frase só: ${falta.join(' e ')}. `
+            + 'Só depois da resposta chame envia_informacoes.';
+  return { grupo, profissao, faltaParaCronograma: falta, semGraduacao, graduacaoConcluida, jaPerguntou, liberaCronograma, perguntarPos, proximoPasso };
 }
 
 const NOME_GRUPO: Record<GrupoCadastro, string> = {
@@ -134,7 +157,7 @@ export function montarBlocoFicha(e: EntradaFicha, a: AvaliacaoFicha): string {
   const ou = (v: unknown) => texto(v) || '—';
   const cr = e.jornada.cronograma ?? {};
   const cronograma = cr.enviado_em
-    ? `enviado${horaBr(cr.enviado_em)}`
+    ? `enviado${horaBr(cr.enviado_em)}${cr.pos_perguntada_em ? ' · pergunta da pós já feita' : ''}`
     : cr.pedido_em
       ? `pedido ${cr.pedido_por === 'botao' ? 'pelo botão do template' : 'em texto'}${horaBr(cr.pedido_em)} · ainda não enviado`
         + (a.jaPerguntou ? ' · coleta já perguntada uma vez' : '')
@@ -142,10 +165,11 @@ export function montarBlocoFicha(e: EntradaFicha, a: AvaliacaoFicha): string {
   const objecoes = Object.entries(e.jornada.objecoes ?? {})
     .map(([tipo, n]) => `${tipo.replace(/^objecao_|^pergunta_/, '')} ${n}x`).join(', ') || 'nenhuma';
   const eleg = e.elegibilidade?.decisao ? `${e.elegibilidade.decisao}${e.elegibilidade.motivo ? ` (${texto(e.elegibilidade.motivo).slice(0, 80)})` : ''}` : 'não avaliada';
+  const pos = c.possui_pos ? `${c.possui_pos}${texto(c.qual_pos) ? ` (${texto(c.qual_pos)})` : ''}` : '—';
   return '[FICHA DO ATENDIMENTO — estado que o sistema já sabe; não é fala do lead, não é assunto de conversa e nunca deve ser citada]\n'
     + `Cadastro do formulário: ${e.cadastro ? JSON.stringify(e.cadastro) : 'vazio'} → grupo: ${NOME_GRUPO[a.grupo]}\n`
     + `Dito na conversa: graduação ${ou(c.graduacao)} · concluiu ${ou(c.graduacao_concluida)}${texto(c.tempo_formacao) ? ` (${texto(c.tempo_formacao)})` : ''}`
-    + ` · área de atuação ${ou(c.area_atuacao)} · atua na área da pós ${ou(c.atua_na_area)}\n`
+    + ` · área de atuação ${ou(c.area_atuacao)} · atua na área da pós ${ou(c.atua_na_area)} · já tem pós-graduação ${pos}\n`
     + `Cronograma: ${cronograma}\n`
     + `Objeções já tratadas: ${objecoes}\n`
     + `Elegibilidade: ${eleg} · Reunião: ${e.agendado ? 'marcada' : 'não marcada'}\n`
@@ -158,10 +182,11 @@ export function montarBlocoFicha(e: EntradaFicha, a: AvaliacaoFicha): string {
 export const INSTRUCAO_FICHA = `## FICHA DO ATENDIMENTO (estado do sistema)
 No fim da última mensagem existe o bloco [FICHA DO ATENDIMENTO]. Ele é a memória determinística desta conversa: o que o cadastro do formulário diz, o que o lead já informou, o que já foi pedido e enviado, as objeções já tratadas e o que FALTA COLETAR. Confie nele acima da sua leitura do histórico. Nunca cite a ficha e nunca diga que registrou ou salvou dados.
 
-### Pedido de cronograma (clique em "Receber Cronograma" ou pedido em texto)
-- Se a ficha traz FALTA COLETAR: responda "claro, te envio aqui" e faça, numa frase só, a pergunta do PRÓXIMO PASSO. Não chame envia_informacoes nesta resposta. Isso NÃO é puxar assunto de formação por conta própria: é a condição para entregar o material que ele pediu.
+### Pedido de cronograma (clique em "Receber Cronograma", "manda as informações por aqui" ou pedido em texto)
+- Se a ficha traz FALTA COLETAR: responda "${SCRIPT_ANTES_DO_CRONOGRAMA}" e faça, numa frase só, a pergunta do PRÓXIMO PASSO. Sempre diga O QUE vai mandar (o cronograma); nunca só "te envio". Não chame envia_informacoes nesta resposta. Isso NÃO é puxar assunto de formação por conta própria: é a condição para entregar o material que ele pediu.
 - Quando ele responder, registre com atualizar_dados_lead (graduação, se concluiu, área de atuação, se atua na área da pós), rode verificar_compatibilidade_curso e, aprovado, chame envia_informacoes.
 - Se ele não responder à pergunta e insistir no cronograma, chame envia_informacoes de novo: o sistema decide se libera.
+- Depois de enviar: se a graduação dele está concluída e a ficha ainda não sabe se ele tem pós, pergunte "${SCRIPT_PERGUNTA_POS}" e registre a resposta com atualizar_dados_lead (possui_pos, qual_pos). A resposta não muda nada: em seguida reconduza para a reunião.
 - Lead que não tem graduação nenhuma: não envie o cronograma; siga o encerramento previsto para esse caso.
 - Sem pedido de material, a ficha não muda a conversa: não puxe formação por conta própria.
 
@@ -169,7 +194,7 @@ No fim da última mensagem existe o bloco [FICHA DO ATENDIMENTO]. Ele é a memó
 "tô sem tempo, manda por aqui" traz duas objeções. Trate PRIMEIRO a falta de tempo: consulta_objecoes com tipo_objecao="objecao_tempo", e ofereça o encaixe. Só ofereça material pelo WhatsApp se ele insistir depois disso (aí sim objecao_canal).
 
 ### Gatilho de ação
-Toda mensagem sua termina com UMA pergunta que leva o lead para a conversa com o monitor (encaixe, período do dia, confirmação). Exceções: (a) você acabou de solicitar um material: pergunte só se apareceu e abriu, e faça o convite quando ele confirmar; (b) você está fazendo a pergunta de coleta da ficha; (c) despedida depois de reunião confirmada, opt-out, pausa ou reprovação. Fora dessas, nunca termine só informando nem com "disponha", "qualquer dúvida me chama" ou "fico à disposição".`;
+Toda mensagem sua termina com UMA pergunta que leva o lead para a conversa com o monitor (encaixe, período do dia, confirmação). Exceções: (a) você acabou de enviar um material: pergunte se chegou e abriu (e, se for o caso, se ele já tem pós), e faça o convite quando ele confirmar; (b) você está fazendo a pergunta de coleta da ficha; (c) despedida depois de reunião confirmada, opt-out, pausa ou reprovação. Fora dessas, nunca termine só informando nem com "disponha", "qualquer dúvida me chama" ou "fico à disposição".`;
 
 // Quebra de TEMPO do canário: substitui a referência revisada de tools.ts para quem tem a
 // ficha. Respeita os limites que o próprio retorno da tool impõe (sem "resolve horas", sem
@@ -183,17 +208,32 @@ export const INSTRUCAO_TEMPO_FICHA = 'Reconheça a rotina corrida sem minimizar 
 
 // ── Detecção do pedido de cronograma no lote de entrada ──────────────────────
 // Clique em botão de template chega com `tipo: 'button'` e o texto do botão ("Receber
-// Cronograma", 936 cliques em 30 dias) depois da citação embutida pelo webhook.
+// Cronograma", 936 cliques em 30 dias) depois da citação embutida pelo webhook. Em texto, o
+// lead pede "cronograma", "informações", "material" ou "manda (isso) por aqui" (18/09: "manda as
+// informações por aqui", "não consegue mandar nada por aqui?").
 const RE_CITACAO = /^\[Em resposta à mensagem: [\s\S]*?\]\s*/;
+const RE_PEDIDO_MATERIAL = /cronograma|informa[çc][õo]es|material|mand\w*[^.?!\n]{0,25}por aqui|por aqui[^.?!\n]{0,25}mand\w*/i;
 export function detectarPedidoDeCronograma(itens: ReadonlyArray<{ tipo?: unknown; mensagem?: unknown; conteudo?: unknown }>): 'botao' | 'texto' | null {
   let porTexto: 'texto' | null = null;
   for (const item of itens) {
     const t = texto(item?.mensagem ?? item?.conteudo).replace(RE_CITACAO, '').trim();
-    if (!/cronograma/i.test(t)) continue;
+    if (!RE_PEDIDO_MATERIAL.test(t)) continue;
     if (item?.tipo === 'button') return 'botao';
     if (t.length <= 120) porTexto = 'texto';
   }
   return porTexto;
+}
+
+// ── O que o João perguntou (lido do texto ENVIADO, nunca da intenção do modelo) ──────────
+/** A mensagem enviada faz a pergunta da coleta (graduação / conclusão / área)? */
+export function perguntouColeta(textoEnviado: string): boolean {
+  const t = texto(textoEnviado);
+  return t.includes('?') && /gradua|forma[çc][aã]o|formad|conclu|atua|[áa]rea|trabalh/i.test(t);
+}
+/** A mensagem enviada pergunta se ele já tem pós-graduação? */
+export function perguntouPos(textoEnviado: string): boolean {
+  const t = texto(textoEnviado);
+  return t.includes('?') && /(possui|tem|fez|cursou|j[áa] tem)\s+(alguma\s+|uma\s+)?p[óo]s/i.test(t);
 }
 
 // ── Mutações puras da jornada (usadas pelo executor real e pelo mock do simulador) ──
@@ -208,6 +248,9 @@ export function aplicarColetaNaJornada(j: Jornada, input: Record<string, unknown
   if (atua) coleta.atua_na_area = atua as 'sim' | 'nao';
   const concluida = FIXO(input.graduacao_concluida, ['sim', 'cursando', 'nao']);
   if (concluida) coleta.graduacao_concluida = concluida as 'sim' | 'cursando' | 'nao';
+  const possuiPos = FIXO(input.possui_pos, ['sim', 'nao']);
+  if (possuiPos) coleta.possui_pos = possuiPos as 'sim' | 'nao';
+  if (texto(input.qual_pos)) coleta.qual_pos = texto(input.qual_pos);
   coleta.atualizado_em = agora.toISOString();
   return { ...j, coleta };
 }
@@ -218,7 +261,7 @@ export function contarObjecaoNaJornada(j: Jornada, tipo: string): Jornada {
   return { ...j, objecoes: { ...(j.objecoes ?? {}), [t]: ((j.objecoes ?? {})[t] ?? 0) + 1 } };
 }
 
-/** Há pedido de cronograma pendente e a ficha vai mostrar FALTA COLETAR: o modelo pergunta nesta rodada. */
+/** Há pedido de cronograma pendente e a ficha mostra FALTA COLETAR: o João deve perguntar nesta rodada. */
 export function deveMarcarPergunta(e: EntradaFicha, a: AvaliacaoFicha): boolean {
   const cr = e.jornada.cronograma ?? {};
   const pendente = Boolean(cr.pedido_em) && (!cr.enviado_em || String(cr.pedido_em) > String(cr.enviado_em));
@@ -229,12 +272,28 @@ export function registrarPerguntaNaJornada(j: Jornada, agora = new Date()): Jorn
   return { ...j, cronograma: { ...(j.cronograma ?? {}), coleta_perguntada_em: agora.toISOString() } };
 }
 
+export function registrarPosPerguntadaNaJornada(j: Jornada, agora = new Date()): Jornada {
+  return { ...j, cronograma: { ...(j.cronograma ?? {}), pos_perguntada_em: agora.toISOString() } };
+}
+
 export function registrarBloqueioNaJornada(j: Jornada, agora = new Date()): Jornada {
   return { ...j, cronograma: { ...(j.cronograma ?? {}), bloqueios: ((j.cronograma ?? {}).bloqueios ?? 0) + 1, bloqueado_em: agora.toISOString() } };
 }
 
 export function registrarEnvioNaJornada(j: Jornada, agora = new Date()): Jornada {
   return { ...j, cronograma: { ...(j.cronograma ?? {}), enviado_em: agora.toISOString() } };
+}
+
+/** Quais perguntas a mensagem enviada fez, dado o estado da ficha naquela volta (puro; o simulador usa igual). */
+export function perguntasFeitas(e: EntradaFicha, a: AvaliacaoFicha, textoEnviado: string): ('coleta' | 'pos')[] {
+  const marcas: ('coleta' | 'pos')[] = [];
+  if (deveMarcarPergunta(e, a) && perguntouColeta(textoEnviado)) marcas.push('coleta');
+  if (a.perguntarPos && perguntouPos(textoEnviado)) marcas.push('pos');
+  return marcas;
+}
+
+export function aplicarPerguntasNaJornada(j: Jornada, marcas: ('coleta' | 'pos')[], agora = new Date()): Jornada {
+  return marcas.reduce((acc, m) => (m === 'coleta' ? registrarPerguntaNaJornada(acc, agora) : registrarPosPerguntadaNaJornada(acc, agora)), j);
 }
 
 /** tool_result da recusa: mesmo contrato de bloqueio das outras guardas (status 'bloqueado' ⇒ não concluiu). */
@@ -250,7 +309,7 @@ export function bloqueioCronograma(id: string, a: AvaliacaoFicha) {
       : `RECUSADO: o cronograma NÃO foi enviado porque ainda falta coletar: ${a.faltaParaCronograma.join(' e ')}.`,
     instrucao: a.semGraduacao
       ? 'Não diga que enviou. Siga o encerramento previsto para quem não tem graduação.'
-      : 'Não diga que enviou. Responda "claro, te envio aqui" e faça, numa frase só, a pergunta do que falta. '
+      : `Não diga que enviou. Responda "${SCRIPT_ANTES_DO_CRONOGRAMA}" e faça, numa frase só, a pergunta do que falta. `
         + 'Quando ele responder, registre com atualizar_dados_lead e chame envia_informacoes de novo.',
   };
 }
@@ -314,4 +373,11 @@ export async function registrarNaJornada(supabase: Banco, telefone: string, muta
   const { error: erroUpdate } = await supabase.from('cliente_ppg_leads_sdr').update({ jornada: nova }).eq('id', lead.id);
   if (erroUpdate) throw new Error(erroUpdate.message);
   return nova;
+}
+
+/** Depois do envio: anota na jornada o que o João de fato perguntou nesta rodada. Devolve as marcas. */
+export async function marcarPerguntasDaFicha(supabase: Banco, telefone: string, ficha: FichaCarregada, textoEnviado: string): Promise<('coleta' | 'pos')[]> {
+  const marcas = perguntasFeitas(ficha.entrada, ficha.avaliacao, textoEnviado);
+  if (marcas.length) await registrarNaJornada(supabase, telefone, (j) => aplicarPerguntasNaJornada(j, marcas));
+  return marcas;
 }

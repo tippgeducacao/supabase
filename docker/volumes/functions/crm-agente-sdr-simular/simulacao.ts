@@ -184,6 +184,8 @@ export type DependenciasSimulacao = {
   humanizar: (texto: string) => string;
   /** Ficha do atendimento da VOLTA (não do turno): a tool da volta anterior pode ter mudado a coleta, como na produção. */
   fichaDaVolta?: () => string | undefined;
+  /** Texto final do João no turno (o que o lead leria): a ficha anota as perguntas feitas, como na produção. */
+  aoResponder?: (texto: string) => void;
 };
 
 export async function executarSimulacao(entrada: EntradaSimulacao, deps: DependenciasSimulacao) {
@@ -223,7 +225,10 @@ export async function executarSimulacao(entrada: EntradaSimulacao, deps: Depende
         quem: 'joao', texto, turno,
         ...(texto !== textoCru ? { saida_filtrada: true, silenciado: !texto } : {}),
       });
-      if (!toolUses.length) break;
+      if (!toolUses.length) {
+        if (texto) deps.aoResponder?.(texto);
+        break;
+      }
 
       const results = [];
       const toolsConcluidas: Encerramento[] = [];

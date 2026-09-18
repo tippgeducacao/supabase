@@ -33,9 +33,11 @@ import { VERSAO_MEMORIA_HUMANA } from '../crm-agente-sdr/memoriaHumana.ts';
 import { montarRetornoInformacoes } from '../crm-agente-sdr/envioMateriais.ts';
 import { comNotaNoContexto, comNotaParaRouter, notaTrocaDeNumero, sinalInerte } from '../crm-agente-sdr/trocaDeNumero.ts';
 import {
-  aplicarColetaNaJornada, avaliarFicha, bloqueioCronograma, contarObjecaoNaJornada, detectarPedidoDeCronograma, deveMarcarPergunta,
-  INSTRUCAO_TEMPO_FICHA, montarBlocoFicha, registrarBloqueioNaJornada, registrarEnvioNaJornada, registrarPerguntaNaJornada, type Jornada,
+  aplicarColetaNaJornada, aplicarPerguntasNaJornada, avaliarFicha, bloqueioCronograma, contarObjecaoNaJornada, detectarPedidoDeCronograma,
+  INSTRUCAO_TEMPO_FICHA, montarBlocoFicha, perguntasFeitas, registrarBloqueioNaJornada, registrarEnvioNaJornada, type Jornada,
 } from '../crm-agente-sdr/fichaAtendimento.ts';
+import { comGanchoDoLote } from '../crm-agente-sdr/ganchoLote.ts';
+import { blocoConviteAgenda } from '../crm-agente-sdr/contexto.ts';
 import { executarFollowupSimulado, executarSimulacao, extrairUso, MAX_CARACTERES_SIMULACAO, validarEntradaSimulacao, type AgenteRouter } from './simulacao.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
@@ -217,6 +219,7 @@ async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimula
       if (ficha) ficha.jornada = contarObjecaoNaJornada(ficha.jornada, String(input?.tipo_objecao ?? ''));
       // Com a ficha, a quebra de TEMPO é a mesma instrução do executor real (com gatilho, sem material).
       if (ficha && input?.tipo_objecao === 'objecao_tempo') return `resposta_objecao: ${JSON.stringify(INSTRUCAO_TEMPO_FICHA)}`;
+      if (ficha) return 'resposta_objecao: "a conversa com o monitor é rápida, uns 10 minutos, e é onde vc vê a condição do primeiro lote promocional". Adapte ao contexto e reconduza pro agendamento.';
       return 'resposta_objecao: "a conversa com o monitor é rápida, uns 15 minutos, e é onde vc vê a condição especial". Adapte ao contexto e reconduza pro agendamento.';
     }
     case 'pausa_ia':
@@ -318,9 +321,7 @@ Deno.serve(async (req) => {
           if (pedido) {
             fichaSim.jornada = { ...fichaSim.jornada, cronograma: { ...(fichaSim.jornada.cronograma ?? {}), pedido_em: new Date().toISOString(), pedido_por: pedido } };
           }
-          // Espelho da produção: a rodada em que a ficha mostra FALTA COLETAR com pedido pendente é a pergunta.
-          const entradaFicha = { cadastro: fichaSim.cadastro, jornada: fichaSim.jornada, inicioRodada: fichaSim.inicioRodada };
-          if (deveMarcarPergunta(entradaFicha, avaliarFicha(entradaFicha))) fichaSim.jornada = registrarPerguntaNaJornada(fichaSim.jornada);
+          // As perguntas feitas são marcadas DEPOIS da fala do João (deps.aoResponder), como na produção.
         }
         const notaTroca = troca ? notaTrocaDeNumero(
           { ...sinalInerte('conta-atual-simulada', 1, 'trocou'), trocou: true, contaAnterior: 'conta-anterior-simulada',
@@ -383,11 +384,21 @@ Deno.serve(async (req) => {
           const extras = (await toolsDe('agente_campanha_direta')).filter((t) => t?.name === 'atualizar_dados_lead');
           tools = [...tools, ...extras];
         }
-        return { agente: agenteTools, promptAgente, contextoTemporal: comNotaNoContexto(montarContextoTemporal() + notaDoNome(vars.nome) + notaDoCurso(vars.curso_interesse_original), notaTroca), tools, comFicha: Boolean(fichaSim) };
+        // Canário: gancho do primeiro lote + CONVITE DE AGENDA, como em crm-agente-sdr/index.ts.
+        const promptFinal = fichaSim ? comGanchoDoLote(promptAgente, { nome: vars.nome, curso: vars.curso_interesse_original }).prompt : promptAgente;
+        const contextoBase = comNotaNoContexto(montarContextoTemporal() + notaDoNome(vars.nome) + notaDoCurso(vars.curso_interesse_original), notaTroca);
+        const contextoFinal = fichaSim ? `${contextoBase}\n\n${blocoConviteAgenda()}` : contextoBase;
+        return { agente: agenteTools, promptAgente: promptFinal, contextoTemporal: contextoFinal, tools, comFicha: Boolean(fichaSim) };
       },
       chamarPrincipal: (opts: Parameters<typeof chamarAgentePrincipal>[0]) => chamarAgentePrincipal({ ...opts, provedor: provedorAlternativo }),
       humanizar: humanizarTexto,
       fichaDaVolta: blocoDaFicha,
+      aoResponder: (texto) => {
+        if (!fichaSim) return;
+        const entradaFicha = { cadastro: fichaSim.cadastro, jornada: fichaSim.jornada, inicioRodada: fichaSim.inicioRodada };
+        const marcas = perguntasFeitas(entradaFicha, avaliarFicha(entradaFicha), texto);
+        if (marcas.length) fichaSim.jornada = aplicarPerguntasNaJornada(fichaSim.jornada, marcas);
+      },
       mockTool: async (nome, input) => {
         const dados = input as Record<string, unknown>;
         const resposta = await mockTool(nome, dados, entrada.mocks, fichaSim);

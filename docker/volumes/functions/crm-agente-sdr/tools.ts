@@ -1113,7 +1113,7 @@ async function atualizarDadosLead(supabase: any, input: any, ctx: CtxConversa, t
   // vivem na jornada — é o que a ficha mostra e o que libera o cronograma. Só a tabela da
   // OpenAI oferece esses campos; o Claude segue mandando os três de sempre.
   const areaAtuacao = String(input?.area_atuacao ?? '').trim();
-  const temCampoDaFicha = Boolean(areaAtuacao || input?.atua_na_area || input?.graduacao_concluida);
+  const temCampoDaFicha = Boolean(areaAtuacao || input?.atua_na_area || input?.graduacao_concluida || input?.possui_pos || input?.qual_pos);
   if (!nome && !formacao && !tempoFormacao && !temCampoDaFicha) {
     return sair('Nada a atualizar: chame esta função só quando o lead informar o nome, a graduação, quando conclui a graduação ou a área em que atua.');
   }
@@ -1123,6 +1123,10 @@ async function atualizarDadosLead(supabase: any, input: any, ctx: CtxConversa, t
       await registrarNaJornada(supabase, ctx.telefone, (j) => aplicarColetaNaJornada(j, input ?? {}));
       if (areaAtuacao && !ctx.modoTeste) await atualizarLead(supabase, ctx.remotejid, { situacao_trabalho_atual: areaAtuacao });
       if (areaAtuacao) registroFicha = ` Área de atuação "${areaAtuacao}" anotada.`;
+      const possuiPos = String(input?.possui_pos ?? '').trim().toLowerCase();
+      if (possuiPos === 'sim' || possuiPos === 'nao') {
+        registroFicha += ` Pós-graduação: ${possuiPos}${String(input?.qual_pos ?? '').trim() ? ` (${String(input.qual_pos).trim()})` : ''}.`;
+      }
     } catch (e) {
       console.error(`[crm-agente-sdr] jornada (coleta): ${(e as Error)?.message ?? e}`);
     }
@@ -1147,7 +1151,11 @@ async function atualizarDadosLead(supabase: any, input: any, ctx: CtxConversa, t
     return sair(String((data as any).instrucao ?? 'Valor inválido. Pergunte de novo, de forma leve.'));
   }
 
-  const partes = [nome ? `nome "${nome}"` : null, formacao ? `graduação "${formacao}"` : null].filter(Boolean);
+  // tempo_formacao entra na lista: só ele vinha e a resposta saía "Registrado no cadastro: ." (18/09/2026).
+  const partes = [
+    nome ? `nome "${nome}"` : null, formacao ? `graduação "${formacao}"` : null,
+    tempoFormacao ? `conclusão "${tempoFormacao}"` : null,
+  ].filter(Boolean);
   return sair(
     `Registrado no cadastro: ${partes.join(' e ')}.${registroFicha} ` +
     (nome ? `Use "${nome.split(' ')[0]}" ao falar com o lead (minúsculo, no máximo duas vezes na conversa). ` : '') +

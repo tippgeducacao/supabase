@@ -56,8 +56,11 @@ export function instrucaoResultadoMaterial(status: StatusMaterial, reenvioAgenda
   const continuidade = ' Não chame pausa_ia nem encaminhe ao humano apenas por esta falha. Termine a mensagem com UMA pergunta: "Enquanto isso, podemos continuar com o agendamento?" Encerre esta rodada logo após essa pergunta. Não emende coleta de dados, perguntas de qualificação, oferta de horários nem argumentos de venda na mesma resposta. Aguarde o aceite; se preferir esperar o arquivo, respeite sem insistir. Se aceitar em uma nova mensagem, retome a qualificação/agenda sem exigir abertura do PDF, mantendo as verificações de elegibilidade e a escolha explícita de dia e horário.';
   switch (status) {
     case 'nao_solicitado': return 'Consulta apenas de valor: nenhum cronograma foi solicitado ou enviado nesta chamada.';
-    case 'aceito': return 'O WhatsApp aceitou o envio do cronograma, mas a entrega ainda NÃO está confirmada. Diga que solicitou o envio e pergunte se o arquivo apareceu e abriu. Não diga que foi entregue nem que está acima. Aguarde a confirmação de acesso antes de retomar a agenda.';
-    case 'entregue': case 'lido': return 'O WhatsApp registrou a entrega desta mensagem. Isso NÃO comprova abertura do PDF. Pergunte se o lead conseguiu abrir; se ele disser que não recebeu ou pedir novamente, reenvie pela ferramenta, sem contradizê-lo. Aguarde a confirmação de acesso antes de retomar a agenda.';
+    // 19/09/2026 (decisão do usuário, vale para todos): "te enviei o cronograma", não "solicitei o
+    // envio". "Enviei" é verdade (o WhatsApp aceitou); a entrega continua sem confirmação, por isso
+    // a pergunta "chegou?" fica, e "entregue"/"está acima" seguem proibidos.
+    case 'aceito': return 'O WhatsApp aceitou o envio do cronograma, mas a entrega ainda NÃO está confirmada. Diga "te enviei o cronograma por aqui" e pergunte se chegou e abriu. Não diga que foi entregue nem que está acima. Aguarde a confirmação de acesso antes de retomar a agenda.';
+    case 'entregue': case 'lido': return 'O WhatsApp registrou a entrega desta mensagem. Isso NÃO comprova abertura do PDF. Diga "te enviei o cronograma por aqui" e pergunte se ele conseguiu abrir; se ele disser que não recebeu ou pedir novamente, reenvie pela ferramenta, sem contradizê-lo. Aguarde a confirmação de acesso antes de retomar a agenda.';
     case 'falhou': return 'O cronograma NÃO foi enviado nesta tentativa. Não diga que enviou ou que está acima. '
       + (reenvioAgendado
         ? 'Uma nova tentativa ficou registrada. Diga de forma natural: "O envio do cronograma pelo WhatsApp não está funcionando agora. Assim que normalizar, tento enviar novamente pra você." Não dê prazo nem garanta entrega; a fila tenta novamente enquanto a janela permitir.'

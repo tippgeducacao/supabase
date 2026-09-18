@@ -25,7 +25,9 @@ import { atualizarAgenteComRatchet, atualizarLead, avaliarFimDoHistorico, buscar
 import { carregarTools, chamarAgentePrincipal, chamarRouter, provedorOpenai, type MetadadosRespostaRouter, type ProvedorIA } from './agente.ts';
 import { type CtxConversa, executarTool, montarToolResults } from './tools.ts';
 import { carregarStatusMateriais } from './envioMateriais.ts';
-import { carregarFicha, detectarPedidoDeCronograma, deveMarcarPergunta, registrarNaJornada, registrarPerguntaNaJornada } from './fichaAtendimento.ts';
+import { carregarFicha, detectarPedidoDeCronograma, marcarPerguntasDaFicha, registrarNaJornada } from './fichaAtendimento.ts';
+import { comGanchoDoLote } from './ganchoLote.ts';
+import { blocoConviteAgenda } from './contexto.ts';
 import { prepararMensagem } from './midia.ts';
 import { persistirEntradasDoLote, registrarEntrada } from './historicoEntradaPausa.ts';
 import { aguardarAudiosDoHistorico, contarAudiosPendentes } from './sincronizacaoAudio.ts';
@@ -457,6 +459,9 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   let tools: any[];
   // A nota vai no bloco de contexto temporal: relido a cada volta, fora do prefixo cacheado.
   let contextoEfetivo = comNotaNoContexto(contextoTemporal, notaTroca);
+  // Canário (19/09/2026): o fecho do convite ("ainda hoje" × "amanhã cedo") vem do relógio, não do
+  // modelo — vai junto do contexto temporal, fora do cache, relido a cada volta.
+  if (ctx.ficha) contextoEfetivo = `${contextoEfetivo}\n\n${blocoConviteAgenda()}`;
   let agenteEfetivo: string;
 
   if (persona === 'recontato') {
@@ -566,6 +571,13 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   // Conversa que veio do CHAT DO SITE: o agente precisa saber que o canal mudou, senão
   // fala como se ainda estivesse lá ("já te mandei pelo whats", dito NO whats).
   promptAgente = comContinuidadeWebchat(promptAgente, lead?.veio_do_webchat_em);
+  // Canário (19/09/2026): gancho do "primeiro lote promocional" no lugar da "secretaria", a 2ª
+  // abordagem com o nome e o CONVITE DE AGENDA (ganchoLote.ts). Produção segue com o texto antigo.
+  if (ctx.ficha) {
+    const gancho = comGanchoDoLote(promptAgente, { nome: vars.nome, curso: vars.curso_interesse_original });
+    promptAgente = gancho.prompt;
+    tel.registrar('gancho_lote', gancho.trocas);
+  }
   const renovar = lockRenovar(remotejid);
 
   // Tools que pausam a IA por decisão do PRÓPRIO agente (pausa_ia, e o
@@ -725,12 +737,8 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
           objecoes: ficha.entrada.jornada.objecoes ?? null, cronograma: ficha.entrada.jornada.cronograma ?? null,
           proximo_passo: ficha.avaliacao.proximoPasso,
         });
-        // "Pergunta uma vez": a rodada em que a ficha mostra FALTA COLETAR com pedido pendente É a
-        // pergunta. Na próxima, se ele insistir sem responder, a trava libera (jaPerguntou).
-        if (deveMarcarPergunta(ficha.entrada, ficha.avaliacao)) {
-          try { await registrarNaJornada(supabase, telefone, (j) => registrarPerguntaNaJornada(j)); }
-          catch (e) { console.error('[crm-agente-sdr] jornada (pergunta):', (e as Error)?.message ?? e); }
-        }
+        // "Pergunta uma vez" é marcada DEPOIS do envio, pelo texto que saiu (marcarPerguntasDaFicha):
+        // a rodada pode ser consumida por uma objeção e a pergunta não acontecer (18/09, 16:52).
       } else {
         // Leitura falhou: a volta segue sem a ficha (e sem a instrução dela). Não é erro da
         // rodada — o lead é respondido do mesmo jeito; fica visível no Debug como estado.
@@ -944,6 +952,16 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
         );
         if (comLink.anexou) tel.registrar('link_escola_reenviado', { pedido: resumir(conteudo, 200) });
         await enviarResposta(ctx, comLink.texto, renovar, tel, pausouPorTool ? undefined : () => iaPausada(remotejid));
+        // Ficha: o que o João acabou de perguntar vira estado — "pergunta uma vez" da coleta e a
+        // pergunta da pós só contam quando a pergunta saiu de fato no texto enviado.
+        if (ctx.ficha && ficha) {
+          try {
+            const marcas = await marcarPerguntasDaFicha(supabase, telefone, ficha, comLink.texto);
+            if (marcas.length) tel.registrar('ficha_pergunta_feita', { marcas });
+          } catch (e) {
+            console.error('[crm-agente-sdr] jornada (perguntas):', (e as Error)?.message ?? e);
+          }
+        }
       }
     }
     tel.registrar('rodada_fim', { voltas_llm: rodada + 1, respondeu: Boolean(texto) }, Date.now() - inicioRodada);
