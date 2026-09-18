@@ -13,7 +13,7 @@
 //   • `curso` virou COLUNA do mailing (antes ia grudado no identifier)
 //
 // A regua de QUEM entra vive na RPC `threec_mailing_selecionar` (fonte unica),
-// que aplica os cinco vetos próprios da SDR por telefone. Esta function formata,
+// que aplica os seis vetos próprios da SDR por telefone (o 6º, aula/escola, é de 18/09/2026). Esta function formata,
 // envia, confirma os lotes e remove quem passou a ser vetado (acao=expurgar).
 //
 // Novo escopo específico autorizado em 09/09/2026: todo retroativo e lead novo,
