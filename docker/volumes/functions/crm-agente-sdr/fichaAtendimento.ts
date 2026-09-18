@@ -173,7 +173,12 @@ export function montarBlocoFicha(e: EntradaFicha, a: AvaliacaoFicha): string {
     + `Cronograma: ${cronograma}\n`
     + `Objeções já tratadas: ${objecoes}\n`
     + `Elegibilidade: ${eleg} · Reunião: ${e.agendado ? 'marcada' : 'não marcada'}\n`
-    + `FALTA COLETAR antes de enviar o cronograma: ${a.faltaParaCronograma.length ? a.faltaParaCronograma.join(' e ') : 'nada'}\n`
+    // Com o envio liberado (já perguntou uma vez), a linha diz "nada": a Luna obedece a "FALTA
+    // COLETAR" ao pé da letra e repetia a pergunta três vezes (harness, 18/09) se a lista ficasse.
+    + `FALTA COLETAR antes de enviar o cronograma: ${
+      !a.faltaParaCronograma.length ? 'nada'
+        : a.liberaCronograma ? `nada — você já perguntou uma vez (${a.faltaParaCronograma.join(' e ')} segue sem resposta) e o envio está liberado`
+        : a.faltaParaCronograma.join(' e ')}\n`
     + `PRÓXIMO PASSO: ${a.proximoPasso}`;
 }
 

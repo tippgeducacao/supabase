@@ -116,6 +116,9 @@ describe('perguntou uma vez e o lead insistiu', () => {
     const depois = avaliarFicha({ ...entrada, jornada: marcada, inicioRodada: '2026-09-19T14:03:00.000Z' });
     expect(depois.jaPerguntou).toBe(true);
     expect(depois.liberaCronograma).toBe(true);
+    // Com o envio liberado, a linha FALTA COLETAR diz "nada": a Luna obedece a essa linha ao pé da letra.
+    const bloco = montarBlocoFicha({ ...entrada, jornada: marcada, inicioRodada: '2026-09-19T14:03:00.000Z' }, depois);
+    expect(bloco).toMatch(/FALTA COLETAR antes de enviar o cronograma: nada — você já perguntou uma vez/);
   });
   it('sem pedido pendente (nada pedido, ou já enviado depois do pedido) não marca pergunta', () => {
     const base = { cadastro: 'Sou formado em outra área', inicioRodada };

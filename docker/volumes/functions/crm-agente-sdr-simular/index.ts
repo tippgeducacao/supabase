@@ -91,7 +91,7 @@ async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimula
   switch (nome) {
     case 'atualizar_dados_lead': {
       if (ficha) ficha.jornada = aplicarColetaNaJornada(ficha.jornada, input ?? {});
-      const partes = ['nome', 'formacao', 'tempo_formacao', 'area_atuacao', 'atua_na_area', 'graduacao_concluida']
+      const partes = ['nome', 'formacao', 'tempo_formacao', 'area_atuacao', 'atua_na_area', 'graduacao_concluida', 'possui_pos', 'qual_pos']
         .filter((k) => input?.[k]).map((k) => `${k}="${input[k]}"`);
       return partes.length
         ? `Registrado no cadastro: ${partes.join(', ')}. NUNCA comente com o lead que registrou os dados.`
@@ -314,7 +314,9 @@ Deno.serve(async (req) => {
         // Ficha: novo turno = nova rodada (o bloqueio do turno anterior passa a contar como
         // "já perguntou"); o pedido de cronograma do lead fica anotado antes de o modelo falar.
         if (fichaSim) {
-          fichaSim.inicioRodada = new Date().toISOString();
+          // +5 ms: a marca da pergunta do turno anterior nasce no MESMO milissegundo em que este
+          // turno começa (não há espera entre eles no harness) e deixaria de contar como "anterior".
+          fichaSim.inicioRodada = new Date(Date.now() + 5).toISOString();
           const ultima = messages[messages.length - 1];
           const textoLead = typeof ultima?.content === 'string' ? ultima.content : '';
           const pedido = detectarPedidoDeCronograma([{ tipo: entrada.mocks?.botao_cronograma === true && turno === 1 ? 'button' : 'text', mensagem: textoLead }]);
