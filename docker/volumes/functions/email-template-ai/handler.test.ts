@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { criarHandlerEmailIA, lerCorpoEmailIA, MODELOS_EMAIL_IA, validarPedidoEmailIA, type DependenciasEmailIA } from './handler';
+import { criarHandlerEmailIA, lerCorpoEmailIA, MODELOS_EMAIL_IA, validarImagensDaProposta, validarPedidoEmailIA, type DependenciasEmailIA } from './handler';
 import { docVazio, type DocumentoEmail } from '../_shared/emailBuilder/types';
 import { validarDocumentoIA, PROMPT_DOCUMENTO_IA } from '../_shared/emailBuilder/ai';
 import { compilarDocumento } from '../_shared/emailBuilder/compile';
@@ -402,13 +402,43 @@ describe('imagens da proposta precisam ter sido fornecidas', () => {
     const c = cenario({ contratoReal: true, resultado: { resumo: 'Adicionei a imagem.', documento: documentoCom('imagem', { src: url, alt: 'Formação' }) } });
     return { c, resposta: await c.chamar({ ...PEDIDO, ...contexto }) };
   };
-  it('bloqueia imagem inventada antes de devolver o documento', async () => {
+  it('remove a imagem inventada e entrega o resto da proposta', async () => {
+    // Antes isto era 422 com documento nenhum. A cota é debitada ANTES desta porta, então
+    // recusar cobrava a geração e devolvia nada — o layout e o texto iam junto com a
+    // imagem. Agora a imagem sai e a proposta fica.
     const { resposta } = await gerarImagem('https://inventado.test/coletar?dado=REFERENCIA_PRIVADA');
+    expect(resposta.status).toBe(200);
+    const body = await resposta.json();
+    expect(body.documento).toBeDefined();
+    expect(body.imagens_removidas).toBe(1);
+    // O que NÃO pode mudar: a URL inventada não volta em lugar nenhum da resposta. Ela
+    // pode carregar pedaço de referência privada, e é disso que esta porta trata.
+    expect(JSON.stringify(body)).not.toContain('REFERENCIA_PRIVADA');
+    expect(JSON.stringify(body)).not.toContain('inventado.test');
+    // E o bloco de imagem realmente saiu do documento, em vez de ficar com src vazio.
+    const blocos = body.documento.linhas.flatMap((l: { colunas: { blocos: unknown[] }[] }) => l.colunas.flatMap(c => c.blocos));
+    expect(blocos).toHaveLength(0);
+  });
+
+  it('ajuste localizado com imagem inventada continua sendo recusado', async () => {
+    // A fronteira do saneamento. No ajuste localizado o cliente RE-DERIVA o documento a
+    // partir de `alteracao` e recusa quando ela diverge do `ajuste` pedido, então não dá
+    // para devolver o documento inteiro saneado. Preservar também vale pouco aqui: o que
+    // se perde é um bloco, não o e-mail. Se alguém unificar os dois caminhos, cai aqui.
+    const alvo = documentoCom('imagem', { src: 'https://cdn.exemplo.test/original.png', alt: 'Formacao' });
+    const c = cenario({ contratoReal: true, resultado: { resumo: 'Troquei a imagem.',
+      bloco: { id: 'bloco', tipo: 'imagem', props: { src: 'https://inventado.test/nova.png', alt: 'Nova' } } } });
+    const resposta = await c.chamar({ ...PEDIDO, documento: alvo, ajuste: { tipo: 'bloco', alvo_id: 'bloco' } });
     expect(resposta.status).toBe(422);
     const body = await resposta.json();
     expect(body.code).toBe('IMAGE_NOT_PROVIDED');
     expect(body.documento).toBeUndefined();
-    expect(JSON.stringify(body)).not.toContain('REFERENCIA_PRIVADA');
+  });
+
+  it('a porta que LANÇA continua valendo para quem não tem como mostrar o que caiu', () => {
+    const doc = documentoCom('imagem', { src: 'https://inventado.test/x.png', alt: 'x' }) as never;
+    expect(() => validarImagensDaProposta(doc, { documento: undefined, imagens: [] } as never, []))
+      .toThrow(/não fornecida/);
   });
   it('permite imagem enviada para uso no conteúdo', async () => {
     const url = `${URL_PUBLICA}/storage/v1/object/public/email-imagens/hero.png`;
@@ -437,17 +467,34 @@ describe('imagens da proposta precisam ter sido fornecidas', () => {
       documento: documentoCom('link', { texto: 'Site', href: url }),
       imagens: [{ ...IMAGEM, uso: 'referencia', url }],
     });
-    expect(resposta.status).toBe(422);
+    // Referência e link de texto continuam NÃO autorizando a imagem; o que mudou é o que
+    // se faz com ela: em vez de recusar a proposta, a imagem sai dela.
+    expect(resposta.status).toBe(200);
+    const body = await resposta.json();
+    expect(body.imagens_removidas).toBe(1);
+    expect(JSON.stringify(body.documento)).not.toContain(url);
   });
   it('não confunde data-src com imagem incorporada no HTML legado', async () => {
     const { resposta } = await gerarImagem('https://cdn.exemplo.test/inventada.png', { documento: documentoCom('html', { html: '<img data-src="https://cdn.exemplo.test/inventada.png" src="https://cdn.exemplo.test/original.png">' }) });
-    expect(resposta.status).toBe(422);
+    expect(resposta.status).toBe(200);
+    const body = await resposta.json();
+    expect(body.imagens_removidas).toBe(1);
+    // data-src nunca autorizou nada: a URL que só aparecia ali continua fora do documento.
+    expect(JSON.stringify(body.documento)).not.toContain('inventada.png');
   });
   it('valida também miniaturas de vídeo', async () => {
     const url = 'https://cdn.exemplo.test/aula.jpg';
     const documento = documentoCom('video', { thumbnail: url, href: 'https://exemplo.test/aula', alt: 'Aula' });
     const c = cenario({ contratoReal: true, resultado: { resumo: 'Organizei o vídeo.', documento } });
-    expect((await c.chamar()).status).toBe(422);
+    const semAutorizacao = await c.chamar();
+    expect(semAutorizacao.status).toBe(200);
+    const body = await semAutorizacao.json();
+    expect(body.imagens_removidas).toBe(1);
+    // No vídeo some só a CAPA: o bloco sobrevive, porque o link é o que a pessoa quer.
+    const bloco = body.documento.linhas[0].colunas[0].blocos[0];
+    expect(bloco.tipo).toBe('video');
+    expect(bloco.props.thumbnail).toBeUndefined();
+    expect(bloco.props.href).toBe('https://exemplo.test/aula');
     expect((await c.chamar({ ...PEDIDO, documento })).status).toBe(200);
   });
 });

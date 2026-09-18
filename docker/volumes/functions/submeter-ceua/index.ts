@@ -109,6 +109,27 @@ function getExt(name: string): string {
 
 // Sanitiza o nome do arquivo para virar key de Storage, preservando a extensão
 // original (PDF/DOC/DOCX) — o anexo fica "conforme enviado pelo pesquisador".
+/**
+ * Sufixo imprevisível para o NOME do arquivo no Storage.
+ *
+ * O bucket é público e a pasta é o protocolo, que é `Date.now()` em base36 — relógio,
+ * não segredo: dá para decodificar o instante do envio a partir dele. Sem isto, quem
+ * souber o dia em que um aluno enviou o trabalho chega ao arquivo por força bruta barata.
+ * O resto do sistema já faz isso há tempos (`src/lib/uploadHelpers.ts`); só estes
+ * formulários públicos tinham ficado de fora.
+ *
+ * Vai no NOME e não na PASTA de propósito: a fila do TCC lê o protocolo do caminho
+ * (`useFilaTcc.ts`, /\/tcc\/([^/]+)\//), e mexer na pasta quebraria isso.
+ *
+ * `crypto.getRandomValues` e não `Math.random`: este sufixo é a única coisa entre um
+ * arquivo com nome de aluno e qualquer pessoa da internet.
+ */
+function sufixoAleatorio(): string {
+  const bytes = new Uint8Array(8)
+  crypto.getRandomValues(bytes)
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
 function sanitizeName(name: string): string {
   const dot = name.lastIndexOf('.')
   const base =
@@ -262,7 +283,7 @@ Deno.serve(async (req) => {
 
     for (const [i, anexo] of anexos.entries()) {
       const original = anexo.file.name || `${anexo.field}.pdf`
-      const path = `${STORAGE_FOLDER}/${referencia}/${i + 1}-${anexo.field}-${sanitizeName(original)}`
+      const path = `${STORAGE_FOLDER}/${referencia}/${i + 1}-${anexo.field}-${sufixoAleatorio()}-${sanitizeName(original)}`
       const buf = new Uint8Array(await anexo.file.arrayBuffer())
 
       const { error: upErr } = await supabase.storage.from(BUCKET).upload(path, buf, {

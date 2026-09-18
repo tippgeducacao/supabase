@@ -220,8 +220,18 @@ function decodificarAtributoHtml(valor: string): string {
 
 /** Referências privadas não autorizam URLs novas. Verificamos os recursos que
  * o navegador carregará, além do contrato de formato; não dependemos do prompt.
- * No HTML legado só extraímos img[src], sem executar HTML, JS ou buscar a URL. */
-export function validarImagensDaProposta(documento: DocumentoEmail, pedido: Pick<PedidoGerar, "documento" | "imagens">, biblioteca: string[] = []): void {
+ * No HTML legado só extraímos img[src], sem executar HTML, JS ou buscar a URL.
+ *
+ * Devolve o documento SEM as imagens não autorizadas, em vez de recusar a proposta
+ * inteira. Recusar gastava a geração (a cota é debitada antes desta porta) e devolvia
+ * nada: perdia-se o layout e o texto por causa de uma imagem que a pessoa consegue
+ * recolocar no editor em dez segundos. A garantia de segurança não muda — a URL não
+ * autorizada NÃO sai daqui dentro do documento.
+ *
+ * `removidas` fica no servidor. A resposta leva só a CONTAGEM: a URL foi inventada pelo
+ * modelo e pode carregar pedaço de referência privada dentro dela — devê-la ao cliente
+ * desfaria justamente o que esta porta existe para impedir. */
+export function sanearImagensDaProposta(documento: DocumentoEmail, pedido: Pick<PedidoGerar, "documento" | "imagens">, biblioteca: string[] = []): { documento: DocumentoEmail; removidas: string[] } {
   const permitidas = new Set<string>();
   const adicionar = (valor: unknown) => { const url = normalizarUrlImagem(valor); if (url) permitidas.add(url); };
   for (const imagem of pedido.imagens) if (imagem.uso === "conteudo") adicionar(imagem.url);
@@ -243,15 +253,39 @@ export function validarImagensDaProposta(documento: DocumentoEmail, pedido: Pick
       }
     }
   }
-  for (const linha of documento.linhas) {
-    for (const coluna of linha.colunas) {
-      for (const bloco of coluna.blocos) {
+  const removidas: string[] = [];
+  const linhas = documento.linhas.map(linha => ({
+    ...linha,
+    colunas: linha.colunas.map(coluna => ({
+      ...coluna,
+      blocos: coluna.blocos.flatMap(bloco => {
         const fonte = bloco.tipo === "video" ? bloco.props.thumbnail : ["imagem", "imagem-link"].includes(bloco.tipo) ? bloco.props.src : null;
-        if (fonte && !permitidas.has(normalizarUrlImagem(fonte) ?? "")) {
-          throw new ErroEmailIA(422, "IMAGE_NOT_PROVIDED", "A proposta usou uma imagem não fornecida. Envie a imagem para usar no e-mail e tente novamente. Seu template foi preservado.");
+        if (!fonte || permitidas.has(normalizarUrlImagem(fonte) ?? "")) return [bloco];
+        removidas.push(String(fonte).slice(0, 300));
+        // No vídeo a imagem é só a capa: o bloco continua válido sem ela, e derrubar
+        // o vídeo inteiro por causa da capa perderia o link que a pessoa quer.
+        if (bloco.tipo === "video") {
+          const props = { ...bloco.props }; delete props.thumbnail;
+          return [{ ...bloco, props }];
         }
-      }
-    }
+        // Imagem sem origem permitida não tem o que preservar: o bloco sai.
+        return [];
+      }),
+    })),
+  }));
+  return { documento: { ...documento, linhas }, removidas };
+}
+
+/**
+ * Porta de segurança das imagens, na forma que LANÇA.
+ *
+ * Mantida porque é o contrato que os testes fixam e porque "recusar" ainda é a resposta
+ * certa em qualquer chamador que NÃO tenha como mostrar o que foi removido. Implementada
+ * sobre o saneador para que as duas nunca discordem sobre o que é permitido.
+ */
+export function validarImagensDaProposta(documento: DocumentoEmail, pedido: Pick<PedidoGerar, "documento" | "imagens">, biblioteca: string[] = []): void {
+  if (sanearImagensDaProposta(documento, pedido, biblioteca).removidas.length > 0) {
+    throw new ErroEmailIA(422, "IMAGE_NOT_PROVIDED", "A proposta usou uma imagem não fornecida. Envie a imagem para usar no e-mail e tente novamente. Seu template foi preservado.");
   }
 }
 
@@ -485,13 +519,32 @@ export function criarHandlerEmailIA(deps: DependenciasEmailIA) {
         });
         throw new ErroEmailIA(422, "INVALID_OUTPUT", "A proposta não passou na validação do construtor. Seu template foi preservado.");
       }
-      validarImagensDaProposta(documento, pedido, [...biblioteca.map(i => i.url), ...(pedido.kit_marca?.logoUrl ? [pedido.kit_marca.logoUrl] : [])]);
+      // Saneia em vez de recusar: a cota já foi debitada acima, então devolver 422 aqui
+      // cobrava a geração e entregava nada.
+      const saneado = sanearImagensDaProposta(documento, pedido, [...biblioteca.map(i => i.url), ...(pedido.kit_marca?.logoUrl ? [pedido.kit_marca.logoUrl] : [])]);
+      if (saneado.removidas.length > 0) {
+        // Só saneia a GERAÇÃO DE DOCUMENTO INTEIRO. No ajuste localizado, `alteracao`
+        // carrega o bloco ou a linha, o cliente RE-DERIVA o documento a partir dela
+        // (aiEdicao.ts:197) e recusa quando `alteracao` e `ajuste` divergem (linha 195) —
+        // trocar o tipo aqui quebraria o ajuste. E preservar vale pouco nesse caso: o que
+        // se perde é um bloco, não o layout e o texto do e-mail todo.
+        if (alteracao.tipo !== "documento") {
+          throw new ErroEmailIA(422, "IMAGE_NOT_PROVIDED", "A proposta usou uma imagem não fornecida. Envie a imagem para usar no e-mail e tente novamente. Seu template foi preservado.");
+        }
+        documento = saneado.documento;
+        // `alteracao` foi montada ANTES do saneamento e carrega o documento (ou o trecho)
+        // com a URL inventada dentro. Devolvê-la assim vazaria pela porta dos fundos o que
+        // acabamos de tirar pela da frente. Trocamos pelo documento inteiro já saneado:
+        // o resultado de aplicar é o mesmo, porque `documento` já é a base com a alteração.
+        alteracao = { tipo: "documento", documento };
+        console.warn("[email-template-ai] imagens removidas da proposta", { modelo: modelo.id, quantidade: saneado.removidas.length });
+      }
       // A proposta anterior não é prova factual: uma segunda rodada de ajuste
       // não pode transformar um preço inventado na primeira em condição confirmada.
       const destinosExistentes = (pedido.documento?.linhas ?? []).flatMap(l => l.colunas.flatMap(c => c.blocos.flatMap(b => typeof b.props.href === "string" ? [b.props.href] : [])));
       if (pedido.kit_marca?.ctaUrl) destinosExistentes.push(pedido.kit_marca.ctaUrl);
       if (pedido.kit_marca?.email) destinosExistentes.push(`mailto:${pedido.kit_marca.email}`);
-      return json({ documento, resumo: resultado.resumo.trim(), ajuste: pedido.ajuste, alteracao, snapshot_fontes: contextoReal.snapshot_fontes, revisao_comercial: revisarComercialEmailIA(documento, referenciasComerciais, destinosExistentes),
+      return json({ documento, resumo: resultado.resumo.trim(), ajuste: pedido.ajuste, alteracao, ...(saneado.removidas.length ? { imagens_removidas: saneado.removidas.length } : {}), snapshot_fontes: contextoReal.snapshot_fontes, revisao_comercial: revisarComercialEmailIA(documento, referenciasComerciais, destinosExistentes),
         ...(integralProtegido ? { estrutura_protegida: resultado.documento } : {}), cota: await consultarCotaSemDescartarEmailIA(cliente, usuarioId) });
     } catch (e) {
       const saldo = cotaConsumida && usuarioCota ? { cota: await consultarCotaSemDescartarEmailIA(cliente, usuarioCota) } : {};
