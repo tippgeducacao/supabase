@@ -727,6 +727,11 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
   const msgId = String(payload?.id ?? '').trim();
   if (!msgId) return;
   const ehManha = payload?.motivo === 'manha';
+  // A transcrição ficou pronta depois de o turno anterior desistir da espera: o gatilho do banco
+  // (`onb_agente_audio_acorda`) devolve o turno pela mesma porta dos outros ticks. Aqui HÁ
+  // mensagem de entrada — o que muda é que o id do POST é sintético e o áudio de verdade está
+  // no `msgId` que a marca carrega.
+  const ehAudioPronto = payload?.motivo === 'audio';
   // A oferta da integração acelerada entra pela mesma porta da retomada das 8h: o tick faz o
   // POST, e aqui não há mensagem nova do aluno para ler.
   const ehOferta = payload?.motivo === 'oferta';
@@ -741,6 +746,8 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
   let conteudo = '';
   let botaoBruto: unknown = null;
   let chegouEm = new Date();
+  /** No despertar do áudio, o wa_message_id REAL da mensagem (o do POST é sintético). */
+  let wamidDoAudio: string | null = null;
   if (semInbound) {
     telefone = digitos(payload?.telefone);
     const ok = ehManha
@@ -751,10 +758,29 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
       return;
     }
   } else {
+    // No despertar do áudio o `msgId` é sintético (`audio-<wamid>-<epoch>`): a mensagem de
+    // verdade vem da marca que o gatilho gravou ANTES do POST, e é ela que autoriza o turno.
+    if (ehAudioPronto) {
+      const tel = digitos(payload?.telefone);
+      const { data: marca } = await supabase
+        .from('onb_agente_eventos')
+        .select('telefone, detalhe')
+        .eq('tipo', 'audio:transcricao_chegou')
+        .eq('detalhe->>id', msgId)
+        .gte('criada_em', new Date(Date.now() - MANHA_VALIDADE_MIN * 60_000).toISOString())
+        .limit(1)
+        .maybeSingle();
+      const wamid = String((marca?.detalhe as any)?.msgId ?? '').trim();
+      if (!wamid || !mesmoTelefone(marca?.telefone ?? '', tel)) {
+        console.log('[crm-agente-aluno] despertar de áudio sem marca, ignorado:', msgId);
+        return;
+      }
+      wamidDoAudio = wamid;
+    }
     const { data: origem } = await supabase
       .from('crm_whatsapp_messages')
       .select('telefone, tipo, conteudo, metadata, created_at')
-      .eq('wa_message_id', msgId)
+      .eq('wa_message_id', wamidDoAudio ?? msgId)
       .eq('direcao', 'inbound')
       .eq('wa_account_id', conta)
       .limit(1)
@@ -904,9 +930,22 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
     // áudio de quem não é aluno da integração, ou de quem escreveu fora do horário.
     let transcricaoAgora = '';
     if (!ehManha && tipo === 'audio') {
-      transcricaoAgora = await esperarTranscricao(msgId, chave);
-      await evento(transcricaoAgora ? 'audio:transcrito' : 'audio:sem_transcricao',
-        { ...rastro, caracteres: transcricaoAgora.length });
+      transcricaoAgora = await esperarTranscricao(wamidDoAudio ?? msgId, chave);
+      if (transcricaoAgora) {
+        await evento('audio:transcrito', { ...rastro, caracteres: transcricaoAgora.length });
+      } else {
+        // ⚠️ DESISTIR DA ESPERA NÃO É DESISTIR DO ALUNO. Cristiane, 18/09: o áudio dela levou
+        // 38,2 s e a espera é de 20 — o turno transferia para a equipe e respondia "não consegui
+        // escutar" a um áudio que o próprio sistema transcreveu doze segundos depois.
+        //
+        // Aqui o turno sai calado e deixa a marca: quando a transcrição chega, o gatilho
+        // `onb_agente_audio_acorda` devolve o turno pela porta dos ticks, com o texto na mão.
+        // Se ela NUNCA chegar, `onb_agente_audio_desistir()` deixa rastro em 10 min para a equipe.
+        await evento('audio:aguardando_transcricao', {
+          ...rastro, msgId: wamidDoAudio ?? msgId, esperou_ms: ESPERA_TRANSCRICAO_MS,
+        });
+        return;
+      }
     }
 
     // ── Histórico da conversa NESTA linha, com ESTA pessoa ────────────────────

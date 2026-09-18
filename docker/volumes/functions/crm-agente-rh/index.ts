@@ -96,9 +96,19 @@ const FUNIL_RH = '27ab7e60-7cbc-432a-b852-52597bf277b4';
  *   coleta  = pergunta e preenche os campos do candidato
  *   agendar = oferece horário e marca a entrevista
  *   marcada = já tem entrevista; só remarca se a pessoa pedir
+ *
+ * ⚠️ 18/09/2026, decisão do Rafael: o agente PARA NA TRIAGEM. Só `coleta` está ativo.
+ * Nas etapas de `agendar` e de `marcada` ele não fala nada (morre em `pulado:etapa`),
+ * porque marcar, remarcar e desmarcar entrevista é da equipe, no painel do SAC ou pelo
+ * link público. O que puxou a mudança: um candidato pediu 14h30, o agente respondeu com
+ * outros dois horários e ficou leiloando agenda, coisa que ninguém pediu para ele fazer.
+ *
+ * A máquina de agendar continua INTEIRA aqui embaixo (as ferramentas, a consulta de
+ * horários, o Google Agenda): religar é acrescentar o papel de volta nesta linha. Foi
+ * de propósito, para não ter que reescrever tudo se ele mudar de ideia.
  */
 type PapelEtapa = 'coleta' | 'agendar' | 'marcada';
-const PAPEIS_ATIVOS: PapelEtapa[] = ['coleta', 'agendar', 'marcada'];
+const PAPEIS_ATIVOS: PapelEtapa[] = ['coleta'];
 
 /**
  * Agenda "RH  - Entrevistas" da conta programappgvet@gmail.com (já existia no Google e

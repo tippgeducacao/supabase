@@ -997,15 +997,31 @@ describe('crm-agente-aluno: áudio do aluno', () => {
     expect(renovacoes()).toBe(0);
   });
 
-  it('sem transcrição no prazo, espera, avisa e mantém o caminho antigo', async () => {
+  it('sem transcrição no prazo, o turno SAI CALADO e deixa a marca — não fala nem transfere', async () => {
+    // ⚠️ 18/09/2026: antes o turno seguia sem o texto e o modelo respondia "não consegui escutar",
+    // transferindo para a equipe. O áudio da Cristiane levou 38,2 s contra os 20 s de espera, e o
+    // sistema transcreveu doze segundos DEPOIS de ele desistir. Agora desistir da espera não é
+    // desistir do aluno: o gatilho `onb_agente_audio_acorda` devolve o turno com o texto na mão.
     estado.origem = audio();
     estado.historico = [estado.origem];
     await chamar(C);
-    const enviado = JSON.stringify((estado.anthropic[0] as { messages: unknown }).messages);
-    expect(enviado).toContain('(ele mandou um áudio, que você não consegue ouvir)');
-    expect(eventos()).toContain('audio:sem_transcricao');
+    expect(eventos()).toContain('audio:aguardando_transcricao');
+    // não chamou o modelo: sem o texto ele não tem o que dizer, e dizer "não consegui ouvir" é
+    // exatamente o que não pode mais acontecer
+    expect(estado.anthropic.length).toBe(0);
+    expect(eventos()).not.toContain('respondido');
     // Esperou de verdade, renovando a trava a cada volta: sem isso a espera comeria a trava.
     expect(renovacoes()).toBeGreaterThan(0);
+  });
+
+  it('com a transcrição pronta, o turno roda normal e o modelo LÊ o que ele falou', async () => {
+    estado.origem = { ...audio(), metadata: { audio_transcricao: 'oi, consegui entrar na plataforma sim' } };
+    estado.historico = [estado.origem];
+    await chamar(C);
+    expect(eventos()).toContain('audio:transcrito');
+    expect(eventos()).not.toContain('audio:aguardando_transcricao');
+    const enviado = JSON.stringify((estado.anthropic[0] as { messages: unknown }).messages);
+    expect(enviado).toContain('consegui entrar na plataforma');
   });
 
   it('áudio de quem o assistente não atende não segura turno nenhum', async () => {
