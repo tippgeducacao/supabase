@@ -187,8 +187,13 @@ describe('pedido de cronograma no lote de entrada', () => {
   });
   it('pedido em texto curto: cronograma, informações, "manda por aqui"', () => {
     expect(detectarPedidoDeCronograma([{ tipo: 'text', mensagem: 'me manda o cronograma por aqui?' }])).toBe('texto');
-    expect(detectarPedidoDeCronograma([{ tipo: 'text', mensagem: 'eu tenho mas to sem tempo agora, manda as informações por aqui' }])).toBe('texto');
+    expect(detectarPedidoDeCronograma([{ tipo: 'text', mensagem: 'manda as informações por aqui' }])).toBe('texto');
     expect(detectarPedidoDeCronograma([{ tipo: 'text', mensagem: 'sem condições mesmo, não consegue mandar nada por aqui?' }])).toBe('texto');
+  });
+  it('"sem tempo, manda por aqui" não é pedido: a falta de tempo vem primeiro; o pedido conta se ele insistir depois', () => {
+    expect(detectarPedidoDeCronograma([{ tipo: 'text', mensagem: 'eu tenho mas to sem tempo agora, manda as informações por aqui' }])).toBeNull();
+    expect(detectarPedidoDeCronograma([{ tipo: 'text', mensagem: 'eu to sem tempo teria como mandar por aqui?' }])).toBeNull();
+    expect(detectarPedidoDeCronograma([{ tipo: 'text', mensagem: 'manda por aqui mesmo' }])).toBe('texto');
   });
   it('não é pedido: sem a palavra, ou texto longo demais para ser um pedido', () => {
     expect(detectarPedidoDeCronograma([{ tipo: 'text', mensagem: 'boa tarde João tudo bem?' }])).toBeNull();

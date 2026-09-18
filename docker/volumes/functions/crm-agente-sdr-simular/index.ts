@@ -31,6 +31,7 @@ import { limparParaRouter } from '../crm-agente-sdr/historico.ts';
 import { gerarFollowup } from '../crm-agente-sdr/followup.ts';
 import { VERSAO_MEMORIA_HUMANA } from '../crm-agente-sdr/memoriaHumana.ts';
 import { montarRetornoInformacoes } from '../crm-agente-sdr/envioMateriais.ts';
+import { instrucaoResultadoMaterial } from '../_shared/resultadoEnvioMaterial.ts';
 import { comNotaNoContexto, comNotaParaRouter, notaTrocaDeNumero, sinalInerte } from '../crm-agente-sdr/trocaDeNumero.ts';
 import {
   aplicarColetaNaJornada, aplicarPerguntasNaJornada, avaliarFicha, bloqueioCronograma, contarObjecaoNaJornada, detectarPedidoDeCronograma,
@@ -128,7 +129,9 @@ async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimula
       if (input?.conteudo === 'portfolio') {
         return 'Portfólio da PPGVET (PDF com todas as pós) enviado ao lead no WhatsApp. Pergunte qual área chamou a atenção dele.';
       }
-      return `Cronograma enviado ao lead no WhatsApp (conteudo="${input?.conteudo ?? '?'}"). Valor integral: R$ 4.200,00.`;
+      // Mesma instrução do executor real depois do aceite ("te enviei o cronograma por aqui"…):
+      // sem ela o modelo escrevia "solicitei o envio" só no harness.
+      return `Cronograma enviado ao lead no WhatsApp (conteudo="${input?.conteudo ?? '?'}"). ${instrucaoResultadoMaterial('aceito')} Valor integral: R$ 4.200,00.`;
     case 'verificar_compatibilidade_curso': {
       const m = mocks?.compatibilidade ?? 'aprovado';
       // ⚠️ REPROVA POR PRAZO SEM DEPENDER DO MOCK — espelho do executor real (tools.ts),

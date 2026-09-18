@@ -218,12 +218,17 @@ export const INSTRUCAO_TEMPO_FICHA = 'Reconheça a rotina corrida sem minimizar 
 // informações por aqui", "não consegue mandar nada por aqui?").
 const RE_CITACAO = /^\[Em resposta à mensagem: [\s\S]*?\]\s*/;
 const RE_PEDIDO_MATERIAL = /cronograma|informa[çc][õo]es|material|mand\w*[^.?!\n]{0,25}por aqui|por aqui[^.?!\n]{0,25}mand\w*/i;
+// "tô sem tempo, manda por aqui" NÃO conta como pedido: a regra do usuário é tratar a falta de
+// tempo primeiro e só mandar material se ele insistir DEPOIS. Contando aqui, a ficha mostrava
+// FALTA COLETAR e a Luna pulava a quebra de tempo direto para a coleta (harness, 18/09).
+const RE_OBJECAO_TEMPO = /sem tempo|n[ãa]o tenho tempo|correria|corrid[oa]|ocupad|agora n[ãa]o d[áa]|n[ãa]o consigo agora/i;
 export function detectarPedidoDeCronograma(itens: ReadonlyArray<{ tipo?: unknown; mensagem?: unknown; conteudo?: unknown }>): 'botao' | 'texto' | null {
   let porTexto: 'texto' | null = null;
   for (const item of itens) {
     const t = texto(item?.mensagem ?? item?.conteudo).replace(RE_CITACAO, '').trim();
     if (!RE_PEDIDO_MATERIAL.test(t)) continue;
     if (item?.tipo === 'button') return 'botao';
+    if (RE_OBJECAO_TEMPO.test(t)) continue;
     if (t.length <= 120) porTexto = 'texto';
   }
   return porTexto;
