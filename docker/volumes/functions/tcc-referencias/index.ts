@@ -6,14 +6,20 @@
 // não verificar. Por isso esta function usa a busca na web NATIVA da Anthropic
 // (`web_search`, servidor deles): o modelo pesquisa, lê o resultado e só então registra.
 //
-// LOTES PEQUENOS (4 referências por invocação): cada referência pode custar uma ou duas
-// buscas, e o limite prático da edge function é ~150 s. O front itera os lotes e grava o
-// progresso (`referencias_verificadas`) para retomar de onde parou.
+// LOTES PEQUENOS (3 referências por invocação): cada uma pode custar duas buscas, e o
+// caminho até aqui passa pelo proxy do Cloudflare, que corta a resposta da origem em
+// ~100 s (524, sem CORS). Não são os ~150 s do runtime. Por isso também há um
+// AbortController de 85 s, somando TODAS as rodadas de pause_turn. O front itera os lotes
+// e grava o progresso (`referencias_verificadas`) para retomar de onde parou.
 //
 // CUSTA DINHEIRO de verdade: cada busca é cobrada à parte dos tokens. O botão na tela é
 // opcional e diz isso. `max_uses` põe teto por lote.
 //
-// Desenho: docs/superpowers/specs/2026-09-16-correcao-tcc-design.md (§17)
+// ⚠️ "localizada" SEM nenhuma busca no lote não é aceita: o modelo às vezes responde de
+// memória, e é exatamente isso que a verificação existe para não fazer. Sem busca, tudo
+// vira "incerta". (Revisão adversarial de 18/09/2026.)
+//
+// Desenho: docs/superpowers/specs/2026-09-16-correcao-tcc-design.md (§17 e §18)
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 
 const corsHeaders = {
@@ -28,11 +34,13 @@ const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 const MODELO = Deno.env.get("ANTHROPIC_MODEL_TCC") ?? "claude-opus-5";
 
-const MAX_REFERENCIAS_POR_LOTE = 4;
+const MAX_REFERENCIAS_POR_LOTE = 3;
 /** Teto de buscas por lote: duas por referência já resolve quase tudo. */
-const MAX_BUSCAS = 8;
+const MAX_BUSCAS = 6;
 /** Rodadas de `pause_turn` (a API devolve o turno quando a busca demora) antes de desistir. */
 const MAX_RODADAS = 4;
+/** Abaixo do corte do Cloudflare (~100 s), somando TODAS as rodadas de pause_turn. */
+const TEMPO_MAXIMO_MS = 85_000;
 
 function json(payload: unknown, status = 200) {
   return new Response(JSON.stringify(payload), {
@@ -120,6 +128,7 @@ interface ReferenciaEntrada {
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  const inicioMs = Date.now();
 
   try {
     const authHeader = req.headers.get("Authorization") ?? "";
@@ -134,7 +143,7 @@ Deno.serve(async (req) => {
     const { data: podeCorrigir } = await asUser.rpc("user_can_access_pedagogico", { _user_id: userData.user.id });
     if (podeCorrigir !== true) {
       console.log(JSON.stringify({ evento: "tcc_referencias_negado", usuario: userData.user.id }));
-      return json({ error: "sem acesso ao modulo Pedagogico" }, 403);
+      return json({ error: "sem acesso ao módulo Pedagógico" }, 403);
     }
 
     const body = await req.json().catch(() => ({}));
@@ -180,9 +189,20 @@ Deno.serve(async (req) => {
 
     // `pause_turn`: a busca do servidor ainda estava rodando quando a API devolveu o turno.
     // Repõe o conteúdo e continua — é o mesmo desenho do assistente interno do WhatsApp.
+    // O orçamento de tempo vale para a SOMA das rodadas: quatro rodadas de 40 s passariam
+    // do corte do proxy e jogariam fora todas as buscas já pagas.
+    let esgotouTempo = false;
     for (let rodada = 0; rodada < MAX_RODADAS; rodada++) {
-      const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      const restante = TEMPO_MAXIMO_MS - (Date.now() - inicioMs);
+      if (restante <= 5_000) { esgotouTempo = true; break; }
+
+      const controle = new AbortController();
+      const temporizador = setTimeout(() => controle.abort(), restante);
+      let resp: Response;
+      try {
+        resp = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
+        signal: controle.signal,
         headers: {
           "x-api-key": apiKey,
           "anthropic-version": "2023-06-01",
@@ -198,7 +218,13 @@ Deno.serve(async (req) => {
           tool_choice: { type: "auto" },
           messages,
         }),
-      });
+        });
+      } catch (e) {
+        if (controle.signal.aborted) { esgotouTempo = true; break; }
+        throw e;
+      } finally {
+        clearTimeout(temporizador);
+      }
 
       if (!resp.ok) {
         const detalhe = await resp.text();
@@ -217,31 +243,52 @@ Deno.serve(async (req) => {
     }
 
     if (!data) return json({ error: "sem resposta do modelo" }, 502);
+
+    // Recusa dos classificadores chega com HTTP 200 — e um TCC de veterinária sobre
+    // patógeno ou fármaco pode disparar. Não pode virar "lote verificado, nada a apontar":
+    // devolve não-2xx para o front NÃO avançar `referencias_verificadas`.
     if (data.stop_reason === "refusal") {
-      return json({ error: "o modelo recusou verificar este lote", verificacoes: [] }, 200);
+      console.log(JSON.stringify({ evento: "tcc_referencias_recusa", lote: referencias.length, categoria: data?.stop_details?.category ?? null }));
+      return json({ error: "o modelo recusou verificar este lote de referências; confira essas entradas à mão", recusado: true }, 422);
+    }
+
+    // Tempo esgotado: as buscas já foram pagas, mas o front precisa PARAR — seguir para o
+    // próximo lote repetiria o custo sem nunca terminar este.
+    if (esgotouTempo) {
+      console.error(JSON.stringify({ evento: "tcc_referencias_tempo", lote: referencias.length, buscas, duracao_ms: Date.now() - inicioMs }));
+      return json(
+        { error: `a verificação passou de ${Math.round(TEMPO_MAXIMO_MS / 1000)} s neste lote e foi interrompida; tente de novo`, buscas },
+        504,
+      );
     }
 
     const chamada = (data.content ?? []).find(
       (b) => b?.type === "tool_use" && b?.name === "registrar_verificacoes",
     );
-    if (!chamada) {
-      console.error("[tcc-referencias] sem tool_use", data.stop_reason);
-      return json({ error: "o modelo não devolveu a verificação no formato esperado" }, 502);
-    }
+    // Sem a chamada da ferramenta (`max_tokens`, o modelo divagou): o laço abaixo devolve
+    // o lote inteiro como "incerta". Perder as buscas pagas e não dizer nada seria pior —
+    // o item 6.10 manda justamente declarar quando não se conseguiu confirmar.
+    if (!chamada) console.error("[tcc-referencias] sem tool_use", data.stop_reason);
 
+    // Nenhuma busca no lote = o modelo respondeu de memória. Nada aqui é "localizada".
+    const semBusca = buscas === 0;
     const validos = new Set(referencias.map((r) => r.indice));
-    const verificacoes = ((chamada.input?.verificacoes ?? []) as Array<Record<string, unknown>>)
+    const verificacoes = ((chamada?.input?.verificacoes ?? []) as Array<Record<string, unknown>>)
       .filter((v) => validos.has(Number(v?.indice)))
       .map((v) => ({
         indice: Number(v.indice),
-        situacao: ["localizada", "nao_localizada", "divergente", "incerta"].includes(String(v.situacao))
-          ? String(v.situacao)
-          : "incerta",
+        situacao: semBusca
+          ? "incerta"
+          : ["localizada", "nao_localizada", "divergente", "incerta"].includes(String(v.situacao))
+            ? String(v.situacao)
+            : "incerta",
         link_direto: String(v.link_direto ?? "").trim() || null,
         tem_doi: v.tem_doi === true,
         falta_acesso: v.falta_acesso === true,
         divergencia: String(v.divergencia ?? "").trim() || null,
-        observacao: String(v.observacao ?? "").trim(),
+        observacao: semBusca
+          ? `Nenhuma busca na web aconteceu neste lote, então nada foi confirmado; conferir à mão. (O modelo relatou: ${String(v.observacao ?? "").trim() || "sem observação"})`
+          : String(v.observacao ?? "").trim(),
       }));
 
     // Referência que o modelo esqueceu de registrar volta como "incerta", nunca some: o
@@ -255,12 +302,21 @@ Deno.serve(async (req) => {
           tem_doi: /\bdoi\b|10\.\d{4,9}\//i.test(r.texto),
           falta_acesso: false,
           divergencia: null,
-          observacao: "O modelo não registrou resultado para esta entrada; conferir manualmente.",
+          observacao: chamada
+            ? "O modelo não registrou resultado para esta entrada; conferir manualmente."
+            : "A verificação terminou sem nenhum resultado registrado; conferir esta entrada manualmente.",
         });
       }
     }
 
-    console.log(JSON.stringify({ evento: "tcc_referencias_ok", lote: referencias.length, buscas }));
+    console.log(JSON.stringify({
+      evento: "tcc_referencias_ok",
+      lote: referencias.length,
+      buscas,
+      sem_busca: semBusca,
+      duracao_ms: Date.now() - inicioMs,
+      saida_tokens: data?.usage?.output_tokens ?? null,
+    }));
 
     return json({ verificacoes, modelo: data.model ?? MODELO, buscas });
   } catch (e) {
