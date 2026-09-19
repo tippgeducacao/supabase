@@ -265,10 +265,28 @@ Deno.serve(async (req) => {
     const chamada = (data.content ?? []).find(
       (b) => b?.type === "tool_use" && b?.name === "registrar_verificacoes",
     );
-    // Sem a chamada da ferramenta (`max_tokens`, o modelo divagou): o laço abaixo devolve
-    // o lote inteiro como "incerta". Perder as buscas pagas e não dizer nada seria pior —
-    // o item 6.10 manda justamente declarar quando não se conseguiu confirmar.
-    if (!chamada) console.error("[tcc-referencias] sem tool_use", data.stop_reason);
+    // Sem a chamada da ferramenta, o laço abaixo devolve o lote inteiro como "incerta":
+    // perder as buscas pagas e não dizer nada seria pior, e o item 6.10 manda justamente
+    // declarar quando não se conseguiu confirmar. Mas o MOTIVO muda o que fazer depois, e
+    // por isso ele vai no log e na observação em vez de virar um erro genérico:
+    //   max_tokens → o lote é grande demais; pause_turn → a busca não terminou nas
+    //   rodadas disponíveis, e tentar de novo costuma resolver.
+    const motivoSemChamada = !chamada
+      ? data.stop_reason === "max_tokens"
+        ? "a resposta do modelo foi cortada no meio (lote grande demais)"
+        : data.stop_reason === "pause_turn"
+          ? `as buscas não terminaram em ${MAX_RODADAS} rodadas`
+          : `o modelo encerrou sem registrar (${data.stop_reason ?? "motivo desconhecido"})`
+      : null;
+    if (motivoSemChamada) {
+      console.error(JSON.stringify({
+        evento: "tcc_referencias_sem_registro",
+        motivo: motivoSemChamada,
+        stop_reason: data.stop_reason ?? null,
+        lote: referencias.length,
+        buscas,
+      }));
+    }
 
     // Nenhuma busca no lote = o modelo respondeu de memória. Nada aqui é "localizada".
     const semBusca = buscas === 0;
@@ -304,7 +322,7 @@ Deno.serve(async (req) => {
           divergencia: null,
           observacao: chamada
             ? "O modelo não registrou resultado para esta entrada; conferir manualmente."
-            : "A verificação terminou sem nenhum resultado registrado; conferir esta entrada manualmente.",
+            : `A verificação não registrou resultado: ${motivoSemChamada}. Conferir esta entrada manualmente ou tentar de novo.`,
         });
       }
     }
