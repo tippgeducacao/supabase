@@ -679,6 +679,17 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   if (levaSoReacao) tel.registrar('leva_so_reacao', { conteudo: conteudo.slice(0, 40) });
   let corrigiuHorario = false; // guarda de horário inventado: re-instrui só 1x
   let corrigiuVazio = false;   // resposta 100% bastidor: pede de novo 1x antes de calar
+  let corrigiuSilencio = false; // silêncio explícito com pergunta do lead no ar: pede a fala 1x
+  // SILÊNCIO INDEVIDO (21/09/2026, teste do usuário): o lead perguntou "mais cedo?", o modelo consultou
+  // a agenda duas vezes e fechou a volta com responder_ao_cliente VAZIO — a conversa travou sem erro
+  // nenhum. Silêncio só é resposta válida quando a rodada encerrou por tool (a despedida já saiu) ou
+  // quando o lote era só reação. Fora disso, a fala é pedida de novo, uma vez.
+  const CORRECAO_SILENCIO =
+    '[CORRECAO_INTERNA_AUTO_IGNORE] Você encerrou esta volta SEM mandar mensagem, mas o lead acabou de escrever e ' +
+    'está esperando resposta. Silêncio aqui trava a conversa. Responda agora à última mensagem dele, na voz do João, ' +
+    'usando os resultados das ferramentas que você já tem nesta conversa (se consultou a agenda, ofereça os horários ' +
+    'que ela devolveu; se não há o que ele pediu, diga isso em uma frase e ofereça o mais próximo). ' +
+    'Não mencione esta correção ao lead.';
 
   // ── SILÊNCIO NÃO É RESPOSTA (2026-08-12, medido no harness) ─────────────────
   // Quando a limpeza de saída derruba a mensagem INTEIRA (era só narração), o
@@ -883,6 +894,12 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       .map((b: any) => b.text)
       .join('\n')
       .trim();
+    if (!texto && !encerrouPorTool && !levaSoReacao && !corrigiuSilencio) {
+      corrigiuSilencio = true;
+      tel.registrar('silencio_indevido_reinstruido', { canal: resp.canal_resposta ?? null, volta: rodada + 1 });
+      await gravarMensagem(supabase, remotejid, { role: 'user', content: CORRECAO_SILENCIO });
+      continue;
+    }
     if (texto) {
       // Regra de ouro nº 2 em CÓDIGO (caso Marcello 2026-07-23): oferta de horário
       // que não apareceu em lugar NENHUM da conversa (consulta_disponibilidade,
