@@ -512,7 +512,7 @@ async function enviar(
   // pendente é substituída, para ele não receber duas respostas parecidas em seguida.
   //
   // ⚠️ MENOS A ENTREGA DE UM PASSO. Matheus, 17/09/2026: ele disse "Sim" às 10:56:32, o vídeo da
-  // Adriane entrou na fila às 10:56:45 e foi CANCELADO às 10:56:56 — porque ele digitou mais duas
+  // Adriane entrou na fila às 10:56:45 e foi CANCELADO às 10:56:56, porque ele digitou mais duas
   // mensagens ("Por mensagem ou video", "??") e o turno seguinte substituiu a pendente. Ele
   // perguntou "por mensagem ou vídeo?" JUSTAMENTE porque o vídeo tinha sumido.
   //
@@ -729,7 +729,7 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
   const ehManha = payload?.motivo === 'manha';
   // A transcrição ficou pronta depois de o turno anterior desistir da espera: o gatilho do banco
   // (`onb_agente_audio_acorda`) devolve o turno pela mesma porta dos outros ticks. Aqui HÁ
-  // mensagem de entrada — o que muda é que o id do POST é sintético e o áudio de verdade está
+  // mensagem de entrada; o que muda é que o id do POST é sintético e o áudio de verdade está
   // no `msgId` que a marca carrega.
   const ehAudioPronto = payload?.motivo === 'audio';
   // A oferta da integração acelerada entra pela mesma porta da retomada das 8h: o tick faz o
@@ -935,7 +935,7 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
         await evento('audio:transcrito', { ...rastro, caracteres: transcricaoAgora.length });
       } else {
         // ⚠️ DESISTIR DA ESPERA NÃO É DESISTIR DO ALUNO. Cristiane, 18/09: o áudio dela levou
-        // 38,2 s e a espera é de 20 — o turno transferia para a equipe e respondia "não consegui
+        // 38,2 s e a espera é de 20: o turno transferia para a equipe e respondia "não consegui
         // escutar" a um áudio que o próprio sistema transcreveu doze segundos depois.
         //
         // Aqui o turno sai calado e deixa a marca: quando a transcrição chega, o gatilho
@@ -1083,7 +1083,7 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
 
     // ── A OFERTA PRECISA SABER O QUE ESTÁ OFERECENDO ─────────────────────────
     // ⚠️ 15/09: o primeiro teste em produção entregou "Que bom, Rafael! Fico feliz que os primeiros
-    // dias tenham sido bons pra você" — gentileza, não oferta. O convite de cada passo estava
+    // dias tenham sido bons pra você": gentileza, não oferta. O convite de cada passo estava
     // escrito no banco desde 14/09 e nunca chegava aqui: pedir "ofereça o próximo passo" sem dizer
     // QUAL faz o modelo puxar conversa e encerrar, que é o único movimento possível sem objeto.
     let conviteDaOferta = '';
@@ -1104,7 +1104,7 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
         // Aqui o banco RESPONDEU que não há o que oferecer: passo de resgate, passo que só sai por
         // template, aluno que pediu para parar, etapa fora da régua, ou o D+1 (a porta de entrada
         // não se oferece). Falar sem ter o que oferecer é pior do que ficar quieto, e a oferta
-        // morre AQUI em vez de segurar a vaga única por 20 h — assim o aluno volta a poder receber
+        // morre AQUI em vez de segurar a vaga única por 20 h; assim o aluno volta a poder receber
         // uma assim que fechar o próximo passo.
         const agoraIso = new Date().toISOString();
         await supabase.from('onb_acelerada_ofertas')
@@ -1125,14 +1125,14 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
       // ── A OFERTA NÃO ATROPELA UMA RESPOSTA QUE JÁ ESTÁ NA FILA ─────────────
       // rayanne, 16/09: ela escreveu quatro mensagens às 09:46-09:47, a resposta a elas foi
       // redigida às 09:47:54 e estava NA FILA (com o atraso humano) quando a oferta disparou às
-      // 09:49. O turno da oferta respondeu a ela — e a substituição trocou a resposta pendente
+      // 09:49. O turno da oferta respondeu a ela, e a substituição trocou a resposta pendente
       // pela dele. A oferta foi gasta sem nunca ter sido feita, e travou a vaga por 20 h.
       //
       // ⚠️ O SINAL É A FILA, NÃO "INBOUND SEM RESPOSTA". A primeira versão deste gate olhava
       // `semResposta.some(inbound)` e a revisão adversarial mostrou que aquilo mataria a acelerada
       // inteira: o gatilho da oferta é o TOQUE NO BOTÃO, e o assistente fica calado diante dele de
       // propósito (ver o comentário do `botaoDaVez`, logo abaixo). Toda oferta nasceria adiada,
-      // para sempre. Reação e figurinha (`pulado:reacao`) têm o mesmo efeito — a rayanne, que
+      // para sempre. Reação e figurinha (`pulado:reacao`) têm o mesmo efeito: a rayanne, que
       // motivou o conserto, teria travado por causa de um ❤️.
       //
       // Resposta ENFILEIRADA é o estado exato da colisão: existe fala dela que o assistente já
@@ -1169,7 +1169,7 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
           return;
         }
         // Estourou o teto: melhor oferecer agora do que nunca. A substituição pode comer a
-        // resposta pendente, mas o aluno recebe o convite — e isso fica no log.
+        // resposta pendente, mas o aluno recebe o convite, e isso fica no log.
         await evento('acelerada:oferta_forcada', { ...rastro, adiamentos: jaAdiada });
       }
     }
@@ -1180,7 +1180,7 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
     // ⚠️⚠️ NO TURNO DA OFERTA O BOTÃO NÃO VALE MAIS. Ele já foi tratado no turno em que chegou;
     // o que trouxe a gente aqui foi o tick, dez minutos depois. Sem esta linha, o botão continua
     // "pendente" (o assistente ficou calado, então não há saída nossa depois dele) e a instrução
-    // dele — "não precisa responder (use nao_responder)" — entra como ÚLTIMA linha do contexto,
+    // dele, "não precisa responder (use nao_responder)", entra como ÚLTIMA linha do contexto,
     // brigando com o pedido de oferta que está na última mensagem do usuário. O modelo obedece à
     // negativa e cala: o passo fecharia e a oferta continuaria não saindo, que é exatamente o
     // problema que este conserto existe para resolver. Achado na revisão adversarial, 15/09/2026.
@@ -1229,7 +1229,7 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
     // ⚠️ 15/09/2026, pergunta do Rafael na primeira noite no ar: oito alunos tocaram "Sim, estou"
     // e a integração acelerada não soube de NENHUM. `marcar_passo_concluido` foi chamada zero vez
     // no dia. A causa é estrutural, não do modelo: o botão é registrado por código e a instrução
-    // que ele recebe diz "isso já ficou registrado, não precisa responder" — então ele cala, e a
+    // que ele recebe diz "isso já ficou registrado, não precisa responder"; então ele cala, e a
     // ferramenta que dispara a acelerada é uma decisão DELE que nunca acontece.
     //
     // Botão é sinal BINÁRIO. "Ele responder se está ou não no grupo da turma" é, literalmente, o
@@ -1240,7 +1240,7 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
     if (botaoDaVez && BOTAO_FECHA_O_PASSO.has(botaoDaVez.tipo)) {
       // O botão é de OUTRO passo? Quick-reply de mensagem antiga continua clicável no WhatsApp:
       // o aluno rola a conversa, toca no "Ok, entendido" do D+3 estando no D+9, e sem esta trava
-      // isso fecharia o D+9 e ofereceria o D+11 — dois passos adiantados por um toque no lugar
+      // isso fecharia o D+9 e ofereceria o D+11: dois passos adiantados por um toque no lugar
       // errado. `passo_dia` é o passo em que o card está, que é a mensagem que ele acabou de
       // receber. (Achado na revisão adversarial: os tipos novos não tinham a conferência de
       // coerência que o `grupo` já tinha contra `ctx.no_grupo`.)
@@ -1274,7 +1274,7 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
         const { data: r, error } = await supabase.rpc('onb_acelerada_agendar', {
           // ⚠️ `p_etapa_id` é IGNORADO pela função: quem decide o passo é
           // `onb_acelerada_passo_pendente`, a partir do estado do card. Vai só por compatibilidade
-          // de assinatura — não confie nele para fixar passo nenhum.
+          // de assinatura: não confie nele para fixar passo nenhum.
           p_oportunidade_id: aluno.oportunidade_id, p_etapa_id: aluno.etapa_id,
         });
         await evento('acelerada:fechou', {
@@ -1334,9 +1334,9 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
           : ehOferta
           // O convite vem do passo em que ele está AGORA (onb_regua_passos.oferta_convite), não de
           // uma frase pronta: o modelo adapta às palavras da conversa. Sem ele o turno nem chega
-          // aqui — ver a porta do convite, lá em cima.
+          // aqui: ver a porta do convite, lá em cima.
           ? `(sem mensagem nova: ele terminou o passo de hoje há pouco e a conversa continua aberta. `
-            + `Faça o convite — ${conviteDaOferta} — em UMA frase, continuando de onde a conversa parou, `
+            + `Faça o convite, ${conviteDaOferta}, em UMA frase, continuando de onde a conversa parou, `
             + `e espere. Não entregue nada agora, não explique o que vem, não abra com saudação e não `
             + `encerre a conversa. Se ele disser que sim, aí sim use entregar_proximo_passo.)`
           : sanearParaModelo(descreverParaModelo(tipo, conteudo, transcricaoAgora)).slice(0, 4000).trim() ||
@@ -1674,7 +1674,7 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
     // ⚠️⚠️ MAS "NA FILA" NÃO É "ENTREGUE". O `enviar()` enfileira; quem manda é o
     // `crm-agendadas-dispatch`, depois. Se ele falhar (mídia fora do ar, recusa da Meta) ou se uma
     // resposta mais nova cancelar a linha, o aluno não recebe nada e o carimbo daqui seria mentira
-    // permanente — a régua nunca mais mandaria aquele passo. Por isso o `fila_id` vai junto: o
+    // permanente: a régua nunca mais mandaria aquele passo. Por isso o `fila_id` vai junto: o
     // `onb_acelerada_tick` confere a fila de minuto em minuto e DESFAZ o carimbo do que morreu
     // (`onb_acelerada_desfazer_entregas_mortas`), e aí o passo volta a sair por template.
     if (entregaPendente) {
@@ -1701,8 +1701,8 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
     // ── OFERTA QUE NÃO VIROU MENSAGEM NÃO PODE SEGURAR A VAGA ────────────────
     // ⚠️ Só existe UMA oferta viva por aluno, e `onb_acelerada_agendar` só reabre quando a
     // anterior está num estado final. O tick marca 'oferecida' ANTES do POST, então toda oferta
-    // que morre depois disso — passagem aberta, humano no comando, janela de 24 h fechada, erro
-    // de RPC, ou o próprio modelo decidindo calar — travava a acelerada do aluno por 20 horas.
+    // que morre depois disso (passagem aberta, humano no comando, janela de 24 h fechada, erro
+    // de RPC, ou o próprio modelo decidindo calar) travava a acelerada do aluno por 20 horas.
     // Aconteceu de verdade em 15/09 (`pulado:transferencia_aberta` seis segundos depois do tick).
     //
     // Mora no `finally` de propósito: os `return` de porta estão espalhados pelo turno inteiro e

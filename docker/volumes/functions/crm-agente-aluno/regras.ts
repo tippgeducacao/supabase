@@ -196,7 +196,7 @@ export type RespostaDeBotao =
   | { tipo: 'combinado' };
 
 /**
- * Os botões que, por si só, FECHAM o passo do dia — sem o modelo precisar julgar.
+ * Os botões que, por si só, FECHAM o passo do dia, sem o modelo precisar julgar.
  *
  * ⚠️ 15/09/2026: oito alunos tocaram "Sim, estou" e a integração acelerada não soube de nenhum.
  * O botão é o sinal mais confiável que existe (binário, sem ambiguidade) e era justamente o
@@ -213,12 +213,12 @@ export const BOTAO_FECHA_O_PASSO = new Set(['grupo', 'entendido', 'combinado']);
  *
  * ⚠️ Quick-reply de mensagem antiga continua clicável no WhatsApp: o aluno rola a conversa para
  * cima e toca no "Ok, entendido" do D+3 estando no D+9. Sem amarrar o botão ao dia, aquele toque
- * fecharia o D+9 e ofereceria o D+11 — dois passos adiantados por um toque no lugar errado.
+ * fecharia o D+9 e ofereceria o D+11: dois passos adiantados por um toque no lugar errado.
  */
 export const DIA_DO_BOTAO: Record<string, number> = {
-  grupo: 1,       // int_aluno_01_boasvindas_cronograma — "Sim, estou" / "Não estou"
-  entendido: 3,   // int_aluno_03_cronograma            — "Ok, entendido"
-  combinado: 7,   // int_aluno_07_suporte               — "Combinado"
+  grupo: 1,       // int_aluno_01_boasvindas_cronograma: "Sim, estou" / "Não estou"
+  entendido: 3,   // int_aluno_03_cronograma:            "Ok, entendido"
+  combinado: 7,   // int_aluno_07_suporte:               "Combinado"
 };
 
 /**
@@ -239,7 +239,7 @@ const POR_PAYLOAD: Record<string, RespostaDeBotao> = {
  * ⚠️ Conferido contra a Meta em 15/09/2026, e faltavam dois: o "Ok, entendido"/"Fiquei com
  * dúvida" do D+3 (`int_aluno_03_cronograma`) e o "Combinado" do D+7 (`int_aluno_07_suporte`).
  * Botão não reconhecido vira texto solto para o modelo, e o prompt manda NÃO tratar um "ok" solto
- * como conclusão — então esses dois passos nunca fechariam, nem para a acelerada nem para o
+ * como conclusão; então esses dois passos nunca fechariam, nem para a acelerada nem para o
  * relatório. Ao trocar o texto de um botão na Meta, ACRESCENTE o título aqui.
  */
 const POR_TITULO: Record<string, RespostaDeBotao> = {
@@ -247,10 +247,10 @@ const POR_TITULO: Record<string, RespostaDeBotao> = {
   'nao estou': { tipo: 'grupo', estaNoGrupo: false },
   'comeco da manha': { tipo: 'ligacao', periodo: 'comeco_da_manha' },
   'fim da tarde': { tipo: 'ligacao', periodo: 'fim_da_tarde' },
-  // D+3 — as aulas ao vivo
+  // D+3: as aulas ao vivo
   'ok entendido': { tipo: 'entendido' },
   'fiquei com duvida': { tipo: 'duvida' },
-  // D+7 — quem é o suporte (o modelo no ar usa "Combinado"; a variante _texto usa os outros dois)
+  // D+7: quem é o suporte (o modelo no ar usa "Combinado"; a variante _texto usa os outros dois)
   'combinado': { tipo: 'combinado' },
   'ja salvei': { tipo: 'combinado' },
   'vou salvar': { tipo: 'combinado' },
@@ -477,7 +477,7 @@ export const assuntoValido = (a: unknown): AssuntoTransferencia =>
 
 /** O que `onb_agente_contexto` devolve. Lista fechada: nada de financeiro entra aqui. */
 export type ContextoAluno = {
-  /** O dia da régua do passo em que o card está — o da mensagem que ele ACABOU de receber. */
+  /** O dia da régua do passo em que o card está: o da mensagem que ele ACABOU de receber. */
   passo_dia?: number | null;
   /** O que conta como este passo concluído (`onb_regua_passos.roteiro_fechou`). */
   passo_fechou_quando?: string | null;
@@ -982,11 +982,11 @@ export function montarContexto(c: ContextoAluno, o: OpcoesContexto): string {
 
   // ⚠️ 15/09/2026: sem esta linha o modelo julgava "ele terminou o que a mensagem de hoje pedia?"
   // SEM SABER o que a mensagem de hoje pedia. O critério está escrito no banco desde 14/09 e
-  // nunca chegava até aqui — o mesmo erro do convite vazio da acelerada, no mesmo dia.
+  // nunca chegava até aqui: o mesmo erro do convite vazio da acelerada, no mesmo dia.
   //
   // A guarda do "ok solto" mora na DESCRIÇÃO da ferramenta e no prompt, e não aqui: repeti-la
   // nesta linha criava contradição em quatro passos, cujo critério é literalmente "ele confirmar
-  // que entendeu" / "confirmar que viu" — um "ok, entendi" satisfaz o critério e seria proibido
+  // que entendeu" / "confirmar que viu"; um "ok, entendi" satisfaz o critério e seria proibido
   // pela guarda, na mesma frase. Aqui vai só o CRITÉRIO.
   if (c.passo_fechou_quando) {
     linhas.push(
