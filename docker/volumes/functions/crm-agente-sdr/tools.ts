@@ -1164,6 +1164,16 @@ async function atualizarDadosLead(supabase: any, input: any, ctx: CtxConversa, t
   );
 }
 
+/** Estudante reprovado por prazo não entra no timer de próxima turma: o caminho dele é agendar_retorno formatura. */
+export function bloqueioProximaTurmaDeEstudante(id: string) {
+  return {
+    id, status: 'bloqueado', output: 'USE_AGENDAR_RETORNO_FORMATURA',
+    resultado: 'RECUSADO: este lead ainda está CURSANDO a graduação e foi reprovado por prazo. Ele não entra no recontato de próxima turma.',
+    instrucao: 'Chame agendar_retorno com tipo="formatura" e meses = quantos meses faltam pra ele concluir. '
+      + 'A despedida precisa dizer que a pós é lato sensu e exige graduação concluída, e que vc o procura perto da formatura.',
+  };
+}
+
 // ── dispatcher ──────────────────────────────────────────────────────────────
 export async function executarTool(
   supabase: any,
@@ -1218,7 +1228,13 @@ export async function executarTool(
       }
       case 'pausa_ia': return await pausaIa(supabase, input, ctx, id);
       case 'agendar_retorno': return await agendarRetorno(supabase, input, ctx, id);
-      case 'temporizador_proxima_turma': return await temporizadorProximaTurma(supabase, input, ctx, id);
+      case 'temporizador_proxima_turma': {
+        // 21/09/2026 (harness do caso Paulo Renato): reprovado por PRAZO, o modelo às vezes chama
+        // "próxima turma" em vez do retorno por formatura — e aí a despedida sai sem dizer que a pós
+        // é lato sensu, e o lead some do radar como desinteressado. Estudante volta pela FORMATURA.
+        if (ctx.ultimaElegibilidade?.motivo === 'REPROVADO_PRAZO') return bloqueioProximaTurmaDeEstudante(id);
+        return await temporizadorProximaTurma(supabase, input, ctx, id);
+      }
       case 'consulta_pos_disponiveis': return await consultaPosDisponiveis(supabase, input, ctx, id);
       case 'atualizar_dados_lead': return await atualizarDadosLead(supabase, input, ctx, id);
       default: return { resultado: `Tool desconhecida: ${name}`, id };

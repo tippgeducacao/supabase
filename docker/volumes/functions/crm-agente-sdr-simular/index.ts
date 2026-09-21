@@ -38,6 +38,7 @@ import {
   INSTRUCAO_TEMPO_FICHA, montarBlocoFicha, perguntasFeitas, registrarBloqueioNaJornada, registrarEnvioNaJornada, type Jornada,
 } from '../crm-agente-sdr/fichaAtendimento.ts';
 import { comGanchoDoLote } from '../crm-agente-sdr/ganchoLote.ts';
+import { bloqueioProximaTurmaDeEstudante } from '../crm-agente-sdr/tools.ts';
 import { blocoConviteAgenda } from '../crm-agente-sdr/contexto.ts';
 import { executarFollowupSimulado, executarSimulacao, extrairUso, MAX_CARACTERES_SIMULACAO, validarEntradaSimulacao, type AgenteRouter } from './simulacao.ts';
 
@@ -296,6 +297,7 @@ Deno.serve(async (req) => {
   };
   let agenteAtual: AgenteRouter = entrada.agente_atual ?? 'agente_validacao';
   const routers: Record<string, unknown>[] = [];
+  let reprovadoPorPrazo = false;
   const cacheTools = new Map<string, any[]>();
   const toolsDe = async (agente: string) => {
     // provedor openai ⇒ lê lista_tools_openai (a mesma tabela que a produção usará)
@@ -406,7 +408,13 @@ Deno.serve(async (req) => {
       },
       mockTool: async (nome, input) => {
         const dados = input as Record<string, unknown>;
+        // Espelho do executor real: reprovado por PRAZO não entra em "próxima turma".
+        if (nome === 'temporizador_proxima_turma' && reprovadoPorPrazo) {
+          const { id: _id, ...recusa } = bloqueioProximaTurmaDeEstudante('');
+          return JSON.stringify(recusa);
+        }
         const resposta = await mockTool(nome, dados, entrada.mocks, fichaSim);
+        if (nome === 'verificar_compatibilidade_curso') reprovadoPorPrazo = resposta.startsWith('REPROVADO_PRAZO');
         if (nome === 'atualizar_dados_lead') {
           if (typeof dados?.nome === 'string') estado.nome = dados.nome;
           if (typeof dados?.formacao === 'string') estado.formacao = dados.formacao;
