@@ -5,7 +5,7 @@ import { compararFontesEmailIA, criarSnapshotFontesEmailIA, MAX_CARACTERES_FONTE
 
 type Objeto = Record<string, unknown>;
 export interface SelecaoContextoEmailIA { curso_id?: string; campanha_id?: string; marca_id?: string; oferta_id?: string; usar_resultados?: boolean }
-export interface ImagemBibliotecaEmailIA { id: string; nome: string; url: string; origem: string; curso_id?: string; marca_id?: string }
+export interface ImagemBibliotecaEmailIA { id: string; nome: string; url: string; origem: string; curso_id?: string; marca_id?: string; largura?: number; altura?: number }
 export interface ContextoEmailIA {
   texto: string;
   fontes: string[];
@@ -88,6 +88,37 @@ function imagemMarketing(item: Objeto): ImagemBibliotecaEmailIA[] {
   const url = urlImagemBiblioteca(item.generated_image_url);
   return url ? [{ id: `marketing:${item.id}`, nome: texto(item.title, 180) || "Imagem aprovada", url, origem: "Marketing · aprovado", ...(typeof item.brand_profile_id === "string" ? { marca_id: item.brand_profile_id } : {}) }] : [];
 }
+/** A URL é a do bucket `email-imagens`, não a do Drive: o link do Drive não
+ * sobrevive como <img src> na caixa do destinatário. Ver drive.ts. */
+function imagemDrive(item: Objeto, pasta: Objeto | undefined): ImagemBibliotecaEmailIA[] {
+  const url = urlImagemBiblioteca(item.url);
+  if (!url || !pasta || !UUID.test(String(item.id))) return [];
+  return [{
+    id: `drive:${item.id}`, nome: texto(item.nome, 180) || "Imagem do Drive", url,
+    origem: `Drive · ${texto(pasta.nome, 60) || "pasta"}`,
+    ...(typeof pasta.marca_id === "string" ? { marca_id: pasta.marca_id } : {}),
+    ...(Number(item.largura) > 0 ? { largura: Math.trunc(Number(item.largura)) } : {}),
+    ...(Number(item.altura) > 0 ? { altura: Math.trunc(Number(item.altura)) } : {}),
+  }];
+}
+
+/** Pasta sem marca serve a todo mundo; com marca, só aparece na marca dela. */
+function pastasDaSelecao(pastas: Objeto[], selecao: SelecaoContextoEmailIA): Objeto[] {
+  return pastas.filter(p => !selecao.marca_id || !p.marca_id || p.marca_id === selecao.marca_id);
+}
+
+async function listarImagensDriveEmailIA(cliente: SupabaseClient, selecao: SelecaoContextoEmailIA): Promise<ImagemBibliotecaEmailIA[]> {
+  const pastas = pastasDaSelecao(
+    await listarPaginado((inicio, fim) => cliente.from("email_ia_drive_pastas").select("id,nome,marca_id").eq("ativo", true).order("nome").order("id").range(inicio, fim)),
+    selecao,
+  );
+  if (!pastas.length) return [];
+  const porPasta = new Map(pastas.map(p => [String(p.id), p]));
+  const imagens = await listarPaginado((inicio, fim) => cliente.from("email_ia_drive_imagens").select("id,pasta_id,nome,url,largura,altura")
+    .eq("ativo", true).in("pasta_id", [...porPasta.keys()]).order("nome").order("id").range(inicio, fim));
+  return imagens.flatMap(i => imagemDrive(i, porPasta.get(String(i.pasta_id))));
+}
+
 function linha(rotulo: string, valor: unknown, limite = 3000): string {
   const conteudo = Array.isArray(valor) ? valor.filter(v => typeof v === "string").join(", ").slice(0, limite) : texto(valor, limite);
   return conteudo ? `${rotulo}: ${conteudo}` : "";
@@ -198,7 +229,7 @@ export async function resolverContextoEmailIA(cliente: SupabaseClient, valor: un
 export async function listarImagensBibliotecaEmailIA(cliente: SupabaseClient, valor: unknown, usuarioId: string): Promise<ImagemBibliotecaEmailIA[]> {
   if (!UUID.test(usuarioId)) throw invalido("Não foi possível identificar o dono da biblioteca.");
   const selecao = validarSelecaoContextoEmailIA(valor);
-  const [cursos, marketing] = await Promise.all([
+  const [cursos, marketing, drive] = await Promise.all([
     listarPaginado((inicio, fim) => {
       let consulta = cliente.from("comercial_cursos").select("id,nome,banner_url,thumbnail_url").eq("ativo", true).order("nome").order("id");
       if (selecao.curso_id) consulta = consulta.eq("id", selecao.curso_id);
@@ -211,8 +242,9 @@ export async function listarImagensBibliotecaEmailIA(cliente: SupabaseClient, va
       if (selecao.marca_id) consulta = consulta.eq("brand_profile_id", selecao.marca_id);
       return consulta.range(inicio, fim);
     }),
+    listarImagensDriveEmailIA(cliente, selecao),
   ]);
-  return [...cursos.flatMap(imagensCurso), ...marketing.flatMap(imagemMarketing)];
+  return [...cursos.flatMap(imagensCurso), ...marketing.flatMap(imagemMarketing), ...drive];
 }
 
 export async function resolverImagensBibliotecaEmailIA(cliente: SupabaseClient, ids: unknown, valor: unknown, _urlPublica: string, usuarioId: string): Promise<ImagemBibliotecaEmailIA[]> {
@@ -227,6 +259,17 @@ export async function resolverImagensBibliotecaEmailIA(cliente: SupabaseClient, 
       if (selecao.curso_id && selecao.curso_id !== registroId) throw invalido("A imagem pertence a outro curso. Atualize a seleção da biblioteca.");
       const curso = await consultarUm(cliente.from("comercial_cursos").select("id,nome,banner_url,thumbnail_url").eq("id", registroId).eq("ativo", true).maybeSingle());
       if (curso) imagens = imagensCurso(curso);
+    } else if (origem === "drive" && !tipo) {
+      // Mesma régua das outras origens: o ID é reconferido no banco antes de
+      // gerar. Imagem tirada da pasta (desativada na sincronização) é recusada.
+      const item = await consultarUm(cliente.from("email_ia_drive_imagens").select("id,pasta_id,nome,url,largura,altura").eq("id", registroId).eq("ativo", true).maybeSingle());
+      if (item) {
+        const pasta = await consultarUm(cliente.from("email_ia_drive_pastas").select("id,nome,marca_id").eq("id", item.pasta_id).eq("ativo", true).maybeSingle());
+        if (pasta) {
+          if (selecao.marca_id && typeof pasta.marca_id === "string" && pasta.marca_id !== selecao.marca_id) throw invalido("A imagem pertence a outra marca. Atualize a seleção da biblioteca.");
+          imagens = imagemDrive(item, pasta);
+        }
+      }
     } else if (origem === "marketing" && !tipo) {
       if (!UUID.test(usuarioId)) throw invalido("Não foi possível identificar o dono da biblioteca.");
       let consulta = cliente.from("ai_content_pipeline").select("id,title,generated_image_url,brand_profile_id").eq("id", registroId).eq("user_id", usuarioId).eq("status", "approved");

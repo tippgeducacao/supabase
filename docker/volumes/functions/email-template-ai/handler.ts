@@ -15,6 +15,7 @@ import { ErroOfertaEmailIA } from "../_shared/emailBuilder/aiOferta.ts";
 import { resolverDesempenhoEmailIA, tratarAcaoDesempenhoEmailIA, ErroDesempenhoEmailIA } from "./desempenho.ts";
 import { orientacaoDesempenhoEmailIA, type ResumoDesempenhoEmailIA } from "../_shared/emailBuilder/aiDesempenho.ts";
 import { tratarVerificacaoLinksEmailIA, ErroLinksEmailIA, type RedeLinksEmailIA } from "./links.ts";
+import { ErroDriveEmailIA, tratarAcaoDriveEmailIA } from "./drive.ts";
 
 // Catálogo fechado: ai_agents.model ainda contém IDs legados. As opções abaixo
 // foram conferidas nas documentações oficiais em 08/09/2026 e aceitam visão.
@@ -51,6 +52,8 @@ export interface DependenciasEmailIA {
   criarClienteUsuario?: (token: string) => SupabaseClient;
   redeLinks?: RedeLinksEmailIA;
   buscar?: typeof fetch;
+  /** GOOGLE_DRIVE_API_KEY. Ausente = biblioteca do Drive some do painel. */
+  chaveDrive?: string;
   validarDocumento: (valor: unknown) => DocumentoEmail;
   promptDocumento: string;
   urlPublica: string;
@@ -398,7 +401,8 @@ export function criarHandlerEmailIA(deps: DependenciasEmailIA) {
       // Uploads e leituras locais podem terminar depois de um logout/login. O
       // usuário capturado no início do pedido não pode consumir a conta seguinte.
       if (corpo.usuario_esperado !== undefined && corpo.usuario_esperado !== usuarioId) throw new ErroEmailIA(409, "ACCOUNT_CHANGED", "A conta mudou durante a preparação. Reabra a criação de e-mail na conta atual.");
-      const acoesNovas = ["listar_ofertas", "carregar_oferta", "salvar_oferta", "desativar_oferta", "consultar_resultados", "verificar_links"];
+      const acoesNovas = ["listar_ofertas", "carregar_oferta", "salvar_oferta", "desativar_oferta", "consultar_resultados", "verificar_links",
+        "listar_pastas_drive", "salvar_pasta_drive", "sincronizar_pasta_drive"];
       if (acoesNovas.includes(String(corpo.acao)) && corpo.usuario_esperado !== usuarioId) throw new ErroEmailIA(409, "ACCOUNT_CHANGED", "Reabra o pedido na conta atual antes de continuar.");
       // Somente as RPCs que exigem auth.uid() recebem o cliente do usuário.
       // Credenciais de serviço nunca substituem a identidade do aprovador.
@@ -410,6 +414,9 @@ export function criarHandlerEmailIA(deps: DependenciasEmailIA) {
       if (corpo.acao === "verificar_links") return json(await tratarVerificacaoLinksEmailIA(corpo, { usuarioId, rede: deps.redeLinks }));
       if (["listar_ofertas", "carregar_oferta", "salvar_oferta", "desativar_oferta"].includes(String(corpo.acao))) return json(await tratarAcaoOfertasEmailIA(corpo, { cliente, usuarioId, clienteUsuario: clienteUsuario() }));
       if (corpo.acao === "consultar_cota") return json({ cota: await consultarCotaEmailIA(cliente, usuarioId) });
+      // Espelhar a pasta do Drive não chama modelo e não consome a cota de IA.
+      const drive = await tratarAcaoDriveEmailIA(corpo, { cliente, usuarioId, chaveDrive: deps.chaveDrive, buscar: deps.buscar });
+      if (drive !== null) return json(drive);
       const dados = await tratarAcaoDadosEmailIA(corpo, { cliente, usuarioId, urlPublica });
       if (dados !== null) return json(dados);
       if (corpo.acao === "gerar_imagem") {
@@ -429,7 +436,7 @@ export function criarHandlerEmailIA(deps: DependenciasEmailIA) {
         ]);
         if (agentes.error || chaves.error) throw new ErroEmailIA(503, "CATALOG_UNAVAILABLE", "Não foi possível carregar os agentes e modelos.");
         const providers = new Set((chaves.data ?? []).map(c => c.provider));
-        return json({ agentes: (agentes.data ?? []).map(a => ({ id: a.id, nome: a.name, descricao: a.description ?? "" })), modelos: MODELOS_EMAIL_IA.filter(m => providers.has(m.provider)), geracao_imagem: providers.has("google"), recursos: { memoria_escrita: 1, conferencia_fontes: 1, ofertas: deps.criarClienteUsuario ? 1 : 0, resultados_campanhas: deps.criarClienteUsuario ? 1 : 0, verificar_links: deps.redeLinks ? 1 : 0 } });
+        return json({ agentes: (agentes.data ?? []).map(a => ({ id: a.id, nome: a.name, descricao: a.description ?? "" })), modelos: MODELOS_EMAIL_IA.filter(m => providers.has(m.provider)), geracao_imagem: providers.has("google"), recursos: { memoria_escrita: 1, conferencia_fontes: 1, ofertas: deps.criarClienteUsuario ? 1 : 0, resultados_campanhas: deps.criarClienteUsuario ? 1 : 0, verificar_links: deps.redeLinks ? 1 : 0, drive: deps.chaveDrive ? 1 : 0 } });
       }
       const apenasAssuntos = corpo.acao === "sugerir_assuntos";
       if (corpo.acao !== "gerar" && !apenasAssuntos) throw invalido();
@@ -551,6 +558,7 @@ export function criarHandlerEmailIA(deps: DependenciasEmailIA) {
       if (e instanceof ErroKitMarcaEmailIA) return json({ error: e.message, code: "BAD_REQUEST" }, 400);
       if (e instanceof ErroOfertaEmailIA || e instanceof ErroDesempenhoEmailIA) return json({ error: e.message, code: e.code, ...saldo }, e.status);
       if (e instanceof ErroLinksEmailIA) return json({ error: e.message, code: "LINK_CHECK_ERROR" }, e.status);
+      if (e instanceof ErroDriveEmailIA) return json({ error: e.message, code: e.code }, e.status);
       if (e instanceof ErroImagemEmailIA) return json({ error: e.message, code: e.code, ...saldo }, e.status, e.retryAfter);
       if (e instanceof ErroDadosEmailIA) return json({ error: e.message, code: e.code }, e.status);
       if (e instanceof ErroEmailIA) return json({ error: e.message, code: e.code, ...saldo }, e.status, e.retryAfter);

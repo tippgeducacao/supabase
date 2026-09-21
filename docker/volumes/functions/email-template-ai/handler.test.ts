@@ -182,7 +182,7 @@ describe('controle de acesso e catálogo de templates IA', () => {
     expect(corpo.agentes).toEqual([{ id: AGENTE, nome: 'Diretor de Arte', descricao: 'Criação visual' }]);
     expect(corpo.modelos).toEqual([MODELOS_EMAIL_IA[1]]);
     expect(corpo.geracao_imagem).toBe(true);
-    expect(corpo.recursos).toEqual({ memoria_escrita: 1, conferencia_fontes: 1, ofertas: 0, resultados_campanhas: 0, verificar_links: 0 });
+    expect(corpo.recursos).toEqual({ memoria_escrita: 1, conferencia_fontes: 1, ofertas: 0, resultados_campanhas: 0, verificar_links: 0, drive: 0 });
     expect(JSON.stringify(corpo)).not.toMatch(/PRIVAD/);
     expect(c.rpc).not.toHaveBeenCalledWith('email_template_ia_consumir_cota', expect.anything());
     expect(c.buscar).not.toHaveBeenCalled();

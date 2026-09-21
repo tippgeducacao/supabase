@@ -15,8 +15,10 @@ function banco(tabelas: Record<string, Linha[]>, falhar?: string) {
     const consulta = { tabela, campos: "", filtros: [] as Array<[string, unknown]>, intervalo: undefined as number[] | undefined };
     consultas.push(consulta);
     let limite: number | undefined;
+    let dentro: [string, unknown[]] | null = null;
     const resultado = (unico = false) => {
-      const filtradas = (tabelas[tabela] ?? []).filter(l => consulta.filtros.every(([campo, valor]) => l[campo] === valor));
+      const filtradas = (tabelas[tabela] ?? []).filter(l => consulta.filtros.every(([campo, valor]) => l[campo] === valor)
+        && (!dentro || dentro[1].includes(l[dentro[0]])));
       const paginadas = consulta.intervalo ? filtradas.slice(consulta.intervalo[0], consulta.intervalo[1] + 1) : filtradas.slice(0, limite);
       const dados = paginadas.map(l => Object.fromEntries(consulta.campos.split(",").map(c => [c, l[c]])));
       return { data: unico ? dados[0] ?? null : dados, error: tabela === falhar ? { message: "SEGREDO_INTERNO" } : null };
@@ -24,6 +26,7 @@ function banco(tabelas: Record<string, Linha[]>, falhar?: string) {
     const q = {
       select(campos: string) { consulta.campos = campos; return q; },
       eq(campo: string, valor: unknown) { consulta.filtros.push([campo, valor]); return q; },
+      in(campo: string, valores: unknown[]) { dentro = [campo, valores]; return q; },
       order() { return q; },
       range(inicio: number, fim: number) { consulta.intervalo = [inicio, fim]; return q; },
       limit(valor: number) { limite = valor; return q; },
@@ -143,6 +146,42 @@ describe("snapshot das fontes resolvidas e consulta sem geração", () => {
 });
 
 describe("biblioteca aprovada de imagens", () => {
+  const PASTA_DRIVE = "55555555-5555-4555-8555-555555555555";
+  const IMG_DRIVE = "66666666-6666-4666-8666-666666666666";
+  const URL_BUCKET = `${URL}/storage/v1/object/public/email-imagens/drive/${PASTA_DRIVE}/arq1234567.png`;
+  const bancoComDrive = (imagem: Record<string, unknown> = {}, pasta: Record<string, unknown> = {}) => banco({
+    email_ia_drive_pastas: [{ id: PASTA_DRIVE, nome: "Artes de e-mail", marca_id: null, ativo: true, ...pasta }],
+    email_ia_drive_imagens: [{ id: IMG_DRIVE, pasta_id: PASTA_DRIVE, nome: "Banner setembro.png", url: URL_BUCKET, largura: 1200, altura: 628, ativo: true, ...imagem }],
+  });
+
+  it("oferece a imagem da pasta do Drive pela URL do bucket, com a pasta como origem", async () => {
+    const { cliente } = bancoComDrive();
+    const resposta = await tratarAcaoDadosEmailIA({ acao: "listar_imagens", contexto: {} }, { cliente, usuarioId: CURSO, urlPublica: URL });
+    expect(resposta?.imagens).toEqual([{ id: `drive:${IMG_DRIVE}`, nome: "Banner setembro.png", url: URL_BUCKET, origem: "Drive · Artes de e-mail", largura: 1200, altura: 628 }]);
+    // O link do Drive não sobrevive como <img src> na caixa do destinatário.
+    expect(JSON.stringify(resposta)).not.toContain("google.com");
+  });
+
+  it("esconde imagem desativada, pasta desativada e pasta de outra marca", async () => {
+    const desativada = await tratarAcaoDadosEmailIA({ acao: "listar_imagens", contexto: {} }, { cliente: bancoComDrive({ ativo: false }).cliente, usuarioId: CURSO, urlPublica: URL });
+    expect(desativada?.imagens).toEqual([]);
+    const pastaInativa = await tratarAcaoDadosEmailIA({ acao: "listar_imagens", contexto: {} }, { cliente: bancoComDrive({}, { ativo: false }).cliente, usuarioId: CURSO, urlPublica: URL });
+    expect(pastaInativa?.imagens).toEqual([]);
+    const outraMarca = await tratarAcaoDadosEmailIA({ acao: "listar_imagens", contexto: { marca_id: MARCA } }, { cliente: bancoComDrive({}, { marca_id: CURSO }).cliente, usuarioId: CURSO, urlPublica: URL });
+    expect(outraMarca?.imagens).toEqual([]);
+    // Pasta sem marca serve a qualquer marca selecionada.
+    const semMarca = await tratarAcaoDadosEmailIA({ acao: "listar_imagens", contexto: { marca_id: MARCA } }, { cliente: bancoComDrive().cliente, usuarioId: CURSO, urlPublica: URL });
+    expect((semMarca?.imagens as unknown[]).length).toBe(1);
+  });
+
+  it("reconfere a imagem do Drive a cada geração e recusa a que saiu da pasta", async () => {
+    expect(await resolverImagensBibliotecaEmailIA(bancoComDrive().cliente, [`drive:${IMG_DRIVE}`], {}, URL, CURSO))
+      .toEqual([{ id: `drive:${IMG_DRIVE}`, nome: "Banner setembro.png", url: URL_BUCKET, origem: "Drive · Artes de e-mail", largura: 1200, altura: 628 }]);
+    await expect(resolverImagensBibliotecaEmailIA(bancoComDrive({ ativo: false }).cliente, [`drive:${IMG_DRIVE}`], {}, URL, CURSO)).rejects.toThrow("disponível");
+    await expect(resolverImagensBibliotecaEmailIA(bancoComDrive({}, { ativo: false }).cliente, [`drive:${IMG_DRIVE}`], {}, URL, CURSO)).rejects.toThrow("disponível");
+    await expect(resolverImagensBibliotecaEmailIA(bancoComDrive({}, { marca_id: CURSO }).cliente, [`drive:${IMG_DRIVE}`], { marca_id: MARCA }, URL, CURSO)).rejects.toThrow("outra marca");
+  });
+
   it("valida aprovação e marca novamente a cada geração", async () => {
     const { cliente } = banco({ ai_content_pipeline: [{ id: MIDIA, user_id: CURSO, status: "approved", brand_profile_id: MARCA, generated_image_url: `${URL}/arte.png`, title: "Arte aprovada" }] });
     expect(await resolverImagensBibliotecaEmailIA(cliente, [`marketing:${MIDIA}`], { marca_id: MARCA }, URL, CURSO)).toEqual([{ id: `marketing:${MIDIA}`, nome: "Arte aprovada", url: `${URL}/arte.png`, origem: "Marketing · aprovado", marca_id: MARCA }]);

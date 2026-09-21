@@ -11,6 +11,9 @@ Deno.serve(criarHandlerEmailIA({
     global: { headers: { Authorization: `Bearer ${token}` } }, auth: { persistSession: false, autoRefreshToken: false },
   }),
   redeLinks: criarRedeLinksEmailIA(Deno),
+  // Mesma chave que o import de fotos de professor já usa. Sem ela o painel
+  // simplesmente não anuncia a biblioteca do Drive, em vez de falhar ao usar.
+  chaveDrive: Deno.env.get("GOOGLE_DRIVE_API_KEY") || undefined,
   validarDocumento: validarDocumentoIA,
   promptDocumento: PROMPT_DOCUMENTO_IA,
   urlPublica: Deno.env.get("SUPABASE_PUBLIC_URL") || Deno.env.get("PUBLIC_SUPABASE_URL") || "https://api.ppgeducacao.site",
