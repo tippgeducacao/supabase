@@ -52,7 +52,8 @@ export function despedidaDe(e: Encerramento | null): string | null {
 /** Só usar DEPOIS de confirmar que a ferramenta concluiu, nunca pela intenção do modelo. */
 export function respostaDoEncerramento(e: Encerramento | null): string | null {
   if (e?.tool === 'agendar_retorno' && e.input.tipo === 'formatura') {
-    return 'como a pós exige graduação concluída, não vou marcar a reunião agora. '
+    // 21/09/2026 (teste do usuário): a despedida precisa dizer POR QUE — a pós é lato sensu.
+    return 'como a pós é lato sensu e exige graduação concluída pra matrícula, não vou marcar a reunião agora. '
       + 'deixo anotado pra te procurar quando estiver mais perto de se formar. bons estudos.';
   }
   return despedidaDe(e);

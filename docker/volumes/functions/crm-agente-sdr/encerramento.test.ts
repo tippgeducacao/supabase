@@ -15,6 +15,7 @@ describe('resposta do encerramento confirmado', () => {
   it('formatura desfaz a expectativa de reunião e não inventa data', () => {
     const texto = respostaDoEncerramento({ tool: 'agendar_retorno', input: { tipo: 'formatura', meses: 14 } });
     expect(texto).toContain('não vou marcar a reunião agora');
+    expect(texto).toContain('lato sensu');
     expect(texto).toContain('quando estiver mais perto de se formar');
     expect(texto).not.toMatch(/14|2026/);
   });
