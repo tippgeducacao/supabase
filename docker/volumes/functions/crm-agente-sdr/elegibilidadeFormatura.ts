@@ -225,14 +225,30 @@ export function avaliarConclusao(
   bruto: unknown,
   normalizado: unknown,
   agora: Date = new Date(),
-): { veredito: VereditoConclusao; leitura: LeituraConclusao; limite: Date } {
+): { veredito: VereditoConclusao; leitura: LeituraConclusao; limite: Date; anoAssumido: boolean } {
   const limite = limiteFormatura(agora);
   const doLead = lerConclusao(bruto, agora);
-  if (doLead.tipo === 'posicao_no_curso') return { veredito: 'indeterminado', leitura: doLead, limite };
+  if (doLead.tipo === 'posicao_no_curso') return { veredito: 'indeterminado', leitura: doLead, limite, anoAssumido: false };
 
-  const leitura = doLead.tipo === 'data' ? doLead : lerConclusao(normalizado, agora);
-  if (leitura.tipo !== 'data') return { veredito: 'indeterminado', leitura, limite };
-  return { veredito: leitura.data <= limite ? 'apto' : 'fora_do_prazo', leitura, limite };
+  // 21/09/2026, caso Paulo Renato: "quando conclui?" → "Ano que vem" → "em que mês?" → "Outubro".
+  // O bruto da última resposta era só o MÊS; o ano foi ASSUMIDO (outubro/2026, ainda não passou)
+  // e o estudante de 2027 saiu como apto — com o modelo tendo mandado 10/2027 e até
+  // `estudante_fora_do_prazo`. Reunião marcada, no-show. Quando o ano do bruto é assumido e o
+  // normalizado traz o MESMO mês com ano explícito MAIS TARDE, vale o normalizado: o ano veio
+  // de outra fala do lead. (O caminho Edinara segue fechado: posição no curso retorna antes.)
+  const ASSUMIDO = ['mes sem ano', 'conclusao com mes'];
+  let leitura: LeituraConclusao = doLead.tipo === 'data' ? doLead : lerConclusao(normalizado, agora);
+  let anoAssumido = leitura.tipo === 'data' && ASSUMIDO.includes(String(leitura.via));
+  if (doLead.tipo === 'data' && anoAssumido) {
+    const doModelo = lerConclusao(normalizado, agora);
+    if (doModelo.tipo === 'data' && !ASSUMIDO.includes(String(doModelo.via))
+        && doModelo.data.getUTCMonth() === doLead.data.getUTCMonth() && doModelo.data > doLead.data) {
+      leitura = doModelo;
+      anoAssumido = false;
+    }
+  }
+  if (leitura.tipo !== 'data') return { veredito: 'indeterminado', leitura, limite, anoAssumido: false };
+  return { veredito: leitura.data <= limite ? 'apto' : 'fora_do_prazo', leitura, limite, anoAssumido };
 }
 
 export type DecisaoPrazo =
@@ -264,10 +280,13 @@ export function decidirPrazoEstudante(input: {
   const ctx = input?.contexto_qualificacao;
   if (ctx !== 'estudante_apto' && ctx !== 'estudante_fora_do_prazo') return { acao: 'segue' };
 
-  const { veredito, leitura } = avaliarConclusao(
+  const { veredito, leitura, anoAssumido } = avaliarConclusao(
     input?.conclusao_graduacao_bruta, input?.conclusao_graduacao, agora,
   );
   if (veredito === 'fora_do_prazo') return { acao: 'reprova' };
+  // Reprovar nunca exige data: se o modelo concluiu "fora do prazo" e o único motivo pra aprovar é
+  // um ANO que o código assumiu (o lead só disse o mês), vale a reprovação (caso Paulo Renato).
+  if (veredito === 'apto' && anoAssumido && ctx === 'estudante_fora_do_prazo') return { acao: 'reprova' };
   if (veredito === 'apto') return { acao: 'segue' };
   // indeterminado
   if (ctx === 'estudante_fora_do_prazo') return { acao: 'reprova' };

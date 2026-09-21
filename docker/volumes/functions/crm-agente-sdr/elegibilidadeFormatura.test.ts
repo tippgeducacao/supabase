@@ -316,3 +316,20 @@ describe('posição no curso E data de conclusão na mesma resposta', () => {
     expect(lerConclusao('tô no 3º período, comecei em janeiro', agora).tipo).toBe('posicao_no_curso');
   });
 });
+
+describe('caso Paulo Renato (21/09/2026): o lead disse o ANO numa fala e o MÊS em outra', () => {
+  const agora = new Date('2026-09-20T20:22:00Z');
+  it('bruto "Outubro" + normalizado 10/2027 + fora_do_prazo ⇒ reprova (antes: outubro/2026 assumido ⇒ apto ⇒ reunião marcada)', () => {
+    expect(decidirPrazoEstudante({ contexto_qualificacao: 'estudante_fora_do_prazo', conclusao_graduacao: '10/2027', conclusao_graduacao_bruta: 'Outubro' }, agora).acao).toBe('reprova');
+  });
+  it('mesmo com o enum "apto", o ano explícito do normalizado vence o ano assumido do mês solto', () => {
+    expect(decidirPrazoEstudante({ contexto_qualificacao: 'estudante_apto', conclusao_graduacao: '10/2027', conclusao_graduacao_bruta: 'Outubro' }, agora).acao).toBe('reprova');
+  });
+  it('fora_do_prazo com mês solto e SEM normalizado: reprovar nunca exige data', () => {
+    expect(decidirPrazoEstudante({ contexto_qualificacao: 'estudante_fora_do_prazo', conclusao_graduacao_bruta: 'Outubro' }, agora).acao).toBe('reprova');
+  });
+  it('quem conclui este ano continua seguindo: "dezembro" + 12/2026 + apto', () => {
+    expect(decidirPrazoEstudante({ contexto_qualificacao: 'estudante_apto', conclusao_graduacao: '12/2026', conclusao_graduacao_bruta: 'dezembro' }, agora).acao).toBe('segue');
+    expect(decidirPrazoEstudante({ contexto_qualificacao: 'estudante_apto', conclusao_graduacao_bruta: 'me formo em dezembro' }, agora).acao).toBe('segue');
+  });
+});
