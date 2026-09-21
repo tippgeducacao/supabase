@@ -234,6 +234,13 @@ async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimula
     case 'temporizador_proxima_turma':
       return 'Recontato agendado para a próxima turma. IA pausada.';
     case 'agendar_retorno': {
+      // Formatura: espelho do banco (meses 1..12 × 30 dias). O mock devolvia "3 dias" e o João
+      // dizia "te procuro no dia 24/09" a um estudante de 2027 (harness do caso Paulo Renato).
+      if (String(input?.tipo ?? '').toLowerCase() === 'formatura') {
+        const meses = Math.min(Math.max(Number(input?.meses) || 6, 1), 12);
+        const quando = new Date(Date.now() + meses * 30 * 86_400_000).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+        return `Retorno agendado para ${quando} (${meses} meses), perto de ele concluir a graduação. O lead fica fora dos disparos até lá e o time o retoma. Encerre com cordialidade dizendo que vai chamá-lo quando ele estiver concluindo.`;
+      }
       // Espelha o clamp DURO do banco (crm_agente_timer_retorno): 1..7.
       const pedidos = Number(input?.dias ?? 3);
       const aplicados = Math.min(Math.max(Number.isFinite(pedidos) ? pedidos : 3, 1), 7);
