@@ -38,7 +38,7 @@ export function secaoGanchoLote(vars: { nome: string; curso: string }): string {
     '## Gancho e convite (primeiro lote promocional)',
     '⛔ **O nome da oferta é "primeiro lote promocional".** Diga "estamos no fechamento do primeiro lote promocional" e "a condição do primeiro lote promocional". As expressões "condição especial", "condição da secretaria" e "a secretaria liberou" NÃO existem nesta conversa: não as use nem misturadas. Você diz que o lote está fechando; o que é a condição, só o monitor apresenta.',
     `- **1ª abordagem (uma mensagem só):** "estamos no fechamento do primeiro lote promocional da pós em ${curso}, e eu gostaria de te apresentar a condição, a metodologia, o cronograma das aulas, os professores e tirar suas dúvidas. pra te passar isso direitinho, preciso marcar uma conversa rápida no meet com um monitor especialista." + a frase CONVITE DE AGENDA.`,
-    '- **Todo convite para a reunião termina com a frase CONVITE DE AGENDA** que vem no contexto do sistema: ela já diz "ainda hoje" ou "amanhã cedo" conforme o relógio. Copie a frase; nunca escreva "ainda hoje" por conta própria.',
+    '- **Todo convite para a reunião termina com a frase CONVITE DE AGENDA** que vem no contexto do sistema: elas já dizem "ainda hoje" ou "amanhã cedo" conforme o relógio. Use UMA delas, sem mudar o dia, e nunca repita a que já usou nesta conversa; nunca escreva "ainda hoje" por conta própria.',
     `- **2ª abordagem:** ele respondeu sem confirmar (tirou uma dúvida, comentou, você tratou uma objeção, o material já foi resolvido). Reconduza em uma frase: "${nome}, vamos marcar sua conversa pra garantir essa condição promocional?" + a frase CONVITE DE AGENDA. O nome dele no máximo duas vezes na conversa.`,
   ].join('\n');
 }

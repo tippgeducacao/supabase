@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { blocoConviteAgenda, fraseConviteAgenda } from './contexto';
+import { blocoConviteAgenda, fraseConviteAgenda, variantesConviteAgenda } from './contexto';
 
 // dia: 0 = domingo … 6 = sábado (hora de Brasília)
 describe('CONVITE DE AGENDA calculado pelo relógio', () => {
@@ -17,6 +17,16 @@ describe('CONVITE DE AGENDA calculado pelo relógio', () => {
   it('sábado à tarde pula o domingo; domingo aponta para amanhã', () => {
     expect(fraseConviteAgenda({ dia: 6, hora: 14, minuto: 0 })).toBe('procuro um encaixe pra segunda-feira cedo, no primeiro horário?');
     expect(fraseConviteAgenda({ dia: 0, hora: 10, minuto: 0 })).toBe('procuro um encaixe pra amanhã cedo, no primeiro horário?');
+  });
+  it('três formas do mesmo convite, sempre no dia certo', () => {
+    const hoje = variantesConviteAgenda({ dia: 1, hora: 10, minuto: 0 });
+    expect(hoje).toHaveLength(3);
+    expect(new Set(hoje).size).toBe(3);
+    expect(hoje[1]).toBe('hoje fica melhor de manhã, à tarde ou à noite?');
+    expect(variantesConviteAgenda({ dia: 4, hora: 15, minuto: 0 })[1]).toBe('consegue conversar ainda hoje?');
+    const amanha = variantesConviteAgenda({ dia: 4, hora: 19, minuto: 0 });
+    expect(amanha.every((f) => f.includes('amanhã') && !f.includes('hoje'))).toBe(true);
+    expect(variantesConviteAgenda({ dia: 6, hora: 14, minuto: 0 }).every((f) => f.includes('segunda-feira'))).toBe(true);
   });
   it('o bloco traz a frase entre aspas para o modelo copiar', () => {
     expect(blocoConviteAgenda({ dia: 3, hora: 10, minuto: 0 })).toContain('"procuro um encaixe pra ainda hoje?"');

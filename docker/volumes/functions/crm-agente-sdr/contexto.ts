@@ -342,8 +342,27 @@ export function fraseConviteAgenda(agora: { dia: number; hora: number; minuto: n
   return `procuro um encaixe pra ${proximo.split(' a partir')[0]} cedo, no primeiro horário?`;
 }
 
+// Três jeitos de dizer o MESMO convite (o dia é do relógio; só a forma varia): a persona proíbe
+// repetir a mesma pergunta, e com uma frase só o João dizia "procuro um encaixe pra ainda hoje?"
+// quatro vezes seguidas (harness, 21/09/2026).
+export function variantesConviteAgenda(agora: { dia: number; hora: number; minuto: number } = agoraBrasilia()): string[] {
+  const base = fraseConviteAgenda(agora);
+  if (base.includes('ainda hoje')) {
+    const nomes: Record<string, string> = { 'manhã': 'de manhã', tarde: 'à tarde', noite: 'à noite' };
+    const periodos = periodosDisponiveisHoje(agora.dia, agora.hora, agora.minuto).lista.map((p) => nomes[p]);
+    return [
+      base,
+      periodos.length >= 2 ? `hoje fica melhor ${periodos.slice(0, -1).join(', ')} ou ${periodos[periodos.length - 1]}?` : 'consegue conversar ainda hoje?',
+      'consigo te encaixar ainda hoje, pode ser?',
+    ];
+  }
+  const quando = base.replace(/^procuro um encaixe pra /, '').replace(/ cedo, no primeiro horário\?$/, '');
+  return [base, `${quando} cedo fica bom pra vc?`, `consegue conversar ${quando}, logo no primeiro horário?`];
+}
+
 export function blocoConviteAgenda(agora?: { dia: number; hora: number; minuto: number }): string {
-  return `**CONVITE DE AGENDA (copie esta frase, sem mudar uma palavra, para fechar qualquer convite de reunião): "${fraseConviteAgenda(agora)}"**`;
+  const frases = variantesConviteAgenda(agora).map((f) => `"${f}"`).join(' · ');
+  return `**CONVITE DE AGENDA (feche qualquer convite de reunião com UMA destas frases, sem mudar o dia; nunca repita a que você já usou nesta conversa): ${frases}**`;
 }
 
 // ── pergunta_formacao + render de placeholders dos prompts ──────────────────
