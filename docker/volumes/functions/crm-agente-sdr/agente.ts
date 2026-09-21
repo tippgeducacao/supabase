@@ -11,6 +11,7 @@ import { descreverToolsSdr } from './descricoesTools.ts';
 import { respostaParaFalhaCatalogo } from './falhaCatalogo.ts';
 import { INSTRUCAO_FATOS_DO_LEAD } from './fatosLead.ts';
 import { INSTRUCAO_FICHA } from './fichaAtendimento.ts';
+import { INSTRUCAO_VOZ } from './vozDoJoao.ts';
 import { contemMeta, contemRaciocinioVazado } from './saida.ts';
 import {
   avaliarCanalResposta, INSTRUCAO_CANAL_RESPOSTA, NOME_TOOL_RESPOSTA,
@@ -171,7 +172,8 @@ export async function chamarAgentePrincipal(opts: {
     { type: 'text', text: INSTRUCAO_EVENTOS },
     // Ficha do atendimento (canário): bloco ESTÁTICO, só para quem tem a ficha — o prefixo
     // desse lead é outro, mas continua idêntico entre as voltas e as rodadas dele.
-    ...(opts.comFicha ? [{ type: 'text', text: INSTRUCAO_FICHA }] : []),
+    // Canário: a ficha (estado) e a VOZ DO JOÃO (persona, 21/09/2026) entram juntas.
+    ...(opts.comFicha ? [{ type: 'text', text: INSTRUCAO_FICHA }, { type: 'text', text: INSTRUCAO_VOZ }] : []),
     { type: 'text', text: INSTRUCAO_CANAL_RESPOSTA, cache_control: { type: 'ephemeral' } },
   ];
 
