@@ -72,7 +72,17 @@ describe('fracionador só pode extrair texto aprovado', () => {
   const original = 'claro, posso te ajudar.\nqual curso vc quer conhecer?';
   it('aceita divisão fiel, tolerando somente espaços e quebras de linha', async () => {
     devolver(['claro, posso te ajudar.', 'qual curso vc quer conhecer?']);
-    expect(await saida.fracionarResposta(original)).toEqual(['claro, posso te ajudar.', 'qual curso vc quer conhecer?']);
+    // balão curto não fica sozinho: a reação vai junto da pergunta que ela introduz
+    expect(await saida.fracionarResposta(original)).toEqual(['claro, posso te ajudar. qual curso vc quer conhecer?']);
+  });
+  it('junta balões curtos ao vizinho, preserva os longos e nunca mistura mídia', () => {
+    expect(saida.juntarBaloesCurtos(['tranquilo, à noite fica melhor.', 'qual é a sua graduação?'])).toEqual(['tranquilo, à noite fica melhor. qual é a sua graduação?']);
+    const lista = 'para a conversa com o monitor sobre a pós, tenho hoje às 19h, 19h30 ou 20h, no horário de brasília.';
+    expect(saida.juntarBaloesCurtos([lista, 'qual fica melhor?'])).toEqual([`${lista} qual fica melhor?`]);
+    const a = 'estamos no fechamento do primeiro lote promocional da pós, e eu gostaria de te apresentar a condição e tirar suas dúvidas.';
+    const b = 'pra te passar isso direitinho, preciso marcar uma conversa rápida no meet com um monitor especialista.';
+    expect(saida.juntarBaloesCurtos([a, b, 'hoje fica melhor de manhã ou à tarde?'])).toEqual([a, `${b} hoje fica melhor de manhã ou à tarde?`]);
+    expect(saida.juntarBaloesCurtos(['olha só', '<video>https://x/y.mp4</video>', 'gostou?'])).toEqual(['olha só', '<video>https://x/y.mp4</video>', 'gostou?']);
   });
   it.each([
     ['Analisando o histórico.', 'claro, posso te ajudar.', 'qual curso vc quer conhecer?'],

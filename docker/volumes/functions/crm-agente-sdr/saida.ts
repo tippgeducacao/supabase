@@ -351,6 +351,27 @@ export function contemLinkCritico(texto: string): boolean {
   return contemLinkReuniao(texto) || RE_LINK_ESCOLA.test(texto ?? '');
 }
 
+// 21/09/2026 (print do usuário): o fracionador (LLM) quebrava frase por frase e deixava balão
+// órfão — "tranquilo, à noite fica melhor." / "qual é a sua graduação?" e, pior, a lista de
+// horários num balão e "qual fica melhor?" sozinho no outro. Gente não escreve assim: a reação
+// curta vai JUNTO da pergunta que ela introduz. Regra determinística, depois do LLM: balão com
+// menos de 45 caracteres se junta ao vizinho (de preferência o anterior), sem passar de 300.
+// Mídia (<video>, <imagem>…) continua sempre em balão próprio.
+const BALAO_MINIMO = 45;
+const BALAO_MAXIMO = 300;
+const temMidia = (t: string) => /<(?:imagem|video|audio|documento)>/i.test(t);
+export function juntarBaloesCurtos(chunks: string[]): string[] {
+  const saida: string[] = [];
+  for (const atual of chunks) {
+    const anterior = saida[saida.length - 1];
+    const cabe = anterior !== undefined && !temMidia(anterior) && !temMidia(atual)
+      && anterior.length + 1 + atual.length <= BALAO_MAXIMO;
+    if (cabe && (atual.length < BALAO_MINIMO || anterior.length < BALAO_MINIMO)) saida[saida.length - 1] = `${anterior} ${atual}`;
+    else saida.push(atual);
+  }
+  return saida;
+}
+
 export async function fracionarResposta(texto: string): Promise<string[]> {
   texto = humanizarTexto(texto);
   if (!texto) return [];
@@ -380,7 +401,7 @@ export async function fracionarResposta(texto: string): Promise<string[]> {
     // nem inventar preâmbulos. No erro, o único fallback é a entrada já validada.
     const normalizar = (t: string) => t.replace(/\s+/g, ' ').trim();
     const fiel = chunks.length > 0 && normalizar(chunks.join(' ')) === normalizar(texto);
-    return fiel ? chunks : [texto];
+    return fiel ? juntarBaloesCurtos(chunks) : [texto];
   } catch (e) {
     console.log(`[crm-agente-sdr] chunking falhou, enviando balão único: ${(e as Error).message}`);
     return [texto];
