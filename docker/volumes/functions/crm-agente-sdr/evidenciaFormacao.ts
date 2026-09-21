@@ -18,6 +18,12 @@ const NUNCA_CURSOU = new RegExp(`^(?:eu )?nunca (?:fiz|cursei|iniciei|comecei|fr
 const UNICA_FORMACAO = /^(?:(?:eu )?(?:(?:so|somente|apenas) tenho|tenho (?:so|somente|apenas))(?: o)?|minha unica formacao e(?: o)?) (?:ensino medio|segundo grau|curso tecnico|tecnico)(?: completo| concluido)?$/;
 const SEM_DIPLOMA = new RegExp(`^(?:eu )?nao (?:tenho|possuo)(?: (?:nenhuma|qualquer))? ${SUPERIOR}(?: complet[ao]| concluid[ao])?$`);
 const NAO_CURSA = new RegExp(`^(?:eu )?nao (?:(?:estou|to) (?:cursando|fazendo)|curso|faco|frequento)(?: (?:uma?|nenhuma?))? ${SUPERIOR}$`);
+// 15/09/2026: estes títulos também são informação conflitante com "nunca
+// cursei faculdade". Isto só impede arquivamento automático; não aprova a
+// formação, não chama a matriz e não classifica graduação por regex.
+const TITULO_PROFISSIONAL = '(?:zootecnista|(?:sub[ -]?)?chefe de veterinaria)';
+const TITULO_DECLARADO = new RegExp(`^(?:eu )?(?:sou|trabalho como) ${TITULO_PROFISSIONAL}(?:$|[ ,:])`);
+const TITULO_COMO_RESPOSTA = new RegExp(`^${TITULO_PROFISSIONAL}$`);
 
 function normalizar(texto: string): string {
   return texto.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
@@ -59,7 +65,9 @@ function temOutraInformacaoAcademica(texto: string): boolean {
   // ambígua de formação também conserva o atendimento até esclarecer.
   const restante = declaracoes(texto).filter((frase) => !negativaConhecida(frase)).join('\n');
   return /\b(?:graduacao|faculdade|universidade|superior|pos|mestrado|doutorado|bacharel|licenciad[oa]|formad[oa]|graduad[oa]|universitari[oa]|graduand[oa]|estudante|cursando|estudando|semestre|periodo|me formei|me formo)\b/.test(restante)
-    || /\b(?:sou|trabalho como) (?:medic[oa]|veterinari[oa]|enfermeir[oa]|engenheir[oa]|advogad[oa])\b/.test(restante);
+    || /\b(?:sou|trabalho como) (?:medic[oa]|veterinari[oa]|enfermeir[oa]|engenheir[oa]|advogad[oa])\b/.test(restante)
+    || restante.split('\n').some((frase) => !frase.includes('?')
+      && (TITULO_DECLARADO.test(frase) || TITULO_COMO_RESPOSTA.test(frase)));
 }
 
 export function avaliarEvidenciaSemGraduacao(historico?: readonly Msg[]): EvidenciaSemGraduacao {

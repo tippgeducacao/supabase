@@ -85,9 +85,25 @@ describe('evidência própria de ausência de graduação', () => {
     'Sou formada e já tenho pós na área e pós complementar.', 'Estou cursando veterinária.',
     'Tenho pós-graduação.', 'Sou bacharel em medicina veterinária.', 'Me formei em 2020.',
     'Estou no quinto semestre.', 'Sou médica veterinária.',
+    'Sou zootecnista.', 'Eu trabalho como zootecnista há 2 anos.',
+    'Chefe de Veterinária.', 'Sou subchefe de veterinária.',
+    'Sub chefe de veterinária e auxiliar de zootecnista e auxiliar de veterinária.',
+    'Eu sou sub-chefe de veterinária.',
   ])('uma formação informada impede saída: %s', (formacao) => {
     expect(avaliarEvidenciaSemGraduacao([lead('Nunca cursei faculdade.'), lead(formacao)]).autorizada).toBe(false);
     expect(avaliarEvidenciaSemGraduacao([lead(formacao), lead('Nunca cursei faculdade.')]).autorizada).toBe(false);
+  });
+
+  it.each([
+    'Meu chefe é zootecnista.', 'Minha mãe é chefe de veterinária.',
+    'Não sou zootecnista.', 'Não sou chefe de veterinária.',
+    'Sou auxiliar de zootecnista.', 'Sou auxiliar de veterinária.',
+    'Quero ser zootecnista.', 'Quero ser chefe de veterinária.',
+    '“Sou zootecnista”', 'Ela disse: sou chefe de veterinária.',
+    'Você é zootecnista?',
+  ])('não transforma menção ao título em conflito de formação própria: %s', (texto) => {
+    expect(avaliarEvidenciaSemGraduacao([lead(texto), lead('Só tenho ensino médio.')]))
+      .toMatchObject({ autorizada: true, motivo: 'declaracao_explicita', indiceMensagem: 1 });
   });
 
   it('não reaproveita uma declaração antiga depois de resposta ambígua', () => {
@@ -139,6 +155,8 @@ describe('pausa_ia no executor real, com banco e rede isolados', () => {
     ['Angélica', ANGELICA], ['histórico ausente', undefined], ['cadastro sem formação', []],
     ['estudante', [lead('Não tenho graduação. Estou cursando veterinária.')]],
     ['correção posterior', [lead('Nunca cursei faculdade.'), lead('Sou formada e já tenho pós.')]],
+    ['zootecnista com histórico conflitante', [lead('Sou zootecnista.'), lead('Só tenho ensino médio.')]],
+    ['chefia com histórico conflitante', [lead('Sub chefe de veterinária e auxiliar de zootecnista e auxiliar de veterinária.'), lead('Nunca cursei faculdade.')]],
     ['resposta da tool', [lead([{ type: 'tool_result', tool_use_id: 'x', content: 'Nunca cursei faculdade.' }])]],
   ] as [string, Msg[] | undefined][])('rejeita %s antes de qualquer RPC/escrita', async (_nome, historico) => {
     const banco = bancoIsolado();

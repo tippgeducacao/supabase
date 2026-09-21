@@ -451,8 +451,6 @@ async function remarcarAgendamento(supabase: any, input: any, ctx: CtxConversa, 
     if (!Number.isFinite(startMs)) {
       return { resultado: 'data/horário inválido pra remarcar (use data_escolhida YYYY-MM-DD e horario_escolhido HH:mm).', id: toolUseId };
     }
-    const endIsoUtc = new Date(startMs + 30 * 60 * 1000).toISOString();
-
     // 2) PATCH no MESMO agendamento (reagenda) — novo horário passa a valer na base.
     const patch = await sdrApi(`agendamentos/${alvo.id}`, {
       method: 'PATCH',
@@ -467,7 +465,24 @@ async function remarcarAgendamento(supabase: any, input: any, ctx: CtxConversa, 
       const err = patchResp.error || `HTTP ${patch.status}`;
       return { resultado: `Não consegui remarcar (${err}). Rode consulta_disponibilidade pro novo horário e ofereça um slot livre antes de remarcar.`, id: toolUseId };
     }
-    const agNovo = patchResp.agendamento ?? {};
+    // 15/09/2026: sdr-api embrulha a linha em `data`. Ler só `agendamento`
+    // descartava google_event_id e fazia recriar o Meet a cada remarcação.
+    // Mantém o envelope legado por compatibilidade, sem aceitar retorno vazio.
+    const agNovo = patchResp.data ?? patchResp.agendamento;
+    const inicioConfirmadoMs = typeof agNovo?.data_agendamento === 'string'
+      ? Date.parse(agNovo.data_agendamento) : NaN;
+    const fimConfirmadoMs = agNovo?.data_fim_agendamento == null
+      ? inicioConfirmadoMs + 30 * 60 * 1000 : Date.parse(agNovo.data_fim_agendamento);
+    if (!agNovo || typeof agNovo !== 'object' || Array.isArray(agNovo)
+      || agNovo.id !== alvo.id || agNovo.vendedor_id !== vendedorNovo
+      || !Number.isFinite(inicioConfirmadoMs) || inicioConfirmadoMs !== startMs
+      || !Number.isFinite(fimConfirmadoMs) || fimConfirmadoMs <= inicioConfirmadoMs) {
+      return {
+        status: 'erro', agendamento_id: alvo.id, id: toolUseId,
+        resultado: 'A resposta do sistema não confirmou a data, o horário e o monitor solicitados. '
+          + 'Não anuncie a remarcação como concluída; os dados do agendamento precisam ser conferidos.',
+      };
+    }
     let link = agNovo.link_reuniao ?? alvo.link_reuniao ?? '';
 
     // 3) move (ou cria) o evento no Google Calendar pro novo horário.
@@ -478,34 +493,52 @@ async function remarcarAgendamento(supabase: any, input: any, ctx: CtxConversa, 
         const { data: prof } = await supabase.from('profiles').select('id_calendar').eq('id', vendedorNovo).maybeSingle();
         calendarId = prof?.id_calendar ?? null;
       }
-      const startISO = toBrasiliaISO(new Date(startMs).toISOString());
-      const endISO = toBrasiliaISO(endIsoUtc);
-      const eventId = agNovo.google_event_id ?? null;
+      if (!calendarId) throw new Error('Agenda Google do monitor não encontrada');
+      // Usa o instante confirmado pelo banco nas duas agendas e na fala final.
+      const startISO = toBrasiliaISO(agNovo.data_agendamento);
+      const endISO = toBrasiliaISO(new Date(fimConfirmadoMs).toISOString());
+      const eventId = agNovo.google_event_id ?? alvo.google_event_id ?? null;
       if (eventId && mesmoVendedor && calendarId) {
         await moverEventoMeet(supabase, calendarId, eventId, startISO, endISO);
       } else if (calendarId) {
+        const oldEventId = alvo.google_event_id ?? eventId;
+        const oldCalendarId = alvo.vendedor?.id_calendar;
+        if (oldEventId && !oldCalendarId) {
+          throw new Error('Agenda Google anterior não identificada para remover o evento antigo');
+        }
         // sem event_id (agendamento antigo) ou trocou de vendedor → cria evento novo
         const evento = await criarEventoMeet(supabase, {
           calendarId, startISO, endISO,
           summary: `Reunião PPG — remarcada`,
           description: `Agendamento: ${alvo.id} (remarcado pela IA)\nLink: ${link || '-'}`,
         });
-        link = evento.hangoutLink ?? link;
-        await supabase.from('agendamentos').update({ link_reuniao: link, google_event_id: evento.eventId }).eq('id', alvo.id);
+        if (!evento.eventId || !evento.hangoutLink) {
+          throw new Error('Novo evento Google ou link do Meet ainda não confirmado');
+        }
+        link = evento.hangoutLink;
+        // Só remove o anterior depois de confirmar que o novo vínculo foi salvo.
+        // Supabase pode devolver error sem lançar exceção (ou atualizar zero linhas).
+        const { data: vinculoSalvo, error: erroVinculo } = await supabase.from('agendamentos')
+          .update({ link_reuniao: link, google_event_id: evento.eventId }).eq('id', alvo.id)
+          .select('id, google_event_id, link_reuniao').maybeSingle();
+        if (erroVinculo || vinculoSalvo?.id !== alvo.id
+          || vinculoSalvo.google_event_id !== evento.eventId || vinculoSalvo.link_reuniao !== link) {
+          throw new Error('Vínculo com o novo evento Google não confirmado no agendamento');
+        }
         // Apaga o evento ANTIGO da agenda do vendedor anterior (senão fica fantasma no
         // horário velho). Só quando há id antigo e ele não é o evento que acabamos de criar.
-        const oldEventId = alvo.google_event_id ?? eventId;
-        const oldCalendarId = alvo.vendedor?.id_calendar;
         if (oldEventId && oldCalendarId && oldEventId !== evento.eventId) {
-          try {
-            await deletarEventoMeet(supabase, oldCalendarId, oldEventId);
-          } catch (e) {
-            console.error(`[crm-agente-sdr] remarcar: evento antigo não removido (segue): ${(e as Error).message}`);
-          }
+          await deletarEventoMeet(supabase, oldCalendarId, oldEventId);
         }
       }
     } catch (e) {
-      console.error(`[crm-agente-sdr] remarcar: GCal não atualizado (segue): ${(e as Error).message}`);
+      console.error(`[crm-agente-sdr] remarcar: sincronização GCal incompleta: ${(e as Error).message}`);
+      return {
+        status: 'erro', agendamento_id: alvo.id, id: toolUseId,
+        resultado: `O horário foi atualizado no sistema para ${formataBrasiliaDataHora(agNovo.data_agendamento)}, `
+          + 'mas a sincronização com a agenda Google não foi concluída. Não anuncie a remarcação como concluída '
+          + 'nem repita a operação automaticamente; encaminhe para conferência humana da agenda e do link.',
+      };
     }
 
     // Nome do monitor computado aqui — sem ele no retorno, o modelo reaproveita o nome
@@ -516,7 +549,7 @@ async function remarcarAgendamento(supabase: any, input: any, ctx: CtxConversa, 
       vendedorNome = prof?.name ?? '';
     } catch { /* segue sem o nome */ }
     return {
-      resultado: `Reunião remarcada. Novo horário: ${formataBrasiliaDataHora(startBR)}. ` +
+      resultado: `Reunião remarcada. Novo horário: ${formataBrasiliaDataHora(agNovo.data_agendamento)}. ` +
         `Monitor: ${vendedorNome || vendedorNovo}. Link: ${link || '(o mesmo de antes)'}. ` +
         `Confirme o novo horário, o monitor e o link pro lead (use exatamente estes dados).`,
       agendamento_id: alvo.id,

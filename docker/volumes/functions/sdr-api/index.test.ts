@@ -153,6 +153,68 @@ describe('envio real do gateway, com WhatsApp simulado', () => {
   });
 });
 
+describe('contrato de remarcação com a agenda Google', () => {
+  const agendamento = {
+    id: idAgendamento,
+    sdr_id: idSdrDaChave,
+    vendedor_id: '00000000-0000-4000-8000-000000000005',
+    data_agendamento: '2030-06-10T21:30:00+00:00',
+    data_fim_agendamento: '2030-06-10T22:00:00+00:00',
+    google_event_id: 'evento_sintetico_existente',
+    link_reuniao: 'https://meet.invalid/evento-existente',
+  };
+
+  it('GET inclui o evento existente e mantém o filtro do SDR autenticado', async () => {
+    const original = mocks.from.getMockImplementation()!;
+    const filtros = vi.fn();
+    mocks.from.mockImplementation((tabela: string) => {
+      if (tabela !== 'agendamentos') return original(tabela);
+      let colunas = '';
+      const consulta = {
+        select: (selecao: string) => { colunas = selecao; return consulta; },
+        eq: (campo: string, valor: unknown) => { filtros(campo, valor); return consulta; },
+        order: () => consulta,
+        limit: () => consulta,
+        then: (resolver: (valor: unknown) => unknown) => {
+          const selecionadas = new Set(colunas.split(',').map((coluna) => coluna.trim()));
+          const linha = Object.fromEntries(Object.entries(agendamento).filter(([campo]) => selecionadas.has(campo)));
+          return Promise.resolve({ data: [linha], error: null }).then(resolver);
+        },
+      };
+      return consulta;
+    });
+    const resposta = await handler(new Request('https://supabase.invalid/functions/v1/sdr-api/agendamentos', {
+      headers: { Authorization: 'Bearer chave_sintetica' },
+    }));
+    expect(resposta.status).toBe(200);
+    expect(await resposta.json()).toEqual({ data: [agendamento] });
+    expect(filtros).toHaveBeenCalledWith('sdr_id', idSdrDaChave);
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
+  it('PATCH devolve a linha confirmada em data, com horário e evento existentes', async () => {
+    mocks.rpc.mockResolvedValue({ data: { success: true, agendamento }, error: null });
+    const resposta = await handler(new Request(`https://supabase.invalid/functions/v1/sdr-api/agendamentos/${idAgendamento}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer chave_sintetica' },
+      body: JSON.stringify({
+        data_agendamento: '2030-06-10T18:30:00-03:00',
+        vendedor_id: agendamento.vendedor_id,
+        sdr_id: 'outro_sdr',
+      }),
+    }));
+    expect(resposta.status).toBe(200);
+    expect(await resposta.json()).toEqual({ data: agendamento });
+    expect(mocks.rpc).toHaveBeenCalledExactlyOnceWith('fn_sdr_api_reagendar', expect.objectContaining({
+      p_sdr_id: idSdrDaChave,
+      p_agendamento_id: idAgendamento,
+      p_data_agendamento: '2030-06-10T18:30:00-03:00',
+      p_vendedor_id: agendamento.vendedor_id,
+    }));
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+});
+
 describe('agendamento exclusivo da IA', () => {
   it('usa a RPC protegida e o SDR dono da chave com a prova e versão do servidor', async () => {
     const resp = await chamar({ ...corpoValido(), sdr_id: 'outro_sdr', p_sdr_id: 'outro_sdr' });

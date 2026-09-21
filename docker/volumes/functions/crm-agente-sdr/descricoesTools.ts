@@ -1,6 +1,7 @@
 // Contratos versionados junto dos executores. A lista/permissões continua vindo
 // de lista_tools_claude; a descrição efetiva não depende de editar produção para testar.
 import { INSTRUCAO_AGENDA_EVENTOS } from './instrucaoEventos.ts';
+import { INSTRUCAO_TITULOS_PROFISSIONAIS } from './fatosLead.ts';
 type Propriedade = { description?: string; [chave: string]: unknown };
 type ToolSdr = {
   name: string;
@@ -11,6 +12,18 @@ type ToolSdr = {
 export function descreverToolsSdr(tools: ToolSdr[]): ToolSdr[] {
   return tools.map(original => {
     const tool = structuredClone(original);
+    if (tool.name === 'verificar_compatibilidade_curso') {
+      // 15/09/2026, Luciana: o catálogo antigo exigia perguntar conclusão até
+      // após a autodeclaração profissional. A descrição efetiva acompanha a
+      // regra comercial sem depender de migration nem alterar o contrato JSON.
+      if (!tool.description?.includes(INSTRUCAO_TITULOS_PROFISSIONAIS)) {
+        tool.description = INSTRUCAO_TITULOS_PROFISSIONAIS + '\n\n' + (tool.description ?? '');
+      }
+      const contexto = tool.input_schema.properties?.contexto_qualificacao;
+      if (contexto) {
+        contexto.description = 'Informe a situação realmente declarada pelo lead. normal = graduação concluída explicitamente declarada ou título autodeclarado de médico veterinário/veterinário, zootecnista ou chefe/subchefe de veterinária, conforme a regra da descrição desta ferramenta. Auxiliar/técnico, terceiro, intenção, negação e cargo genérico não equivalem a título concluído. Quem ainda cursa essa graduação nunca usa normal. Nome do curso isolado e trabalho na área não confirmam conclusão. Para estudante, use a DATA-LIMITE DE ELEGIBILIDADE calculada no contexto temporal; não recalcule nem reprove apenas por ser ano que vem. estudante_apto = conclusão dentro dessa data-limite; estudante_fora_do_prazo = conclusão depois dela. Envie a resposta literal em conclusao_graduacao_bruta e a data sustentada por ela em conclusao_graduacao. Se faltar saber se já concluiu ou em que mês/ano conclui, pergunte só isso, usando a graduação já conhecida. Semestre/período e respostas ambíguas não permitem deduzir conclusão. correcao_sem_formacao só vale quando estava marcado Sem Formação, mas declarou graduação concluída ou título profissional aceito e informou o curso correspondente. Esses contextos descrevem a informação recebida; não substituem a aprovação da ferramenta para o mesmo lead e pós. Não cite a régua, data-limite ou elegibilidade ao lead.';
+      }
+    }
     if (['consulta_disponibilidade', 'confirmar_agendamento', 'remarcar_agendamento'].includes(tool.name)
       && !tool.description?.includes(INSTRUCAO_AGENDA_EVENTOS)) {
       tool.description = INSTRUCAO_AGENDA_EVENTOS + '\n\n' + (tool.description ?? '');

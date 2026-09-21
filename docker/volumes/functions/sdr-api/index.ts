@@ -367,9 +367,11 @@ async function handleListAgendamentos(sdrId: string, url: URL): Promise<Response
 
   // vendedor embutido (FK explícita: sdr_id também aponta pra profiles) — id_calendar é a
   // agenda Google do vendedor, usada pelo fluxo externo pra criar/editar o evento do Meet.
+  // 15/09/2026: a remarcação também precisa do evento atual. Omitir este ID
+  // impedia mover/apagar o evento antigo e podia deixar outra data na agenda Google.
   let query = supabase
     .from('agendamentos')
-    .select('id, lead_id, vendedor_id, sdr_id, pos_graduacao_interesse, data_agendamento, data_fim_agendamento, link_reuniao, status, resultado_reuniao, data_resultado, is_forcado, origem, created_at, vendedor:profiles!agendamentos_vendedor_id_fkey(id, name, id_calendar)')
+    .select('id, lead_id, vendedor_id, sdr_id, pos_graduacao_interesse, data_agendamento, data_fim_agendamento, link_reuniao, google_event_id, status, resultado_reuniao, data_resultado, is_forcado, origem, created_at, vendedor:profiles!agendamentos_vendedor_id_fkey(id, name, id_calendar)')
     .eq('sdr_id', sdrId)
     .order('data_agendamento', { ascending: false })
     .limit(limit)
