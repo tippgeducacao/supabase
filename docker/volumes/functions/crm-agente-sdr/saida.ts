@@ -320,7 +320,22 @@ export function humanizarTexto(texto: string): string {
   t = t.replace(/,\s*$/gm, '.');             // vírgula pendurada no fim da linha
   t = t.replace(/[ \t]+([,.;:?])/g, '$1');   // espaço antes de pontuação ("aí ," → "aí,")
   t = t.replace(/[ \t]{2,}/g, ' ');
-  return t.trim();
+  return corrigirNomeDeCurso(t).trim();
+}
+
+// 21/09/2026 (pedido do usuário) — o que o lead LÊ sobre o nome do curso, corrigido na saída:
+//  · o catálogo grava "MBA | GESTÃO DA PECUÁRIA LEITERA" (sem o "i"). Esse nome é CHAVE em 17
+//    tabelas (crm_materiais_pos, cursos_pos_graduacao, segmentos, webhooks, matrículas…), então
+//    não se renomeia o cadastro: corrige-se a grafia só na fala. As tools seguem recebendo o nome
+//    do catálogo, porque o input delas não passa por aqui.
+//  · "pós em MBA X" é redundante (os prompts dizem "pós em {curso}" e o curso já se chama MBA):
+//    vira "MBA X", com o artigo ajustado ("na pós em MBA" → "no MBA").
+export function corrigirNomeDeCurso(texto: string): string {
+  return texto
+    .replace(/\bleitera(s?)\b/gi, (m) => (m === m.toUpperCase() ? m.replace('LEITERA', 'LEITEIRA') : m.replace(/eitera/i, 'eiteira')))
+    .replace(/\b([dn])a\s+p[óo]s(?:-gradua[çc][ãa]o)?\s+em\s+MBA\b/gi, (_m, p: string) => `${p}o MBA`)
+    .replace(/\ba\s+p[óo]s(?:-gradua[çc][ãa]o)?\s+em\s+MBA\b/gi, 'o MBA')
+    .replace(/\bp[óo]s(?:-gradua[çc][ãa]o)?\s+em\s+MBA\b/gi, 'MBA');
 }
 
 // ── CONFIRMAÇÃO DE REUNIÃO VAI EM UM BALÃO SÓ (2026-07-27, caso Fran Lopes) ──

@@ -104,3 +104,16 @@ describe('fracionador só pode extrair texto aprovado', () => {
     expect(transporte).not.toHaveBeenCalled();
   });
 });
+
+describe('nome do curso na fala (21/09/2026)', () => {
+  it('"pós em MBA" vira só MBA, com o artigo ajustado', () => {
+    expect(saida.corrigirNomeDeCurso('o valor integral da pós em MBA GESTÃO DA PECUÁRIA LEITERA é X')).toBe('o valor integral do MBA GESTÃO DA PECUÁRIA LEITEIRA é X');
+    expect(saida.corrigirNomeDeCurso('vc tem interesse na pós em MBA gestão?')).toBe('vc tem interesse no MBA gestão?');
+    expect(saida.corrigirNomeDeCurso('a pós em MBA crédito rural é online')).toBe('o MBA crédito rural é online');
+    expect(saida.corrigirNomeDeCurso('pós-graduação em MBA crédito rural')).toBe('MBA crédito rural');
+  });
+  it('corrige a grafia do catálogo só na fala, e não toca em quem não tem o erro', () => {
+    expect(saida.humanizarTexto('o MBA em gestão da pecuária leitera tem aulas ao vivo')).toBe('o MBA em gestão da pecuária leiteira tem aulas ao vivo');
+    expect(saida.corrigirNomeDeCurso('pós em clínica de bovinos leiteiros')).toBe('pós em clínica de bovinos leiteiros');
+  });
+});
