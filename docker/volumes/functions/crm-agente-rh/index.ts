@@ -291,7 +291,8 @@ const TOOL_DADOS = {
       cidade: { type: 'string', description: 'Cidade onde a pessoa mora hoje.' },
       conhece_alguem: { type: 'string', description: 'Quem ela conhece que trabalha ou trabalhou na PPG. "não" se não conhece.' },
       habilidades: { type: 'string', description: 'As 3 principais habilidades, separadas por vírgula.' },
-      mudanca: { type: 'string', description: 'Só quando mora fora de Ampére: se teria disponibilidade de se mudar para Ampére ou de vir até a empresa todos os dias. Registre qual dos dois caminhos, com as palavras da pessoa.' },
+      mudanca: { type: 'string', description: 'Só quando mora fora de Ampére: o que ela respondeu sobre se mudar para Ampére. Morando por perto, a pergunta oferece também vir até a empresa todos os dias, e aí registre qual dos dois caminhos ela escolheu. Sempre com as palavras dela, e só o que ela disse: quem não falou de mudança não tem nada gravado aqui.' },
+      home_office: { type: 'string', description: 'Só quando mora longe, fora da nossa região: o que ela respondeu sobre uma vaga para trabalhar de casa. Com as palavras dela, inclusive quando for não. Não preencha por dedução.' },
     },
     additionalProperties: false,
   },
@@ -488,6 +489,8 @@ const CAMPO_POR_CHAVE: Record<string, string> = {
   conhece_alguem: '_rh_conhece_alguem',
   habilidades: '_rh_habilidades',
   mudanca: '_rh_mudanca',
+  // Quem mora longe demais para vir todo dia: o interesse dela em vaga de trabalho em casa.
+  home_office: '_rh_home_office',
   // Só de quem quer DAR AULA, gravados pelo encaminhar_para_triagem.
   lattes: '_rh_lattes',
   area_docencia: '_rh_area_docencia',
