@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { compilarDocumento } from "./compile";
 import { docVazio, type DocumentoEmail, type Linha } from "./types";
-import { CAMINHO_LOGO_TOPO_EMAIL, ID_LINHA_LOGO_TOPO_EMAIL, emailTemLogoTopo, garantirLogoTopoEmail, linhaLogoTopoEmail, urlLogoTopoEmail } from "./logoTopo";
+import { CAMINHO_LOGO_TOPO_EMAIL, DESTINO_LOGO_TOPO_EMAIL, ID_LINHA_LOGO_TOPO_EMAIL, blocoLogoTopoEmail, emailTemLogoTopo, garantirLogoTopoEmail, linhaLogoTopoEmail, urlLogoTopoEmail } from "./logoTopo";
 
 const URL_PUBLICA = "https://api.exemplo.test";
 const LOGO = urlLogoTopoEmail(URL_PUBLICA);
@@ -40,6 +40,26 @@ describe("faixa do logo institucional no topo do e-mail", () => {
     expect(garantirLogoTopoEmail(doc, "")).toBe(doc);
   });
 
+  it("uma VERSÃO ANTERIOR do arquivo conta como logo — não duplica a faixa", () => {
+    // E-mail montado antes de o arquivo mudar de tamanho continua com o caminho
+    // antigo. É o mesmo logo na tela de quem recebe; uma segunda faixa seria erro.
+    const antigo = `${URL_PUBLICA}/storage/v1/object/public/email-imagens/institucional/logo-ppgvet.png`;
+    const doc: DocumentoEmail = { ...comCabecalho(), linhas: [{
+      id: "lin_topo_antigo", colunas: [{ id: "col", larguraPct: 100, blocos: [{ id: "b_antigo", tipo: "imagem", props: { src: antigo, alt: "PPGVET" } }] }],
+    }, cabecalho()] };
+    expect(emailTemLogoTopo(doc, LOGO)).toBe(true);
+    expect(garantirLogoTopoEmail(doc, LOGO)).toBe(doc);
+  });
+
+  it("o logo leva ao site, em aba nova e sem UTM escrito à mão", () => {
+    const bloco = blocoLogoTopoEmail(LOGO);
+    expect(bloco.tipo).toBe("imagem-link");
+    expect(bloco.props.href).toBe(DESTINO_LOGO_TOPO_EMAIL);
+    expect(bloco.props.alvo).toBe("_blank");
+    // UTM fixo aqui apagaria o utm_content que a campanha usa no teste A/B.
+    expect(DESTINO_LOGO_TOPO_EMAIL).not.toContain("utm_");
+  });
+
   it("compila a 180px, centralizado e com fundo branco mesmo em e-mail de fundo escuro", () => {
     const doc = garantirLogoTopoEmail({ ...comCabecalho(), globais: { ...docVazio().globais, corFundo: "#0f2e1f" } }, LOGO);
     const html = compilarDocumento(doc).html;
@@ -49,6 +69,7 @@ describe("faixa do logo institucional no topo do e-mail", () => {
     expect(img).toContain('alt="PPGVET Educação"');
     expect(img).toContain("margin:0 auto");
     expect(html).toContain("background-color:#ffffff");
+    expect(html).toContain(`href="${DESTINO_LOGO_TOPO_EMAIL}"`);
     // A faixa fica dentro do container: nada de sangrar na largura total da página.
     expect(linhaLogoTopoEmail(LOGO).corFundoExterna).toBeUndefined();
   });
