@@ -11,6 +11,7 @@ import { INSTRUCAO_DISPONIBILIDADE_CONTATO } from './disponibilidadeContato';
 import { INSTRUCAO_EVENTOS } from './instrucaoEventos';
 import { INSTRUCAO_FATOS_DO_LEAD } from './fatosLead';
 import { INSTRUCAO_VOZ } from './vozDoJoao';
+import { INSTRUCAO_FALHA_COMPATIBILIDADE } from './falhaCompatibilidade';
 import { INSTRUCAO_FICHA, avaliarFicha, montarBlocoFicha } from './fichaAtendimento';
 import { INSTRUCAO_CANAL_RESPOSTA, NOME_TOOL_RESPOSTA } from './canalResposta';
 
@@ -71,6 +72,32 @@ beforeEach(() => {
 });
 
 describe('instrução de memória no system enviado à Anthropic', () => {
+  const matrizFalhou: Msg[] = [
+    { role: 'assistant', content: [{ type: 'tool_use', id: 'matriz', name: 'verificar_compatibilidade_curso', input: {} }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'matriz', content: '{"output":"FALHA_TECNICA"}' }] },
+  ];
+  it.each([true, false])('o aceite após falha dispensa LLM apenas no piloto: %s', async (comFicha) => {
+    const r = await chamarAgentePrincipal({ promptAgente: AGENTE_VALIDACAO, contextoTemporal: '', comFicha,
+      tools: [{ name: 'verificar_compatibilidade_curso' }], messages: [...matrizFalhou,
+        { role: 'assistant', content: 'vou confirmar sua formação, tudo bem?' }, { role: 'user', content: 'OK' }],
+    });
+    if (comFicha) {
+      expect(transporte).not.toHaveBeenCalled();
+      expect(r.origem).toBe('aceite_apos_falha_compatibilidade');
+      expect(r.content[0].text).toBe('não consegui concluir essa verificação agora. desculpa por te deixar esperando.');
+    } else expect(transporte).toHaveBeenCalledOnce();
+  });
+  it('novos pedidos preservam o fluxo e recebem o estado corrigido da consulta', async () => {
+    await chamarAgentePrincipal({ promptAgente: AGENTE_VALIDACAO, contextoTemporal: '', comFicha: true,
+      tools: [{ name: 'verificar_compatibilidade_curso' }], messages: [...matrizFalhou,
+        { role: 'assistant', content: 'não consegui concluir a verificação agora' }, { role: 'user', content: 'tenta de novo' }],
+    });
+    const pedido = ultimoPedido();
+    expect(transporte).toHaveBeenCalledOnce();
+    expect(pedido.tools?.some((t) => t.name === 'verificar_compatibilidade_curso')).toBe(true);
+    expect(JSON.stringify(pedido.messages)).toContain('TERMINOU COM FALHA');
+    expect((pedido.messages.at(-1)?.content as { text?: string }[]).some((b) => b.text?.includes(INSTRUCAO_FALHA_COMPATIBILIDADE))).toBe(true);
+  });
   it.each([true, false])('cumprimento e confirmação nomeada entram somente no canário: %s', async (comFicha) => {
     const entrada = { cadastro: 'Médico Veterinário (a)', jornada: { coleta: { area_atuacao: 'formulação de dietas', atua_na_area: 'sim' as const } } };
     const ficha = montarBlocoFicha(entrada, avaliarFicha(entrada));

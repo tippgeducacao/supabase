@@ -67,13 +67,17 @@ describe('confirmação antes da matriz no piloto', () => {
     expect(b.rpc).toHaveBeenCalledWith('crm_agente_elegibilidade_finalizar', expect.objectContaining({ p_decisao: 'aprovado' }));
   });
 
-  it('falta de saldo faz uma tentativa por rodada; próxima entrada pode tentar de novo', async () => {
+  it('falha encerra a tentativa, preserva a graduação e permite nova tentativa concreta', async () => {
     carregar({ graduacao_concluida: 'sim' });
     mocks.modelo.mockRejectedValue(new Error('Anthropic: saldo insuficiente no teste'));
     const b = banco(); const ctx = contexto();
     const primeira = await executar(b, pedido('primeira'), ctx);
     const repetida = await executar(b, pedido('repetida'), ctx);
     expect(primeira.output).toBe('FALHA_TECNICA');
+    expect(primeira).toMatchObject({ checagem_em_andamento: false, nova_tentativa_agendada: false });
+    expect(primeira.instrucao).toContain('TERMINOU COM FALHA');
+    expect(primeira.instrucao).not.toContain('tente esta função de novo na próxima rodada');
+    expect(JSON.stringify(primeira)).not.toContain('saldo insuficiente no teste');
     expect(repetida).toMatchObject({ id: 'repetida', output: 'FALHA_TECNICA', reutilizado_nesta_rodada: true });
     expect(ctx.compatibilidadeIndisponivel).toBe(true);
     expect(mocks.modelo).toHaveBeenCalledOnce();

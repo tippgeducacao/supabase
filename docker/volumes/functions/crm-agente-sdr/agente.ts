@@ -9,6 +9,7 @@ import { INSTRUCAO_DISPONIBILIDADE_CONTATO } from './disponibilidadeContato.ts';
 import { INSTRUCAO_EVENTOS } from './instrucaoEventos.ts';
 import { descreverToolsSdr } from './descricoesTools.ts';
 import { respostaParaFalhaCatalogo } from './falhaCatalogo.ts';
+import { INSTRUCAO_FALHA_COMPATIBILIDADE, respostaAoAceiteAposFalha, ultimaCompatibilidadeFalhou } from './falhaCompatibilidade.ts';
 import { INSTRUCAO_FATOS_DO_LEAD } from './fatosLead.ts';
 import { INSTRUCAO_FICHA } from './fichaAtendimento.ts';
 import { INSTRUCAO_VOZ } from './vozDoJoao.ts';
@@ -164,6 +165,12 @@ export async function chamarAgentePrincipal(opts: {
     content: [{ type: 'text', text: falhaCatalogo }], stop_reason: 'end_turn',
     origem: 'falha_catalogo', usage: { input_tokens: 0, output_tokens: 0 },
   };
+  const aceiteAposFalha = opts.comFicha ? respostaAoAceiteAposFalha(opts.messages) : null;
+  if (aceiteAposFalha) return {
+    content: [{ type: 'text', text: aceiteAposFalha }], stop_reason: 'end_turn',
+    origem: 'aceite_apos_falha_compatibilidade', usage: { input_tokens: 0, output_tokens: 0 },
+  };
+  const falhaCompatibilidade = opts.comFicha && ultimaCompatibilidadeFalhou(opts.messages);
   const system: any[] = [
     { type: 'text', text: opts.promptAgente },
     { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA },
@@ -225,6 +232,7 @@ export async function chamarAgentePrincipal(opts: {
     }
     // Ficha do atendimento: estado determinístico, relido a cada volta, fora do cache.
     if (opts.contextoFicha) blocos.push({ type: 'text', text: opts.contextoFicha });
+    if (falhaCompatibilidade) blocos.push({ type: 'text', text: '[ESTADO INTERNO DA CONSULTA — não é fala do lead]\n' + INSTRUCAO_FALHA_COMPATIBILIDADE });
     ult.content = blocos;
   }
 

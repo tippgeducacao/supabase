@@ -23,6 +23,7 @@ import { atualizarLead, buscarLead } from './historico.ts';
 import type { Msg } from './historico.ts';
 import { avaliarEvidenciaSemGraduacao, bloqueioSemEvidenciaGraduacao } from './evidenciaFormacao.ts';
 import { chamarAnthropic } from './agente.ts';
+import { INSTRUCAO_FALHA_COMPATIBILIDADE } from './falhaCompatibilidade.ts';
 import { temDorFinanceira } from './objecaoFinanceira.ts';
 import { montarRetornoInformacoes } from './envioMateriais.ts';
 import { consultarCatalogo } from './catalogoCursos.ts';
@@ -1237,7 +1238,8 @@ export async function executarTool(
     return { id, output: 'FALHA_TECNICA', compativel: null, pode_cursar: null,
       reutilizado_nesta_rodada: true,
       resultado: 'A checagem já falhou nesta rodada. Nenhuma nova tentativa foi feita.',
-      instrucao: 'Encerre a rodada com uma resposta breve. Não ofereça horários, não repita perguntas acadêmicas já respondidas e não tente a matriz novamente nesta rodada.' };
+      checagem_em_andamento: false, nova_tentativa_agendada: false,
+      instrucao: INSTRUCAO_FALHA_COMPATIBILIDADE };
   }
   try {
     switch (name) {
@@ -1323,9 +1325,11 @@ export async function executarTool(
         compativel: null,
         pode_cursar: null,
         mensagem_para_lead: null,
-        resultado: `A checagem de compatibilidade NÃO rodou (falha técnica: ${(e as Error).message}).`,
-        instrucao: (ctx.ficha ? 'Não repita esta checagem na mesma rodada. Falha técnica não é falta de formação: não peça de novo o dado já confirmado pelo lead. ' : '')
-          + 'É PROIBIDO tratar o lead como apto, dizer que a formação dele atende ou '
+        ...(ctx.ficha ? { checagem_em_andamento: false, nova_tentativa_agendada: false } : {}),
+        resultado: ctx.ficha ? 'A tentativa de checagem terminou sem resultado por falha técnica. Nenhuma aprovação foi obtida.'
+          : `A checagem de compatibilidade NÃO rodou (falha técnica: ${(e as Error).message}).`,
+        instrucao: ctx.ficha ? INSTRUCAO_FALHA_COMPATIBILIDADE
+          : 'É PROIBIDO tratar o lead como apto, dizer que a formação dele atende ou '
           + 'oferecer horário agora. Sem citar erro técnico, diga que vai confirmar a '
           + 'compatibilidade e siga a conversa; tente esta função de novo na próxima rodada.',
       };
