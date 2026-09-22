@@ -3,6 +3,8 @@
 //   → delay de "digitação" por chunk (palavras/0.75 ±20%, 2 a 12s)
 //   → POST crm-whatsapp-send por chunk.
 // Se o chunking falhar, manda o texto inteiro num balão só (resposta > silêncio).
+// 22/09/2026: candidata local troca só o fracionamento do canário OpenAI por
+// código puro. O modo padrão continua sendo o modelo para os demais chamadores.
 
 // deno-lint-ignore-file no-explicit-any
 import { CHUNKING_SYSTEM } from './prompts.ts';
@@ -11,6 +13,10 @@ import { contemArtefatoAntml, contemAvaliacaoInterna } from './bastidorEditorial
 import { limparTagsDoCanal } from './canalResposta.ts';
 import { configurarVoz, conferirEstadoVoz, tentarEnviarVoz, type OpcoesVozSdr } from './envioVoz.ts';
 import { confirmarInteracaoVoz, planejarCadenciaVoz, type ChaveCadenciaVoz, type PlanoCadenciaVoz } from './cadenciaVoz.ts';
+import { contemLinkCritico, contemLinkReuniao, fracionarTextoDeterministico, prepararQuebras } from './fracionamentoTexto.ts';
+export { contemLinkCritico, contemLinkReuniao } from './fracionamentoTexto.ts';
+
+export type ModoFracionamento = 'modelo' | 'codigo';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
 const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
@@ -356,17 +362,7 @@ export function corrigirNomeDeCurso(texto: string): string {
 // mandada na despedida de quem encerra sem reunião): é a ÚLTIMA mensagem daquele lead, e
 // o link vem no fim dela — exatamente a posição que o truncamento come. Sem balão único,
 // o presente viraria "tranquilo, agradeço sua preferência" e mais nada.
-const RE_LINK_REUNIAO = /https?:\/\/(?:meet\.google\.com|[\w.-]*\bzoom\.us|teams\.(?:live|microsoft)\.com)\/\S+/i;
-const RE_LINK_ESCOLA = /escoladeespecializacao\.ppgvet\.com\.br/i;
-
-export function contemLinkReuniao(texto: string): boolean {
-  return RE_LINK_REUNIAO.test(texto ?? '');
-}
-
-/** Link que não pode se perder num balão truncado ⇒ a mensagem vai inteira, num balão só. */
-export function contemLinkCritico(texto: string): boolean {
-  return contemLinkReuniao(texto) || RE_LINK_ESCOLA.test(texto ?? '');
-}
+// Detecção compartilhada com o fracionador determinístico em fracionamentoTexto.ts.
 
 // 21/09/2026 (print do usuário): o fracionador (LLM) quebrava frase por frase e deixava balão
 // órfão — "tranquilo, à noite fica melhor." / "qual é a sua graduação?" e, pior, a lista de
@@ -389,9 +385,10 @@ export function juntarBaloesCurtos(chunks: string[]): string[] {
   return saida;
 }
 
-export async function fracionarResposta(texto: string): Promise<string[]> {
+export async function fracionarResposta(texto: string, modo: ModoFracionamento = 'modelo'): Promise<string[]> {
   texto = humanizarTexto(texto);
   if (!texto) return [];
+  if (modo === 'codigo') return fracionarTextoDeterministico(texto);
   if (contemLinkCritico(texto)) return [texto];
   try {
     const res = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -484,11 +481,12 @@ export async function enviarResposta(
   tel?: { registrar: (tipo: string, dados?: Record<string, unknown>, duracaoMs?: number, erro?: string) => void },
   pausada?: () => Promise<boolean>,
   voz?: OpcoesVozSdr,
+  modoFracionamento: ModoFracionamento = 'modelo',
 ): Promise<ResultadoEnvioResposta> {
   // Rótulo da tool (</mensagem>) vazando no texto: fora antes de tudo (16/09/2026).
   const semTagDoCanal = limparTagsDoCanal(texto);
   const tagCanalRemovida = semTagDoCanal !== texto.trim();
-  const textoLimpo = humanizarTexto(semTagDoCanal);
+  const textoLimpo = humanizarTexto(modoFracionamento === 'codigo' ? prepararQuebras(semTagDoCanal) : semTagDoCanal);
   const raciocinioRemovido = contemRaciocinioVazado(texto);
   const metaRemovida = contemMeta(texto);
   // Nada sobrou pro lead: ou era só raciocínio (<thinking> truncado por
@@ -545,9 +543,10 @@ export async function enviarResposta(
       return { aceitos: resultado === 'aceito' ? 1 : 0, canal: 'audio', estado: resultado };
     }
   }
-  const chunks = await fracionarResposta(textoLimpo);
+  const chunks = await fracionarResposta(textoLimpo, modoFracionamento);
   tel?.registrar('resposta_chunks', {
     total: chunks.length,
+    metodo: modoFracionamento,
     sanitizado: textoLimpo !== texto,
     tag_canal_removida: tagCanalRemovida || undefined,
     raciocinio_removido: raciocinioRemovido || undefined,

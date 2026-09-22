@@ -3,7 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 let saida: typeof import('./saida');
 const transporte = vi.fn();
 beforeAll(async () => {
-  vi.stubGlobal('Deno', { env: { get: () => '' } });
+  vi.stubGlobal('Deno', { env: { get: () => undefined } });
   vi.stubGlobal('fetch', transporte);
   saida = await import('./saida');
 });
@@ -101,6 +101,38 @@ describe('fracionador só pode extrair texto aprovado', () => {
   it('mensagem com link crítico continua inteira e não chama outro modelo', async () => {
     const texto = 'seu acesso: https://escoladeespecializacao.ppgvet.com.br';
     expect(await saida.fracionarResposta(texto)).toEqual([texto]);
+    expect(transporte).not.toHaveBeenCalled();
+  });
+});
+
+describe('fracionamento determinístico no pipeline de saída', () => {
+  it('divide o texto aprovado sem chamar API', async () => {
+    const texto = 'primeira ideia.\n\nsegunda ideia.';
+    expect(await saida.fracionarResposta(texto, 'codigo')).toEqual(['primeira ideia.', 'segunda ideia.']);
+    expect(transporte).not.toHaveBeenCalled();
+  });
+
+  it('mantém as barreiras de bastidor antes de dividir em código', async () => {
+    expect(await saida.fracionarResposta(analiseDoIncidente, 'codigo')).toEqual([]);
+    expect(transporte).not.toHaveBeenCalled();
+  });
+
+  it('envia pelo transporte existente, sem chamar o fracionador LLM', async () => {
+    transporte.mockResolvedValue(new Response('{}', { status: 200 }));
+    const registrar = vi.fn();
+    const resultado = await saida.enviarResposta({ telefone: '5511999990001' } as never,
+      'claro, vc já trabalha nessa área?', vi.fn(), { registrar }, undefined, undefined, 'codigo');
+    expect(resultado).toEqual({ aceitos: 1, canal: 'texto', estado: 'aceito' });
+    expect(transporte).toHaveBeenCalledTimes(1);
+    expect(transporte.mock.calls[0][0]).toContain('crm-whatsapp-send');
+    expect(JSON.parse(transporte.mock.calls[0][1].body).conteudo).toBe('claro, vc já trabalha nessa área?');
+    expect(registrar).toHaveBeenCalledWith('resposta_chunks', expect.objectContaining({ metodo: 'codigo', total: 1 }));
+  });
+
+  it('honra pausa antes do primeiro envio, mesmo sem a chamada de chunking', async () => {
+    const resultado = await saida.enviarResposta({ telefone: '5511999990001' } as never,
+      'claro, vc já trabalha nessa área?', vi.fn(), undefined, async () => true, undefined, 'codigo');
+    expect(resultado).toEqual({ aceitos: 0, canal: 'texto', estado: 'cancelado' });
     expect(transporte).not.toHaveBeenCalled();
   });
 });

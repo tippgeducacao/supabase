@@ -583,6 +583,10 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     tel.registrar('gancho_lote', gancho.trocas);
   }
   const renovar = lockRenovar(remotejid);
+  // 22/09/2026: candidato local, só no canário OpenAI já selecionado pelo telefone.
+  // Consulta o provedor na HORA da saída: fallback para Claude conserva o legado.
+  const fracionamentoAtual = () => ctx.ficha && provedor?.nome === 'openai' && provedor.formato === 'openai'
+    ? 'codigo' as const : 'modelo' as const;
 
   // Tools que pausam a IA por decisão do PRÓPRIO agente (pausa_ia, e o
   // temporizador_proxima_turma, que pausa via RPC). A despedida que acompanha
@@ -885,6 +889,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
           await enviarResposta(
             ctx, comPresente.texto, renovar, tel,
             pausouPorTool ? undefined : () => iaPausada(remotejid),
+            undefined, fracionamentoAtual(),
           );
           tel.registrar('rodada_fim', { voltas_llm: rodada + 1, respondeu: true }, Date.now() - inicioRodada);
           return;
@@ -979,7 +984,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
             interacaoId: tel.rodadaId,
             referenciaMensagemId: doUltimoCom('msg_id') ?? undefined,
             interrompido: () => iaPausada(remotejid),
-          });
+          }, fracionamentoAtual());
         if (registrarFalaAposEnvio && envio?.aceitos) {
           await gravarMensagem(supabase, remotejid, { role: 'assistant', content: humanizarTexto(comLink.texto) });
         }

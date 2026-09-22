@@ -23,6 +23,40 @@ beforeEach(() => {
 });
 
 describe('saída com voz e fallback', () => {
+  it('candidato em código mantém a resposta inteira para o áudio, sem narrar break', async () => {
+    vi.mocked(tentarEnviarVoz).mockResolvedValue('aceito');
+    const resposta = 'a conversa é para conhecer a pós.<break>qual período fica melhor?';
+    const resultado = await saida.enviarResposta(ctx, resposta, vi.fn(), undefined, undefined, opcoes, 'codigo');
+    expect(resultado.canal).toBe('audio');
+    expect(tentarEnviarVoz).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      texto: 'a conversa é para conhecer a pós.\n\nqual período fica melhor?',
+    }));
+    expect(transporte).not.toHaveBeenCalled();
+  });
+
+  it('candidato em código revalida nova entrada depois do preparo de voz', async () => {
+    vi.mocked(tentarEnviarVoz).mockResolvedValue('texto_revalidar');
+    vi.mocked(conferirEstadoVoz).mockResolvedValue({ permitido: false, motivo: 'entrada_nova' });
+    const resultado = await saida.enviarResposta(ctx, texto, vi.fn(), undefined, undefined, opcoes, 'codigo');
+    expect(resultado).toEqual({ aceitos: 0, canal: 'texto', estado: 'cancelado' });
+    expect(transporte).not.toHaveBeenCalled();
+    expect(confirmarInteracaoVoz).not.toHaveBeenCalled();
+  });
+
+  it('dois balões em código contam uma interação e não chamam o fracionador LLM', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(tentarEnviarVoz).mockResolvedValue('texto');
+      transporte.mockImplementation(async () => new Response(JSON.stringify({ success: true, wa_message_id: 'wamid-local' })));
+      const resposta = saida.enviarResposta(ctx, 'primeira ideia.\n\nsegunda ideia.', vi.fn(), undefined, undefined, opcoes, 'codigo');
+      await vi.runAllTimersAsync();
+      expect((await resposta).aceitos).toBe(2);
+      expect(transporte).toHaveBeenCalledTimes(2);
+      expect(transporte.mock.calls.every(([url]) => !url.includes('openai.com'))).toBe(true);
+      expect(confirmarInteracaoVoz).toHaveBeenCalledOnce();
+    } finally { vi.useRealTimers(); }
+  });
+
   it.each(['aceito', 'desconhecido', 'cancelado'] as const)('áudio %s não gera um segundo envio por texto', async (estado) => {
     vi.mocked(tentarEnviarVoz).mockResolvedValue(estado);
     const resultado = await saida.enviarResposta(ctx, texto, vi.fn(), undefined, undefined, opcoes);
