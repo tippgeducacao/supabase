@@ -21,9 +21,120 @@
 //
 // O que fica de FORA daqui de propósito, porque já é conferido por código ou por outra
 // function (e o modelo é instruído a não repetir): ortografia/gramática, citação ×
-// referência, nome do curso, limite de páginas, CEP/CEUA, numeração de títulos, tabelas e
+// referência, nome do curso, limite de páginas, numeração de títulos, tabelas e
 // figuras, palavras-chave, idioma estrangeiro, citação depois do ponto, separador decimal,
-// siglas, margens/corpo/entrelinha, seções faltantes por tipo.
+// siglas, margens/corpo de fonte. Dois desses só são conferidos quando o corretor INFORMA o
+// tipo de produção — `conferirEstruturaPorTipo` (seção faltante) e `conferirComiteEtica`
+// (CEP/CEUA) devolvem [] com tipo nulo, e nada obriga o corretor a informar —, por isso a
+// proibição correspondente no SISTEMA é condicional. A condicional é aproximada por cima:
+// `conferirComiteEtica` também devolve [] em revisão de literatura e quando não reconhece a
+// seção de métodos/caso, e aí o SISTEMA segue proibindo o que ninguém confere — buraco
+// conhecido e PRÉ-EXISTENTE, anotado na revisão de 22/09/2026. ENTRELINHA fica de fora por
+// outro motivo: não é exigência da PPGVET para o TCC (formato de artigo, NBR 6022 — decidido
+// pela gestão em 22/09/2026, ver `src/components/tcc-correcao/formatacao.ts`). Ninguém a
+// confere, e é de propósito — por isso ela ganhou frase própria no SISTEMA, fora da lista do
+// "outro sistema já confere".
+//
+// 📏 CALIBRAGEM DE 22/09/2026 — todo apontamento de IA que a equipe já julgou (do parecer E
+// da `tcc-referencias`: os 5 `referencia_*` do recorte vêm de lá).
+// RECORTE de todos os números abaixo: `tcc_apontamentos` origem='ia' × `tcc_correcoes`
+// status='concluida' = 6 TCCs (MT9BPN8J, MT9B7X8A, MT9B7FPU, MT8R4080, MT8OZ6UU, MT7VJC2R),
+// 99 apontamentos: 54 aceitos, 45 descartados. Na BASE INTEIRA dá o mesmo porque nada fora
+// deles foi julgado: nenhum apontamento de IA de TCC em_revisao foi julgado — todos seguem
+// 'pendente'. (Contagem viva, apurada em 22/09/2026 18:40 UTC: 14 TCCs em_revisao, 8 com
+// apontamento de IA, 144 no total — 118 de ortografia/gramática da `tcc-analisar` e 26 do
+// parecer/referências. Ela envelhece sozinha; confira antes de repetir.)
+// Aproveitamento por tipo: formatacao 17/22 (77.27%), formato_citacao 8/10 (80.00%),
+// referencia_* 5/5 (100.00%), estrutura 21/47 (44.68%), precisao_factual 3/15 (20.00%).
+//
+// precisao_factual — 12 descartes (os 3 de grau "institucional" estão entre eles):
+//  - 6 palpites que o próprio modelo dizia não fechar ("não tenho como confirmar/conferir/
+//    verificar", "precisa de conferência na fonte"). A redação antiga do 6.4 MANDAVA dizer
+//    quando não tinha como confirmar, isto é, autorizava o que a revisão reprova;
+//  - 1 palpite de taxonomia sem a frase (Reoviridae × Sedoreoviridae, MT8R4080 p.9);
+//  - 2 de grafia de sobrenome de autor (lista logo abaixo);
+//  - 3 conflitos DENTRO do documento, que não são palpite e continuam de pé tirada a frase
+//    final: "o flushing ... conflita com a conclusão (p.14)" (MT7VJC2R p.7); "resultados de
+//    ovulação atribuídos a Almeida et al. (2014) ... na p.11 a Machado et al. (2008)"
+//    (MT7VJC2R p.8); e "no mesmo bloco os limiares aparecem em gramas absolutas ... e aqui em
+//    g por quilograma" (MT9B7X8A p.5). Este último já foi contado como palpite pela frase
+//    "não tenho como conferir a fonte", mas o CONTEÚDO é conflito interno: o 6.2 ("notação de
+//    unidades inconsistente") o autoriza no modo capa_formatacao e o 6.7 no modo precisao,
+//    sem precisar de fonte nenhuma — daí a reclassificação de 7+2 para 6+3.
+//  Os 3 aceitos: RT-PCR × qPCR (MT8R4080 p.10, base "item 6.4") e, com base "item 6.7" e só
+//  o tipo trocado, o Flowers e o autor chamado pelo prenome (TIMOTHY). É daí que sai a regra
+//  de TIPO ÚNICO do SISTEMA (6.4 × 6.7): conflito que se fecha DENTRO do documento é 6.7 e vai
+//  como tipo estrutura; o 6.4 ficou só com a afirmação sobre o MUNDO e com o tipo
+//  precisao_factual. Sem essa fronteira o modelo tinha duas etiquetas válidas para o mesmo
+//  achado, o teto de 3 do 6.4 era contornável trocando de tipo e a calibragem por tipo não
+//  comparava entre lotes — e era exatamente o que acontecia: dos 15 precisao_factual, 6 têm
+//  base "item 6.7"; outros 20 com base 6.7 vieram como estrutura.
+//  A fórmula "não tenho como confirmar" virou SINAL de palpite, mas pedir conferência segue
+//  permitido no apontamento de 6.4 que se sustenta sozinho (o RT-PCR aceito termina em
+//  "Requer conferência.") e no pedido VISUAL do recuo de 7.9, que vai no mesmo SISTEMA para o
+//  modo capa_formatacao — o 6.6 NÃO pede conferência de negrito/itálico, ali só se aponta o
+//  que o texto mostra. Proibir a PALAVRA calaria os dois.
+//  Projeção — é TETO, não piso, e só vale SE o modelo obedecer à letra: saem os 6 + 1 de
+//  palpite e os 2 de grafia; os 3 conflitos internos e os 2 aceitos de base 6.7 mudam de tipo,
+//  não somem. O que sobra chamado de precisao_factual é o RT-PCR: 1 aceito × 0 descartes.
+//
+// Grafia de sobrenome de AUTOR: 5 descartes, 0 aceitos — Rhoades × RHODES e BITARELLO ×
+// BITTARELLO (tipo precisao_factual); SOBESTIANSKI × SOBESTIANSKY, Anderson × ANDERSEN e
+// Le Devidich × Le Dividich (tipo estrutura). Território do cruzamento determinístico: foi
+// para o "O QUE NÃO APONTAR". Cuidado ao mexer: a equipe ACEITA a mesma fonte chamada de
+// FORMAS diferentes sem erro de letra ("Hideshima et al." × "Hideshima", "SOBESTIANSKY;
+// BARCELLOS" × "SOBESTIANSKY", autor pelo prenome), que continua sendo 6.7 legítimo.
+//
+// 6.7 — o item NÃO foi reforçado, e o número é o motivo: é o maior produtor de descarte do
+// módulo. São 26 apontamentos com base "item 6.7" (20 gravados como tipo estrutura, 6 como
+// precisao_factual): 10 aceitos × 16 descartados (38.46%); tirando os 5 de grafia acima,
+// 10 × 11 (47.62%) — abaixo dos 54/99 (54.55%) da IA no recorte. Por isso o texto do item
+// VOLTOU ao do HEAD. A única mudança com prova a favor é a exclusão da grafia (5 descartes,
+// 0 aceitos) e o que ela obriga a dizer junto — que a MESMA fonte chamada de formas
+// diferentes SEM erro de letra continua sendo 6.7, já que 3 dos 10 aceitos são disso. Os
+// exemplos que a rodada anterior acrescentara ("critério", "apêndice", "espécie", caixa alta
+// dos sobrenomes) saíram: os apontamentos aceitos que os inspiraram foram produzidos pelo
+// texto do HEAD, sem eles — não compram nada medido e só alargam a rede.
+// A alternativa "exigir os dois trechos com página E que a divergência seja de DADO" foi
+// considerada e RECUSADA, porque o banco diz o contrário: nas 10 aceitas NENHUMA é o mesmo
+// indicador com dois valores — são de designação (nome de fonte, escopo do título, "Apêndice
+// 1" × "Apêndice A", "sob" × "sobre a bancada", padrão de caixa) ou de metadado de
+// referência (duas entradas de Lindsay e Blagburn com ano e volume divergentes, MT8R4080
+// p.15) —, enquanto 6 das 11 descartadas restantes são número, ano ou data: 56% × 61%
+// (MT9B7FPU p.6), 37,5% × 87,5% (MT9BPN8J p.1), 6 × 7 critérios (MT9BPN8J p.4), 12–24 h ×
+// um a dois dias (MT9B7X8A p.4), Klobasa 1985 × 1986 (MT9B7X8A p.4) e coleta em maio ×
+// consolidação até 12 de junho (MT9BPN8J p.4).
+// Exigir "dado" cortaria o lado certo da conta e deixaria o errado. Ficou só a exigência de
+// citar os DOIS trechos com as páginas, que é de relato e já estava na instrução do modo.
+// Próxima medição: se 47.62% não subir, o candidato seguinte é prender o 6.7 à DESIGNAÇÃO e
+// tirar dele o número — mas só com o lote novo na mão, não antes.
+//
+// estrutura — "não confronta autores" (5.3): 0 aceitos em 2 (MT8OZ6UU p.6, MT8R4080 p.9).
+// Não confundir com o "item 5.3" inteiro: no tipo estrutura são 0 aceitos em 5, mas no tipo
+// formato_citacao (trecho sem citação, que o modelo carimba de 5.3) são 7 aceitos em 9.
+// Projeção conservadora: 21 aceitos para 23 descartes (21 em 44, 47.73%) — só saem os 3 de
+// grafia. O teto de UM "não confronta" por trabalho não tira nenhum dos 2 (já eram um por
+// TCC), e o título duplicado (MT8R4080 p.3) fica na conta: "sequência dos títulos
+// numerados" já estava no "O QUE NÃO APONTAR" e o modelo apontou assim mesmo, via 5.3. Se o
+// critério novo do 5.3 segurar esses três: 21 para 20 (21 em 41, 51.22%).
+// A frase do 5.3 promete só o que `conferirTitulos` cumpre: o ramo (b) dela compara número
+// repetido e salto APENAS entre títulos de nível 1. O MT8R4080 p.3 é justamente isso — "3
+// Desenvolvimento" e "3 REVISÃO BIBLIOGRÁFICA", duas primárias com o número 3 —, e por isso
+// continua coberto. Nível 2 duplicado e dois títulos com o mesmo TEXTO ninguém confere: a
+// frase diz "seções PRIMÁRIAS" para não prometer o que não existe.
+// ⚠️ Essas duas projeções de estrutura são ANTES da regra de tipo único: ela não cria aceite
+// nenhum, só muda etiqueta, e move para cá 2 aceitos (Flowers, TIMOTHY) e 3 descartes (os
+// conflitos internos). Com a migração: 23 × 26 (23 em 49, 46.94%); com o 5.3 segurando os
+// três, 23 × 23 (50.00%). Por isso a conta que importa é a do MÓDULO, não a por tipo: se o
+// modelo obedecer à letra saem 12 descartes (6 palpites por frase + 1 de taxonomia + 5 de
+// grafia) e o recorte vai de 54/99 (54.55%) para 54 × 33 (54 em 87, 62.07%); somando os três
+// do 5.3, 54 × 30 (54 em 84, 64.29%). TETO, não piso.
+//
+// O teto de 25 por modo FICA: a maior chamada gravada teve 10 apontamentos (modo estrutura
+// do MT7VJC2R; na base inteira também 10, no MTQ49MEK — cada modo grava num lote só, com o
+// mesmo created_at). O que a function descarta por trecho não é gravado, então a saída crua
+// pode ter sido um pouco maior; longe de 25 de todo jeito. Quem segura o ruído é o
+// critério, não o teto.
 //
 // Desenho: docs/superpowers/specs/2026-09-16-correcao-tcc-design.md (§17 e §18)
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
@@ -72,7 +183,10 @@ async function chaveAnthropic(sb: ReturnType<typeof createClient>): Promise<stri
 }
 
 // ⚠️ ESTÁVEL DE PROPÓSITO: é o prefixo do cache. Nada de data, nome de aluno ou modo aqui
-// dentro — o modo vai na mensagem do usuário, DEPOIS do documento.
+// dentro — o modo vai na mensagem do usuário, DEPOIS do documento. Editar este texto custa
+// UMA regravação de cache (a primeira correção depois do deploy) e nada mais; foi o que a
+// calibragem de 22/09/2026 fez nos itens 1.5, 5.3, 6.4, 6.7 e na lista do "O QUE NÃO
+// APONTAR".
 const SISTEMA = `PAPEL
 Você é o corretor técnico de Trabalhos de Conclusão de Curso (TCC) de pós-graduação da PPGVET, nas áreas de Ciências Agrárias, com ênfase em Medicina Veterinária, Agronegócio e Gestão. Seu parecer é a única instância avaliativa: não há banca nem defesa oral. Seus apontamentos serão revisados um a um por uma pessoa da equipe pedagógica antes de chegar ao aluno — cada apontamento errado custa tempo humano. Prefira apontar menos e com certeza.
 
@@ -81,7 +195,7 @@ REGRAS DE CONDUTA
 1.2 Baseie cada apontamento em uma regra concreta (item do documento institucional ou norma ABNT) — nunca em preferência pessoal. Informe a regra no campo base_normativa (ex.: "item 5.6", "NBR 6024", "NBR 14724", "IBGE 1993").
 1.3 Não reescreva o conteúdo do aluno. Aponte o problema e oriente como corrigir (mover o trecho, completar dado, revisar coerência). O campo correcao é ORIENTAÇÃO, nunca o texto pronto para substituição.
 1.4 Suspeita de citação inadequada ou fabricada: descreva o que observou, sem acusar. Fica a critério do corretor.
-1.5 Se faltar informação para avaliar algo com segurança, diga isso explicitamente em vez de supor.
+1.5 O silêncio vale mais do que a suspeita quando a suspeita é sobre o MUNDO FORA do documento. Se avaliar uma AFIRMAÇÃO só for possível consultando algo que você não tem aqui — um número, uma ordem de grandeza, um ponto de corte, o dado de um relatório, uma classificação taxonômica —, NÃO aponte: ali "não tenho como confirmar" significa "não aponte". É o item 6.4, e a régua está nele. Esta regra NÃO alcança o que se decide olhando o próprio texto recebido, onde "parecer" é o critério e não um defeito: o 1.4 (citação que pareça inadequada ou fabricada) continua valendo, a sinalização de parágrafo ou trecho que PAREÇA não estar citado (formato_citacao) continua valendo, e o pedido de conferência do recuo da citação longa (7.9) continua obrigatório. Negrito e itálico dos títulos (6.6) não pedem conferência: ali, aponte só o que o texto mostra e não peça conferência do resto.
 1.6 Em cada apontamento, marque o grau: "institucional" (regra confirmada da instituição) ou "proposta" (boa prática, aplicar com bom senso).
 
 TIPOS DE PRODUÇÃO E ESTRUTURA ESPERADA
@@ -92,7 +206,7 @@ TIPOS DE PRODUÇÃO E ESTRUTURA ESPERADA
 CRITÉRIOS POR SEÇÃO (institucional = regra da instituição; proposta = boa prática)
 5.1 Introdução: tema, objetivos, justificativa e metodologia (institucional); objetivo obrigatório no ÚLTIMO parágrafo (institucional) — qualquer menção clara ao objetivo do trabalho, explícita ou implícita, é aceita; só é pendência se o objetivo não for descrito ou não ficar claro no parágrafo final; justificativa explica a relevância (proposta); não antecipa resultados/conclusões (proposta); objetivo coerente com o título (proposta).
 5.2 Materiais e Métodos: descritivo contínuo ou com subitens (institucional); detalhamento suficiente para reproduzir (proposta); coerente com o objetivo (proposta); só o "como foi feito" — valores calculados e achados pertencem a Resultados (proposta).
-5.3 Desenvolvimento: blocos temáticos coerentes (proposta); compara diferentes autores, não resume um só (proposta); legenda e dados coerentes com o texto.
+5.3 Desenvolvimento: blocos temáticos coerentes (proposta); confronta autores em vez de resumir um só (proposta) — no MÁXIMO UM apontamento por trabalho sobre isso, referente à seção inteira, e só quando praticamente todo o Desenvolvimento for parágrafo de fonte única; nunca um apontamento por bloco, por parágrafo, ou só porque um trecho é descritivo/normativo; legenda e dados coerentes com o texto. Número de seção PRIMÁRIA repetido, ou salto na numeração entre seções PRIMÁRIAS, NÃO é 5.3 — outro sistema confere isso.
 5.4 Descrição do Caso: clareza, objetividade e cronologia (institucional); dados objetivos sem interpretação antecipada (proposta).
 5.5 Resultados e Discussão / Discussão: interpretação relacionada à literatura — no Relato de Caso, justificando a importância do relato (institucional); resultado antes da interpretação (proposta); não introduz dado novo (proposta).
 5.6 Conclusão: clara e coerente com os objetivos (institucional); retoma o(s) objetivo(s) da Introdução (proposta); não introduz informação, tabela ou dado apresentado pela primeira vez (proposta) — inclusive tabela de síntese: dado que só aparece fisicamente na Conclusão é pendência.
@@ -100,10 +214,13 @@ Em 5.1 a 5.5: sinalize parágrafo/trecho que pareça não estar citado/referenci
 
 CRITÉRIOS TRANSVERSAIS
 6.2 Caracteres tipográficos incorretos (aspas curvas trocadas, hífen especial no lugar de travessão ou vice-versa) e notação de unidades inconsistente (kg / Kg / quilos no mesmo texto).
-6.4 Precisão factual: informação possivelmente incorreta frente ao conhecimento científico consolidado. Descreva como SUSPEITA a verificar, nunca como erro confirmado, e diga quando não tem como confirmar.
+6.4 Precisão factual — critério EXCEPCIONAL, o mais restrito de todos, e com UM assunto só: a afirmação do trabalho sobre o MUNDO que contraria fato consolidado que você conhece COM SEGURANÇA, sem precisar consultar nada (ex.: para um vírus de RNA, RT-PCR designa transcrição reversa, enquanto PCR em tempo real é qPCR). Nada além disso é 6.4. Conflito entre dois pontos do PRÓPRIO documento NÃO é 6.4 — é 6.7, ver a regra de tipo único logo abaixo do 6.7.
+Fora dessa condição, NÃO APONTE. É PROIBIDO palpitar sobre número, percentual, ordem de grandeza, ranking, ponto de corte, ano de relatório, proporção ou taxonomia que você não tem como conferir aqui — nem como "proposta", nem como "suspeita a verificar", nem como "vale confrontar com a fonte". "Parece alto", "a literatura costuma relatar outro valor", "os pontos de corte usuais tendem a ser outros" e "classificações recentes realocaram" NÃO são apontamentos: são impressões, e a revisão humana reprova todas.
+O que este item proíbe é o PALPITE — o apontamento que não se sustenta sem consulta —, não a palavra "conferência". O palpite se denuncia pela frase de quem não fecha a questão: "não tenho como confirmar", "não tenho como conferir", "não tenho como verificar", "precisa de conferência na fonte", "sem acesso à fonte" ou equivalente. Se o apontamento só se sustenta com uma frase dessas, ele não existe — e não adianta trocar a frase por outra: é o apontamento inteiro que sai. Já o apontamento de fato consolidado é emitido normalmente, e pode, sim, pedir ao aluno que confira ou revise o ponto (o RT-PCR × qPCR do exemplo, aceito pela equipe, termina em "Requer conferência."). Esta proibição também não alcança o pedido de conferência VISUAL do recuo da citação longa (7.9): ele não é 6.4 e é obrigatório sempre que houver citação longa. (O 6.6 não pede conferência de negrito/itálico — ali só se aponta o que o texto mostra.) Nenhum apontamento de precisão factual é o resultado esperado na maioria dos trabalhos, e NO MÁXIMO 3 por trabalho.
 6.5 Profundidade: tema suficientemente abordado ou texto repetitivo/raso (proposta).
 6.6 Hierarquia de títulos (NBR 6024): seção primária apenas iniciais maiúsculas; secundária sem negrito; terciária itálico. Você NÃO enxerga negrito/itálico no texto extraído — aponte só o que o texto mostra (caixa alta indevida num nível, sub-título em caixa alta enquanto o primário não é).
-6.7 Consistência interna: números, percentuais, quantidades, siglas e nomes de fontes iguais em todas as seções (mesmo indicador com valores diferentes em Resultados e Conclusão; amostra divergente entre Introdução e Métodos; nome de empresa/produto grafado de dois jeitos; entrevistado chamado pelo primeiro nome e depois pelo sobrenome).
+6.7 Consistência interna: números, percentuais, quantidades, siglas e nomes de fontes iguais em todas as seções (mesmo indicador com valores diferentes em Resultados e Conclusão; amostra divergente entre Introdução e Métodos; nome de empresa/produto grafado de dois jeitos; entrevistado chamado pelo primeiro nome e depois pelo sobrenome; a MESMA fonte chamada de formas diferentes, sem erro de letra — "Hideshima et al., 2021" e depois "Hideshima, 2021", "SOBESTIANSKY; BARCELLOS, 2012" e depois "SOBESTIANSKY, 2012"). Cite na explicação os DOIS trechos que divergem, com as páginas. NÃO entra aqui a GRAFIA do sobrenome de um autor divergindo entre citação e referência, ou entre duas citações — ver "O QUE NÃO APONTAR".
+6.4 × 6.7, UM achado tem UM tipo só: o que separa os dois é ONDE está a prova. Se ela está DENTRO do documento recebido — dois pontos do texto, uma tabela, a lista de referências —, é 6.7 e o tipo é "estrutura", inclusive quando o que diverge é um número, uma sigla, uma técnica ou a atribuição de um resultado a um autor. Se a prova está FORA, no conhecimento consolidado, é 6.4 e o tipo é "precisao_factual". Nenhum achado cabe nos dois: não registre o mesmo defeito duas vezes e não troque o tipo para escapar do teto de 3 do 6.4.
 6.8 Alíneas (NBR 6024): letra minúscula + parêntese — a), b), c) —, nunca "•", "1.", "2." ou travessão; texto introdutório termina em dois-pontos; cada alínea termina em ponto e vírgula, a última em ponto; alíneas iniciam em minúscula, salvo nome próprio/sigla.
 6.9 Elementos não textuais: título/legenda autodescritivo; legenda e dados coerentes com o texto.
 7.3 Capa: nome do curso e tipo de TCC (Artigo Original / Revisão de Literatura / Relato de Caso) na MESMA linha, abaixo das logos. Se o tipo não aparece na capa, é pendência.
@@ -114,7 +231,9 @@ CRITÉRIOS TRANSVERSAIS
 NBR 10520: dado oral não publicado (entrevista) exige a indicação "informação verbal" em nota; "apud" só quando a fonte original não foi consultada.
 
 O QUE NÃO APONTAR — outro sistema já confere, e repetir vira ruído
-Ortografia e gramática; citação sem referência / referência sem citação / ano divergente; nome do curso contra a lista oficial; limite de 15–30 páginas; CEP/CEUA; ponto depois do número do título; sequência e caixa alta dos títulos numerados; numeração, menção e "Fonte:" de tabelas e figuras; palavras-chave (contagem, separador, grafia); abstract e resumen juntos; citação depois do ponto final; "et al."; separador decimal; siglas sem definição; agradecimentos com mais de 6 linhas; margens, corpo de fonte e entrelinha; ausência de resumo/abstract/palavras-chave; seção faltante em relação ao tipo de produção; ordem alfabética das referências; formato NBR 6023 da lista.
+Ortografia e gramática; citação sem referência / referência sem citação / ano divergente; nome do curso contra a lista oficial; limite de 15–30 páginas; ponto depois do número do título; sequência e caixa alta dos títulos numerados; numeração, menção e "Fonte:" de tabelas e figuras; palavras-chave (contagem, separador, grafia); abstract e resumen juntos; citação depois do ponto final; "et al."; separador decimal; siglas sem definição; agradecimentos com mais de 6 linhas; margens e corpo de fonte; ausência de resumo/abstract/palavras-chave; ordem alfabética das referências; formato NBR 6023 da lista; divergência de GRAFIA do sobrenome de um autor — letra trocada, dobrada ou faltando — entre a citação e a lista de referências ou entre duas citações ("Rhoades" × "RHODES", "BITARELLO" × "BITTARELLO", "SOBESTIANSKI" × "SOBESTIANSKY", "Anderson" × "ANDERSEN"), porque o cruzamento determinístico de citação × referência já confere isso.
+Dois itens que também não se apontam valem SÓ quando o corretor informou o tipo de produção (a instrução do modo diz se informou): seção faltante em relação ao tipo, e CEP/CEUA. Sem o tipo informado a conferência automática não roda, e aí o apontamento é seu.
+A ENTRELINHA também não se aponta, mas pelo motivo OPOSTO: ninguém a confere porque ela não é exigência da PPGVET para o TCC, entregue em formato de artigo.
 
 REGRA ABSOLUTA DO CAMPO trecho
 O "trecho" tem que ser cópia LITERAL, caractere por caractere, de um pedaço do texto recebido — mesma acentuação, pontuação e caixa. É por ele que o sistema acha o lugar no PDF. Copie de 3 a 12 palavras em volta do problema, sem atravessar quebra de linha quando puder. Trecho reescrito é descartado pelo sistema. Para apontamento sobre uma SEÇÃO inteira (ex.: objetivo ausente na Introdução), copie o título da seção ou a primeira frase do último parágrafo.
@@ -143,7 +262,7 @@ const FERRAMENTA = {
               type: "string",
               enum: ["estrutura", "formatacao", "precisao_factual", "formato_citacao"],
               description:
-                "estrutura = conteúdo/estrutura (seções, objetivo, dado novo, consistência interna, profundidade, tipo de produção); formatacao = capa, título, autores, hierarquia de títulos, alíneas, caracteres/unidades; precisao_factual = suspeita de informação incorreta; formato_citacao = trecho sem citação aparente, apud, informação verbal, citação longa sem recuo conferido.",
+                "estrutura = conteúdo/estrutura (seções, objetivo, dado novo, profundidade, tipo de produção) e consistência interna (6.7) — inclusive número, sigla, técnica ou atribuição que se contradizem entre dois pontos do documento; formatacao = capa, título, autores, hierarquia de títulos, alíneas, caracteres/unidades; precisao_factual = afirmação que contraria fato científico consolidado (6.4), e só isso — nunca conflito interno (é estrutura), nunca suspeita a verificar; formato_citacao = trecho sem citação aparente, apud, informação verbal, citação longa sem recuo conferido.",
             },
             pagina: { type: "integer", description: "Número da página onde o trecho está." },
             trecho: { type: "string", description: "Cópia LITERAL do texto recebido, 3 a 12 palavras." },
@@ -189,13 +308,15 @@ function instrucaoDoModo(modo: Modo, tipoProducao: string | null): string {
     case "estrutura":
       return `MODO: CONTEÚDO E ESTRUTURA POR SEÇÃO.
 ${tipo}
-Aplique SOMENTE: itens 5.1 a 5.6 (por seção, na ordem do documento), 6.5 (profundidade) e a regra de trecho sem citação aparente (formato_citacao, grau proposta). Também: entrevista ou dado oral usado como fonte sem a indicação "informação verbal" (NBR 10520). Não aplique os critérios de capa, alíneas, consistência numérica ou precisão factual — eles têm modo próprio.`;
+Aplique SOMENTE: itens 5.1 a 5.6 (por seção, na ordem do documento), 6.5 (profundidade) e a regra de trecho sem citação aparente (formato_citacao, grau proposta). Também: entrevista ou dado oral usado como fonte sem a indicação "informação verbal" (NBR 10520). Em 5.3, a falta de confronto entre autores rende NO MÁXIMO UM apontamento no trabalho inteiro, sobre a seção como um todo — nunca um por bloco ou por parágrafo. Não aplique os critérios de capa, alíneas, consistência numérica ou precisão factual — eles têm modo próprio.`;
     case "capa_formatacao":
       return `MODO: CAPA, TÍTULOS, ALÍNEAS E ELEMENTOS NÃO TEXTUAIS.
 Aplique SOMENTE: 7.3 (tipo de TCC na linha do curso), 7.4 (título só com iniciais maiúsculas; um idioma estrangeiro no título), 7.5 (autores: quantidade, ordem alfabética, orientador por último, nota de rodapé completa, titulação do orientador), 7.6 (resumo com os dados relevantes), 6.6 (só o que o texto mostra da hierarquia), 6.8 (alíneas), 6.2 (caracteres tipográficos e unidades), 6.9 (legenda autodescritiva) e 7.9 (citação longa: um apontamento pedindo conferência do recuo). Devolva tipo_producao_sugerido = "indefinido".`;
     case "precisao":
       return `MODO: CONSISTÊNCIA INTERNA E PRECISÃO FACTUAL.
-Aplique SOMENTE: 6.7 (o mesmo número, percentual, amostra, nome de fonte, empresa, produto ou pessoa grafado de forma diferente em pontos distintos do trabalho — cite os dois trechos na explicação) e 6.4 (afirmação científica possivelmente incorreta, descrita como suspeita a verificar, com o que você sabe a respeito e a ressalva de que precisa de conferência). Sem acesso à web você NÃO verifica fontes: não afirme ter conferido nada. Devolva tipo_producao_sugerido = "indefinido".`;
+Aplique SOMENTE 6.7 e 6.4. Não aplique capa, títulos, alíneas, elementos não textuais, 7.9 nem os critérios 5.x — eles têm modo próprio.
+O peso deste modo é o 6.7 — é dele que sai quase todo apontamento útil aqui. Aplique 6.7 com atenção: o mesmo número, percentual, amostra, sigla, nome de fonte, empresa, produto ou pessoa aparecendo de dois jeitos em pontos distintos do trabalho; cite os DOIS trechos na explicação, com as páginas. Não entra em 6.7 a grafia (letras) do sobrenome de autor divergindo entre citação e referência ou entre duas citações — outro sistema confere.
+O 6.4 é o contrário: excepcional. Sem acesso à web você NÃO verifica fonte nenhuma, então só aponte precisão factual quando o fato for consolidado e você o afirmar com segurança. Conflito que se fecha DENTRO do documento não vem para cá: é 6.7, e vai com o tipo "estrutura". Se o apontamento precisar da frase "conferir na fonte" para existir, ele não existe: não aponte. Sendo fato consolidado, aponte normalmente — pedir ao aluno que confira ou revise o ponto, aí, é orientação, não palpite. No máximo 3 de 6.4 por trabalho, e zero é o resultado normal. Não afirme ter conferido nada. Devolva tipo_producao_sugerido = "indefinido".`;
   }
 }
 
