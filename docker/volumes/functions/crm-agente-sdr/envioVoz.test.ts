@@ -90,6 +90,34 @@ describe('piloto de voz exige configuração explícita', () => {
 });
 
 describe('envio de áudio preserva o contrato do SDR', () => {
+  it('sintetiza e registra a versão falada, preservando o original para fallback', async () => {
+    const { opts } = preparar();
+    const original = 'imagino kkk, vc trabalha bastante. qdo fica melhor conversar sobre a pós?';
+    const falado = 'imagino, você trabalha bastante. quando fica melhor conversar sobre a pós?';
+    opts.texto = original;
+    expect(await tentarEnviarVoz(opts)).toBe('aceito');
+    expect(prepararVozElevenlabs).toHaveBeenCalledWith(expect.objectContaining({ texto: falado }));
+    expect(JSON.parse(String(opts.fetchImpl.mock.calls[0][1]?.body)).conteudo).toBe(falado);
+    expect(opts.tel.registrar).toHaveBeenCalledWith('voz_preparada', expect.objectContaining({ texto_normalizado: true }));
+    expect(opts.texto).toBe(original);
+  });
+  it('texto que ultrapassa o limite ao expandir abreviações volta para texto sem TTS', async () => {
+    const { opts } = preparar();
+    const real = await vi.importActual<typeof import('./vozElevenlabs')>('./vozElevenlabs');
+    vi.mocked(prepararVozElevenlabs).mockImplementation(real.prepararVozElevenlabs);
+    opts.texto = 'vc '.repeat(150).trim();
+    expect(await tentarEnviarVoz(opts)).toBe('texto_revalidar');
+    expect(opts.fetchImpl).not.toHaveBeenCalled();
+    expect(opts.tel.registrar).toHaveBeenCalledWith('voz_fallback_texto', { motivo: 'preparo_falhou', codigo: 'TEXTO_LONGO' });
+    expect(opts.texto).toBe('vc '.repeat(150).trim());
+  });
+  it('só marcas de risada não geram áudio vazio', async () => {
+    const { opts } = preparar();
+    opts.texto = 'kkk '.repeat(15).trim();
+    expect(await tentarEnviarVoz(opts)).toBe('texto_revalidar');
+    expect(prepararVozElevenlabs).not.toHaveBeenCalled();
+    expect(opts.fetchImpl).not.toHaveBeenCalled();
+  });
   it('encaminha o modelo e os ajustes do painel à síntese do piloto', async () => {
     const { opts } = preparar();
     const perfil: Record<string, string> = { ...configuracao,

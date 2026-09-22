@@ -8,6 +8,7 @@ import { pausaVigente } from './pausa.ts';
 import { avaliarPoliticaVoz } from './politicaVoz.ts';
 import { prepararVozElevenlabs, ErroVozElevenlabs, MODELO_ELEVENLABS_PADRAO, VOZ_PADRAO_ELEVENLABS } from './vozElevenlabs.ts';
 import type { ConfiguracoesVozElevenlabs } from './vozElevenlabs.ts';
+import { normalizarTextoParaVoz } from './textoParaVoz.ts';
 import type { CtxConversa } from './tools.ts';
 
 export type OpcoesVozSdr = {
@@ -166,11 +167,17 @@ export async function tentarEnviarVoz(opts: {
   }
 
   let audio: Awaited<ReturnType<typeof prepararVozElevenlabs>> | undefined;
+  let textoFalado = texto;
   try {
     await opts.renovarLock();
-    audio = await prepararVozElevenlabs({ texto, ...config, storage: opcoes.supabase.storage });
+    textoFalado = normalizarTextoParaVoz(texto);
+    if (!/[\p{L}\p{N}]/u.test(textoFalado)) throw new ErroVozElevenlabs('TEXTO_INVALIDO');
+    // O helper valida o limite depois da expansão e usa o texto realmente falado
+    // no hash: um áudio antigo soletrando "vc" não pode satisfazer esse cache.
+    audio = await prepararVozElevenlabs({ texto: textoFalado, ...config, storage: opcoes.supabase.storage });
     tel?.registrar('voz_preparada', {
       voz: config.voiceId, modelo: config.modelo, caracteres: audio.caracteres, cache: audio.cacheHit,
+      texto_normalizado: textoFalado !== texto,
     });
   } catch (erro) {
     // Síntese ainda não enviou nada ao destinatário. O texto aprovado é seguro
@@ -199,7 +206,7 @@ export async function tentarEnviarVoz(opts: {
       method: 'POST', signal: controller.signal,
       headers: { Authorization: `Bearer ${opts.serviceRole}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        telefone: ctx.telefone, tipo: 'audio', origem: 'ia', conteudo: texto, anexo_url: audio.url,
+        telefone: ctx.telefone, tipo: 'audio', origem: 'ia', conteudo: textoFalado, anexo_url: audio.url,
         mime_type: audio.mimeType, filename: audio.filename, wa_account_id: ctx.waAccountId,
         lead_id: ctx.leadId, oportunidade_id: ctx.oportunidadeId,
       }),
@@ -209,7 +216,7 @@ export async function tentarEnviarVoz(opts: {
       tel?.registrar('audio_enviado', { ok: true, wa_message_id: retorno.wa_message_id, voz: config.voiceId, origem: opcoes.origem });
       // Compatibilidade com o contador de partes aceitas do follow-up. A fala
       // permanece no histórico existente; este evento associa texto e áudio.
-      tel?.registrar('chunk_enviado', { ok: true, status: res.status, canal: 'audio', wa_message_id: retorno.wa_message_id, texto });
+      tel?.registrar('chunk_enviado', { ok: true, status: res.status, canal: 'audio', wa_message_id: retorno.wa_message_id, texto: textoFalado });
       return 'aceito';
     }
     // Sem comprovação de aceite/falha anterior ao despacho, nunca mandar texto

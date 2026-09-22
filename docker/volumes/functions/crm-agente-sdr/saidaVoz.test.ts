@@ -23,6 +23,16 @@ beforeEach(() => {
 });
 
 describe('saída com voz e fallback', () => {
+  it('fallback de áudio mantém vc e kkk na mensagem escrita original', async () => {
+    vi.mocked(tentarEnviarVoz).mockResolvedValue('texto_revalidar');
+    vi.mocked(conferirEstadoVoz).mockResolvedValue({ permitido: true, motivo: 'estado_valido' });
+    transporte.mockResolvedValueOnce(new Response(JSON.stringify({ success: true, wa_message_id: 'wamid-texto' })));
+    const original = 'imagino kkk, vc trabalha bastante. qual período fica melhor para conversar?';
+    const resultado = await saida.enviarResposta(ctx, original, vi.fn(), undefined, undefined, opcoes, 'codigo');
+    expect(resultado.canal).toBe('texto');
+    expect(transporte).toHaveBeenCalledOnce();
+    expect(JSON.parse(String(transporte.mock.calls[0][1]?.body)).conteudo).toBe(original);
+  });
   it('candidato em código mantém a resposta inteira para o áudio, sem narrar break', async () => {
     vi.mocked(tentarEnviarVoz).mockResolvedValue('aceito');
     const resposta = 'a conversa é para conhecer a pós.<break>qual período fica melhor?';
