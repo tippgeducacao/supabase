@@ -329,6 +329,25 @@ describe('SDR: texto de ferramenta nunca vira despedida', () => {
     expect(fronteiras.gravar).toHaveBeenCalledWith(expect.anything(), payload.remotejid, { role: 'assistant', content: enviada });
   });
 
+  it.each(['compatibilidadeIndisponivel', 'perguntaFormacaoPendente'] as const)(
+    '%s faz o piloto redigir a resposta sem repetir ferramentas na rodada', async (campo) => {
+      fronteiras.lunaTelefones = [payload.telefone];
+      fronteiras.provedorOpenai.mockReturnValue({ nome: 'openai', formato: 'openai', modelo: 'modelo-sintetico' });
+      fronteiras.tools.mockResolvedValue([{ name: 'verificar_compatibilidade_curso' }]);
+      fronteiras.executar.mockImplementation(async (_banco, tool, ctx) => {
+        ctx[campo] = campo === 'compatibilidadeIndisponivel' ? true : 'vc já é formado em Medicina Veterinária?';
+        return { id: tool.id, output: campo === 'compatibilidadeIndisponivel' ? 'FALHA_TECNICA' : 'CONFIRMAR_CONCLUSAO' };
+      });
+      fronteiras.chamarPrincipal.mockResolvedValueOnce({ stop_reason: 'tool_use', content: [
+        { type: 'tool_use', id: 'matriz', name: 'verificar_compatibilidade_curso', input: {} },
+      ] }).mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'vc já é formado em Medicina Veterinária?' }] });
+      await chamar({ wa_account_id: 'conta-sintetica' });
+      expect(fronteiras.executar).toHaveBeenCalledOnce();
+      expect(fronteiras.chamarPrincipal).toHaveBeenCalledTimes(2);
+      expect(fronteiras.chamarPrincipal.mock.calls[1][0].tools).toEqual([]);
+      expect(fronteiras.enviar).toHaveBeenCalledOnce();
+    });
+
   it('encerramento desconhecido exige nova resposta e desliga tools de negócio', async () => {
     fronteiras.executar.mockResolvedValue({ id: 'pausa', status: 'pausado' });
     fronteiras.chamarPrincipal.mockResolvedValueOnce({ stop_reason: 'tool_use', content: [

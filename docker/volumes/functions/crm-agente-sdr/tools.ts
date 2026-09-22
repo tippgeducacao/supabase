@@ -64,6 +64,10 @@ export type CtxConversa = ContextoElegibilidade & {
   historicoConversa?: Msg[];
   /** Ficha do atendimento (canário): presente ⇒ trava do cronograma, contagem de objeções e coleta na jornada. */
   ficha?: { inicioRodada: string } | null;
+  /** Só dura a rodada atual: após falha da matriz, responder sem repetir a chamada. */
+  compatibilidadeIndisponivel?: boolean;
+  /** A tool pediu confirmação real do lead; esta rodada termina fazendo a pergunta. */
+  perguntaFormacaoPendente?: string;
 };
 
 function sdrApi(path: string, init: RequestInit = {}): Promise<Response> {
@@ -628,6 +632,21 @@ function validarMatriz(resultado: any): any {
 }
 
 async function verificarCompatibilidade(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
+  if (ctx.ficha) {
+    const ficha = await carregarFicha(supabase, ctx);
+    const pergunta = ficha?.avaliacao.perguntaConfirmacaoFormacao;
+    if (pergunta) {
+      ctx.perguntaFormacaoPendente = pergunta;
+      return {
+        id: toolUseId, output: 'CONFIRMAR_CONCLUSAO', compativel: null, pode_cursar: null,
+        pergunta,
+        resultado: 'A graduação veio do cadastro, mas a conclusão ainda não foi confirmada pelo lead. A matriz não foi chamada.',
+        instrucao: `Responda agora perguntando diretamente: "${pergunta}". Conecte a confirmação à busca de horário, conservando o período que ele pediu. `
+          + 'Não pergunte qual é a formação nem "posso confirmar?". Não chame mais ferramentas nesta rodada. '
+          + 'Na próxima resposta do lead, registre a conclusão e só depois verifique a compatibilidade.',
+      };
+    }
+  }
   const avaliacao = await iniciarAvaliacao(supabase, ctx, input);
   try {
     const resultado = await avaliarCompatibilidade(supabase, input, ctx, toolUseId);
@@ -1214,6 +1233,12 @@ export async function executarTool(
   ctx: CtxConversa,
 ): Promise<Record<string, unknown>> {
   const { id, name, input } = toolUse;
+  if (name === 'verificar_compatibilidade_curso' && ctx.ficha && ctx.compatibilidadeIndisponivel) {
+    return { id, output: 'FALHA_TECNICA', compativel: null, pode_cursar: null,
+      reutilizado_nesta_rodada: true,
+      resultado: 'A checagem já falhou nesta rodada. Nenhuma nova tentativa foi feita.',
+      instrucao: 'Encerre a rodada com uma resposta breve. Não ofereça horários, não repita perguntas acadêmicas já respondidas e não tente a matriz novamente nesta rodada.' };
+  }
   try {
     switch (name) {
       case 'consulta_disponibilidade': return await consultaDisponibilidade(supabase, input, ctx, id);
@@ -1291,6 +1316,7 @@ export async function executarTool(
       Aqui a falha é FECHADA: sem checagem, é proibido tratar como apto.
     */
     if (name === 'verificar_compatibilidade_curso') {
+      if (ctx.ficha) ctx.compatibilidadeIndisponivel = true;
       return {
         id,
         output: 'FALHA_TECNICA',
@@ -1298,7 +1324,8 @@ export async function executarTool(
         pode_cursar: null,
         mensagem_para_lead: null,
         resultado: `A checagem de compatibilidade NÃO rodou (falha técnica: ${(e as Error).message}).`,
-        instrucao: 'É PROIBIDO tratar o lead como apto, dizer que a formação dele atende ou '
+        instrucao: (ctx.ficha ? 'Não repita esta checagem na mesma rodada. Falha técnica não é falta de formação: não peça de novo o dado já confirmado pelo lead. ' : '')
+          + 'É PROIBIDO tratar o lead como apto, dizer que a formação dele atende ou '
           + 'oferecer horário agora. Sem citar erro técnico, diga que vai confirmar a '
           + 'compatibilidade e siga a conversa; tente esta função de novo na próxima rodada.',
       };

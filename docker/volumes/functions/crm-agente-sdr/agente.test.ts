@@ -10,6 +10,8 @@ import { montarContextoEntregaMateriais } from './entregaMateriais';
 import { INSTRUCAO_DISPONIBILIDADE_CONTATO } from './disponibilidadeContato';
 import { INSTRUCAO_EVENTOS } from './instrucaoEventos';
 import { INSTRUCAO_FATOS_DO_LEAD } from './fatosLead';
+import { INSTRUCAO_VOZ } from './vozDoJoao';
+import { INSTRUCAO_FICHA, avaliarFicha, montarBlocoFicha } from './fichaAtendimento';
 import { INSTRUCAO_CANAL_RESPOSTA, NOME_TOOL_RESPOSTA } from './canalResposta';
 
 // Exercita o request HTTP real das três rotas, com o transporte como única fronteira
@@ -69,6 +71,24 @@ beforeEach(() => {
 });
 
 describe('instrução de memória no system enviado à Anthropic', () => {
+  it.each([true, false])('cumprimento e confirmação nomeada entram somente no canário: %s', async (comFicha) => {
+    const entrada = { cadastro: 'Médico Veterinário (a)', jornada: { coleta: { area_atuacao: 'formulação de dietas', atua_na_area: 'sim' as const } } };
+    const ficha = montarBlocoFicha(entrada, avaliarFicha(entrada));
+    await chamarAgentePrincipal({ promptAgente: AGENTE_VALIDACAO, contextoTemporal: '',
+      comFicha, contextoFicha: comFicha ? ficha : undefined, tools: [],
+      messages: [{ role: 'user', content: 'oi João, tudo bem? já atuo com formulação de dietas' }],
+    });
+    const pedido = ultimoPedido();
+    const system = pedido.system.map((bloco) => bloco.text);
+    expect(system.includes(INSTRUCAO_VOZ)).toBe(comFicha);
+    expect(system.includes(INSTRUCAO_FICHA)).toBe(comFicha);
+    expect(JSON.stringify(pedido.messages).includes('vc já é formado em Medicina Veterinária?')).toBe(comFicha);
+    if (comFicha) {
+      expect(system.join('\n')).toContain('Responda ao cumprimento recebido');
+      expect(system.join('\n')).toContain('Não peça permissão para perguntar');
+    }
+  });
+
   // Verifica os requests montados, sem atribuir ao modelo simulado decisões reais.
   it.each([
     ['confirmação do botão', '[Em resposta à mensagem: "Hoje às 19h teremos a aula ao vivo. Consegue confirmar?"] Confirmar Participação'],

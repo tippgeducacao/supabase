@@ -79,11 +79,40 @@ describe('o que falta coletar antes do cronograma', () => {
     expect(a.graduacaoConcluida).toBe(false);
     expect(a.proximoPasso).toContain('se ele já é formado em Medicina Veterinária');
   });
-  it('profissão nomeada e ficou claro que atua: não pergunta e conta como formado', () => {
+  it('profissão no formulário e atuação genérica não confirmam graduação concluída', () => {
     const a = avaliarFicha({ cadastro: 'Zootecnista', jornada: { coleta: { atua_na_area: 'sim' } } });
-    expect(a.faltaParaCronograma).toEqual([]);
-    expect(a.liberaCronograma).toBe(true);
+    expect(a.faltaParaCronograma).toEqual(['se ele já é formado em Zootecnia (graduação concluída)']);
+    expect(a.liberaCronograma).toBe(false);
+    expect(a.graduacaoConcluida).toBe(false);
+    expect(a.perguntaConfirmacaoFormacao).toBe('vc já é formado em Zootecnia?');
+  });
+  it('caso Gustavo: mantém a área dita e pergunta a conclusão do curso conhecido', () => {
+    const entrada = { cadastro: 'Médico Veterinário (a)', jornada: {
+      coleta: { area_atuacao: 'formulação de dietas', atua_na_area: 'sim' as const },
+    } };
+    const a = avaliarFicha(entrada);
+    expect(a.perguntaConfirmacaoFormacao).toBe('vc já é formado em Medicina Veterinária?');
+    const bloco = montarBlocoFicha(entrada, a);
+    expect(bloco).toContain('formulação de dietas');
+    expect(bloco).toContain('"vc já é formado em Medicina Veterinária?"');
+    expect(bloco).not.toContain('Nada falta:');
+  });
+  it('conclusão confirmada na conversa dispensa repetir a pergunta', () => {
+    const a = avaliarFicha({ cadastro: 'Médico Veterinário (a)', jornada: { coleta: { graduacao_concluida: 'sim' } } });
+    expect(a.perguntaConfirmacaoFormacao).toBeNull();
     expect(a.graduacaoConcluida).toBe(true);
+    expect(a.faltaParaCronograma).toEqual([]);
+  });
+  it('cursando explícito prevalece sobre atuação e descrição antiga de formado', () => {
+    const a = avaliarFicha({ cadastro: 'Médico Veterinário (a)', jornada: {
+      coleta: { graduacao_concluida: 'cursando', atua_na_area: 'sim', tempo_formacao: 'formado há 3 anos' },
+    } });
+    expect(a.graduacaoConcluida).toBe(false);
+    expect(a.perguntaConfirmacaoFormacao).toBeNull();
+  });
+  it('"não sou formado" não vira conclusão pelo texto de tempo_formacao', () => {
+    const a = avaliarFicha({ cadastro: 'Médico Veterinário (a)', jornada: { coleta: { tempo_formacao: 'não sou formado' } } });
+    expect(a.graduacaoConcluida).toBe(false);
   });
   it('profissão nomeada e "formado" registrado em tempo_formacao: não pergunta', () => {
     const a = avaliarFicha({ cadastro: 'Zootecnista', jornada: { coleta: { tempo_formacao: 'formado há 3 anos' } } });
@@ -162,10 +191,10 @@ describe('a pergunta da pós depois do cronograma', () => {
     expect(a.perguntarPos).toBe(false);
   });
   it('já respondeu ou já foi perguntado: não repete', () => {
-    const respondeu = avaliarFicha({ cadastro: 'Zootecnista', jornada: enviado({ atua_na_area: 'sim', possui_pos: 'nao' }) });
+    const respondeu = avaliarFicha({ cadastro: 'Zootecnista', jornada: enviado({ graduacao_concluida: 'sim', possui_pos: 'nao' }) });
     expect(respondeu.perguntarPos).toBe(false);
     expect(respondeu.proximoPasso).toContain('Cronograma já enviado');
-    const jornada = enviado({ atua_na_area: 'sim' });
+    const jornada = enviado({ graduacao_concluida: 'sim' });
     const a = avaliarFicha({ cadastro: 'Zootecnista', jornada });
     expect(perguntasFeitas({ cadastro: 'Zootecnista', jornada }, a, 'te enviei o cronograma por aqui. chegou o arquivo pra vc? e me diz, vc já possui alguma pós-graduação?')).toEqual(['pos']);
     const marcada = aplicarPerguntasNaJornada(jornada, ['pos']);

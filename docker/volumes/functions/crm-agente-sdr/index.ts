@@ -799,7 +799,9 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       messages,
       // A ação terminal já concluiu: esta volta só pode redigir a resposta.
       // Não permitir pausar/arquivar/agendar outra vez para tentar escrever o adeus.
-      tools: encerrouPorTool ? [] : tools,
+      // Piloto: falta confirmação do lead ou a matriz já falhou ⇒ esta volta
+      // só redige a pergunta/resposta; não repete cinco consultas sem saldo.
+      tools: encerrouPorTool || (ctx.ficha && (ctx.compatibilidadeIndisponivel || ctx.perguntaFormacaoPendente)) ? [] : tools,
     };
     let resp: any;
     try {

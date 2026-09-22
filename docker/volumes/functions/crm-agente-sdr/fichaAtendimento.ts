@@ -68,6 +68,8 @@ export type AvaliacaoFicha = {
   faltaParaCronograma: string[];
   semGraduacao: boolean;
   graduacaoConcluida: boolean;
+  /** Pergunta direta quando o cadastro nomeia a graduação, mas o lead não confirmou a conclusão. */
+  perguntaConfirmacaoFormacao: string | null;
   jaPerguntou: boolean;
   liberaCronograma: boolean;
   /** Há pedido de cronograma ainda não atendido. Sem ele, o script da coleta não aparece. */
@@ -101,20 +103,27 @@ export function avaliarFicha(e: EntradaFicha): AvaliacaoFicha {
   const { grupo, profissao } = grupoDoCadastro(e.cadastro);
   const c = e.jornada.coleta ?? {};
   const semGraduacao = c.graduacao_concluida === 'nao';
-  const disseFormado = c.graduacao_concluida === 'sim' || /formad/i.test(texto(c.tempo_formacao));
+  // 22/09/2026: "atuo com formulação de dietas" não confirma a graduação do
+  // cadastro. Conclusão vem da declaração registrada, não da área de trabalho.
+  const disseFormado = c.graduacao_concluida === 'sim' || (c.graduacao_concluida !== 'cursando'
+    && !/\b(?:n[ãa]o|ainda)\b/i.test(texto(c.tempo_formacao)) && /\bformad[oa]\b/i.test(texto(c.tempo_formacao)));
+  const graduacaoConcluida = !semGraduacao && disseFormado;
+  const perguntaConfirmacaoFormacao = grupo === 'profissao' && !graduacaoConcluida
+    && !semGraduacao && c.graduacao_concluida !== 'cursando'
+    ? `vc já é formado em ${profissao}?` : null;
   const falta: string[] = [];
   if (!semGraduacao) {
     if (grupo === 'vago' || grupo === 'desconhecido') {
       if (!texto(c.graduacao)) falta.push('qual é a graduação dele');
       if (!texto(c.area_atuacao) && c.atua_na_area !== 'sim') falta.push('em que área ele atua hoje');
     } else if (grupo === 'profissao') {
-      if (!disseFormado && c.atua_na_area !== 'sim') falta.push(`se ele já é formado em ${profissao} (graduação concluída)`);
+      if (c.graduacao_concluida === 'cursando') {
+        if (!texto(c.tempo_formacao)) falta.push('quando ele conclui a graduação (mês e ano)');
+      } else if (!disseFormado) falta.push(`se ele já é formado em ${profissao} (graduação concluída)`);
     } else if (grupo === 'estudante') {
       if (!texto(c.tempo_formacao) && c.graduacao_concluida !== 'sim') falta.push('quando ele conclui a graduação (mês e ano)');
     }
   }
-  // Graduação concluída: disse que é formado, ou (profissão nomeada) ficou claro que atua nela.
-  const graduacaoConcluida = !semGraduacao && (disseFormado || (grupo === 'profissao' && c.atua_na_area === 'sim'));
   const cr = e.jornada.cronograma ?? {};
   // "Pergunta uma vez" (decisão do usuário): conta a recusa da tool numa rodada anterior e a
   // rodada anterior em que o João DE FATO perguntou a coleta (marcada depois do envio, pelo texto).
@@ -146,7 +155,7 @@ export function avaliarFicha(e: EntradaFicha): AvaliacaoFicha {
               + 'se ele responder, registre com atualizar_dados_lead antes de enviar.'
             : `Antes de enviar o cronograma, diga "${SCRIPT_ANTES_DO_CRONOGRAMA}" e pergunte, numa frase só: ${falta.join(' e ')}. `
               + 'Só depois da resposta chame envia_informacoes.';
-  return { grupo, profissao, faltaParaCronograma: falta, semGraduacao, graduacaoConcluida, jaPerguntou, liberaCronograma, pedidoPendente, perguntarPos, proximoPasso };
+  return { grupo, profissao, faltaParaCronograma: falta, semGraduacao, graduacaoConcluida, perguntaConfirmacaoFormacao, jaPerguntou, liberaCronograma, pedidoPendente, perguntarPos, proximoPasso };
 }
 
 const NOME_GRUPO: Record<GrupoCadastro, string> = {
@@ -184,6 +193,9 @@ export function montarBlocoFicha(e: EntradaFicha, a: AvaliacaoFicha): string {
     + `Cronograma: ${cronograma}\n`
     + `Objeções já tratadas: ${objecoes}\n`
     + `Elegibilidade: ${eleg} · Reunião: ${e.agendado ? 'marcada' : 'não marcada'}\n`
+    + (a.perguntaConfirmacaoFormacao
+      ? `Se o lead pedir horários ou aceitar procurar um encaixe, confirme diretamente: ${JSON.stringify(a.perguntaConfirmacaoFormacao)}. Preserve o período pedido. Não pergunte qual é a graduação nem peça permissão para confirmá-la.\n`
+      : '')
     // Com o envio liberado (já perguntou uma vez), a linha diz "nada": a Luna obedece a "FALTA
     // COLETAR" ao pé da letra e repetia a pergunta três vezes (harness, 18/09) se a lista ficasse.
     // A linha "FALTA COLETAR" só existe com pedido pendente: é o gatilho do script no INSTRUCAO_FICHA.
@@ -201,13 +213,17 @@ export function montarBlocoFicha(e: EntradaFicha, a: AvaliacaoFicha): string {
 export const INSTRUCAO_FICHA = `## FICHA DO ATENDIMENTO (estado do sistema)
 No fim da última mensagem existe o bloco [FICHA DO ATENDIMENTO]. Ele é a memória determinística desta conversa: o que o cadastro do formulário diz, o que o lead já informou, o que já foi pedido e enviado, as objeções já tratadas e o que FALTA COLETAR. Confie nele acima da sua leitura do histórico. Nunca cite a ficha e nunca diga que registrou ou salvou dados.
 
+### Formação conhecida e pedido de horário
+Se o formulário já nomeia a graduação (ex.: Medicina Veterinária), não pergunte "qual é sua formação?". Quando o lead pedir horários ou aceitar procurar um encaixe, confirme somente se concluiu: use a pergunta direta indicada na ficha e conecte-a ao horário que ele pediu. "Vou confirmar sua formação, pode ser?" não coleta nada; faça a pergunta na mesma mensagem. Atuar na área da pós não confirma graduação concluída. O título profissional preenchido no formulário também não equivale a uma confirmação nesta conversa.
+Se o próprio lead já afirmou que concluiu ou se apresentou na conversa como profissional reconhecido pela regra de autodeclaração, não repita a pergunta: primeiro registre graduacao_concluida="sim" com atualizar_dados_lead, depois faça a checagem. Se disse que ainda cursa, registre "cursando" e esclareça somente a data que falta. A compatibilidade continua obrigatória e é distinta dessa confirmação.
+
 ### Pedido de cronograma (clique em "Receber Cronograma", "manda as informações por aqui" ou pedido em texto)
 - Se a ficha traz FALTA COLETAR: responda "${SCRIPT_ANTES_DO_CRONOGRAMA}" e faça, numa frase só, a pergunta do PRÓXIMO PASSO. Sempre diga O QUE vai mandar (o cronograma); nunca só "te envio". Não chame envia_informacoes nesta resposta. Isso NÃO é puxar assunto de formação por conta própria: é a condição para entregar o material que ele pediu.
 - Quando ele responder, registre com atualizar_dados_lead (graduação, se concluiu, área de atuação, se atua na área da pós), rode verificar_compatibilidade_curso e, aprovado, chame envia_informacoes.
 - Se ele não responder à pergunta e insistir no cronograma, chame envia_informacoes de novo: o sistema decide se libera.
 - Depois de enviar: se a graduação dele está concluída e a ficha ainda não sabe se ele tem pós, pergunte "${SCRIPT_PERGUNTA_POS}" e registre a resposta com atualizar_dados_lead (possui_pos, qual_pos). A resposta não muda nada: em seguida reconduza para a reunião.
 - Lead que não tem graduação nenhuma: não envie o cronograma; siga o encerramento previsto para esse caso.
-- Sem pedido de material, a ficha não muda a conversa: não puxe formação por conta própria.
+- Sem pedido de material nem avanço para a agenda, não puxe formação por conta própria. Pedido de horários segue a confirmação direta acima.
 
 ### Falta de tempo junto com pedido de material
 "tô sem tempo, manda por aqui" traz duas objeções. Trate PRIMEIRO a falta de tempo: consulta_objecoes com tipo_objecao="objecao_tempo", e ofereça o encaixe. Só ofereça material pelo WhatsApp se ele insistir depois disso (aí sim objecao_canal).
