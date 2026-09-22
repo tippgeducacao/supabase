@@ -328,7 +328,11 @@ const TOOL_GRUPO = {
   description:
     'Use quando ele disser, por escrito, se já está ou não no grupo de WhatsApp da turma. ' +
     'Grava a resposta e diz o que fazer em seguida: mandar o link do grupo, ou passar para um ' +
-    'atendente quando não temos o link da turma dele.',
+    'atendente quando não temos o link da turma dele. ' +
+    'NUNCA use para reconfirmar o que ele já respondeu antes nesta conversa, e não use quando ' +
+    'o assunto da vez for outro: chamar esta ferramenta faz o link do grupo ser colado na sua ' +
+    'mensagem, e repetir um link que ele acabou de receber faz você parecer robô. ' +
+    'Se ele PEDIR o link de novo, mande sem pensar duas vezes: aí ele quer mesmo.',
   input_schema: {
     type: 'object',
     properties: {
@@ -446,8 +450,15 @@ const TOOL_FECHOU = {
 const TOOL_ENTREGAR = {
   name: 'entregar_proximo_passo',
   description:
-    'Use SÓ quando você tiver oferecido o próximo passo e ele tiver ACEITADO ("sim", "pode ' +
-    'mandar", "quero"). Nunca use por conta própria, sem ele ter dito que sim. ' +
+    'Use depois de ter oferecido o próximo passo, quando ele responder SOBRE O QUE VOCÊ OFERECEU ' +
+    'sem recusar. "Sim", "pode mandar" e "quero" são o aceite óbvio; PERGUNTAR sobre aquilo ' +
+    '("é um vídeo?", "é longo?", "e por ligação?") também é, e a resposta certa para essas ' +
+    'perguntas é ENTREGAR respondendo a dúvida dentro da entrega. ' +
+    'NÃO use se ele recusou ("agora não", "depois"), se falou de OUTRO assunto, se reclamou de ' +
+    'alguma coisa, ou se mandou algo que você não conseguiu ler (imagem, áudio sem transcrição): ' +
+    'em nenhum desses casos você sabe que ele aceitou, e entregar por cima CARIMBA O PASSO COMO ' +
+    'ENTREGUE PARA SEMPRE. Errar para menos custa um dia; errar para mais custa o passo. ' +
+    'Nunca use sem ter oferecido antes. ' +
     'Devolve os PONTOS que a sua mensagem precisa cobrir. Escreva com as suas palavras, ' +
     'continuando a conversa de onde parou: nada de "oi, tudo bem" nem de "hoje vamos falar de".',
   input_schema: { type: 'object', properties: {}, additionalProperties: false },
@@ -1625,6 +1636,24 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
     // 14/09/2026: resposta vazia ou limite de tools não autoriza enviar o texto
     // intermediário. O fluxo abaixo registra silêncio/transferência sem aviso.
     resposta = sanearParaModelo(limparResposta(resposta)).trim();
+    // ⚠️ E não manda de novo o link que ele acabou de receber. 21/09: o David tocou "Não estou",
+    // recebeu o link às 17:10, e às 17:54, quando perguntou "é um vídeo?", o modelo chamou
+    // `registrar_grupo_da_turma` sem motivo e o link foi colado outra vez no fim da mensagem.
+    // A rede existe para quem PROMETEU e esqueceu de colar, não para repetir.
+    //
+    // ⚠️⚠️ ENVIO QUE FALHOU NÃO CONTA. 17% das saídas da casa em 30 dias são `failed`: o link que
+    // não chegou ao aparelho dele não pode desarmar a rede, senão o aluno fica sem link nenhum
+    // justamente quando pede. (A mesma regra que a `conversa` já aplica logo acima.)
+    const linkJaFoi = linkQueTemQueIr && resposta
+      ? daPessoa.some((m: any) => m.direcao === 'outbound' &&
+          m.status_entrega !== 'failed' &&
+          String(m.conteudo ?? '').includes(linkQueTemQueIr!) &&
+          new Date(m.created_at).getTime() > Date.now() - 24 * 3600_000)
+      : false;
+    if (linkJaFoi) {
+      await evento('link_do_grupo:ja_foi', { ...rastro });
+      linkQueTemQueIr = null;
+    }
     if (linkQueTemQueIr && resposta && !resposta.includes(linkQueTemQueIr)) {
       // O modelo prometeu o link e esqueceu de colar: o link é o que resolve, então vai junto.
       resposta = `${resposta}\n${linkQueTemQueIr}`;

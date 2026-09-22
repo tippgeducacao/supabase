@@ -657,6 +657,47 @@ describe('crm-agente-aluno: o turno', () => {
     expect(resultado).not.toContain('Não achei');
   });
 
+  it('o link do grupo NÃO vai de novo se ele já recebeu (caso David, 21/09)', async () => {
+    // Ele tocou "Não estou" e recebeu o link. Meia hora depois perguntou "é um vídeo?" e o modelo
+    // chamou registrar_grupo_da_turma sem motivo — o código colava o link outra vez no fim.
+    const LINK = 'https://chat.whatsapp.com/grupo-da-turma';
+    estado.origem = mensagem({ tipo: 'text', conteudo: 'É um vídeo?' });
+    estado.historico = [
+      estado.origem,
+      mensagem({ direcao: 'outbound', conteudo: `Segue o link do grupo da sua turma:\n${LINK}` }),
+    ];
+    estado.respostasModelo = [
+      { content: [{ type: 'tool_use', id: 't1', name: 'registrar_grupo_da_turma', input: { esta_no_grupo: false } }] },
+      { content: [{ type: 'text', text: 'É vídeo sim, já te mando.' }] },
+    ];
+    await chamar(C);
+    // O que importa é o que SAI: o link não pode aparecer na mensagem. (O evento sozinho não
+    // provava nada — apagando a correção e mantendo o evento, o teste continuava passando.)
+    expect(fila()[0].conteudo).not.toContain(LINK);
+    expect(eventos()).toContain('link_do_grupo:ja_foi');
+  });
+
+  it('mas se o envio do link FALHOU, ele vai de novo: no aparelho dele não chegou nada', async () => {
+    // 17% das saídas da casa em 30 dias voltam `failed`. Se um envio que não chegou desarmasse a
+    // rede, o aluno ficaria sem link nenhum justamente quando pergunta por ele.
+    const LINK = 'https://chat.whatsapp.com/grupo-da-turma';
+    estado.origem = mensagem({ tipo: 'text', conteudo: 'E o grupo da turma?' });
+    estado.historico = [
+      estado.origem,
+      mensagem({
+        direcao: 'outbound', status_entrega: 'failed',
+        conteudo: `Segue o link do grupo da sua turma:\n${LINK}`,
+      }),
+    ];
+    estado.respostasModelo = [
+      { content: [{ type: 'tool_use', id: 't1', name: 'registrar_grupo_da_turma', input: { esta_no_grupo: false } }] },
+      { content: [{ type: 'text', text: 'Segue o link do grupo da sua turma.' }] },
+    ];
+    await chamar(C);
+    expect(eventos()).not.toContain('link_do_grupo:ja_foi');
+    expect(fila()[0].conteudo).toContain(LINK);
+  });
+
   it('"Não estou" sem link e depois "parem de me mandar": uma passagem por assunto', async () => {
     estado.contexto = { ...estado.contexto, grupo_url: null };
     estado.origem = mensagem({
