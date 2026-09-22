@@ -7,6 +7,7 @@ import type { Msg } from './historico.ts';
 import { pausaVigente } from './pausa.ts';
 import { avaliarPoliticaVoz } from './politicaVoz.ts';
 import { prepararVozElevenlabs, ErroVozElevenlabs, MODELO_ELEVENLABS_PADRAO, VOZ_PADRAO_ELEVENLABS } from './vozElevenlabs.ts';
+import type { ConfiguracoesVozElevenlabs } from './vozElevenlabs.ts';
 import type { CtxConversa } from './tools.ts';
 
 export type OpcoesVozSdr = {
@@ -25,7 +26,7 @@ export type OpcoesVozSdr = {
 };
 type Telemetria = { registrar: (tipo: string, dados?: Record<string, unknown>, duracaoMs?: number, erro?: string) => void };
 export type ResultadoVoz = 'texto' | 'texto_revalidar' | 'aceito' | 'cancelado' | 'desconhecido';
-type ConfigVoz = { chaveApi: string; voiceId: string; modelo: string };
+type ConfigVoz = { chaveApi: string; voiceId: string; modelo: string; voiceSettings?: ConfiguracoesVozElevenlabs };
 
 export function configurarVoz(
   telefone: string,
@@ -41,10 +42,16 @@ export function configurarVoz(
   if (!permitidos.some((numero) => variantes.has(numero.replace(/\D/g, '')))) return null;
   const chaveApi = env('AGENTE_SDR_ELEVENLABS_KEY') || env('ELEVENLABS_API_KEY');
   if (!chaveApi) return null;
+  const voiceId = env('AGENTE_SDR_ELEVENLABS_VOICE_ID') || VOZ_PADRAO_ELEVENLABS;
+  const modelo = env('AGENTE_SDR_ELEVENLABS_MODEL') || MODELO_ELEVENLABS_PADRAO;
+  // 22/09/2026: o clone profissional do piloto ficou artificial no V3. Perfil
+  // conferido no painel que o usuário aprovou: Multilingual v2, mesmos ajustes.
+  // Restringir ao par voz/modelo evita aplicar o perfil pessoal a outra voz.
+  const voiceSettings = voiceId === 'kg0vrevk3kmdbBvFCQr0' && modelo === 'eleven_multilingual_v2'
+    ? { stability: 0.69, similarity_boost: 1, style: 0.63, use_speaker_boost: true, speed: 0.97 }
+    : undefined;
   return {
-    chaveApi,
-    voiceId: env('AGENTE_SDR_ELEVENLABS_VOICE_ID') || VOZ_PADRAO_ELEVENLABS,
-    modelo: env('AGENTE_SDR_ELEVENLABS_MODEL') || MODELO_ELEVENLABS_PADRAO,
+    chaveApi, voiceId, modelo, ...(voiceSettings ? { voiceSettings } : {}),
   };
 }
 

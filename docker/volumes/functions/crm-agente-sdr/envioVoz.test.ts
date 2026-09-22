@@ -63,6 +63,18 @@ describe('piloto de voz exige configuração explícita', () => {
   it('usa a voz escolhida, com chave apenas no servidor', () => {
     expect(configurarVoz(ctx.telefone, (nome) => configuracao[nome], 'openai')).toMatchObject({ voiceId: 'lvkgCBi6spByiTZMPJEK', modelo: 'eleven_v3' });
   });
+  it('reproduz o perfil do painel somente para o clone pessoal com Multilingual v2', () => {
+    const perfil = { ...configuracao, AGENTE_SDR_ELEVENLABS_VOICE_ID: 'kg0vrevk3kmdbBvFCQr0', AGENTE_SDR_ELEVENLABS_MODEL: 'eleven_multilingual_v2' };
+    const ler = (nome: string) => perfil[nome as keyof typeof perfil];
+    expect(configurarVoz(ctx.telefone, ler, 'openai')).toMatchObject({
+      voiceId: 'kg0vrevk3kmdbBvFCQr0', modelo: 'eleven_multilingual_v2',
+      voiceSettings: { stability: 0.69, similarity_boost: 1, style: 0.63, use_speaker_boost: true, speed: 0.97 },
+    });
+    expect(configurarVoz(ctx.telefone, (nome) => nome === 'AGENTE_SDR_ELEVENLABS_MODEL' ? 'eleven_v3' : ler(nome), 'openai')?.voiceSettings).toBeUndefined();
+    expect(configurarVoz(ctx.telefone, (nome) => nome === 'AGENTE_SDR_ELEVENLABS_VOICE_ID' ? 'outra-voz' : ler(nome), 'openai')?.voiceSettings).toBeUndefined();
+    expect(configurarVoz(ctx.telefone, ler, 'anthropic')).toBeNull();
+    expect(configurarVoz('5511999990002', ler, 'openai')).toBeNull();
+  });
   it.each(['AGENTE_SDR_VOZ_ATIVA', 'AGENTE_SDR_VOZ_TELEFONES', 'ELEVENLABS_API_KEY'])('não ativa sem %s', (chave) => {
     expect(configurarVoz(ctx.telefone, (nome) => nome === chave ? undefined : configuracao[nome], 'openai')).toBeNull();
   });
@@ -78,6 +90,16 @@ describe('piloto de voz exige configuração explícita', () => {
 });
 
 describe('envio de áudio preserva o contrato do SDR', () => {
+  it('encaminha o modelo e os ajustes do painel à síntese do piloto', async () => {
+    const { opts } = preparar();
+    const perfil: Record<string, string> = { ...configuracao,
+      AGENTE_SDR_ELEVENLABS_VOICE_ID: 'kg0vrevk3kmdbBvFCQr0', AGENTE_SDR_ELEVENLABS_MODEL: 'eleven_multilingual_v2' };
+    expect(await tentarEnviarVoz({ ...opts, env: (nome) => perfil[nome] })).toBe('aceito');
+    expect(prepararVozElevenlabs).toHaveBeenCalledWith(expect.objectContaining({
+      texto, voiceId: 'kg0vrevk3kmdbBvFCQr0', modelo: 'eleven_multilingual_v2',
+      voiceSettings: { stability: 0.69, similarity_boost: 1, style: 0.63, use_speaker_boost: true, speed: 0.97 },
+    }));
+  });
   it('follow-up Claude não consulta banco, sintetiza ou despacha áudio', async () => {
     const { opts, supabase } = preparar();
     expect(await tentarEnviarVoz({ ...opts, opcoes: { ...opts.opcoes, provedorResposta: 'anthropic' } })).toBe('texto');
