@@ -21,7 +21,7 @@ export type ConfiguracoesVozElevenlabs = {
   use_speaker_boost: boolean;
   speed: number;
 };
-type ErroStorage = { statusCode?: string | number; status?: string | number; code?: string; message?: string };
+type ErroStorage = { statusCode?: string | number; status?: string | number; code?: string; message?: string; originalError?: unknown };
 export type StorageVozElevenlabs = {
   from(bucket: string): {
     download(path: string): PromiseLike<{ data: Blob | null; error: ErroStorage | null }>;
@@ -133,6 +133,26 @@ function faltaObjeto(erro: ErroStorage): boolean {
     || (status === 400 && /^(?:object|resource|the resource)(?: was)? not found[.!]?$/i.test(erro.message ?? ''));
 }
 
+async function cacheAusente(erro: ErroStorage): Promise<boolean> {
+  if (faltaObjeto(erro)) return true;
+  // 22/09/2026: o SDK 2.50.3 usa storage-js 2.7.1. download passa
+  // noResolveJson=true; o 400/404 vem como StorageUnknownError.originalError
+  // (Response), sem status/message normalizados. O cache vazio travava TODO
+  // primeiro áudio antes do TTS. Não confundir 400 de autenticação com ausência.
+  const resposta = erro.originalError;
+  if (!(resposta instanceof Response)) return false;
+  if (resposta.status === 404) return true;
+  if (resposta.status !== 400) return false;
+  try {
+    const corpo: unknown = await resposta.clone().json();
+    if (!corpo || typeof corpo !== 'object' || Array.isArray(corpo)) return false;
+    const dado = corpo as Record<string, unknown>;
+    return faltaObjeto({ status: resposta.status,
+      code: typeof dado.code === 'string' ? dado.code : typeof dado.error === 'string' ? dado.error : undefined,
+      message: typeof dado.message === 'string' ? dado.message : undefined });
+  } catch { return false; }
+}
+
 async function lerAudio(resposta: Response, sinal: AbortSignal): Promise<Uint8Array> {
   const declarado = Number(resposta.headers.get('content-length'));
   if (declarado > LIMITE_AUDIO_VOZ_BYTES) {
@@ -199,7 +219,7 @@ export async function prepararVozElevenlabs(opts: OpcoesVozElevenlabs): Promise<
       const cache = await bucket.download(caminho);
       sinal.throwIfAborted();
       if (cache.error) {
-        if (faltaObjeto(cache.error)) return false;
+        if (await cacheAusente(cache.error)) return false;
         throw new ErroVozElevenlabs('CACHE_LEITURA_FALHOU');
       }
       if (!cache.data) throw new ErroVozElevenlabs('CACHE_LEITURA_FALHOU');

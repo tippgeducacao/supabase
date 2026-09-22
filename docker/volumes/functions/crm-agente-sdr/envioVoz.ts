@@ -6,7 +6,7 @@ import { buscarLead } from './historico.ts';
 import type { Msg } from './historico.ts';
 import { pausaVigente } from './pausa.ts';
 import { avaliarPoliticaVoz } from './politicaVoz.ts';
-import { prepararVozElevenlabs, MODELO_ELEVENLABS_PADRAO, VOZ_PADRAO_ELEVENLABS } from './vozElevenlabs.ts';
+import { prepararVozElevenlabs, ErroVozElevenlabs, MODELO_ELEVENLABS_PADRAO, VOZ_PADRAO_ELEVENLABS } from './vozElevenlabs.ts';
 import type { CtxConversa } from './tools.ts';
 
 export type OpcoesVozSdr = {
@@ -120,7 +120,10 @@ export async function tentarEnviarVoz(opts: {
     habilitada: true, origem: opcoes.origem, texto, historico: opcoes.historico,
     cadenciaAtingida: opts.cadenciaAtingida === true,
   });
-  if (!politica.permitido) return 'texto';
+  if (!politica.permitido) {
+    tel?.registrar('voz_mantida_texto', { motivo: politica.motivo });
+    return 'texto';
+  }
   let referencia: string | undefined;
   try {
     const estado = await conferirEstadoVoz(ctx, opcoes);
@@ -149,10 +152,12 @@ export async function tentarEnviarVoz(opts: {
     tel?.registrar('voz_preparada', {
       voz: config.voiceId, modelo: config.modelo, caracteres: audio.caracteres, cache: audio.cacheHit,
     });
-  } catch {
+  } catch (erro) {
     // Síntese ainda não enviou nada ao destinatário. O texto aprovado é seguro
     // como fallback, mas somente depois de reler o estado abaixo.
-    tel?.registrar('voz_fallback_texto', { motivo: 'preparo_falhou' });
+    // Só o enum local entra no log: nunca Error.message, body, URL ou chave.
+    tel?.registrar('voz_fallback_texto', { motivo: 'preparo_falhou',
+      codigo: erro instanceof ErroVozElevenlabs ? erro.codigo : 'ERRO_NAO_CLASSIFICADO' });
   }
   try {
     const estado = await conferirEstadoVoz(ctx, opcoes, referencia);

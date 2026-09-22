@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { configurarVoz, conferirEstadoVoz, tentarEnviarVoz } from './envioVoz';
-import { prepararVozElevenlabs } from './vozElevenlabs';
+import { prepararVozElevenlabs, ErroVozElevenlabs } from './vozElevenlabs';
 
-vi.mock('./vozElevenlabs', () => ({
-  VOZ_PADRAO_ELEVENLABS: 'lvkgCBi6spByiTZMPJEK', MODELO_ELEVENLABS_PADRAO: 'eleven_v3', prepararVozElevenlabs: vi.fn(),
+vi.mock('./vozElevenlabs', async (original) => ({
+  ...await original<typeof import('./vozElevenlabs')>(), prepararVozElevenlabs: vi.fn(),
 }));
 
 const ctx = { telefone: '5511999990001', remotejid: '5511999990001@s.whatsapp.net', waAccountId: 'conta-meta', leadId: null, oportunidadeId: null };
@@ -99,6 +99,13 @@ describe('envio de áudio preserva o contrato do SDR', () => {
     expect(await tentarEnviarVoz(opts)).toBe('texto_revalidar');
     expect(opts.fetchImpl).not.toHaveBeenCalled();
     expect(JSON.stringify(opts.tel.registrar.mock.calls)).not.toContain('credencial-secreta');
+    expect(opts.tel.registrar).toHaveBeenCalledWith('voz_fallback_texto', { motivo: 'preparo_falhou', codigo: 'ERRO_NAO_CLASSIFICADO' });
+  });
+  it('registra o código local do preparo, sem detalhes do provedor ou chave', async () => {
+    const { opts } = preparar();
+    vi.mocked(prepararVozElevenlabs).mockRejectedValue(new ErroVozElevenlabs('CACHE_LEITURA_FALHOU'));
+    expect(await tentarEnviarVoz(opts)).toBe('texto_revalidar');
+    expect(opts.tel.registrar).toHaveBeenCalledWith('voz_fallback_texto', { motivo: 'preparo_falhou', codigo: 'CACHE_LEITURA_FALHOU' });
   });
   it('pausa durante a síntese impede áudio e fallback texto', async () => {
     const { opts } = preparar();

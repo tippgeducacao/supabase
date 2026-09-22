@@ -102,6 +102,37 @@ describe('preparação de voz ElevenLabs sem envio', () => {
     expect(await prepararVozElevenlabs(d.opts)).toMatchObject({ cacheHit: false });
   });
 
+  it.each([400, 404])('gera o primeiro áudio com StorageUnknownError do SDK 2.7.1 (HTTP %s)', async (status) => {
+    const d = dependencias();
+    d.download.mockResolvedValue({ data: null, error: {
+      message: '{}', originalError: new Response(JSON.stringify({ statusCode: '404', error: 'not_found', message: 'Object not found' }), { status }),
+    } });
+    expect(await prepararVozElevenlabs(d.opts)).toMatchObject({ cacheHit: false, mimeType: 'audio/ogg' });
+    expect(d.transporte).toHaveBeenCalledOnce();
+    expect(d.upload).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    [400, { statusCode: '400', error: 'InvalidJWT', message: 'Invalid JWT' }],
+    [401, { statusCode: '404', error: 'not_found', message: 'Object not found' }],
+    [403, { message: 'Object not found' }],
+    [500, { message: 'Object not found' }],
+  ])('erro encapsulado HTTP %s não é cache ausente por aproximação', async (status, corpo) => {
+    const d = dependencias();
+    d.download.mockResolvedValue({ data: null, error: {
+      message: '{}', originalError: new Response(JSON.stringify(corpo), { status: Number(status) }),
+    } });
+    await expect(prepararVozElevenlabs(d.opts)).rejects.toMatchObject({ codigo: 'CACHE_LEITURA_FALHOU' });
+    expect(d.transporte).not.toHaveBeenCalled();
+  });
+
+  it('400 encapsulado sem JSON de objeto ausente não gasta síntese', async () => {
+    const d = dependencias();
+    d.download.mockResolvedValue({ data: null, error: { originalError: new Response('resposta inválida', { status: 400 }) } });
+    await expect(prepararVozElevenlabs(d.opts)).rejects.toMatchObject({ codigo: 'CACHE_LEITURA_FALHOU' });
+    expect(d.transporte).not.toHaveBeenCalled();
+  });
+
   it('não sintetiza sobre cache inacessível e não propaga erros do Storage', async () => {
     const d = dependencias();
     d.download.mockResolvedValue({ data: null, error: { statusCode: '403', message: 'segredo-sintetico' } });
