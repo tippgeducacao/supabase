@@ -101,3 +101,56 @@ export function prepararLinksNoHtml(html: string, opcoes: OpcoesLink): string {
     },
   );
 }
+
+/**
+ * Entidades que aparecem num atributo href escrito pelo compilador (`&` vira
+ * `&amp;`). Sem desfazer isso, o destino guardado no rastreio sairia com
+ * "&amp;utm_source=..." e o parâmetro morreria no site.
+ */
+function decodificarHref(href: string): string {
+  return href
+    .replace(/&amp;/gi, "&").replace(/&quot;/gi, '"').replace(/&#0*39;/g, "'")
+    .replace(/&apos;/gi, "'").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">");
+}
+
+/** Volta para dentro do atributo: `&` precisa virar `&amp;` de novo. */
+function escaparHref(href: string): string {
+  return href.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+}
+
+/**
+ * Reescreve os `href` de um HTML JÁ PRONTO para passarem pelo redirecionador de
+ * cliques. É async porque a URL rastreada é ASSINADA (ver `linkCliqueEmail`), e
+ * assinar é `crypto.subtle`, que é assíncrono.
+ *
+ * Roda no ENVIO, não na compilação: o `corpo_html` do modelo é compilado e salvo
+ * uma vez, e o id do envio — que é o que identifica o clique — só existe na hora
+ * de despachar. Por isso também aceita HTML legado, que nunca passou pelo
+ * construtor.
+ *
+ * O que NÃO é embrulhado: mailto/tel/âncora, merge tag não resolvida e qualquer
+ * link que `ignorar` recusar (o descadastro, que precisa chegar inteiro ao
+ * destinatário e tem trava própria).
+ */
+export async function envolverCliquesNoHtml(
+  html: string,
+  rastrear: (href: string) => Promise<string>,
+  ignorar: (href: string) => boolean = () => false,
+): Promise<string> {
+  if (!html) return html;
+  const encontrados: string[] = [];
+  const padrao = /(<a\b[^>]*?\bhref\s*=\s*)(["'])(.*?)\2/gi;
+  for (const [, , , href] of html.matchAll(padrao)) {
+    const limpo = decodificarHref(href);
+    if (ehLinkNavegavel(limpo) && !ignorar(limpo) && !encontrados.includes(limpo)) encontrados.push(limpo);
+  }
+  if (encontrados.length === 0) return html;
+  // Assina uma vez por destino distinto: e-mail com o mesmo CTA em três botões
+  // faria três HMACs idênticos.
+  const mapa = new Map<string, string>();
+  for (const destino of encontrados) mapa.set(destino, await rastrear(destino));
+  return html.replace(padrao, (inteiro, antes: string, aspas: string, href: string) => {
+    const novo = mapa.get(decodificarHref(href));
+    return novo ? `${antes}${aspas}${escaparHref(novo)}` : inteiro;
+  });
+}

@@ -11,7 +11,8 @@
 // A separação é de propósito: bounce de campanha não pode queimar a reputação do
 // domínio que manda o e-mail de aprovação de TCC. Ver docs/E-mail e Caixas.md.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
-import { formatarFrom, linkDescadastro, tagSegura } from "../_shared/envioComum.ts";
+import { formatarFrom, linkCliqueEmail, linkDescadastro, tagSegura } from "../_shared/envioComum.ts";
+import { envolverCliquesNoHtml } from "../_shared/emailBuilder/links.ts";
 import { urlPublicaEmail } from "../_shared/urlPublicaEmail.ts";
 import { ErroEnvio, obterProvedor, provedorEfetivo } from "../_shared/emailProviders/index.ts";
 import { buscarSupressao, supressaoSeAplica } from "../_shared/supressao.ts";
@@ -424,6 +425,27 @@ Deno.serve(async (req) => {
     // que nenhum cliente de e-mail alcança — o pixel apontou pra lá por muito tempo
     // e por isso NENHUMA abertura foi registrada. Mesmo motivo vale pro descadastro.
     const basePublicaEmail = urlPublicaEmail((chave) => Deno.env.get(chave));
+
+    // Cliques: embrulha os links ANTES do pixel e do descadastro, que não são
+    // conteúdo do e-mail e têm rastreio próprio. Vale para disparo de massa e
+    // webhook — a mesma régua do descadastro logo abaixo. Notificação pessoal
+    // (tarefa, menção, lead) continua com o link cru: ali o número não é métrica
+    // de campanha, e link redirecionado em aviso interno só atrapalha.
+    if (ehCampanha || payload.contexto_tipo === "webhook") {
+      try {
+        corpoHtml = await envolverCliquesNoHtml(
+          corpoHtml,
+          (href) => linkCliqueEmail(basePublicaEmail, log.id, href),
+          // O descadastro precisa chegar inteiro: tem token próprio e é o que o
+          // Gmail aciona no one-click.
+          (href) => href.includes("/functions/v1/email-descadastro") || href.includes("/functions/v1/email-track-"),
+        );
+      } catch (e) {
+        // Rastreio é acessório: e-mail não deixa de sair porque a assinatura falhou.
+        console.warn("[email-send] cliques não rastreados", { envio: log.id, motivo: e instanceof Error ? e.message : "desconhecido" });
+      }
+    }
+
     const pixelTag = `<img src="${basePublicaEmail}/functions/v1/email-track-open?id=${log.id}" width="1" height="1" alt="" style="display:none" />`;
     if (/<\/body>/i.test(corpoHtml)) {
       corpoHtml = corpoHtml.replace(/<\/body>/i, `${pixelTag}</body>`);

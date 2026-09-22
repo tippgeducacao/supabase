@@ -84,3 +84,50 @@ export async function linkDescadastro(baseUrl: string, email: string): Promise<s
   const token = await assinarDescadastro(email);
   return `${baseUrl}/functions/v1/email-descadastro?e=${encodeURIComponent(email)}&t=${token}`;
 }
+
+// ---------------------------------------------------------------- cliques
+
+/**
+ * Assinatura do link RASTREADO. Mesmo princípio do descadastro: HMAC no lugar de
+ * uma tabela de tokens.
+ *
+ * ⚠️ Aqui a assinatura não é conveniência, é a trava contra OPEN REDIRECT. O
+ * redirecionador recebe o destino na URL; sem assinar, qualquer um montaria
+ * `…/email-track-click?u=https://site-de-golpe` e teria um link de phishing
+ * saindo do NOSSO domínio, com a nossa reputação. A edge só redireciona para
+ * destino que ela mesma assinou no envio.
+ *
+ * O par (envio, url) entra na assinatura: um link assinado de um envio não serve
+ * para inventar outro destino nem para creditar clique em envio alheio.
+ */
+async function chaveHmacClique(): Promise<CryptoKey> {
+  const segredo = Deno.env.get("EMAIL_CLICK_SECRET") ??
+    Deno.env.get("EMAIL_UNSUB_SECRET") ??
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  return await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(segredo),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+}
+
+export async function assinarCliqueEmail(envioId: string, url: string): Promise<string> {
+  const chave = await chaveHmacClique();
+  // O id vai ENCODADO: sem isso, (envio "a", url "b\nc") e (envio "a\nb", url "c")
+  // produzem a mesma mensagem e a mesma assinatura — um token serviria para os dois.
+  // Hoje o id é um uuid e não tem como carregar quebra de linha, mas a trava não
+  // pode depender de quem chama. (Pego pelo teste, não pela leitura.)
+  const assinatura = await crypto.subtle.sign("HMAC", chave, new TextEncoder().encode(`${encodeURIComponent(envioId)}\n${url}`));
+  return [...new Uint8Array(assinatura)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 32);
+}
+
+export async function conferirCliqueEmail(envioId: string, url: string, token: string): Promise<boolean> {
+  return igualSeguro(await assinarCliqueEmail(envioId, url), token);
+}
+
+export async function linkCliqueEmail(baseUrl: string, envioId: string, url: string): Promise<string> {
+  const token = await assinarCliqueEmail(envioId, url);
+  return `${baseUrl}/functions/v1/email-track-click?e=${encodeURIComponent(envioId)}&t=${token}&u=${encodeURIComponent(url)}`;
+}
