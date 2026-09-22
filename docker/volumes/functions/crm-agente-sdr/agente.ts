@@ -10,6 +10,7 @@ import { INSTRUCAO_EVENTOS } from './instrucaoEventos.ts';
 import { descreverToolsSdr } from './descricoesTools.ts';
 import { respostaParaFalhaCatalogo } from './falhaCatalogo.ts';
 import { INSTRUCAO_FALHA_COMPATIBILIDADE, respostaAoAceiteAposFalha, ultimaCompatibilidadeFalhou } from './falhaCompatibilidade.ts';
+import { comPrazoModelo, PRAZO_MODELO_PILOTO_MS } from './prazoModelo.ts';
 import { INSTRUCAO_FATOS_DO_LEAD } from './fatosLead.ts';
 import { INSTRUCAO_FICHA } from './fichaAtendimento.ts';
 import { INSTRUCAO_VOZ } from './vozDoJoao.ts';
@@ -56,22 +57,25 @@ export async function chamarAnthropic(
   body: Record<string, unknown>,
   extraHeaders: Record<string, string> = {},
   provedor: ProvedorIA | null = null,
+  prazoMs?: number,
 ): Promise<any> {
   const alternativo = provedor;
   const base = alternativo?.base ?? 'https://api.anthropic.com';
   const chave = alternativo?.chave ?? ANTHROPIC_KEY;
   const openai = alternativo?.formato === 'openai' ? alternativo : null;
-  // retryOnFail do n8n: 5 tentativas, 3s entre elas.
+  const executar = async (sinal?: AbortSignal) => {
+  // retryOnFail do n8n: até 5 tentativas, dentro do mesmo prazo no piloto.
   let ultimoErro = '';
   for (let tentativa = 1; tentativa <= 5; tentativa++) {
+    sinal?.throwIfAborted();
     const res = openai
       ? await fetch(`${base}/v1/responses`, {
-        method: 'POST',
+        method: 'POST', ...(sinal ? { signal: sinal } : {}),
         headers: { authorization: `Bearer ${chave}`, 'content-type': 'application/json' },
         body: JSON.stringify(paraPedidoOpenai(body, openai)),
       })
       : await fetch(`${base}/v1/messages`, {
-        method: 'POST',
+        method: 'POST', ...(sinal ? { signal: sinal } : {}),
         headers: {
           'x-api-key': chave,
           'anthropic-version': '2023-06-01',
@@ -80,13 +84,24 @@ export async function chamarAnthropic(
         },
         body: JSON.stringify(body),
       });
-    if (res.ok) return openai ? paraRespostaAnthropic(await res.json()) : await res.json();
+    sinal?.throwIfAborted();
+    if (res.ok) {
+      const dados = await res.json();
+      sinal?.throwIfAborted();
+      return openai ? paraRespostaAnthropic(dados) : dados;
+    }
     ultimoErro = `HTTP ${res.status}: ${await res.text()}`;
+    sinal?.throwIfAborted();
     // 4xx (exceto 429) não melhora com retry.
     if (res.status >= 400 && res.status < 500 && res.status !== 429) break;
     if (tentativa < 5) await new Promise((r) => setTimeout(r, 3000));
   }
   throw new Error(`${alternativo?.nome === 'openai' ? 'OpenAI' : alternativo?.nome ?? 'Anthropic'}: ${ultimoErro}`);
+  };
+  // 22/09/2026: o piloto parou após tools, com fetch sem limite e sem resposta.
+  // O legado conserva seu contrato; OpenAI e fallback explícito têm prazo finito.
+  const limite = prazoMs ?? (openai ? PRAZO_MODELO_PILOTO_MS : undefined);
+  return limite === undefined ? executar() : comPrazoModelo(executar, limite);
 }
 
 // ── Router: decide validação × qualificador (tool forçada, sem thinking) ─────
@@ -159,6 +174,7 @@ export async function chamarAgentePrincipal(opts: {
   tools: any[];
   /** null/ausente = Anthropic. */
   provedor?: ProvedorIA | null;
+  prazoModeloMs?: number;
 }): Promise<any> {
   const falhaCatalogo = respostaParaFalhaCatalogo(opts.messages);
   if (falhaCatalogo) return {
@@ -247,7 +263,7 @@ export async function chamarAgentePrincipal(opts: {
     tools,
   };
   const provedor = opts.provedor ?? null;
-  const resposta = await chamarAnthropic(pedido, {}, provedor);
+  const resposta = await chamarAnthropic(pedido, {}, provedor, opts.prazoModeloMs);
   const contemBastidor = (texto: string) => contemRaciocinioVazado(texto) || contemMeta(texto);
   const decisao = avaliarCanalResposta(resposta, contemBastidor, false, ferramentasDisponiveis);
   if (decisao.tipo !== 'corrigir') return normalizarRespostaCanal(resposta, decisao);
@@ -275,7 +291,7 @@ export async function chamarAgentePrincipal(opts: {
           + 'Não mencione esta correção nem descreva raciocínio, decisões ou ações internas. '
           + 'Use mensagem vazia quando o contexto pedir silêncio. Nenhuma ferramenta de negócio pode ser chamada nesta correção.',
       }],
-    }, {}, provedor);
+    }, {}, provedor, opts.prazoModeloMs);
     return normalizarRespostaCanal({
       ...corrigida, usage: somarUsoModelo(resposta.usage, corrigida.usage),
     }, avaliarCanalResposta(corrigida, contemBastidor, true), decisao.motivo);

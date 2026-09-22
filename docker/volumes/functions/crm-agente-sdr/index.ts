@@ -33,6 +33,7 @@ import { persistirEntradasDoLote, registrarEntrada } from './historicoEntradaPau
 import { aguardarAudiosDoHistorico, contarAudiosPendentes } from './sincronizacaoAudio.ts';
 import { conversaTexto, enviarResposta, horariosInventados, humanizarTexto, removerRaciocinioVazado } from './saida.ts';
 import { configurarVoz } from './envioVoz.ts';
+import { PRAZO_MODELO_PILOTO_MS, RESPOSTA_MODELO_INDISPONIVEL } from './prazoModelo.ts';
 import { contaDoLead, dadosDaConta, personaDaConta } from './conta.ts';
 import { rodarEsteiraFollowup } from './followup.ts';
 import { rodarEsteiraFollowupTemplate } from './followup-template.ts';
@@ -585,7 +586,8 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   const renovar = lockRenovar(remotejid);
   // 22/09/2026: candidato local, só no canário OpenAI já selecionado pelo telefone.
   // Consulta o provedor na HORA da saída: fallback para Claude conserva o legado.
-  const fracionamentoAtual = () => ctx.ficha && provedor?.nome === 'openai' && provedor.formato === 'openai'
+  let respostaOperacional = false;
+  const fracionamentoAtual = () => respostaOperacional || (ctx.ficha && provedor?.nome === 'openai' && provedor.formato === 'openai')
     ? 'codigo' as const : 'modelo' as const;
 
   // Tools que pausam a IA por decisão do PRÓPRIO agente (pausa_ia, e o
@@ -784,6 +786,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     const contextoComMateriais = contextoEfetivo;
     const instrucaoEncerramento = retornoPorFormatura ? INSTRUCAO_POS_RETORNO : INSTRUCAO_POS_PAUSA;
     const inicioLlm = Date.now();
+    tel.registrar('llm_inicio', { volta: rodada + 1, provedor: provedor?.nome ?? 'anthropic' });
     const pedidoPrincipal = {
       promptAgente,
       contextoEntregaMateriais,
@@ -810,12 +813,26 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       // Provedor alternativo fora do ar (ou recusando o pedido) NÃO pode calar o João: a volta
       // é refeita no Claude e o resto da rodada fica nele. As tools são as mesmas — a tabela
       // da OpenAI já guarda o texto efetivo, no mesmo contrato interno.
-      if (!provedor) throw e;
+      if (!provedor && !ctx.ficha) throw e;
       // O motivo vai em `dados`, não em `erro`: a rodada foi RECUPERADA, e erro preenchido a
       // pintaria de vermelho na tela de Debug mesmo com o lead respondido.
-      tel.registrar('provedor_ia_fallback', { de: provedor.nome, para: 'anthropic', volta: rodada + 1, motivo: String((e as Error)?.message ?? e).slice(0, 500) });
-      provedor = null;
-      resp = await chamarAgentePrincipal({ ...pedidoPrincipal, provedor: null });
+      try {
+        if (!provedor) throw e;
+        tel.registrar('provedor_ia_fallback', { de: provedor.nome, para: 'anthropic', volta: rodada + 1, motivo: String((e as Error)?.message ?? e).slice(0, 500) });
+        provedor = null;
+        resp = await chamarAgentePrincipal({ ...pedidoPrincipal, provedor: null,
+          ...(ctx.ficha ? { prazoModeloMs: PRAZO_MODELO_PILOTO_MS } : {}) });
+      } catch (falhaReserva) {
+        if (!ctx.ficha) throw falhaReserva;
+        // A reserva também pode estar indisponível (ex.: sem saldo). Uma frase
+        // operacional segue as guardas normais de pausa/aceite, sem outra IA,
+        // sem áudio e sem afirmar que tools ou agendamento deram certo.
+        provedor = null;
+        respostaOperacional = true;
+        tel.registrar('modelo_indisponivel', { volta: rodada + 1, resposta_operacional: true });
+        resp = { content: [{ type: 'text', text: RESPOSTA_MODELO_INDISPONIVEL }], stop_reason: 'end_turn',
+          origem: 'indisponibilidade_modelo', usage: { input_tokens: 0, output_tokens: 0 } };
+      }
     }
     // OUTPUT da IA (não o prompt): o que o modelo gerou nesta volta — raciocínio
     // (thinking), resposta crua (text) e as tools que ELA decidiu chamar.

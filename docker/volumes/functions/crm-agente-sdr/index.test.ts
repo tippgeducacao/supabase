@@ -453,6 +453,27 @@ describe('SDR: texto de ferramenta nunca vira despedida', () => {
     expect(fronteiras.enviar.mock.calls[0][5]).toMatchObject({ provedorResposta: 'anthropic' });
   });
 
+  it.each([false, true])('falha do principal e da reserva gera texto operacional respeitando pausa=%s', async (pausar) => {
+    fronteiras.vozAtiva = true;
+    fronteiras.lunaTelefones = [payload.telefone];
+    fronteiras.provedorOpenai.mockReturnValue(luna);
+    fronteiras.chamarPrincipal.mockRejectedValueOnce(new Error('MODELO_TEMPO_ESGOTADO'))
+      .mockImplementationOnce(async () => { fronteiras.pausaNoDebounce = pausar; throw new Error('saldo indisponível'); });
+    await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
+    expect(fronteiras.chamarPrincipal).toHaveBeenCalledTimes(2);
+    expect(fronteiras.chamarPrincipal.mock.calls[1][0].prazoModeloMs).toBe(45000);
+    expect(fronteiras.executar).not.toHaveBeenCalled();
+    if (pausar) expect(fronteiras.enviar).not.toHaveBeenCalled();
+    else {
+      expect(fronteiras.enviar).toHaveBeenCalledOnce();
+      const envio = fronteiras.enviar.mock.calls[0];
+      expect(envio[1]).toBe('não consegui concluir sua resposta agora. pode tentar novamente em instantes?');
+      expect(envio[5]).toMatchObject({ provedorResposta: 'anthropic' });
+      expect(envio[6]).toBe('codigo');
+    }
+    expect(fronteiras.registrar).toHaveBeenCalledWith('modelo_indisponivel', expect.objectContaining({ resposta_operacional: true }));
+  });
+
   it('canário da Luna usa o debounce DELE, não o zero do telefone de teste nem os 45 s da produção', async () => {
     fronteiras.lunaTelefones = ['5511999990001'];
     fronteiras.lunaDelay = 5;
