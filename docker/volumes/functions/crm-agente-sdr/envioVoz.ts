@@ -135,11 +135,24 @@ export async function tentarEnviarVoz(opts: {
     // A frequência é controlada pelo ciclo 3–5 persistido no banco. O antigo
     // teto de um áudio diário impediria o intervalo pedido pelo usuário.
     const { data: ultimas, error: erroUltima } = await opcoes.supabase.from('crm_whatsapp_messages')
-      .select('tipo').eq('wa_account_id', ctx.waAccountId).in('telefone', phoneVariants(ctx.telefone))
+      .select('tipo,wa_message_id').eq('wa_account_id', ctx.waAccountId).in('telefone', phoneVariants(ctx.telefone))
       .eq('direcao', 'outbound').neq('status_entrega', 'failed')
       .order('created_at', { ascending: false }).order('id', { ascending: false }).limit(1);
     if (erroUltima) throw new Error('voz_estado_indisponivel');
-    if (ultimas?.[0]?.tipo === 'audio') return 'texto';
+    if (ultimas?.[0]?.tipo === 'audio') {
+      const anterior = ultimas[0].wa_message_id;
+      if (opcoes.origem !== 'conversa' || typeof anterior !== 'string' || !anterior) return 'texto';
+      // 22/09/2026: o dono do piloto pediu ouvir a voz nova na próxima resposta.
+      // Operação explícita, auditada e válida por 2h, presa ao último wamid:
+      // qualquer novo envio invalida a exceção, sem relaxar a cadência da base.
+      const { data: testes, error: erroTeste } = await opcoes.supabase.from('crm_agente_sdr_eventos')
+        .select('id').eq('remotejid', ctx.remotejid).eq('tipo', 'voz_teste_proxima_resposta')
+        .eq('dados->>wa_account_id', ctx.waAccountId).eq('dados->>apos_wa_message_id', anterior)
+        .eq('dados->>voz', config.voiceId)
+        .gte('criado_em', new Date(Date.now() - 2 * 3600_000).toISOString()).limit(1);
+      if (erroTeste || !testes?.length) return 'texto';
+      tel?.registrar('voz_teste_autorizado', { solicitacao_id: testes[0].id });
+    }
   } catch {
     tel?.registrar('voz_cancelada', { motivo: 'estado_indisponivel' });
     return 'cancelado';

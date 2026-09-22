@@ -147,6 +147,35 @@ describe('envio de áudio preserva o contrato do SDR', () => {
     expect(await tentarEnviarVoz(opts)).toBe('texto');
     expect(prepararVozElevenlabs).not.toHaveBeenCalled();
   });
+  it('teste solicitado libera uma resposta após o wamid exato, na mesma conta e voz', async () => {
+    const { opts, filas, consultas } = preparar([entrada(), { data: [{ tipo: 'audio', wa_message_id: 'audio-anterior' }] }, entrada()]);
+    filas.crm_agente_sdr_eventos = [{ data: [{ id: 123 }] }];
+    expect(await tentarEnviarVoz({ ...opts, opcoes: { ...opts.opcoes, origem: 'conversa' } })).toBe('aceito');
+    expect(consultas).toContainEqual(['crm_agente_sdr_eventos', 'eq', 'remotejid', ctx.remotejid]);
+    expect(consultas).toContainEqual(['crm_agente_sdr_eventos', 'eq', 'tipo', 'voz_teste_proxima_resposta']);
+    expect(consultas).toContainEqual(['crm_agente_sdr_eventos', 'eq', 'dados->>wa_account_id', ctx.waAccountId]);
+    expect(consultas).toContainEqual(['crm_agente_sdr_eventos', 'eq', 'dados->>apos_wa_message_id', 'audio-anterior']);
+    expect(consultas).toContainEqual(['crm_agente_sdr_eventos', 'eq', 'dados->>voz', 'lvkgCBi6spByiTZMPJEK']);
+    const prazo = consultas.find(([tabela, metodo]) => tabela === 'crm_agente_sdr_eventos' && metodo === 'gte');
+    expect(Date.now() - Date.parse(String(prazo?.[3]))).toBeGreaterThanOrEqual(2 * 3600_000);
+    expect(Date.now() - Date.parse(String(prazo?.[3]))).toBeLessThan(2 * 3600_000 + 5000);
+    expect(opts.tel.registrar).toHaveBeenCalledWith('voz_teste_autorizado', { solicitacao_id: 123 });
+  });
+  it.each(['sem_pedido', 'erro', 'novo_wamid'])('teste não libera áudio com %s', async (cenario) => {
+    const anterior = cenario === 'novo_wamid' ? 'outro-audio' : 'audio-anterior';
+    const { opts, filas, consultas } = preparar([entrada(), { data: [{ tipo: 'audio', wa_message_id: anterior }] }]);
+    filas.crm_agente_sdr_eventos = [{ data: [], error: cenario === 'erro' ? { message: 'indisponível' } : null }];
+    expect(await tentarEnviarVoz({ ...opts, opcoes: { ...opts.opcoes, origem: 'conversa' } })).toBe('texto');
+    expect(consultas).toContainEqual(['crm_agente_sdr_eventos', 'eq', 'dados->>apos_wa_message_id', anterior]);
+    expect(prepararVozElevenlabs).not.toHaveBeenCalled();
+  });
+  it('exceção solicitada não libera áudio consecutivo em follow-up', async () => {
+    const { opts, filas, consultas } = preparar([entrada(), { data: [{ tipo: 'audio', wa_message_id: 'audio-anterior' }] }]);
+    filas.crm_agente_sdr_eventos = [{ data: [{ id: 123 }] }];
+    expect(await tentarEnviarVoz(opts)).toBe('texto');
+    expect(consultas.some(([tabela]) => tabela === 'crm_agente_sdr_eventos')).toBe(false);
+    expect(prepararVozElevenlabs).not.toHaveBeenCalled();
+  });
   it.each(['rede', 'http', 'sem_id'])('envio %s fica desconhecido, sem repetir nem cair para texto', async (modo) => {
     const { opts } = preparar();
     if (modo === 'rede') opts.fetchImpl.mockRejectedValue(new Error('timeout após aceite'));
