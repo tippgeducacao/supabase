@@ -24,6 +24,17 @@ describe('texto escrito do SDR adaptado só para a fala', () => {
     const texto = 'NASEM, PPGVET, MBA, RS, TB, TD, AGR, q, n, código_vc, AVC, álvc, vca, abcvc, 3vc';
     expect(normalizarTextoParaVoz(texto)).toBe(texto);
   });
+  it.each([
+    ['hoje às 18h, 18h30 ou 19h', 'hoje às dezoito horas, dezoito horas e trinta minutos ou dezenove horas'],
+    ['às 01h01 e 02:05', 'às uma hora e um minuto e duas horas e cinco minutos'],
+    ['das 00:00 às 23:59', 'das zero horas às vinte e três horas e cinquenta e nove minutos'],
+    ['às 12h15 ou 20h45.', 'às doze horas e quinze minutos ou vinte horas e quarenta e cinco minutos.'],
+    ['18h60, 24h, abc18h30, 18h300, 18:30:20', '18h60, 24h, abc18h30, 18h300, 18:30:20'],
+    ['https://exemplo.com/18h30 `18h30`', 'https://exemplo.com/18h30 `18h30`'],
+  ])('adapta somente horários válidos para fala: %s', (original, falado) => {
+    expect(normalizarTextoParaVoz(original)).toBe(falado);
+    expect(normalizarTextoParaVoz(falado)).toBe(falado);
+  });
   it('preserva links, e-mails e literais sem trocar trechos internos', () => {
     const enderecos = 'https://exemplo.com/vc/kkk?q=tbm vc@exemplo.com `vc`';
     expect(normalizarTextoParaVoz(`vc pode ler ${enderecos}`)).toBe(`você pode ler ${enderecos}`);

@@ -115,18 +115,36 @@ describe('conteúdo que precisa permanecer acessível por escrito', () => {
     'Pode enviar a sua dúvida para atendimento@ppg.educacao que o time responde por lá.',
     'O investimento integral da pós é de R$ 4.200,00, conforme o material informado.',
     'O investimento informado no material é de quatro mil reais para esta pós.',
-    'A conversa ficou para amanhã às 14h30, conforme o horário que você escolheu.',
-    'A conversa ficou para amanhã às duas da tarde, conforme o horário escolhido.',
-    'A conversa ficou combinada para amanhã ao meio-dia com o monitor da pós.',
+    'A conversa é às 14h30, pelo link https://meet.google.com/abc-defg-hij.',
+    'A conversa é às 14h30 e a matrícula custa R$ 492,50.',
+    'A conversa ficou para 22/09/2026 às 14h30.',
+    'O telefone para falar às 18h é 46988166051.',
     'O protocolo para consultar esse atendimento é ABCDE, guarde para consultar depois.',
     'Você pode consultar o endereço informado para chegar ao local da aula presencial.',
   ])('preserva texto mesmo com pedido de áudio: %s', (texto) => {
     expect(avaliar({ texto })).toEqual({ permitido: false, motivo: 'conteudo_para_escrita' });
   });
 
-  it('não transforma resposta curta nem texto longo em áudio e respeita os limites inclusivos', () => {
-    expect(avaliar({ texto: 'certo, combinado.' }).motivo).toBe('texto_curto');
-    expect(avaliar({ texto: 'a'.repeat(39) }).motivo).toBe('texto_curto');
+  it.each([
+    'sim, para a conversa com o monitor, consigo hoje às 18h, 18h30 ou 19h, no horário de brasília. qual fica melhor?',
+    'tranquilo, fico no aguardo.',
+    'certo, combinado.',
+    'A conversa ficou para amanhã às duas da tarde, conforme o horário escolhido.',
+    'A conversa ficou combinada para amanhã ao meio-dia com o monitor da pós.',
+    'Podemos conversar às 19:30?',
+  ])('não represa o áudio devido por horário ou frase curta: %s', (texto) => {
+    expect(avaliar({ texto })).toEqual({ permitido: true, motivo: 'cadencia_atingida' });
+    expect(avaliar({ texto, cadenciaAtingida: false }).motivo).toBe('intervalo_nao_atingido');
+    expect(avaliar({ texto, historico: [lead('prefiro texto')] }).motivo).toBe('preferencia_texto');
+  });
+
+  it.each(['24h', '18h60', '118h', '19:70', '18:30:20', 'abc18h30', '18h30abc', '18h300', '14h30.5'])('não confunde número ou identificador com horário: %s', (numero) => {
+    expect(avaliar({ texto: `Podemos conversar em ${numero}, qual fica melhor?` }).motivo).toBe('conteudo_para_escrita');
+  });
+
+  it('não transforma texto vazio nem longo em áudio e respeita o teto inclusivo', () => {
+    expect(avaliar({ texto: '  ' }).motivo).toBe('texto_curto');
+    expect(avaliar({ texto: 'a'.repeat(39) }).permitido).toBe(true);
     expect(avaliar({ texto: 'a'.repeat(40) }).permitido).toBe(true);
     expect(avaliar({ texto: 'a'.repeat(600) }).permitido).toBe(true);
     expect(avaliar({ texto: 'a'.repeat(601) }).motivo).toBe('texto_longo');

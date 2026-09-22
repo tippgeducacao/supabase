@@ -90,6 +90,25 @@ describe('piloto de voz exige configuração explícita', () => {
 });
 
 describe('envio de áudio preserva o contrato do SDR', () => {
+  it.each([
+    ['tranquilo, fico no aguardo.', 'tranquilo, fico no aguardo.'],
+    ['sim, para a conversa com o monitor, consigo hoje às 18h, 18h30 ou 19h, no horário de brasília. qual fica melhor?',
+      'sim, para a conversa com o monitor, consigo hoje às dezoito horas, dezoito horas e trinta minutos ou dezenove horas, no horário de brasília. qual fica melhor?'],
+  ])('a resposta real antes bloqueada chega ao TTS e ao envio: %s', async (original, falado) => {
+    const { opts } = preparar();
+    opts.texto = original;
+    expect(await tentarEnviarVoz(opts)).toBe('aceito');
+    expect(prepararVozElevenlabs).toHaveBeenCalledWith(expect.objectContaining({ texto: falado }));
+    expect(JSON.parse(String(opts.fetchImpl.mock.calls[0][1]?.body))).toMatchObject({ tipo: 'audio', conteudo: falado });
+  });
+  it('falha ao preparar horário falado devolve o texto original para o fallback', async () => {
+    const { opts } = preparar();
+    opts.texto = 'Posso hoje às 18h30, serve para você?';
+    vi.mocked(prepararVozElevenlabs).mockRejectedValue(new ErroVozElevenlabs('TEMPO_ESGOTADO'));
+    expect(await tentarEnviarVoz(opts)).toBe('texto_revalidar');
+    expect(opts.texto).toBe('Posso hoje às 18h30, serve para você?');
+    expect(opts.fetchImpl).not.toHaveBeenCalled();
+  });
   it('sintetiza e registra a versão falada, preservando o original para fallback', async () => {
     const { opts } = preparar();
     const original = 'imagino kkk, vc trabalha bastante. qdo fica melhor conversar sobre a pós?';

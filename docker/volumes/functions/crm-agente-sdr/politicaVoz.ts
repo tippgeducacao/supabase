@@ -1,4 +1,5 @@
 import type { Msg } from './historico.ts';
+import { normalizarHorariosParaVoz } from './textoParaVoz.ts';
 
 export type OrigemVoz = 'followup' | 'conversa';
 
@@ -35,7 +36,6 @@ export type DecisaoPoliticaVoz = { permitido: boolean; motivo: MotivoPoliticaVoz
 
 type Preferencia = 'audio' | 'texto' | null;
 
-const TAMANHO_MINIMO = 40;
 const TAMANHO_MAXIMO = 600;
 
 function normalizar(texto: string): string {
@@ -107,13 +107,12 @@ function preferenciaDoLead(historico: readonly Msg[]): Preferencia {
 function precisaEscrita(texto: string): boolean {
   const normalizado = normalizar(texto);
   // Dados copiáveis ficam disponíveis por escrito mesmo que o lead peça áudio.
-  // No piloto, qualquer dígito também conserva texto: cobre horas, datas, telefone,
-  // códigos, valores e quantidades sem tentar adivinhar qual deles é dispensável.
-  return /\d|https?:\/\/|www\.|[\w.+-]+@[\w.-]+\.[a-z]{2,}/i.test(texto)
+  // 22/09: horários e falas breves represavam o áudio mesmo com contador em 5/5.
+  // Horários válidos podem ser falados; demais números/dados copiáveis seguem escritos.
+  return /\d/.test(normalizarHorariosParaVoz(texto))
+    || /https?:\/\/|www\.|[\w.+-]+@[\w.-]+\.[a-z]{2,}/i.test(texto)
     || /\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|com\.br|org|net|edu|br|io|app)(?:\b|\/)/i.test(texto)
-    || /[$€£¥%]|\b(?:brl|usd|eur|reais|real|dolares|euros|pix|cpf|cnpj|cep|senha|codigo|protocolo|endereco|e-mail|email)\b/.test(normalizado)
-    || /\b(?:as|a partir das|ate as) (?:uma|duas|tres|quatro|cinco|seis|sete|oito|nove|dez|onze|doze|treze|catorze|quatorze|quinze|dezesseis|dezessete|dezoito|dezenove|vinte)\b/.test(normalizado)
-    || /\b(?:meio[- ]dia|meia[- ]noite)\b/.test(normalizado);
+    || /[$€£¥%]|\b(?:brl|usd|eur|reais|real|dolares|euros|pix|cpf|cnpj|cep|senha|codigo|protocolo|endereco|e-mail|email)\b/.test(normalizado);
 }
 
 /** Só decide modalidade; configuração, janela, pausa e aceite continuam no chamador. */
@@ -122,7 +121,7 @@ export function avaliarPoliticaVoz(opcoes: OpcoesPoliticaVoz): DecisaoPoliticaVo
   if (opcoes.habilitada !== true) return negar('voz_desativada');
   const texto = opcoes.texto.trim();
   const tamanho = Array.from(texto).length;
-  if (tamanho < TAMANHO_MINIMO) return negar('texto_curto');
+  if (!tamanho) return negar('texto_curto');
   if (tamanho > TAMANHO_MAXIMO) return negar('texto_longo');
   if (precisaEscrita(texto)) return negar('conteudo_para_escrita');
   const preferencia = preferenciaDoLead(opcoes.historico ?? []);

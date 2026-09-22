@@ -15,6 +15,26 @@ const TRECHOS_LITERAIS = /((?:https?:\/\/|www\.)[^\s<>]+|[\w.+-]+@[\w.-]+\.[a-z]
 const PALAVRA = /(^|[^\p{L}\p{M}\p{N}_])([a-z]+)(?=$|[^\p{L}\p{M}\p{N}_])/giu;
 const RISADA = /(^|[^\p{L}\p{M}\p{N}_])(?:k{2,}|(?:rs){2,}|(?:ha){2,}|(?:he){2,})(?=$|[^\p{L}\p{M}\p{N}_])/giu;
 
+const NUMEROS = ['zero', 'um', 'dois', 'três', 'quatro', 'cinco', 'seis', 'sete', 'oito', 'nove',
+  'dez', 'onze', 'doze', 'treze', 'catorze', 'quinze', 'dezesseis', 'dezessete', 'dezoito', 'dezenove'];
+function numeroFalado(numero: number): string {
+  if (numero < 20) return NUMEROS[numero];
+  return ['', '', 'vinte', 'trinta', 'quarenta', 'cinquenta'][Math.floor(numero / 10)]
+    + (numero % 10 ? ` e ${NUMEROS[numero % 10]}` : '');
+}
+
+// Mesma interpretação na política e no preparo: só horários válidos e isolados.
+// Não liberar qualquer número nem ler "18h30" literalmente como sigla no TTS.
+export function normalizarHorariosParaVoz(texto: string): string {
+  return texto.replace(/(?<![\p{L}\p{M}\p{N}_:])([01]?\d|2[0-3])(?:h([0-5]\d)?|:([0-5]\d))(?![\p{L}\p{M}\p{N}_:]|\.\d)/giu,
+    (_original, horas: string, minutosH?: string, minutosDoisPontos?: string) => {
+      const hora = Number(horas);
+      const minuto = Number(minutosH ?? minutosDoisPontos ?? 0);
+      const horaFalada = hora === 1 ? 'uma hora' : hora === 2 ? 'duas horas' : `${numeroFalado(hora)} horas`;
+      return horaFalada + (minuto ? ` e ${numeroFalado(minuto)} ${minuto === 1 ? 'minuto' : 'minutos'}` : '');
+    });
+}
+
 export function normalizarTextoParaVoz(texto: string): string {
   return texto.split(TRECHOS_LITERAIS).map((trecho, i) => {
     if (i % 2) return trecho;
@@ -34,6 +54,6 @@ export function normalizarTextoParaVoz(texto: string): string {
       .replace(/[ \t]+([,;:.!?])/g, '$1')
       .replace(/[,;:](?=\s*[,;:.!?])/g, '')
       .replace(/^[\s,;:.!?]+/, '');
-    return fala;
+    return normalizarHorariosParaVoz(fala);
   }).join('').trim();
 }
