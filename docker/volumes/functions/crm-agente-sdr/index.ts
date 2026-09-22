@@ -32,6 +32,7 @@ import { prepararMensagem } from './midia.ts';
 import { persistirEntradasDoLote, registrarEntrada } from './historicoEntradaPausa.ts';
 import { aguardarAudiosDoHistorico, contarAudiosPendentes } from './sincronizacaoAudio.ts';
 import { conversaTexto, enviarResposta, horariosInventados, humanizarTexto, removerRaciocinioVazado } from './saida.ts';
+import { configurarVoz } from './envioVoz.ts';
 import { contaDoLead, dadosDaConta, personaDaConta } from './conta.ts';
 import { rodarEsteiraFollowup } from './followup.ts';
 import { rodarEsteiraFollowupTemplate } from './followup-template.ts';
@@ -292,8 +293,11 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   const doUltimoCom = (campo: string): any =>
     [...itens].reverse().find((i: any) => i?.[campo] != null)?.[campo] ?? null;
   const telefone = String(remotejid).split('@')[0];
+  // No piloto de voz a preparação pode ser cancelada por uma entrada nova.
+  // A fala final só passa a ser memória depois de pelo menos um envio aceito.
   // `let`: se o provedor alternativo falhar no meio da rodada, o resto dela volta para o Claude.
   let provedor = await provedorDoLead(telefone);
+  const registrarFalaAposEnvio = Boolean(configurarVoz(telefone, (nome) => Deno.env.get(nome), provedor?.nome));
   if (provedor) tel.registrar('provedor_ia', { provedor: provedor.nome, modelo: provedor.formato === 'openai' ? provedor.modelo : null, motivo: 'canario_luna_telefones' });
   const ctx: CtxConversa = {
     remotejid,
@@ -836,7 +840,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     }, Date.now() - inicioLlm);
     // Silêncio explícito ou canal bloqueado não gera assistant vazio no histórico
     // (além de não ter sido enviado, content: [] é inválido no próximo replay).
-    if (blocosResp.length) {
+    if (blocosResp.length && (!registrarFalaAposEnvio || blocosResp.some((b) => b.type === 'tool_use'))) {
       await gravarMensagem(supabase, remotejid, { role: 'assistant', content: semRaciocinioNoTexto(resp.content) });
     }
 
@@ -968,7 +972,21 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
           comPresente.texto, conteudo, estaNaEscola || jaTemOPresente(conversaTexto(messages)),
         );
         if (comLink.anexou) tel.registrar('link_escola_reenviado', { pedido: resumir(conteudo, 200) });
-        await enviarResposta(ctx, comLink.texto, renovar, tel, pausouPorTool ? undefined : () => iaPausada(remotejid));
+        const envio = await enviarResposta(ctx, comLink.texto, renovar, tel, pausouPorTool ? undefined : () => iaPausada(remotejid),
+          encerrouPorTool ? undefined : {
+            supabase, origem: 'conversa', historico, iniciadaEm: inicioRodada,
+            provedorResposta: provedor?.nome === 'openai' && provedor.formato === 'openai' ? 'openai' : 'anthropic',
+            interacaoId: tel.rodadaId,
+            referenciaMensagemId: doUltimoCom('msg_id') ?? undefined,
+            interrompido: () => iaPausada(remotejid),
+          });
+        if (registrarFalaAposEnvio && envio?.aceitos) {
+          await gravarMensagem(supabase, remotejid, { role: 'assistant', content: humanizarTexto(comLink.texto) });
+        }
+        if (registrarFalaAposEnvio && !envio?.aceitos) {
+          tel.registrar('rodada_fim', { voltas_llm: rodada + 1, respondeu: false, motivo: envio?.estado ?? 'envio_sem_aceite' }, Date.now() - inicioRodada);
+          return;
+        }
         // Ficha: o que o João acabou de perguntar vira estado — "pergunta uma vez" da coleta e a
         // pergunta da pós só contam quando a pergunta saiu de fato no texto enviado.
         if (ctx.ficha && ficha) {

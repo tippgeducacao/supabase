@@ -364,6 +364,7 @@ export async function gerarFollowup(
 
 // ── processa um lead (sob lock, com revalidação fresca) ─────────────────────
 export async function processarFollowupLead(supabase: any, leadSel: any, stageSel: number): Promise<boolean> {
+  const inicioRodada = Date.now();
   const remotejid = leadSel.remotejid;
   if (!(await lockClaim(supabase, remotejid))) return false; // inbound em andamento, pula
   const tel = criarTelemetria(supabase, remotejid);
@@ -461,7 +462,11 @@ export async function processarFollowupLead(supabase: any, leadSel: any, stageSe
       if (tipo === 'chunk_enviado' && dados?.ok === true) partesAceitas++;
       tel.registrar(tipo, dados, duracao, erro);
     } };
-    await enviarResposta(ctx, message, lockRenovar(supabase, remotejid), telemetriaEnvio, interrompido);
+    await enviarResposta(ctx, message, lockRenovar(supabase, remotejid), telemetriaEnvio, interrompido, {
+      supabase, origem: 'followup', historico: history, etapaFollowup: stage, iniciadaEm: inicioRodada, interrompido,
+      provedorResposta: 'anthropic',
+      interacaoId: tel.rodadaId,
+    });
     if (!partesAceitas) {
       tel.registrar('followup_pulado', { motivo: 'nenhuma_parte_aceita', stage });
       return false;

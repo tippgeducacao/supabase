@@ -9,6 +9,8 @@ import { CHUNKING_SYSTEM } from './prompts.ts';
 import type { CtxConversa } from './tools.ts';
 import { contemArtefatoAntml, contemAvaliacaoInterna } from './bastidorEditorial.ts';
 import { limparTagsDoCanal } from './canalResposta.ts';
+import { configurarVoz, conferirEstadoVoz, tentarEnviarVoz, type OpcoesVozSdr } from './envioVoz.ts';
+import { confirmarInteracaoVoz, planejarCadenciaVoz, type ChaveCadenciaVoz, type PlanoCadenciaVoz } from './cadenciaVoz.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
 const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
@@ -440,13 +442,14 @@ export function calcularDelaySegundos(mensagem: string): number {
   return Math.round(delay * 10) / 10;
 }
 
-async function enviarChunk(ctx: CtxConversa, conteudo: string): Promise<{ ok: boolean; status: number; erro?: string }> {
+async function enviarChunk(ctx: CtxConversa, conteudo: string, confirmarAceite = false): Promise<{ ok: boolean; status: number; erro?: string; desconhecido?: boolean; waMessageId?: string }> {
   const res = await fetch(SEND_URL, {
     method: 'POST',
     headers: { Authorization: `Bearer ${SERVICE_ROLE}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       telefone: ctx.telefone,
       tipo: 'text',
+      origem: 'ia',
       conteudo,
       wa_account_id: ctx.waAccountId,
       lead_id: ctx.leadId,
@@ -458,6 +461,13 @@ async function enviarChunk(ctx: CtxConversa, conteudo: string): Promise<{ ok: bo
     console.error(`[crm-agente-sdr] crm-whatsapp-send HTTP ${res.status}: ${corpo}`);
     return { ok: false, status: res.status, erro: `HTTP ${res.status}: ${corpo.slice(0, 500)}` };
   }
+  if (confirmarAceite) {
+    const retorno = await res.json().catch(() => null);
+    if (retorno?.success !== true || typeof retorno.wa_message_id !== 'string' || !retorno.wa_message_id) {
+      return { ok: false, status: res.status, desconhecido: true, erro: 'aceite_nao_comprovado' };
+    }
+    return { ok: true, status: res.status, waMessageId: retorno.wa_message_id };
+  }
   return { ok: true, status: res.status };
 }
 
@@ -465,13 +475,16 @@ async function enviarChunk(ctx: CtxConversa, conteudo: string): Promise<{ ok: bo
 // `pausada` (opcional): rechecagem FRESCA da pausa da IA — os chunks pingam ao longo
 // de 2-12s CADA, então entre um balão e outro o atendente pode ter pausado a IA. Antes
 // de cada envio relê o flag e ABORTA os chunks restantes (a pausa precisa valer "em voo").
+export type ResultadoEnvioResposta = { aceitos: number; canal: 'texto' | 'audio'; estado: 'aceito' | 'cancelado' | 'desconhecido' | 'falhou' };
+
 export async function enviarResposta(
   ctx: CtxConversa,
   texto: string,
   renovarLock: () => Promise<void>,
   tel?: { registrar: (tipo: string, dados?: Record<string, unknown>, duracaoMs?: number, erro?: string) => void },
   pausada?: () => Promise<boolean>,
-): Promise<void> {
+  voz?: OpcoesVozSdr,
+): Promise<ResultadoEnvioResposta> {
   // Rótulo da tool (</mensagem>) vazando no texto: fora antes de tudo (16/09/2026).
   const semTagDoCanal = limparTagsDoCanal(texto);
   const tagCanalRemovida = semTagDoCanal !== texto.trim();
@@ -488,7 +501,49 @@ export async function enviarResposta(
       artefato_antml: contemArtefatoAntml(texto) || undefined,
       avaliacao_interna: contemAvaliacaoInterna(texto) || undefined,
     });
-    return;
+    return { aceitos: 0, canal: 'texto', estado: 'cancelado' };
+  }
+  let plano: PlanoCadenciaVoz | null = null;
+  let chave: ChaveCadenciaVoz | null = null;
+  if (voz && ctx.waAccountId && ctx.canal !== 'webchat' && configurarVoz(ctx.telefone, (nome) => Deno.env.get(nome), voz.provedorResposta)) {
+    chave = { contaId: ctx.waAccountId, telefone: ctx.telefone, interacaoId: voz.interacaoId ?? crypto.randomUUID() };
+    try {
+      plano = await planejarCadenciaVoz(voz.supabase, chave);
+      tel?.registrar('voz_cadencia', { alvo: plano.alvo, interacoes: plano.interacoes, audio_devido: plano.audioDevido, concluida: plano.concluida });
+      if (plano.concluida) return { aceitos: 0, canal: 'texto', estado: 'cancelado' };
+    } catch {
+      // Sem contador confiável, seguir por texto e nunca sortear de novo no isolate.
+      tel?.registrar('voz_cadencia_indisponivel', { acao: 'texto' });
+      chave = null;
+    }
+  }
+  const confirmar = async (canal: 'texto' | 'audio', waMessageId?: string) => {
+    if (!chave || !voz) return;
+    try { await confirmarInteracaoVoz(voz.supabase, chave, canal, waMessageId); }
+    catch {
+      // O destinatário já recebeu: erro de contador nunca autoriza repetir envio.
+      tel?.registrar('voz_cadencia_confirmacao_falhou', { canal, interacao_id: chave.interacaoId });
+    }
+  };
+  if (voz) {
+    const resultado = await tentarEnviarVoz({
+      ctx, texto: textoLimpo, opcoes: voz, renovarLock, tel, sendUrl: SEND_URL, serviceRole: SERVICE_ROLE,
+      cadenciaAtingida: plano?.audioDevido ?? false,
+    });
+    if (resultado === 'texto_revalidar') {
+      const pausaOriginal = pausada;
+      // O fracionador também leva tempo. Uma validação só após TTS deixaria
+      // passar uma entrada recebida enquanto o fallback era dividido em texto.
+      pausada = async () => {
+        try {
+          if (pausaOriginal && await pausaOriginal()) return true;
+          return !(await conferirEstadoVoz(ctx, voz)).permitido;
+        } catch { return true; }
+      };
+    } else if (resultado !== 'texto') {
+      if (resultado === 'aceito') await confirmar('audio');
+      return { aceitos: resultado === 'aceito' ? 1 : 0, canal: 'audio', estado: resultado };
+    }
   }
   const chunks = await fracionarResposta(textoLimpo);
   tel?.registrar('resposta_chunks', {
@@ -503,6 +558,8 @@ export async function enviarResposta(
     balao_unico_link_escola: (!contemLinkReuniao(textoLimpo) && contemLinkCritico(textoLimpo)) || undefined,
   });
   let enviados = 0;
+  let cancelado = false;
+  let desconhecido = false;
   let primeiro = true;
   for (const chunk of chunks) {
     // ⚠️ O "tempo de digitação" vale ENTRE os balões, NUNCA antes do primeiro: o lead
@@ -514,6 +571,7 @@ export async function enviarResposta(
     if (delay > 0) await new Promise((r) => setTimeout(r, delay * 1000));
     // Pausou durante o "tempo de digitação"? Não manda este nem os próximos balões.
     if (pausada && (await pausada())) {
+      cancelado = true;
       tel?.registrar('envio_abortado_pausa', {
         onde: 'entre_chunks',
         enviados,
@@ -521,16 +579,21 @@ export async function enviarResposta(
       });
       break;
     }
-    const env = await enviarChunk(ctx, chunk);
-    if (env.ok) enviados++;
+    const env = await enviarChunk(ctx, chunk, Boolean(plano));
+    if (env.ok) {
+      enviados++;
+      if (enviados === 1) await confirmar('texto', env.waMessageId);
+    }
     tel?.registrar(
       'chunk_enviado',
       { texto: chunk.length > 300 ? chunk.slice(0, 300) + '…' : chunk, delay_s: delay, ok: env.ok, status: env.status },
       undefined,
       env.ok ? undefined : env.erro,
     );
+    if (env.desconhecido) { desconhecido = true; break; }
     await renovarLock(); // rodada longa não pode perder o lock pro TTL
   }
+  return { aceitos: enviados, canal: 'texto', estado: enviados ? 'aceito' : cancelado ? 'cancelado' : desconhecido ? 'desconhecido' : 'falhou' };
 }
 
 // ── Guarda de HORÁRIO INVENTADO (2026-07-23, caso Marcello) ─────────────────

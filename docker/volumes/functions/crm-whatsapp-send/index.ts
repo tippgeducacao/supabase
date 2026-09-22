@@ -6,6 +6,7 @@ import { getWaProvider } from "../_shared/waProviders.ts";
 import { telefoneEnviavel, digitosParaEnvio } from "../_shared/telefone.ts";
 import { phoneVariants, canonicalConversationPhone } from "./telefoneConversa.ts";
 import { autorDaMensagemAgendada, confirmarAutoriaAposEco } from "./autoria.ts";
+import { textoVozIaParaPersistir } from "./textoVozIa.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -291,6 +292,7 @@ async function enviarViaConexao(admin: any, p: {
   reaction_message_id?: string | null;
   enviadoPorId?: string | null; enviadoPorNome?: string | null;
   fluxoId?: string | null; sacV2AutomacaoId?: string | null;
+  textoVozIa?: string;
 }): Promise<Response> {
   const { data: conex } = await admin
     .from("wa_conexoes")
@@ -328,7 +330,8 @@ async function enviarViaConexao(admin: any, p: {
       url: urlMidia,
       filename: p.filename ?? `${p.tipo}`,
     }];
-    if (p.tipo === "audio" || p.tipo === "sticker") conteudoPersist = "";
+    if (p.tipo === "audio") conteudoPersist = p.textoVozIa ?? "";
+    else if (p.tipo === "sticker") conteudoPersist = "";
   } else if (p.tipo === "reaction") {
     const emoji = conteudoPersist.trim();
     if (!emoji || !p.reaction_message_id) return json({ error: "reaction_message_id e conteudo (emoji) obrigatórios" }, 400);
@@ -584,8 +587,8 @@ Deno.serve(async (req) => {
     // mandou origem='humano' — pra carimbar o nome do atendente na mensagem (balão rosa).
     let enviadoPorId: string | null = null;
     let enviadoPorNome: string | null = null;
+    const authToken = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
     {
-      const authToken = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
       if (authToken && authToken !== SERVICE_ROLE) {
         try {
           const { data: u } = await admin.auth.getUser(authToken);
@@ -610,6 +613,10 @@ Deno.serve(async (req) => {
         enviadoPorNome = (prof?.name ?? "").trim() || null;
       } catch { /* perfil indisponível — segue sem nome */ }
     }
+    const textoVozIa = textoVozIaParaPersistir({
+      tipo, origem: origemFinal, conteudo, enviadoPorId,
+      chamadaServico: Boolean(SERVICE_ROLE) && authToken === SERVICE_ROLE,
+    });
 
     // ── Rota provider-agnóstica (Uazapi etc.) ────────────────────────────────
     // Roteamento de canal (prioridade): (1) wa_conexao_id explícito → linha web;
@@ -634,6 +641,7 @@ Deno.serve(async (req) => {
       return await enviarViaConexao(admin, {
         conexaoId: conexaoIdRota, to, tipo, conteudo, anexo_url, filename, mime_type,
         lead_id, oportunidade_id, origemFinal, reaction_message_id, enviadoPorId, enviadoPorNome,
+        textoVozIa,
         fluxoId: fluxo_id ? String(fluxo_id) : null,
         sacV2AutomacaoId: sac_v2_automacao_id ? String(sac_v2_automacao_id) : null,
       });
@@ -1123,7 +1131,8 @@ Deno.serve(async (req) => {
     let conteudoPersist: string;
     if (tipo === "text") conteudoPersist = String(conteudo);
     else if (tipo === "template") conteudoPersist = templateTexto ?? `[template] ${template_name}`;
-    else if (tipo === "audio" || tipo === "sticker") conteudoPersist = "";
+    else if (tipo === "audio") conteudoPersist = textoVozIa;
+    else if (tipo === "sticker") conteudoPersist = "";
     else if (tipo === "image" || tipo === "video") conteudoPersist = String(conteudo ?? "").trim(); // legenda (ou vazio)
     else if (tipo === "reaction") conteudoPersist = `[reacao]${String(conteudo)}`;
     else if (tipo === "interactive") {

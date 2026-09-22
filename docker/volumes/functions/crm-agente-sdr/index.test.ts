@@ -6,6 +6,7 @@ const fronteiras = vi.hoisted(() => ({
   prepararMensagem: vi.fn(), chamarPrincipal: vi.fn(), chamarRouter: vi.fn(), enviar: vi.fn(),
   registrar: vi.fn(), bufferInserir: vi.fn(), buffer: [] as { id: number; payload: Record<string, unknown> }[],
   pausaNoDebounce: false,
+  vozAtiva: false,
   executar: vi.fn(), tools: vi.fn(), gravar: vi.fn(), historico: vi.fn(),
   humanizar: vi.fn(), horarios: vi.fn(), conversa: vi.fn(),
   sincronizarAudio: vi.fn(), provedorOpenai: vi.fn(), lunaTelefones: [] as string[], lunaDelay: 0 as number | null,
@@ -61,7 +62,13 @@ function semResposta() {
 
 beforeAll(async () => {
   vi.stubGlobal('Deno', {
-    env: { get: (chave: string) => chave === 'SUPABASE_URL' ? 'https://supabase.invalid' : '' },
+    env: { get: (chave: string) => {
+      if (chave === 'SUPABASE_URL') return 'https://supabase.invalid';
+      if (fronteiras.vozAtiva) return ({
+        AGENTE_SDR_VOZ_ATIVA: 'true', AGENTE_SDR_VOZ_TELEFONES: '5511999990001', ELEVENLABS_API_KEY: 'chave-sintetica',
+      } as Record<string, string>)[chave] ?? '';
+      return '';
+    } },
     serve: (fn: typeof handler) => { handler = fn; },
   });
   vi.stubGlobal('fetch', vi.fn(() => { throw new Error('Rede não autorizada neste teste'); }));
@@ -72,6 +79,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   fronteiras.buffer = [];
   fronteiras.pausaNoDebounce = false;
+  fronteiras.vozAtiva = false;
   fronteiras.lunaTelefones = [];
   fronteiras.lunaDelay = 0;
   fronteiras.sincronizarAudio.mockResolvedValue({ estado: 'pronto', esperouMs: 0, pendentes: 0 });
@@ -410,6 +418,7 @@ describe('SDR: texto de ferramenta nunca vira despedida', () => {
   });
 
   it('Luna fora do ar não cala o João: a volta é refeita no Claude e o lead recebe a resposta', async () => {
+    fronteiras.vozAtiva = true;
     fronteiras.lunaTelefones = ['5511999990001'];
     fronteiras.provedorOpenai.mockReturnValue(luna);
     fronteiras.chamarPrincipal
@@ -422,6 +431,7 @@ describe('SDR: texto de ferramenta nunca vira despedida', () => {
     expect(fronteiras.registrar).toHaveBeenCalledWith('provedor_ia_fallback', expect.objectContaining({ de: 'openai', para: 'anthropic' }));
     expect(fronteiras.registrar.mock.calls.some(([tipo]) => tipo === 'erro')).toBe(false);
     expect(fronteiras.enviar).toHaveBeenCalledOnce();
+    expect(fronteiras.enviar.mock.calls[0][5]).toMatchObject({ provedorResposta: 'anthropic' });
   });
 
   it('canário da Luna usa o debounce DELE, não o zero do telefone de teste nem os 45 s da produção', async () => {
@@ -459,6 +469,24 @@ describe('SDR: texto de ferramenta nunca vira despedida', () => {
     fronteiras.chamarPrincipal.mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'certo.' }] });
     await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
     expect(fronteiras.chamarPrincipal.mock.calls[0][0].provedor).toBeNull();
+  });
+
+  it.each(['aceito', 'cancelado', 'desconhecido'] as const)('canário de voz só registra fala final após aceite: %s', async (estado) => {
+    fronteiras.vozAtiva = true;
+    fronteiras.lunaTelefones = [payload.telefone];
+    fronteiras.provedorOpenai.mockReturnValue(luna);
+    const texto = 'a conversa com o monitor é para tirar suas dúvidas sobre a pós.';
+    fronteiras.chamarPrincipal.mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: texto }] });
+    fronteiras.enviar.mockResolvedValueOnce({ estado, canal: 'audio', aceitos: estado === 'aceito' ? 1 : 0 });
+    await chamar({ wa_account_id: 'conta-sintetica', agente_ia_persona: 'recontato' });
+    expect(fronteiras.enviar).toHaveBeenCalledOnce();
+    expect(fronteiras.enviar.mock.calls[0][5]).toMatchObject({ origem: 'conversa', provedorResposta: 'openai', referenciaMensagemId: payload.id });
+    const falas = fronteiras.gravar.mock.calls.filter(([, , mensagem]) => mensagem.role === 'assistant');
+    expect(falas).toHaveLength(estado === 'aceito' ? 1 : 0);
+    if (estado === 'aceito') {
+      expect(falas[0][2].content).toBe(texto);
+      expect(fronteiras.gravar.mock.invocationCallOrder[0]).toBeGreaterThan(fronteiras.enviar.mock.invocationCallOrder[0]);
+    }
   });
 
   it('canal bloqueado não envia nem persiste assistant vazio', async () => {
