@@ -132,3 +132,41 @@ describe.each(campanhas)('$funcao: dados visíveis no atendimento do 3C', ({ fun
     expect(fronteiras.rpc.mock.calls.every(([nome]) => nome.startsWith('threec_mailing_selecionar'))).toBe(true)
   })
 })
+
+describe('threec-mailing-listas: campanhas de origem (Indicação / Orgânico)', () => {
+  beforeEach(() => {
+    const comOrigem = leads.map((l, i) => ({
+      ...l, curso: 'Indicação', origem: i === 0 ? 'Indicação · cadastrado por  Debora​ Leticia ' : 'Indicação',
+    }))
+    const rpcBase = fronteiras.rpc.getMockImplementation()!
+    fronteiras.rpc.mockImplementation(async (nome: string, args: unknown) =>
+      nome === 'threec_mailing_selecionar_lista' ? { data: comOrigem, error: null } : rpcBase(nome, args))
+    fronteiras.from.mockImplementation(() => ({
+      select: () => ({ eq: () => ({ order: () => ({ limit: async () => ({ data: [{
+        id: 'config-teste', nome: 'INDICAÇÕES', campanha_id: 'campanha-teste',
+        lista_id: 'lista-teste', recorte: 'origem', limite_por_rodada: 300,
+      }], error: null }) }) }) }),
+      update: () => ({ eq: async () => ({ error: null }) }),
+    }))
+  })
+
+  it('manda a origem com quem cadastrou em mailing.data e a coluna no header', async () => {
+    const resposta = await chamar('threec-mailing-listas')
+    expect(resposta.status).toBe(200)
+    const [, init] = fronteiras.fetch.mock.calls.find(([, i]) => i.method === 'POST')!
+    const corpo = JSON.parse(init.body)
+    expect(corpo.header).toEqual(['identifier', 'areacode', 'phone', 'nome', 'email', 'formacao', 'curso', 'origem'])
+    expect(corpo.mailing[0].data.origem).toBe('Indicação · cadastrado por Debora Leticia')
+    expect(corpo.mailing[1].data.origem).toBe('Indicação')
+  })
+})
+
+describe('threec-mailing-listas: campanha de pós não ganha a coluna origem', () => {
+  it('mantém o header original', async () => {
+    await chamar('threec-mailing-listas')
+    const [, init] = fronteiras.fetch.mock.calls.find(([, i]) => i.method === 'POST')!
+    const corpo = JSON.parse(init.body)
+    expect(corpo.header).not.toContain('origem')
+    expect(corpo.mailing[0].data).not.toHaveProperty('origem')
+  })
+})

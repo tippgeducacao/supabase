@@ -49,6 +49,9 @@ const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 
 // ORDEM IMPORTA: é o header com que a lista foi criada no 3C. Mesmo da campanha quente.
 const HEADER = ['identifier', 'areacode', 'phone', 'nome', 'email', 'formacao', 'curso'] as const
+// Campanhas de origem (INDICAÇÕES / LEADS ORGÂNICOS) mostram também de onde o lead veio e
+// quem o cadastrou — "Indicação · cadastrado por Fulana" (pedido do usuário, 22/09/2026).
+const HEADER_ORIGEM = [...HEADER, 'origem'] as const
 
 const MAX_POR_POST = 300 // teto do 3C: "O campo Mailing deve ter no maximo 300 itens"
 const MAX_POR_DELETE = 100
@@ -140,6 +143,8 @@ interface LeadRow {
   email: string
   formacao: string
   curso: string
+  // Só no recorte `origem`; NULL nos demais (threec_mailing_origem_rotulo).
+  origem?: string | null
 }
 
 interface ExpurgoRow {
@@ -254,13 +259,19 @@ async function expurgar(cfg: ListaCfg, limite: number, dry: boolean, renovarLeas
 // (`threec_mailing_lista_substituir`) e reenvia quem AINDA passa na régua, 1.000 por rodada.
 // Por isso não há segunda régua aqui, nem mexida no histórico local.
 //
-// ⚠️ SÓ `grupo_segmento`. Novo Lead SDR (outra function), Orgânico/Indicação (`origem`) e
-// as filas de reunião (`resultado_reuniao`) NÃO entram — o escopo já custou caro em 09/09.
+// ⚠️ A NOITE é SÓ `grupo_segmento`. Novo Lead SDR (outra function), Orgânico/Indicação
+// (`origem`) e as filas de reunião (`resultado_reuniao`) NÃO entram — o escopo já custou
+// caro em 09/09. Orgânico/Indicação só se renovam A PEDIDO, com `?lista=<uuid>` explícito
+// (troca do campo `origem`, 22/09/2026): nunca pelo cron.
 const RECORTE_RENOVAVEL = 'grupo_segmento'
+const RECORTES_RENOVAVEIS_A_PEDIDO = [RECORTE_RENOVAVEL, 'origem']
 
-async function renovar(cfg: ListaCfg, dry: boolean, renovarLease?: RenovarLease): Promise<Response> {
-  if (cfg.recorte !== RECORTE_RENOVAVEL) {
-    return json({ ok: false, campanha: cfg.nome, error: 'renovação noturna vale só para campanhas de pós (grupo_segmento)' }, 400)
+async function renovar(cfg: ListaCfg, dry: boolean, renovarLease?: RenovarLease, aPedido = false): Promise<Response> {
+  const permitidos = aPedido ? RECORTES_RENOVAVEIS_A_PEDIDO : [RECORTE_RENOVAVEL]
+  if (!permitidos.includes(cfg.recorte)) {
+    return json({ ok: false, campanha: cfg.nome, error: aPedido
+      ? 'renovação a pedido vale só para campanhas de pós (grupo_segmento) e de origem'
+      : 'renovação noturna vale só para campanhas de pós (grupo_segmento)' }, 400)
   }
   let listas: Array<{ id: string; nome: string; estoque: number }>
   try {
@@ -366,8 +377,10 @@ async function sincronizar(cfg: ListaCfg, limite: number | null, dry: boolean, r
       email: limpar(r.email),
       formacao: humanizarFormacao(r.formacao),
       curso: limpar(r.curso),
+      ...(cfg.recorte === 'origem' ? { origem: limpar(r.origem ?? '') } : {}),
     },
   }))
+  const header = cfg.recorte === 'origem' ? HEADER_ORIGEM : HEADER
 
   if (dry) {
     return json({
@@ -392,7 +405,7 @@ async function sincronizar(cfg: ListaCfg, limite: number | null, dry: boolean, r
         method: 'POST',
         signal: AbortSignal.timeout(API_TIMEOUT_MS),
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({ header: HEADER, mailing: fatia }),
+        body: JSON.stringify({ header, mailing: fatia }),
       })
     } catch (err) {
       falhas.push(`lote ${ini / MAX_POR_POST}: ${String(err)}`)
@@ -512,8 +525,8 @@ async function handler(req: Request): Promise<Response> {
   if (acao === 'renovar') {
     // Fila da NOITE: só pós, e só quem ainda não foi renovada nas últimas 12 h (o cron roda
     // 30 min seguidos; sem isto a campanha recém-recriada seria apagada de novo).
-    q = q.eq('recorte', RECORTE_RENOVAVEL)
     if (!qLista) {
+      q = q.eq('recorte', RECORTE_RENOVAVEL)
       const corte = new Date(Date.now() - 12 * 3_600_000).toISOString()
       q = q.or(`ultima_renovacao_em.is.null,ultima_renovacao_em.lt.${corte}`)
     }
@@ -550,7 +563,7 @@ async function handler(req: Request): Promise<Response> {
   } : undefined
 
   try {
-    if (acao === 'renovar') return await renovar(cfg, dry, renovarLease)
+    if (acao === 'renovar') return await renovar(cfg, dry, renovarLease, Boolean(qLista))
     if (acao !== 'manter') return await executarAcao(cfg, acao as 'expurgar' | 'sincronizar', qLimite, dry, renovarLease, token ?? undefined)
     const respostaExpurgo = await executarAcao(cfg, 'expurgar', qLimite, dry, renovarLease, token ?? undefined)
     const resultadoExpurgo = await respostaExpurgo.json()
