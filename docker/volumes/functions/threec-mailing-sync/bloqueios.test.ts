@@ -84,12 +84,37 @@ describe('espelho dos bloqueios expressos 3C', () => {
     expect(u.searchParams.has('campaigns[]')).toBe(false)
   })
 
-  it('ignora agenda e sem interesse mesmo que API ignore o filtro de qualificações', async () => {
-    regras.push(regra(216390, 'Agendamento', null, false), regra(216387, 'Sem interesse', null, false))
-    chamadas.push(chamada('agenda', 216390), chamada('sem-interesse', 216387))
+  it('ignora agenda mesmo que API ignore o filtro de qualificações', async () => {
+    regras.push(regra(216390, 'Agendamento', null, false))
+    chamadas.push(chamada('agenda', 216390))
     await executar()
     expect(itens()).toHaveLength(1)
     expect(itens()[0].fonte_id).toBe('number')
+  })
+
+  // Decisão do usuário (22/09/2026): nunca mais entram em lista do 3C.
+  it('sem interesse, telefone incorreto e falecido viram descarte permanente, sem consultar a blacklist', async () => {
+    regras = [regra(216387, 'Sem interesse', null, false), regra(216389, 'Telefone incorreto / Engano', null, false),
+      regra(216388, 'Falecido', null, false)]
+    chamadas = [chamada('si', 216387, '5511999990001'), chamada('ti', 216389, '5511999990002'), chamada('fa', 216388, '5511999990003')]
+    await expect(executar()).resolves.toMatchObject({ consultas_nativas: 0, registros: 3 })
+    expect(itens()).toEqual([
+      expect.objectContaining({ canon: '1199990001', origem: '3c_qualificacao', categoria: 'descartado', permanente: true, valid_until: null, ativo: true, qualificacao: 'Sem interesse' }),
+      expect.objectContaining({ canon: '1199990002', categoria: 'descartado', qualificacao: 'Telefone incorreto / Engano' }),
+      expect.objectContaining({ canon: '1199990003', categoria: 'descartado', qualificacao: 'Falecido' }),
+    ])
+    const u = new URL(fetchMock.mock.calls.find(([u]) => new URL(u).pathname.endsWith('/calls'))![0])
+    expect(u.searchParams.getAll('qualifications[]')).toEqual(['216387', '216389', '216388'])
+  })
+
+  it('grava na linha nativa o nome da qualificação mais recente (prazo da tag)', async () => {
+    regras = [regra(217544, 'Bloquear por 30 dias', 30), regra(217536, 'Bloqueio Permanente', null)]
+    chamadas = [
+      { ...chamada('antiga', 217536), call_date_rfc3339: '2026-09-08T10:00:00-03:00' },
+      { ...chamada('nova', 217544), call_date_rfc3339: '2026-09-09T10:00:00-03:00' },
+    ]
+    await executar()
+    expect(itens()).toEqual([expect.objectContaining({ origem: '3c_blacklist', qualificacao: 'Bloquear por 30 dias' })])
   })
 
   it('estado nativo permanente e aluno são categorias distintas; aluno não ganha permanência inventada', async () => {

@@ -1,5 +1,8 @@
-// Espelho dos bloqueios expressos do 3C para a SDR. Nunca interpreta agenda,
-// sem interesse ou comportamento not-call-* como bloqueio por conta própria.
+// Espelho dos bloqueios expressos do 3C para a SDR e as listas automáticas. Nunca
+// interpreta agenda ou comportamento not-call-* como bloqueio por conta própria.
+// Exceção DECIDIDA pelo usuário (22/09/2026): Sem interesse, Telefone incorreto/Engano
+// e Falecido viram 'descartado' — a pessoa nunca mais entra em lista do 3C (só ligação;
+// WhatsApp não muda). Essas qualificações não passam pela blacklist do 3C.
 // A API filtra pela data da chamada, sem filtro documentado por updated_at:
 // sobrepor 48 h cobre qualificações tardias recentes, não edições arbitrariamente
 // antigas. Blacklist/DND nativos continuam sendo proteção independente no 3C.
@@ -25,7 +28,9 @@ interface Bloqueio {
   origem: '3c_qualificacao' | '3c_blacklist'
   fonte_id: string
   fonte_qualid: string | null
-  categoria: 'aluno' | 'bloqueado'
+  categoria: 'aluno' | 'bloqueado' | 'descartado'
+  // Nome que o agente marcou — dá o prazo da tag "Bloqueado no 3C · N dias".
+  qualificacao?: string | null
   bloqueado_em: string
   valid_until: string | null
   permanente: boolean
@@ -41,6 +46,10 @@ let cacheRegras: { base: string; token: string; ate: number; regras: Map<string,
 const objeto = (v: unknown): v is Registro => !!v && typeof v === 'object' && !Array.isArray(v)
 function falhar(codigo: string): never { throw new Error(`Falha ao atualizar bloqueios 3C (${codigo})`) }
 const id = (v: unknown): string => typeof v === 'string' || typeof v === 'number' ? String(v) : ''
+// Pelo NOME, não pelo id: cada lista de qualificação do 3C tem ids próprios.
+const DESCARTE = /sem interesse|telefone incorreto|engano|falecid/i
+const ehDescarte = (regra: Registro): boolean =>
+  typeof regra.name === 'string' && DESCARTE.test(regra.name.normalize('NFD').replace(/[\u0300-\u036f]/g, ''))
 
 // Mesma identidade DDD+últimos8 de fn_canon_ddd8. O número original normalizado
 // (com o nono dígito, quando existe) é preservado para consultar /blacklist/number.
@@ -157,7 +166,7 @@ export async function atualizarBloqueios3C({ supabase, base, token, signal }: Op
         const listaId = id(lista.id)
         if (!/^\d+$/.test(listaId)) falhar('QUALIFICACAO_LISTA_INVALIDA')
         for (const regra of await listar(`qualification_lists/${listaId}/qualifications`)) {
-          if (regra.should_insert_blacklist === true || regra.black_list === true) {
+          if (regra.should_insert_blacklist === true || regra.black_list === true || ehDescarte(regra)) {
             const regraId = id(regra.id)
             if (!/^\d+$/.test(regraId)) falhar('QUALIFICACAO_INVALIDA')
             regras.set(regraId, regra)
@@ -218,6 +227,7 @@ export async function atualizarBloqueios3C({ supabase, base, token, signal }: Op
       return pendente
     }
     const linhas = Array.from(chamadas.values())
+    const ultimaQualificacao = new Map<string, { em: string; nome: string | null }>()
     // Toda qualificação bloqueadora é confirmada no estado nativo atual.
     // Uma chamada antiga pode ter sido requalificada depois de um desbloqueio:
     // a data da chamada e o rótulo/duração da qualificação não são autoridade.
@@ -229,16 +239,29 @@ export async function atualizarBloqueios3C({ supabase, base, token, signal }: Op
         // SDR. Contabilizar sem bloquear toda a manutenção por um registro ruim.
         if (!numero) { chamadasSemIdentidade++; return }
         const aluno = q === '218230'
+        const regra = regras.get(q)!
+        const nomeQual = typeof regra.name === 'string' ? regra.name : null
+        const quandoQual = dataUTC(chamada.qualification_date ?? chamada.qualified_at ?? chamada.call_date_rfc3339 ?? chamada.call_date) ?? fim
         let item: Bloqueio
-        if (!aluno) {
+        if (!aluno && regra.should_insert_blacklist !== true && regra.black_list !== true && ehDescarte(regra)) {
+          // Descarte é permanente por decisão do usuário e independe da blacklist.
+          item = {
+            canon: canon(numero), origem: '3c_qualificacao', fonte_id: id(chamada.id), fonte_qualid: q,
+            qualificacao: nomeQual, categoria: 'descartado', bloqueado_em: quandoQual, valid_until: null,
+            permanente: true, ativo: true, verificado_em: fim,
+          }
+        } else if (!aluno) {
           item = await nativo(numero)
+          // O estado nativo continua decidindo o veto; o nome da qualificação MAIS
+          // RECENTE só diz o prazo que o agente escolheu (tag "Bloqueado no 3C · N dias").
+          const anterior = ultimaQualificacao.get(item.canon)
+          if (!anterior || anterior.em <= quandoQual) ultimaQualificacao.set(item.canon, { em: quandoQual, nome: nomeQual })
         } else {
           // A qualificação Aluno é evidência atual independente da data antiga
           // da ligação. Sem data válida, registramos quando ela foi observada.
-          const quando = dataUTC(chamada.qualification_date ?? chamada.qualified_at ?? chamada.call_date_rfc3339 ?? chamada.call_date) ?? fim
           item = {
             canon: canon(numero), origem: '3c_qualificacao', fonte_id: id(chamada.id), fonte_qualid: q,
-            categoria: 'aluno', bloqueado_em: quando, valid_until: null,
+            qualificacao: nomeQual, categoria: 'aluno', bloqueado_em: quandoQual, valid_until: null,
             permanente: false, ativo: true, verificado_em: fim,
           }
         }
@@ -260,7 +283,9 @@ export async function atualizarBloqueios3C({ supabase, base, token, signal }: Op
         registros.set(`${item.canon}|${item.origem}|${item.fonte_id}`, item)
       }))
     }
-    const itens = Array.from(registros.values())
+    const itens = Array.from(registros.values(), item =>
+      item.origem === '3c_blacklist' && ultimaQualificacao.get(item.canon)?.nome
+        ? { ...item, qualificacao: ultimaQualificacao.get(item.canon)!.nome } : item)
     for (let i = 0; i < itens.length; i += MAX_POR_RPC) {
       if (controle.signal.aborted) falhar('PRAZO_EXCEDIDO')
       const gravar = await supabase.rpc('threec_sdr_bloqueios_upsert', { p_itens: itens.slice(i, i + MAX_POR_RPC) })
