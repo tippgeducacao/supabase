@@ -174,6 +174,28 @@ describe("renderCronogramaAlunoPdf (edge)", () => {
     expect(bruto).not.toMatch(/\/Width 480\b/);
   });
 
+  it("turma de 1 aula por semana não ganha nenhuma marca de semana intensiva", () => {
+    const { texto } = gerar();
+    expect(texto).not.toContain("SEMANA INTENSIVA");
+  });
+
+  it("semana com duas aulas ao vivo sai marcada, nas DUAS datas, com legenda", () => {
+    // Módulo intensivo da vida real: turma de terça (dia normal) com quarta como dia adicional.
+    const aulas: CronogramaAlunoAula[] = [
+      { data: "2026-08-04", horario: "19:00 - 22:00", titulo: "Aula 1", ementa: EMENTA, tipo_aula: "Curricular" },
+      { data: "2026-08-11", horario: "19:00 - 22:00", titulo: "Aula 2", ementa: EMENTA, tipo_aula: "Curricular" },
+      { data: "2026-08-12", horario: "19:00 - 22:00", titulo: "Aula 3", ementa: EMENTA, tipo_aula: "Curricular" },
+    ];
+    const { texto } = gerar({ aulas });
+    expect(texto).toContain("SEMANA INTENSIVA: nas datas marcadas em dourado a turma tem mais de uma aula ao vivo na mesma semana.");
+    // 1 legenda + o selo nas DUAS datas da semana cheia (a de 04/08, sozinha, não leva).
+    // Na célula da data o selo quebra em duas linhas ("SEMANA" / "INTENSIVA"), por isso a
+    // contagem é pela segunda palavra.
+    expect([...texto.matchAll(/INTENSIVA/g)].length).toBe(3);
+    expect(texto).toContain("11/08/2026");
+    expect(texto).toContain("12/08/2026");
+  });
+
   it("compressão ligada por padrão encolhe o arquivo", () => {
     const aberto = renderCronogramaAlunoPdf(deps, { ...entrada(), comprimir: false }).bytes.length;
     const comprimido = renderCronogramaAlunoPdf(deps, entrada()).bytes.length;

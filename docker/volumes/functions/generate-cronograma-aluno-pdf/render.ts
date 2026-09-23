@@ -5,7 +5,8 @@
  * Cronograma do aluno do Pedagógico e no botão "Baixar cronograma do aluno" do comercial. O
  * layout é o MESMO: logo, faixa rosa "CRONOGRAMA DE AULAS", cards de início das aulas ao vivo e
  * de duração, aviso amarelo, tabela por mês (AULA / DATA-DIA / HORÁRIO / EMENTA, sem professor)
- * e, no fim, a tabela "MÓDULOS PRÁTICOS PRESENCIAIS" com a tarja de semipresencial. Mudou o
+ * e, no fim, a tabela "MÓDULOS PRÁTICOS PRESENCIAIS" com a tarja de semipresencial. Inclui o
+ * destaque DOURADO das semanas com mais de uma aula ao vivo (semanaIntensiva.ts). Mudou o
  * modelo lá (decisões do diretor de 09/07 e 31/08 já mexeram nele)? Mude aqui na mesma tarefa.
  *
  * O que muda em relação ao navegador, e por quê:
@@ -26,6 +27,7 @@
  * todos os alunos da turma, e o link é público (a Meta baixa sem autenticação).
  */
 import { agruparPraticos, TARJA_PRATICO_LONGA, type PraticoSessao } from "./praticos.ts";
+import { datasEmSemanaIntensiva, SELO_SEMANA_INTENSIVA } from "./semanaIntensiva.ts";
 import { LOGOS, type LogoPdf, type Marca } from "./logos.ts";
 
 export type { Marca } from "./logos.ts";
@@ -204,6 +206,9 @@ export function renderCronogramaAlunoPdf(deps: DepsPdf, entrada: EntradaCronogra
   const PINK_BG: [number, number, number] = [253, 235, 239];
   const YELLOW_BG: [number, number, number] = [253, 243, 214];
   const YELLOW_BORDER: [number, number, number] = [232, 176, 78];
+  // Dourado da SEMANA INTENSIVA (mais saturado que o amarelo do aviso, para não se confundir)
+  const GOLD_BG: [number, number, number] = [250, 231, 184];
+  const GOLD_TXT: [number, number, number] = [134, 90, 8];
   const PURPLE: [number, number, number] = [142, 58, 120];
   const GRAY_TXT: [number, number, number] = [80, 80, 80];
 
@@ -342,12 +347,27 @@ export function renderCronogramaAlunoPdf(deps: DepsPdf, entrada: EntradaCronogra
     const horas = raw.match(/\d{1,2}:\d{2}/g);
     return horas?.length ? horas.slice(0, 2).join(" - ") : raw;
   };
+  // Semanas com mais de uma aula ao vivo (mesma regra do navegador, ver semanaIntensiva.ts).
+  const intensivas = datasEmSemanaIntensiva(aulas);
   const renderAulaRow = (a: CronogramaAlunoAula, dataStr: string) => {
     const horario = a.horario
       ? fmtHorario(String(a.horario))
       : `${turma.horario_inicio?.slice(0, 5) ?? "-"} - ${turma.horario_fim?.slice(0, 5) ?? "-"}`;
-    return [a.titulo ?? "-", dataStr, horario, a.ementa ?? ""];
+    // A data é a célula destacada: é ali que o aluno lê "tenho aula de novo nesta semana".
+    const dataCell = a.data && intensivas.has(a.data)
+      ? { content: `${dataStr}\n${SELO_SEMANA_INTENSIVA}`, styles: { fillColor: GOLD_BG, textColor: GOLD_TXT, fontStyle: "bold" } }
+      : dataStr;
+    return [a.titulo ?? "-", dataCell, horario, a.ementa ?? ""];
   };
+
+  // Legenda do dourado, só quando a turma TEM semana com duas aulas.
+  if (intensivas.size > 0) {
+    rows.push([{
+      content: "SEMANA INTENSIVA: nas datas marcadas em dourado a turma tem mais de uma aula ao vivo na mesma semana.",
+      colSpan: 4,
+      styles: { fillColor: GOLD_BG, textColor: GOLD_TXT, fontStyle: "bold", halign: "left", fontSize: 7.5 },
+    }]);
+  }
 
   if (preAbertura.length > 0) {
     rows.push([{ content: "PRÉ-ABERTURA (a confirmar)", colSpan: 4, styles: { fillColor: YELLOW_BG, textColor: [160, 100, 20], fontStyle: "bold", halign: "center", fontSize: 9 } }]);
