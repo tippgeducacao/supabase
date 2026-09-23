@@ -31,7 +31,7 @@ import { FOLLOWUP_SYSTEM } from './prompts-followup.ts';
 import { chamarAnthropic, MODELO_AGENTE, type ProvedorIA } from './agente.ts';
 import { selecionarProvedorDoLead } from './pilotoOpenai.ts';
 import { FOLLOWUP_PILOTO_SYSTEM } from './followupPiloto.ts';
-import { contextoFollowupCarreira, planejarFollowupCarreira, validarFollowupCarreira } from './followupCarreira.ts';
+import { contextoFollowupCarreira, corrigirPremissaDeCarreira, planejarFollowupCarreira, validarFollowupCarreira } from './followupCarreira.ts';
 import { registrarNaJornada } from './fichaAtendimento.ts';
 import { carregarAulaParaFollowup, contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from './contextoAulaPiloto.ts';
 import { carregarModoTrocaNumero, carregarSinalTrocaDeNumero, notaTrocaDeNumero, resumoDoSinal } from './trocaDeNumero.ts';
@@ -369,6 +369,11 @@ export async function gerarFollowup(
   let out = ['max_tokens', 'refusal'].includes(resp?.stop_reason)
     ? { message: '', final_answer: 'resposta_incompleta', pergunta_id: '' } : parseResposta(resp);
   if (planoCarreira) {
+    const corrigida = corrigirPremissaDeCarreira(out.message, out.pergunta_id, planoCarreira, history);
+    if (corrigida !== out.message) {
+      tel.registrar('followup_premissa_corrigida', { pergunta_id: out.pergunta_id });
+      out = { ...out, message: corrigida };
+    }
     const motivo = validarFollowupCarreira(out.message, out.pergunta_id, planoCarreira, history);
     if (motivo) {
       tel.registrar('followup_conteudo_recusado', { motivo, pergunta_id: out.pergunta_id });

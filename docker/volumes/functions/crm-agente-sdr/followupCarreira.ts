@@ -24,6 +24,14 @@ function textosAssistant(history: readonly Msg[]): string[] {
 const normalizar = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
 const palavras = (s: string) => new Set(normalizar(s).split(' ').filter(p => p.length > 2 && !['voce', 'pra', 'para', 'que', 'uma', 'seu', 'sua', 'com', 'mais', 'hoje'].includes(p)));
 
+function pressuposicaoDePreco(texto: string, history: readonly Msg[]): boolean {
+  const preco = /\b(?:cobrar mais|aumentar (?:o )?(?:preco|valor)|valor cobrado|aumento de preco)\b/;
+  const premissa = /\b(?:alem de|ja que|agora que|como voce (?:quer|vai|decidiu))\b/;
+  if (!preco.test(normalizar(texto)) || !premissa.test(normalizar(texto))) return false;
+  return !history.some(m => m.role === 'user' && typeof m.content === 'string' && preco.test(normalizar(m.content))
+    && !/\bnao\b.{0,45}(?:cobrar|aumentar)/.test(normalizar(m.content)));
+}
+
 /** Complementa o ID durável com o texto da conversa, inclusive perguntas do principal. */
 export function perguntaRepetida(texto: string, history: readonly Msg[]): boolean {
   const atual = texto.match(/[^.!?\n]*\?/g)?.at(-1) ?? texto;
@@ -42,6 +50,7 @@ export function validarFollowupCarreira(texto: string, perguntaId: string, plano
   if (texto.length > 600 || (texto.match(/\?/g)?.length ?? 0) !== 1) return 'formato';
   if (perguntaId !== 'pendencia' && !plano.perguntas.some(p => p.id === perguntaId)) return 'pergunta_indisponivel';
   if (perguntaRepetida(texto, history)) return 'pergunta_repetida';
+  if (pressuposicaoDePreco(texto, history)) return 'decisao_de_preco_nao_declarada';
   const t = normalizar(texto);
   // Não há número salarial aprovado para este piloto. O recorte histórico da Catho
   // permite falar de associação, sem transferir percentuais para veterinária ou agro.
@@ -51,4 +60,11 @@ export function validarFollowupCarreira(texto: string, perguntaId: string, plano
     || /\b(?:pos graduados|quem tem pos|pessoas com pos)\b.*\b(?:ganham|ganha|recebem|salario)\b/.test(t);
   if (afirmaPesquisaRenda && (!t.includes('catho') || !t.includes('2019') || !t.includes('coordenacao'))) return 'pesquisa_sem_recorte';
   return null;
+}
+
+/** A opção já escolhida tem um exemplo neutro. Corrige a premissa sem outra chamada
+ * paga; se a própria pergunta de referência já foi feita, o validador mantém silêncio. */
+export function corrigirPremissaDeCarreira(texto: string, perguntaId: string, plano: PlanoFollowupCarreira, history: readonly Msg[]): string {
+  if (!pressuposicaoDePreco(texto, history)) return texto;
+  return plano.perguntas.find(p => p.id === perguntaId)?.exemplo ?? '';
 }

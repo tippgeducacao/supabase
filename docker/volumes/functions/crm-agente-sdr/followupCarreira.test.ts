@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { contextoFollowupCarreira, planejarFollowupCarreira, perguntaRepetida, validarFollowupCarreira } from './followupCarreira';
+import { contextoFollowupCarreira, corrigirPremissaDeCarreira, planejarFollowupCarreira, perguntaRepetida, validarFollowupCarreira } from './followupCarreira';
 import { PERFIS_CARREIRA, perfilCarreira } from './perguntasCarreira';
 import { avaliarPoliticaVoz } from './politicaVoz';
 
@@ -49,6 +49,18 @@ describe('follow-up sobre a pessoa na área escolhida', () => {
     const plano = planejarFollowupCarreira('Cannabis Medicinal Veterinária', []);
     expect(validarFollowupCarreira('o que você gostaria de mudar nos seus ganhos na clínica?', 'cannabis:ganhos', plano, [])).toBeNull();
     expect(validarFollowupCarreira('a Catho relacionou qualificação e remuneração em cargos de coordenação num levantamento de 2019, sem prever o ganho de cada pessoa. o que gostaria de mudar nos seus ganhos?', 'cannabis:mercado', plano, [])).toBeNull();
+  });
+  it('corrige a suposição encontrada no modelo real sem inventar uma nova intenção', () => {
+    const plano = planejarFollowupCarreira('Reprodução, Nutrição e Gestão de Bovinos (3em1)', []);
+    const resposta = 'entendi, Gustavo. além de aumentar o valor cobrado, o que essa valorização representaria para você na sua consultoria?';
+    const history = [{ role: 'user' as const, content: 'quero melhorar o valor do meu trabalho, não só atender mais fazendas' }];
+    expect(validarFollowupCarreira(resposta, 'bovinos_3em1:valorizacao', plano, history)).toBe('decisao_de_preco_nao_declarada');
+    const corrigida = corrigirPremissaDeCarreira(resposta, 'bovinos_3em1:valorizacao', plano, history);
+    expect(corrigida).not.toContain('valor cobrado');
+    expect(validarFollowupCarreira(corrigida, 'bovinos_3em1:valorizacao', plano, history)).toBeNull();
+    expect(validarFollowupCarreira(corrigida, 'bovinos_3em1:valorizacao', plano, [{ role: 'assistant', content: corrigida }])).toBe('pergunta_repetida');
+    expect(corrigirPremissaDeCarreira(resposta, 'bovinos_3em1:valorizacao', plano, [{ role: 'user', content: 'quero cobrar mais pelas visitas' }])).toBe(resposta);
+    expect(corrigirPremissaDeCarreira(resposta, 'bovinos_3em1:valorizacao', plano, [{ role: 'user', content: 'não quero cobrar mais' }])).toBe(corrigida);
   });
   it.each(PERFIS_CARREIRA)('as perguntas de $id cabem em áudio quando o intervalo vence', perfil => {
     for (const pergunta of perfil.perguntas) {
