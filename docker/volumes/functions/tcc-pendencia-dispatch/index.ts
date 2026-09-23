@@ -75,6 +75,23 @@ Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
 
   const admin = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
+
+  // Gate (23/09/2026): só service role. No self-hosted o VERIFY_JWT está desligado, e sem
+  // isto qualquer um com um pendencia_id disparava o template ao aluno pela linha 3250.
+  // Quem chama é o pg_net da gt_tcc_pendencia_mover_lote, com a chave do VAULT — aceita as
+  // duas (vault e env do container), como a threec-mailing-listas: comparar só com uma dá 403.
+  const token = (req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '');
+  if (!token || token !== SERVICE_ROLE) {
+    let chaveVault: string | null = null;
+    try {
+      const r = await admin.rpc('_get_service_role_key');
+      chaveVault = (r.data as string | null) ?? null;
+    } catch (e) {
+      console.error('[tcc-pendencia] falha ao ler a key do vault:', String(e));
+    }
+    if (!chaveVault || token !== chaveVault) return json({ error: 'forbidden' }, 403);
+  }
+
   let pendenciaId = '';
 
   try {
