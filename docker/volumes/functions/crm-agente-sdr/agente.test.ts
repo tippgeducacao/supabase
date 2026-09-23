@@ -11,6 +11,7 @@ import { INSTRUCAO_DISPONIBILIDADE_CONTATO } from './disponibilidadeContato';
 import { INSTRUCAO_EVENTOS } from './instrucaoEventos';
 import { INSTRUCAO_FATOS_DO_LEAD } from './fatosLead';
 import { INSTRUCAO_VOZ } from './vozDoJoao';
+import { INSTRUCAO_AULA_PILOTO } from './contextoAulaPiloto';
 import { INSTRUCAO_FALHA_COMPATIBILIDADE } from './falhaCompatibilidade';
 import { INSTRUCAO_FICHA, avaliarFicha, montarBlocoFicha } from './fichaAtendimento';
 import { INSTRUCAO_CANAL_RESPOSTA, NOME_TOOL_RESPOSTA } from './canalResposta';
@@ -72,6 +73,15 @@ beforeEach(() => {
 });
 
 describe('instrução de memória no system enviado à Anthropic', () => {
+  it('aula substitui o roteiro da ficha de venda direta e conserva guardas comuns', async () => {
+    await chamarAgentePrincipal({ promptAgente: 'Aula', contextoTemporal: 'Aula futura no YouTube', contextoFicha: 'graduação conhecida',
+      comFicha: true, instrucaoFicha: INSTRUCAO_AULA_PILOTO, messages: [{ role: 'user', content: 'Que horas começa?' }], tools: [] });
+    const blocos = ultimoPedido().system.map(b => b.text);
+    expect(blocos).toContain(INSTRUCAO_AULA_PILOTO);
+    expect(blocos).not.toContain(INSTRUCAO_FICHA);
+    expect(blocos).toContain(INSTRUCAO_EVENTOS);
+    expect(blocos).toContain(INSTRUCAO_VOZ);
+  });
   const matrizFalhou: Msg[] = [
     { role: 'assistant', content: [{ type: 'tool_use', id: 'matriz', name: 'verificar_compatibilidade_curso', input: {} }] },
     { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'matriz', content: '{"output":"FALHA_TECNICA"}' }] },

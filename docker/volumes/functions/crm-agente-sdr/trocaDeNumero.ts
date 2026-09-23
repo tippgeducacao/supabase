@@ -100,7 +100,7 @@ const ehTemplateEnviado = (l: LinhaMensagemCrm): boolean =>
 export function detectarTrocaDeNumero(
   linhas: readonly LinhaMensagemCrm[],
   contaAtual: string | null | undefined,
-  opts: { idsDoLote?: Iterable<string | null | undefined>; personas?: Map<string, string | null>; contasNoLote?: number; agora?: number } = {},
+  opts: { idsDoLote?: Iterable<string | null | undefined>; personas?: Map<string, string | null>; contasNoLote?: number; agora?: number; somenteSaidas?: boolean } = {},
 ): SinalTrocaDeNumero {
   const contasNoLote = opts.contasNoLote ?? 1;
   const atual = contaAtual ? String(contaAtual) : null;
@@ -114,8 +114,9 @@ export function detectarTrocaDeNumero(
     .sort((a, b) => quando(b) - quando(a));
   if (!validas.length) return sinalInerte(atual, contasNoLote, 'sem_historico_crm');
 
-  const falaAqui = validas.find((l) => String(l.wa_account_id) === atual && ehFala(l)) ?? null;
-  const falaOutra = validas.find((l) => String(l.wa_account_id) !== atual && ehFala(l)) ?? null;
+  const contaComoFala = (l: LinhaMensagemCrm) => ehFala(l) && (!opts.somenteSaidas || l.direcao === 'outbound');
+  const falaAqui = validas.find((l) => String(l.wa_account_id) === atual && contaComoFala(l)) ?? null;
+  const falaOutra = validas.find((l) => String(l.wa_account_id) !== atual && contaComoFala(l)) ?? null;
   const base = {
     contaAtual: atual,
     ultimaFalaAquiEm: falaAqui ? String(falaAqui.created_at) : null,
@@ -191,21 +192,21 @@ function resumirTemplate(conteudo: string | null | undefined, max = 220): string
 export function notaTrocaDeNumero(
   sinal: SinalTrocaDeNumero,
   contas: { atual?: DadosConta | null; anterior?: DadosConta | null },
-  lead: { agendado?: boolean | null },
+  lead: { agendado?: boolean | null; iniciativa?: 'followup' },
 ): string {
   const atual = descreverConta(contas.atual);
   const anterior = descreverConta(contas.anterior);
   const porEsteNumero = atual ? `pelo número ${atual}` : 'por este número';
   const porOutroNumero = anterior ? `por OUTRO número da PPGVET, ${anterior},` : 'por OUTRO número da PPGVET,';
   const corpoTemplate = resumirTemplate(sinal.templateAtual?.conteudo);
-  const origem = sinal.templateAtual
+  const origem = lead.iniciativa === 'followup' ? 'Você está iniciando uma retomada nesta conta, dentro da janela dela. Não presuma que o lead acabou de responder ao template.' : sinal.templateAtual
     ? `A última coisa que saiu por ESTE número foi um template automático da empresa${corpoTemplate ? ` — "${corpoTemplate}"` : ''}; o lead está respondendo a ele.`
     : 'Nenhuma mensagem sua havia saído por este número: o lead escreveu aqui por conta própria.';
   const reuniao = lead.agendado === true
     ? 'Existe uma reunião CONFIRMADA no sistema para este lead: ela continua valendo em qualquer número. Não remarque nem ofereça horários novos sem ele pedir.'
     : 'Não há reunião confirmada no sistema para este lead.';
   return [
-    `${PREFIXO_NOTA_INTERNA} TROCA DE NÚMERO. Esta mensagem chegou ${porEsteNumero}, e é por ele que você responde agora. `
+    `${PREFIXO_NOTA_INTERNA} TROCA DE NÚMERO. ${lead.iniciativa === 'followup' ? 'Esta retomada ocorre' : 'Esta mensagem chegou'} ${porEsteNumero}, e é por ele que você responde agora. `
       + `A conversa anterior com esta pessoa aconteceu ${porOutroNumero} ${humanizarGap(sinal.gapMin)}. ${origem}`,
     'Como agir nesta resposta:',
     '- Diga, em UMA frase curta e natural, que a PPGVET já tinha conversado com ele por outro número (ex.: "vi aqui que a gente já tinha se falado por outro número da PPG"). Não cite horários, nome de atendente nem detalhes daquele atendimento — ele pode ter sido com um vendedor humano.',
@@ -239,14 +240,17 @@ export function comNotaNoContexto(contexto: string, nota: string | null | undefi
 
 // ── Leituras no banco (fail-open: qualquer falha = comportamento antigo) ─────
 
-export async function carregarModoTrocaNumero(supabase: any): Promise<ModoTrocaNumero> {
+export async function carregarModoTrocaNumero(supabase: any, telefone?: string): Promise<ModoTrocaNumero> {
   try {
     const { data, error } = await supabase
       .from('crm_agente_sdr_config')
-      .select('troca_numero_modo')
+      .select(telefone ? 'troca_numero_modo,troca_numero_telefones' : 'troca_numero_modo')
       .eq('id', 1)
       .maybeSingle();
     if (error) throw new Error(error.message);
+    const variantes = new Set(phoneVariants(telefone ?? ''));
+    if (Array.isArray(data?.troca_numero_telefones)
+      && data.troca_numero_telefones.some((t: string) => variantes.has(String(t).replace(/\D/g, '')))) return 'ativo';
     const v = data?.troca_numero_modo;
     return v === 'ativo' || v === 'sombra' ? v : 'off';
   } catch (e) {
@@ -257,7 +261,7 @@ export async function carregarModoTrocaNumero(supabase: any): Promise<ModoTrocaN
 
 export async function carregarSinalTrocaDeNumero(
   supabase: any,
-  args: { telefone: string; contaAtual: string | null | undefined; itens: readonly any[]; contasNoLote: number },
+  args: { telefone: string; contaAtual: string | null | undefined; itens: readonly any[]; contasNoLote: number; somenteSaidas?: boolean },
 ): Promise<SinalTrocaDeNumero> {
   const contaAtual = args.contaAtual ? String(args.contaAtual) : null;
   if (!contaAtual) return sinalInerte(null, args.contasNoLote, 'sem_conta');
@@ -278,6 +282,7 @@ export async function carregarSinalTrocaDeNumero(
       idsDoLote: args.itens.map((i: any) => i?.msg_id ?? null),
       personas,
       contasNoLote: args.contasNoLote,
+      somenteSaidas: args.somenteSaidas,
     });
   } catch (e) {
     console.error(`[crm-agente-sdr][troca-numero] consulta falhou (fail-open): ${(e as Error)?.message ?? e}`);

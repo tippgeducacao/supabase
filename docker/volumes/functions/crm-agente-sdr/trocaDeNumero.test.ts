@@ -44,6 +44,13 @@ const templateDeB = linha({ conta: B, min: 120, direcao: 'outbound', tipo: 'temp
 const respostaEmB = linha({ conta: B, min: 1, direcao: 'inbound', conteudo: 'Oi, quero saber mais', wa_message_id: 'wamid.lote-1' });
 
 describe('detectarTrocaDeNumero — regra pura', () => {
+  it('follow-up vê a última saída real de outra conta mesmo com inbound na conta atual', () => {
+    const sinal = detectarTrocaDeNumero([...conversaEmA, templateDeB, respostaEmB], B, { somenteSaidas: true, agora: T0 });
+    expect(sinal.trocou).toBe(true);
+    expect(notaTrocaDeNumero(sinal, {}, { iniciativa: 'followup' })).toContain('iniciando uma retomada');
+    const jaApresentou = linha({ conta: B, min: 0, direcao: 'outbound', conteudo: 'já conversamos por outro número' });
+    expect(detectarTrocaDeNumero([...conversaEmA, templateDeB, respostaEmB, jaApresentou], B, { somenteSaidas: true }).trocou).toBe(false);
+  });
   it('sem conta atual não decide nada', () => {
     const s = detectarTrocaDeNumero(conversaEmA, null);
     expect(s).toMatchObject({ trocou: false, motivo: 'sem_conta', contaAtual: null });
@@ -199,6 +206,12 @@ describe('leituras no banco (fail-open)', () => {
     expect(await carregarModoTrocaNumero(config({ teste_telefones: [] }))).toBe('off');
     expect(await carregarModoTrocaNumero(config(null, { message: 'coluna não existe' }))).toBe('off');
     expect(await carregarModoTrocaNumero({ from: () => { throw new Error('sem banco'); } })).toBe('off');
+  });
+  it('ativa somente os telefones completos do piloto sem mudar o modo da base', async () => {
+    const s = config({ troca_numero_modo: 'off', troca_numero_telefones: ['5546988166051'] });
+    expect(await carregarModoTrocaNumero(s, '554688166051')).toBe('ativo');
+    expect(await carregarModoTrocaNumero(s, '5547988166051')).toBe('off');
+    expect(await carregarModoTrocaNumero(s)).toBe('off');
   });
 
   function bancoComMensagens(linhas: LinhaMensagemCrm[] | null, error: unknown = null) {

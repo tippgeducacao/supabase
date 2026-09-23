@@ -33,6 +33,8 @@ import { persistirEntradasDoLote, registrarEntrada } from './historicoEntradaPau
 import { aguardarAudiosDoHistorico, contarAudiosPendentes } from './sincronizacaoAudio.ts';
 import { conversaTexto, enviarResposta, horariosInventados, humanizarTexto, removerRaciocinioVazado } from './saida.ts';
 import { configurarVoz } from './envioVoz.ts';
+import { selecionarProvedorDoLead } from './pilotoOpenai.ts';
+import { contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from './contextoAulaPiloto.ts';
 import { PRAZO_MODELO_PILOTO_MS, RESPOSTA_MODELO_INDISPONIVEL } from './prazoModelo.ts';
 import { contaDoLead, dadosDaConta, personaDaConta } from './conta.ts';
 import { rodarEsteiraFollowup } from './followup.ts';
@@ -217,19 +219,9 @@ async function permitidoNoTeste(telefone: string): Promise<boolean> {
 // Falha fechada para o lado SEGURO: sem chave, com erro de leitura ou coluna ausente, o lead
 // fica no Claude — trocar de modelo nunca pode ser o motivo de alguém ficar sem resposta.
 // Escopo do canário: router + loop principal + correção do canal. Matriz de elegibilidade
-// (verificar_compatibilidade_curso) e follow-up continuam na Anthropic nesta fase.
+// (verificar_compatibilidade_curso) continua na Anthropic; follow-up usa a mesma seleção.
 async function provedorDoLead(telefone: string): Promise<ProvedorIA | null> {
-  try {
-    const { data, error } = await supabase.from('crm_agente_sdr_config').select('luna_telefones').eq('id', 1).maybeSingle();
-    if (error) return null;
-    const lista: string[] = data?.luna_telefones ?? [];
-    if (!lista.length) return null;
-    const sub8 = String(telefone).replace(/\D/g, '').slice(-8);
-    if (!lista.some((t) => String(t).replace(/\D/g, '').slice(-8) === sub8)) return null;
-    return provedorOpenai();
-  } catch {
-    return null;
-  }
+  return selecionarProvedorDoLead(supabase, telefone);
 }
 
 // Debounce do canário da Luna (pedido do usuário, 18/09/2026): quem está em `luna_telefones`
@@ -354,7 +346,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   // modelo cobrava aqui o horário "combinado" lá. O sinal é determinístico (crm_whatsapp_messages
   // sabe a conta de cada mensagem); o que fazer com ele depende do modo na config. Regra, casos
   // de borda e a nota em trocaDeNumero.ts.
-  const modoTroca = await carregarModoTrocaNumero(supabase);
+  const modoTroca = await carregarModoTrocaNumero(supabase, telefone);
   const contasNoLote = new Set(itens.map((i: any) => i?.wa_account_id).filter(Boolean)).size;
   const sinalTroca: SinalTrocaDeNumero = modoTroca === 'off'
     ? sinalInerte(ctx.waAccountId ?? null, contasNoLote, 'desligado')
@@ -373,6 +365,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   // segue com o qualificador, pelo mesmo router e ratchet. Lead sem contexto = tudo como antes.
   // Falha ao carregar a aula NÃO cala o agente: cai na persona padrão e registra o motivo.
   const campanha = (lead?.contexto_campanha ?? null) as { persona?: string; aula_id?: string } | null;
+  const aulaPiloto = Boolean(ctx.ficha && campanha?.persona === 'aula' && !lead?.modo_recontato && doUltimoCom('agente_ia_persona') !== 'recontato');
   let aulaDaCampanha: AulaParaPrompt | null = null;
   if (campanha?.persona === 'aula' && campanha.aula_id) {
     try {
@@ -419,7 +412,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   const personaDoNumero = doUltimoCom('agente_ia_persona');
   const persona = lead?.modo_recontato === true || personaDoNumero === 'recontato'
     ? 'recontato'
-    : aulaDaCampanha ? 'aula'
+    : aulaDaCampanha || aulaPiloto ? 'aula'
     : personaDoNumero === 'campanha_direta' ? 'campanha_direta' : 'qualificador';
   const ehCampanha = persona === 'campanha_direta';
   // Só o modo 'ativo' muda comportamento; 'sombra' registra o que faria. Recontato tem missão
@@ -466,7 +459,8 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   let contextoEfetivo = comNotaNoContexto(contextoTemporal, notaTroca);
   // Canário (19/09/2026): o fecho do convite ("ainda hoje" × "amanhã cedo") vem do relógio, não do
   // modelo — vai junto do contexto temporal, fora do cache, relido a cada volta.
-  if (ctx.ficha) contextoEfetivo = `${contextoEfetivo}\n\n${blocoConviteAgenda()}`;
+  if (ctx.ficha && !aulaPiloto) contextoEfetivo = `${contextoEfetivo}\n\n${blocoConviteAgenda()}`;
+  if (aulaPiloto) contextoEfetivo += contextoAulaPiloto(aulaDaCampanha);
   let agenteEfetivo: string;
 
   if (persona === 'recontato') {
@@ -578,7 +572,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   promptAgente = comContinuidadeWebchat(promptAgente, lead?.veio_do_webchat_em);
   // Canário (19/09/2026): gancho do "primeiro lote promocional" no lugar da "secretaria", a 2ª
   // abordagem com o nome e o CONVITE DE AGENDA (ganchoLote.ts). Produção segue com o texto antigo.
-  if (ctx.ficha) {
+  if (ctx.ficha && !aulaPiloto) {
     const gancho = comGanchoDoLote(promptAgente, { nome: vars.nome, curso: vars.curso_interesse_original });
     promptAgente = gancho.prompt;
     tel.registrar('gancho_lote', gancho.trocas);
@@ -791,8 +785,9 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       promptAgente,
       contextoEntregaMateriais,
       // Sem o bloco (leitura falhou), a instrução também fica de fora: ela aponta para ele.
-      contextoFicha: ficha?.texto,
-      comFicha: Boolean(ficha),
+      contextoFicha: aulaPiloto ? `DADOS COLETADOS (não são um roteiro): ${JSON.stringify(ficha?.entrada ?? {})}` : ficha?.texto,
+      comFicha: Boolean(ficha) || aulaPiloto,
+      ...(aulaPiloto ? { instrucaoFicha: INSTRUCAO_AULA_PILOTO } : {}),
       // Encerramento vence reação: a despedida é o que importa nessa volta.
       contextoTemporal: encerrouPorTool
         ? `${contextoComMateriais}\n\n${instrucaoEncerramento}`

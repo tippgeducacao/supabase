@@ -170,6 +170,8 @@ export async function chamarAgentePrincipal(opts: {
   /** Ficha do atendimento (canário): bloco no fim da última mensagem + instrução estática no system. */
   contextoFicha?: string;
   comFicha?: boolean;
+  /** Substitui o roteiro da ficha comercial quando a missão do piloto é aula. */
+  instrucaoFicha?: string;
   messages: Msg[];
   tools: any[];
   /** null/ausente = Anthropic. */
@@ -196,7 +198,7 @@ export async function chamarAgentePrincipal(opts: {
     // Ficha do atendimento (canário): bloco ESTÁTICO, só para quem tem a ficha — o prefixo
     // desse lead é outro, mas continua idêntico entre as voltas e as rodadas dele.
     // Canário: a ficha (estado) e a VOZ DO JOÃO (persona, 21/09/2026) entram juntas.
-    ...(opts.comFicha ? [{ type: 'text', text: INSTRUCAO_FICHA }, { type: 'text', text: INSTRUCAO_VOZ }] : []),
+    ...(opts.comFicha ? [{ type: 'text', text: opts.instrucaoFicha ?? INSTRUCAO_FICHA }, { type: 'text', text: INSTRUCAO_VOZ }] : []),
     { type: 'text', text: INSTRUCAO_CANAL_RESPOSTA, cache_control: { type: 'ephemeral' } },
   ];
 

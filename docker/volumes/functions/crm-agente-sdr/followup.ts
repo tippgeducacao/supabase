@@ -28,7 +28,12 @@
 
 // deno-lint-ignore-file no-explicit-any
 import { FOLLOWUP_SYSTEM } from './prompts-followup.ts';
-import { chamarAnthropic, MODELO_AGENTE } from './agente.ts';
+import { chamarAnthropic, MODELO_AGENTE, type ProvedorIA } from './agente.ts';
+import { selecionarProvedorDoLead } from './pilotoOpenai.ts';
+import { FOLLOWUP_PILOTO_SYSTEM } from './followupPiloto.ts';
+import { carregarAulaParaFollowup, contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from './contextoAulaPiloto.ts';
+import { carregarModoTrocaNumero, carregarSinalTrocaDeNumero, notaTrocaDeNumero, resumoDoSinal } from './trocaDeNumero.ts';
+import { PRAZO_MODELO_PILOTO_MS } from './prazoModelo.ts';
 import { extrairPrimeiroNome, montarContextoTemporal } from './contexto.ts';
 import { INSTRUCAO_MEMORIA_HUMANA } from './memoriaHumana.ts';
 import { carregarStatusMateriais } from './envioMateriais.ts';
@@ -46,7 +51,7 @@ import {
 import { enviarResposta } from './saida.ts';
 import type { CtxConversa } from './tools.ts';
 import { criarTelemetria, resumir, type Telemetria } from './eventos.ts';
-import { contaDoLead } from './conta.ts';
+import { contaDoLead, dadosDaConta } from './conta.ts';
 import { chaveJanelaAberta, enfileirarFollowups } from './fila.ts';
 
 // Cadência da JANELA ABERTA — 7 toques, em minutos desde a última msg do lead.
@@ -312,7 +317,8 @@ export async function gerarFollowup(
   tel: Telemetria,
   history: Msg[],
   contextoMateriais = '',
-): Promise<{ message: string; final_answer: string }> {
+  opcoes?: { provedor: ProvedorIA; contexto: string },
+): Promise<{ message: string; final_answer: string; provedorResposta: 'openai' | 'anthropic' }> {
   const remotejid = lead.remotejid;
   const tentativaAtual = contarTentativas(history) + 1;
 
@@ -323,13 +329,13 @@ export async function gerarFollowup(
   // vão no bloco INFORMAÇÕES DA TENTATIVA (última mensagem) — o system fica ESTÁTICO.
   const nomeCtx = nome || '(ausente no cadastro; use apenas autoidentificação explícita do lead no histórico)';
   const cursoCtx = curso || '(ausente no cadastro; use apenas curso explicitamente escolhido pelo lead no histórico)';
-  const contextoTemporal = montarContextoTemporal() + contextoMateriais;
+  const contextoTemporal = montarContextoTemporal() + contextoMateriais + (opcoes?.contexto ?? '');
   const messages = montarMensagensFollowup(history, tentativaAtual, nomeCtx, cursoCtx);
 
   const inicio = Date.now();
   // thinking disabled EXPLÍCITO: no Sonnet 5, omitir liga o adaptativo — o follow-up
   // devolve JSON curto em 1024 tokens (thinking truncaria a resposta).
-  const resp = await chamarAnthropic({
+  const pedido = {
     model: MODELO_AGENTE,
     max_tokens: 1024,
     thinking: { type: 'disabled' },
@@ -338,16 +344,27 @@ export async function gerarFollowup(
     // mantém o TTL de 5 min sempre quente, então quase toda chamada lê a 0,1x.
     // O temporal (muda a cada minuto) fica FORA do prefixo, depois do breakpoint.
     system: [
-      { type: 'text', text: FOLLOWUP_SYSTEM },
+      { type: 'text', text: opcoes ? FOLLOWUP_PILOTO_SYSTEM : FOLLOWUP_SYSTEM },
       { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA, cache_control: { type: 'ephemeral' } },
       { type: 'text', text: contextoTemporal },
     ],
     messages,
-  });
-  const out = parseResposta(resp);
+  };
+  let provedor = opcoes?.provedor ?? null;
+  let resp;
+  try { resp = await chamarAnthropic(pedido, {}, provedor); }
+  catch (erro) {
+    if (!provedor) throw erro;
+    tel.registrar('followup_provedor_fallback', { de: 'openai', para: 'anthropic' });
+    provedor = null;
+    resp = await chamarAnthropic(pedido, {}, null, PRAZO_MODELO_PILOTO_MS);
+  }
+  const out = ['max_tokens', 'refusal'].includes(resp?.stop_reason)
+    ? { message: '', final_answer: 'resposta_incompleta' } : parseResposta(resp);
   tel.registrar('llm_chamada', {
     volta: 1,
     agente: 'followup',
+    provedor: provedor?.nome ?? 'anthropic',
     stage,
     tentativa: tentativaAtual,
     modelo: resp?.model ?? null,
@@ -359,7 +376,7 @@ export async function gerarFollowup(
     cache_lido: resp?.usage?.cache_read_input_tokens ?? null,
     cache_escrito: resp?.usage?.cache_creation_input_tokens ?? null,
   }, Date.now() - inicio);
-  return out;
+  return { ...out, provedorResposta: provedor?.nome === 'openai' ? 'openai' : 'anthropic' };
 }
 
 // ── processa um lead (sob lock, com revalidação fresca) ─────────────────────
@@ -416,7 +433,31 @@ export async function processarFollowupLead(supabase: any, leadSel: any, stageSe
     const telefone = String(remotejid).split('@')[0];
     const contaLead = await contaDoLead(supabase, telefone, { direcao: 'inbound' });
     const contextoMateriais = await carregarStatusMateriais(supabase, { telefone, waAccountId: contaLead });
-    const { message, final_answer } = await gerarFollowup(supabase, lead, stage, tel, history, contextoMateriais);
+    const provedor = await selecionarProvedorDoLead(supabase, telefone);
+    let contextoPiloto = '';
+    let leadGeracao = lead;
+    if (provedor) {
+      // A conta escolhida continua sendo a do inbound; não abrir janela nem trocar
+      // número para conseguir enviar um follow-up. Ausência da conta cancela o piloto.
+      if (!contaLead) return false;
+      contextoPiloto = '\n\nDADOS JÁ COLETADOS (não perguntar de novo): ' + JSON.stringify(lead.jornada?.coleta ?? {});
+      if (lead.contexto_campanha?.persona === 'aula') {
+        const aula = await carregarAulaParaFollowup(supabase, lead);
+        if (!aula) { tel.registrar('followup_pulado', { motivo: 'aula_sem_contexto' }); return false; }
+        leadGeracao = { ...lead, curso_interesse_original: aula.curso_nome ?? '' };
+        contextoPiloto += '\n\n' + INSTRUCAO_AULA_PILOTO + contextoAulaPiloto(aula);
+      }
+      if (await carregarModoTrocaNumero(supabase, telefone) === 'ativo') {
+        const sinal = await carregarSinalTrocaDeNumero(supabase, { telefone, contaAtual: contaLead, itens: [], contasNoLote: 1, somenteSaidas: true });
+        if (sinal.trocou) {
+          const [atual, anterior] = await Promise.all([dadosDaConta(supabase, contaLead), dadosDaConta(supabase, sinal.contaAnterior)]);
+          contextoPiloto += '\n\n' + notaTrocaDeNumero(sinal, { atual, anterior }, { agendado: lead.agendado, iniciativa: 'followup' });
+          tel.registrar('troca_de_numero', { ...resumoDoSinal(sinal), origem: 'followup', aplicado: true });
+        }
+      }
+    }
+    const { message, final_answer, provedorResposta } = await gerarFollowup(supabase, leadGeracao, stage, tel, history, contextoMateriais,
+      provedor ? { provedor, contexto: contextoPiloto } : undefined);
     // Gerar leva tempo: uma resposta, pausa ou reunião no intervalo
     // cancela esta retomada. Não consumir o toque da conversa que acabou de reabrir.
     const interrompido = async () => {
@@ -464,9 +505,9 @@ export async function processarFollowupLead(supabase: any, leadSel: any, stageSe
     } };
     await enviarResposta(ctx, message, lockRenovar(supabase, remotejid), telemetriaEnvio, interrompido, {
       supabase, origem: 'followup', historico: history, etapaFollowup: stage, iniciadaEm: inicioRodada, interrompido,
-      provedorResposta: 'anthropic',
+      provedorResposta,
       interacaoId: tel.rodadaId,
-    });
+    }, provedorResposta === 'openai' ? 'codigo' : 'modelo');
     if (!partesAceitas) {
       tel.registrar('followup_pulado', { motivo: 'nenhuma_parte_aceita', stage });
       return false;
