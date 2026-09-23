@@ -35,6 +35,18 @@ describe('follow-up sobre a pessoa na área escolhida', () => {
     expect(contexto).toContain('"area":null');
     expect(contexto).toContain('"fonte_mercado":null');
     expect(contexto).not.toContain('bovinos');
+    expect(contexto).toContain('"base_curricular":null');
+  });
+  it('leva somente a grade conferida da pós selecionada, sem misturar cursos ou inventar base ausente', () => {
+    const cannabis = contextoFollowupCarreira(planejarFollowupCarreira('PÓS | CANNABIS MEDICINAL VETERINÁRIA', []));
+    expect(cannabis).toContain('Prescrição Veterinária, Titulação e Acompanhamento Clínico');
+    expect(cannabis).toContain('65a84565-5390-4f4a-a5ee-cf1e78dbdd03');
+    expect(cannabis).not.toContain('POEDEIRAS');
+    const postura = contextoFollowupCarreira(planejarFollowupCarreira('MBA | POSTURA COMERCIAL', []));
+    expect(postura).toContain('NUTRIÇÃO DE POEDEIRAS');
+    expect(postura).not.toContain('Prescrição Veterinária');
+    expect(contextoFollowupCarreira(planejarFollowupCarreira('CURSO | CANNABIS', []))).toContain('"base_curricular":null');
+    expect(contextoFollowupCarreira(planejarFollowupCarreira('MBA | LIDERANÇA E INTELIGÊNCIA ARTIFICIAL NO AGRONEGÓCIO', []))).toContain('"base_curricular":null');
   });
   it.each([
     ['com a pós você vai ganhar o dobro. quer crescer?', 'promessa_de_renda'],

@@ -93,6 +93,7 @@ describe('follow-up do piloto chega ao mesmo pipeline de voz', () => {
     const pedido = JSON.stringify(vi.mocked(chamarAnthropic).mock.calls[0][0]);
     expect(pedido).toContain('Dor em animais');
     expect(pedido).toContain('Cannabis Medicinal Veterinária');
+    expect(pedido).toContain('Prescrição Veterinária, Titulação e Acompanhamento Clínico');
     expect(pedido).not.toContain('Pós antiga');
   });
   it('aula sem cadastro e resposta incompleta não geram retomada inventada', async () => {

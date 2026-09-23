@@ -1,5 +1,5 @@
 // 23/09/2026 — direção de Gustavo: conversar sobre a pessoa, seus projetos e ganhos.
-// Temas do catálogo ativo e de src/data/spin; perguntas são possibilidades, nunca
+// Temas do catálogo ativo, da grade pedagógica e de src/data/spin; perguntas são possibilidades, nunca
 // diagnóstico do lead, promessa de renda, grade curricular ou autorização profissional.
 // Uma pergunta por curso só volta depois de reset explícito da jornada do teste.
 export type EixoCarreira = 'objetivo' | 'futuro' | 'valorizacao' | 'ganhos' | 'mercado';
@@ -8,6 +8,8 @@ export type PerfilCarreira = {
   nomes: string[];
   area: string;
   perguntas: [string, string, string];
+  ganhos?: string;
+  mercado?: string;
 };
 export type PerguntaCarreira = { id: string; eixo: EixoCarreira; exemplo: string };
 export type RegistroPerguntaCarreira = { escopo: string; pergunta_id: string; enviado_em: string };
@@ -24,10 +26,13 @@ export const PERFIS_CARREIRA: PerfilCarreira[] = [
     'na consultoria nutricional, o que teria mais valor pra você: ampliar os atendimentos ou ser mais reconhecido pelo trabalho?',
   ] },
   { id: 'cannabis', nomes: ['cannabis medicinal veterinaria', 'cannabis medicinal na medicina veterinaria'], area: 'cannabis medicinal veterinária', perguntas: [
-    'o que despertou em você o interesse em trabalhar com cannabis na medicina veterinária?',
-    'como você gostaria que o cuidado com dor crônica fizesse parte da sua rotina profissional no futuro?',
-    'pensando na sua carreira clínica, o que você gostaria de mudar na forma como seu trabalho é valorizado?',
-  ] },
+    'o que você gostaria de aprofundar sobre prescrição de cannabis para a sua atuação na clínica?',
+    'o que ter mais segurança para avaliar a prescrição de cannabis mudaria nos seus atendimentos?',
+    'como você gostaria que esse conhecimento sobre cannabis fosse reconhecido pelos tutores na sua clínica?',
+  ],
+    ganhos: 'pensando no acompanhamento dos pacientes com cannabis, que diferença você gostaria que esse trabalho fizesse na sua carreira?',
+    mercado: 'os tutores que você atende já procuram orientação sobre o uso de cannabis para os animais?',
+  },
   { id: 'clinica_bovinos', nomes: ['clinica medica e cirurgica de bovinos'], area: 'clínica e cirurgia de bovinos', perguntas: [
     'na clínica de bovinos, qual tipo de atendimento você gostaria de fazer com mais segurança?',
     'olhando pra frente, como você imagina seu trabalho com clínica e cirurgia nas fazendas?',
@@ -140,7 +145,7 @@ export function catalogoPerguntasCarreira(nome: string): { escopo: string; area:
   const perguntas = exemplos.map((exemplo, i) => ({ id: `${escopo}:${eixos[i]}`, eixo: eixos[i], exemplo }));
   // Renda é aspiração, não exploração de aperto financeiro. Só usar se fizer sentido
   // na conversa; a pesquisa não obriga o lead a falar de salário nem autoriza números.
-  perguntas.push({ id: `${escopo}:ganhos`, eixo: 'ganhos', exemplo: 'pensando no caminho profissional que você quer seguir, o que gostaria de mudar nos seus ganhos?' });
-  if (perfil) perguntas.push({ id: `${escopo}:mercado`, eixo: 'mercado', exemplo: 'você já chegou a pesquisar como a qualificação é valorizada nos cargos que gostaria de ocupar?' });
+  perguntas.push({ id: `${escopo}:ganhos`, eixo: 'ganhos', exemplo: perfil?.ganhos ?? 'pensando no caminho profissional que você quer seguir, o que gostaria de mudar nos seus ganhos?' });
+  if (perfil) perguntas.push({ id: `${escopo}:mercado`, eixo: 'mercado', exemplo: perfil.mercado ?? 'você já chegou a pesquisar como a qualificação é valorizada nos cargos que gostaria de ocupar?' });
   return { escopo, area: perfil?.area ?? null, perguntas };
 }
