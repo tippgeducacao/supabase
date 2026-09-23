@@ -208,7 +208,7 @@ export function montarMensagensFollowup(history: Msg[], tentativaAtual: number, 
     `- Esta é a ${tentativaAtual}ª tentativa de follow-up.\n` +
     `- Dados do lead: nome = ${nomeCtx}, curso de interesse = ${cursoCtx}.\n` +
     (piloto
-      ? '- Leia o que a pessoa já contou. Decida entre silêncio, retomada de pendência real e uma pergunta de carreira disponível, sem repetir assunto respondido. Gere o JSON pedido.'
+      ? '- Leia o que a pessoa já contou. Priorize impedimentos e pendências reais; nos demais casos, combine perguntas da pós, retomadas de agenda e perguntas gerais disponíveis, considerando a preferência desta tentativa e sem repetir assunto respondido. Gere o JSON pedido.'
       : '- Analise o histórico, identifique o checkpoint e o último estilo usado, escolha um estilo diferente e gere a mensagem no formato JSON pedido.');
 
   const ult = norm[norm.length - 1];
@@ -314,7 +314,7 @@ function parseResposta(resp: any): { message: string; final_answer: string; perg
   };
 }
 
-// ── geração da mensagem de follow via Claude ────────────────────────────────
+// ── geração pelo provedor selecionado: OpenAI no piloto, Anthropic nos demais ──
 export async function gerarFollowup(
   supabase: any,
   lead: any,
@@ -336,7 +336,7 @@ export async function gerarFollowup(
   const cursoCtx = curso || '(ausente no cadastro; use apenas curso explicitamente escolhido pelo lead no histórico)';
   const planoCarreira = opcoes ? planejarFollowupCarreira(curso, lead.jornada?.followup_carreira) : null;
   const contextoTemporal = montarContextoTemporal() + contextoMateriais + (opcoes?.contexto ?? '')
-    + (planoCarreira ? contextoFollowupCarreira(planoCarreira) : '');
+    + (planoCarreira ? contextoFollowupCarreira(planoCarreira, tentativaAtual) : '');
   const messages = montarMensagensFollowup(history, tentativaAtual, nomeCtx, cursoCtx, Boolean(opcoes));
 
   const inicio = Date.now();

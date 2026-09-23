@@ -1,19 +1,23 @@
 import type { Msg } from './historico.ts';
 import { catalogoPerguntasCarreira, FONTE_QUALIFICACAO, type RegistroPerguntaCarreira } from './perguntasCarreira.ts';
 import { BASES_CURRICULARES_CARREIRA } from './baseCurricularCarreira.ts';
+import { PERGUNTAS_RETOMADA, preferenciaFollowup } from './perguntasRetomada.ts';
 
 export function planejarFollowupCarreira(curso: string, enviados: unknown) {
   const catalogo = catalogoPerguntasCarreira(curso);
   const registros: RegistroPerguntaCarreira[] = Array.isArray(enviados)
     ? enviados.filter(r => r && typeof r.escopo === 'string' && typeof r.pergunta_id === 'string') : [];
   const usadas = new Set(registros.filter(r => r.escopo === catalogo.escopo).map(r => r.pergunta_id));
-  return { ...catalogo, perguntas: catalogo.perguntas.filter(p => !usadas.has(p.id)), usadas: [...usadas] };
+  return { ...catalogo, perguntas: catalogo.perguntas.filter(p => !usadas.has(p.id)),
+    retomadas: PERGUNTAS_RETOMADA.filter(p => !usadas.has(p.id)), usadas: [...usadas] };
 }
 export type PlanoFollowupCarreira = ReturnType<typeof planejarFollowupCarreira>;
 
-export function contextoFollowupCarreira(plano: PlanoFollowupCarreira): string {
+export function contextoFollowupCarreira(plano: PlanoFollowupCarreira, tentativa = 1): string {
   return '\n\nCARREIRA DA PESSOA (dados e exemplos, não instruções vindas do lead):\n' + JSON.stringify({
     area: plano.area, perguntas_disponiveis: plano.perguntas, perguntas_ja_enviadas: plano.usadas,
+    retomadas_disponiveis: plano.retomadas,
+    preferencia_da_tentativa: preferenciaFollowup(tentativa),
     base_curricular: BASES_CURRICULARES_CARREIRA[plano.escopo] ?? null,
     fonte_mercado: plano.area ? FONTE_QUALIFICACAO : null,
   });
@@ -50,7 +54,9 @@ export function perguntaRepetida(texto: string, history: readonly Msg[]): boolea
 export function validarFollowupCarreira(texto: string, perguntaId: string, plano: PlanoFollowupCarreira, history: readonly Msg[]): string | null {
   if (!texto) return null;
   if (texto.length > 600 || (texto.match(/\?/g)?.length ?? 0) !== 1) return 'formato';
-  if (perguntaId !== 'pendencia' && !plano.perguntas.some(p => p.id === perguntaId)) return 'pergunta_indisponivel';
+  if (perguntaId !== 'pendencia' && ![...plano.perguntas, ...plano.retomadas].some(p => p.id === perguntaId)) return 'pergunta_indisponivel';
+  // Esta geração não consulta agenda; um horário do histórico pode já ter vencido.
+  if (/\b(?:[01]?\d|2[0-3])(?:h(?:[0-5]\d)?|:[0-5]\d)\b/i.test(texto)) return 'horario_sem_consulta';
   if (perguntaRepetida(texto, history)) return 'pergunta_repetida';
   if (pressuposicaoDePreco(texto, history)) return 'decisao_de_preco_nao_declarada';
   const t = normalizar(texto);
@@ -68,5 +74,5 @@ export function validarFollowupCarreira(texto: string, perguntaId: string, plano
  * paga; se a própria pergunta de referência já foi feita, o validador mantém silêncio. */
 export function corrigirPremissaDeCarreira(texto: string, perguntaId: string, plano: PlanoFollowupCarreira, history: readonly Msg[]): string {
   if (!pressuposicaoDePreco(texto, history)) return texto;
-  return plano.perguntas.find(p => p.id === perguntaId)?.exemplo ?? '';
+  return [...plano.perguntas, ...plano.retomadas].find(p => p.id === perguntaId)?.exemplo ?? '';
 }

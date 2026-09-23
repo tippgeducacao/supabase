@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { contextoFollowupCarreira, corrigirPremissaDeCarreira, planejarFollowupCarreira, perguntaRepetida, validarFollowupCarreira } from './followupCarreira';
 import { PERFIS_CARREIRA, perfilCarreira } from './perguntasCarreira';
 import { avaliarPoliticaVoz } from './politicaVoz';
+import { preferenciaFollowup } from './perguntasRetomada';
 
 describe('follow-up sobre a pessoa na área escolhida', () => {
   it('separa pós parecidas, postura avícola e cursos curtos', () => {
@@ -19,12 +20,35 @@ describe('follow-up sobre a pessoa na área escolhida', () => {
     expect(validarFollowupCarreira('como imagina seu trabalho no campo?', 'bovinos_3em1:futuro', plano, [])).toBe('pergunta_indisponivel');
     expect(planejarFollowupCarreira('Cannabis Medicinal Veterinária', enviados).perguntas).toHaveLength(5);
   });
-  it('mantém silêncio disponível quando o banco termina, sem reiniciar o rodízio', () => {
+  it('esgotar carreira preserva retomadas úteis e silêncio, sem reiniciar temas usados', () => {
     const inicial = planejarFollowupCarreira('Sanidade Avícola', []);
     const fim = planejarFollowupCarreira('Sanidade Avícola', inicial.perguntas.map(p => ({ escopo: inicial.escopo, pergunta_id: p.id, enviado_em: '2026-09-23' })));
     expect(fim.perguntas).toEqual([]);
     expect(validarFollowupCarreira('', '', fim, [])).toBeNull();
     expect(validarFollowupCarreira('quer que eu confira aquele horário?', 'pendencia', fim, [])).toBeNull();
+    expect(validarFollowupCarreira('ficou alguma dúvida sobre o que conversamos?', 'retomada:geral_duvida', fim, [])).toBeNull();
+  });
+  it('registra e exclui retomadas gerais/de agenda pelo mesmo escopo durável', () => {
+    const registro = [{ escopo: 'cannabis', pergunta_id: 'retomada:agenda_periodo', enviado_em: '2026-09-23' }];
+    const plano = planejarFollowupCarreira('Cannabis Medicinal Veterinária', registro);
+    expect(plano.retomadas.some(p => p.id === registro[0].pergunta_id)).toBe(false);
+    expect(validarFollowupCarreira('qual período fica melhor para a reunião?', registro[0].pergunta_id, plano, [])).toBe('pergunta_indisponivel');
+    expect(planejarFollowupCarreira('Sanidade Avícola', registro).retomadas.some(p => p.id === registro[0].pergunta_id)).toBe(true);
+    expect(validarFollowupCarreira('quer continuar?', 'retomada:inventada', plano, [])).toBe('pergunta_indisponivel');
+  });
+  it('a preferência varia por tentativa e não obriga reiniciar o banco depois da sétima', () => {
+    expect([1, 2, 3, 4, 5, 6, 7].map(preferenciaFollowup)).toEqual(['retomada', 'carreira', 'geral', 'retomada', 'carreira', 'geral', 'agenda']);
+    expect(preferenciaFollowup(20)).toBe('agenda');
+    expect(contextoFollowupCarreira(planejarFollowupCarreira('Cannabis Medicinal Veterinária', []), 3)).toContain('"preferencia_da_tentativa":"geral"');
+  });
+  it('agenda reabre a escolha, mas não oferece disponibilidade antiga nem contorna repetição', () => {
+    const plano = planejarFollowupCarreira('Cannabis Medicinal Veterinária', []);
+    for (const horario of ['19h', '19h30', '19:30']) {
+      expect(validarFollowupCarreira(`tenho ${horario}, pode ser?`, 'retomada:agenda_reconsultar', plano, [])).toBe('horario_sem_consulta');
+    }
+    expect(validarFollowupCarreira('qual período fica melhor para conversar com o monitor?', 'retomada:agenda_periodo', plano, [
+      { role: 'assistant', content: 'qual período fica melhor para conversar com o monitor?' },
+    ])).toBe('pergunta_repetida');
   });
   it('recusa repetição inclusive da conversa principal e de áudio transcrito', () => {
     expect(perguntaRepetida('como você imagina sua rotina profissional trabalhando com bovinos?', [{ role: 'assistant', content: [{ type: 'text', text: 'Como você imagina sua rotina profissional trabalhando com bovinos?' }] }])).toBe(true);

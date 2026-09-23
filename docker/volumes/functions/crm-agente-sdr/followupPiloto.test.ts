@@ -13,7 +13,7 @@ vi.mock('./eventos.ts', () => ({ criarTelemetria: () => ({ rodadaId: 'rodada-tes
 import { gerarFollowup, processarFollowupLead } from './followup';
 import { chamarAnthropic } from './agente';
 import { selecionarProvedorDoLead } from './pilotoOpenai';
-import { buscarLead, carregarHistorico } from './historico';
+import { buscarLead, carregarHistorico, MARCADOR_FOLLOWUP } from './historico';
 import { enviarResposta } from './saida';
 import { carregarAulaParaFollowup } from './contextoAulaPiloto';
 import { FOLLOWUP_SYSTEM } from './prompts-followup';
@@ -46,6 +46,31 @@ beforeEach(() => {
 });
 
 describe('follow-up do piloto chega ao mesmo pipeline de voz', () => {
+  it('integra pergunta geral na esteira real e só a consome após o texto aceito', async () => {
+    lead.curso_interesse_original = 'Cannabis Medicinal Veterinária';
+    vi.mocked(carregarHistorico).mockResolvedValue([
+      { role: 'user', content: 'quero conhecer melhor essa área' },
+      { role: 'user', content: MARCADOR_FOLLOWUP }, { role: 'assistant', content: 'uma pergunta anterior?' },
+      { role: 'user', content: MARCADOR_FOLLOWUP }, { role: 'assistant', content: 'outro tema anterior?' },
+    ]);
+    vi.mocked(chamarAnthropic).mockResolvedValue({ ...fala, content: [{ type: 'text', text: JSON.stringify({
+      message: 'ficou alguma dúvida sobre o que conversamos?', final_answer: 'geral', pergunta_id: 'retomada:geral_duvida',
+    }) }] });
+    vi.mocked(enviarResposta).mockImplementation(async (_ctx, _texto, _renovar, telemetria) => {
+      expect(registrarNaJornada).not.toHaveBeenCalled();
+      telemetria?.registrar('chunk_enviado', { ok: true });
+      return { aceitos: 1, canal: 'texto', estado: 'aceito' };
+    });
+    expect(await processarFollowupLead(banco, lead, 1)).toBe(true);
+    const pedido = JSON.stringify(vi.mocked(chamarAnthropic).mock.calls[0][0]);
+    // Stage 1 não apaga as duas tentativas anteriores do histórico.
+    expect(pedido).toContain('preferencia_da_tentativa\\\":\\\"geral');
+    expect(pedido).toContain('retomada:agenda_periodo');
+    const mutar = vi.mocked(registrarNaJornada).mock.calls[0][2];
+    expect(mutar(lead.jornada).followup_carreira).toEqual([expect.objectContaining({
+      escopo: 'cannabis', pergunta_id: 'retomada:geral_duvida',
+    })]);
+  });
   it('persiste a pergunta de carreira só depois do áudio aceito', async () => {
     lead.curso_interesse_original = 'Reprodução, Nutrição e Gestão de Bovinos (3em1)';
     vi.mocked(chamarAnthropic).mockResolvedValue({ ...fala, content: [{ type: 'text', text: JSON.stringify({ message: 'como você imagina seu trabalho com bovinos no futuro?', final_answer: 'futuro', pergunta_id: 'bovinos_3em1:futuro' }) }] });
