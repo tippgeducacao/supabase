@@ -37,6 +37,8 @@ export type ColetaJornada = {
   atualizado_em?: string;
 };
 export type Jornada = {
+  /** Perguntas de carreira efetivamente enviadas no piloto, por curso. Não conta geração falha. */
+  followup_carreira?: { escopo: string; pergunta_id: string; enviado_em: string }[];
   cronograma?: {
     pedido_em?: string;
     pedido_por?: 'botao' | 'texto';

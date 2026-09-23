@@ -31,6 +31,8 @@ import { FOLLOWUP_SYSTEM } from './prompts-followup.ts';
 import { chamarAnthropic, MODELO_AGENTE, type ProvedorIA } from './agente.ts';
 import { selecionarProvedorDoLead } from './pilotoOpenai.ts';
 import { FOLLOWUP_PILOTO_SYSTEM } from './followupPiloto.ts';
+import { contextoFollowupCarreira, planejarFollowupCarreira, validarFollowupCarreira } from './followupCarreira.ts';
+import { registrarNaJornada } from './fichaAtendimento.ts';
 import { carregarAulaParaFollowup, contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from './contextoAulaPiloto.ts';
 import { carregarModoTrocaNumero, carregarSinalTrocaDeNumero, notaTrocaDeNumero, resumoDoSinal } from './trocaDeNumero.ts';
 import { PRAZO_MODELO_PILOTO_MS } from './prazoModelo.ts';
@@ -174,7 +176,7 @@ function blocosParaTexto(content: string | any[]): string {
 // Funde turnos consecutivos do mesmo role, garante 1ª msg user e injeta as
 // INFORMAÇÕES DA TENTATIVA na última msg user (mantém os marcadores no histórico
 // pro modelo contar tentativas e detectar o último estilo).
-export function montarMensagensFollowup(history: Msg[], tentativaAtual: number, nomeCtx: string, cursoCtx: string): Msg[] {
+export function montarMensagensFollowup(history: Msg[], tentativaAtual: number, nomeCtx: string, cursoCtx: string, piloto = false): Msg[] {
   // Só o FIM da conversa importa pro follow (checkpoint + último estilo estão nos
   // turnos recentes); o nº da tentativa é contado FORA, no histórico COMPLETO, e
   // injetado abaixo. ⚠️ Cap de 16 (medido 2026-07-27): o cap de 40 NÃO mordia —
@@ -205,7 +207,9 @@ export function montarMensagensFollowup(history: Msg[], tentativaAtual: number, 
     '\n\nINFORMAÇÕES DA TENTATIVA DE FOLLOW-UP:\n' +
     `- Esta é a ${tentativaAtual}ª tentativa de follow-up.\n` +
     `- Dados do lead: nome = ${nomeCtx}, curso de interesse = ${cursoCtx}.\n` +
-    '- Analise o histórico, identifique o checkpoint e o último estilo usado, escolha um estilo diferente e gere a mensagem no formato JSON pedido.';
+    (piloto
+      ? '- Leia o que a pessoa já contou. Decida entre silêncio, retomada de pendência real e uma pergunta de carreira disponível, sem repetir assunto respondido. Gere o JSON pedido.'
+      : '- Analise o histórico, identifique o checkpoint e o último estilo usado, escolha um estilo diferente e gere a mensagem no formato JSON pedido.');
 
   const ult = norm[norm.length - 1];
   if (ult.role === 'user') ult.content += '\n\n' + info;
@@ -291,7 +295,7 @@ export function retornoPendente(history: Msg[]): boolean {
 }
 
 // Parser do JSON {steps, final_answer, message} (port de "Processa Resposta do Claude").
-function parseResposta(resp: any): { message: string; final_answer: string } {
+function parseResposta(resp: any): { message: string; final_answer: string; pergunta_id: string } {
   const content = resp?.content ?? [];
   const bloco = Array.isArray(content) ? content.find((b: any) => b.type === 'text') : null;
   let texto = String(bloco?.text ?? '').trim();
@@ -306,6 +310,7 @@ function parseResposta(resp: any): { message: string; final_answer: string } {
   return {
     message: String(parsed?.message ?? '').trim(),
     final_answer: String(parsed?.final_answer ?? '').trim(),
+    pergunta_id: String(parsed?.pergunta_id ?? '').trim(),
   };
 }
 
@@ -318,7 +323,7 @@ export async function gerarFollowup(
   history: Msg[],
   contextoMateriais = '',
   opcoes?: { provedor: ProvedorIA; contexto: string },
-): Promise<{ message: string; final_answer: string; provedorResposta: 'openai' | 'anthropic' }> {
+): Promise<{ message: string; final_answer: string; provedorResposta: 'openai' | 'anthropic'; perguntaCarreira?: { escopo: string; pergunta_id: string } }> {
   const remotejid = lead.remotejid;
   const tentativaAtual = contarTentativas(history) + 1;
 
@@ -329,8 +334,10 @@ export async function gerarFollowup(
   // vão no bloco INFORMAÇÕES DA TENTATIVA (última mensagem) — o system fica ESTÁTICO.
   const nomeCtx = nome || '(ausente no cadastro; use apenas autoidentificação explícita do lead no histórico)';
   const cursoCtx = curso || '(ausente no cadastro; use apenas curso explicitamente escolhido pelo lead no histórico)';
-  const contextoTemporal = montarContextoTemporal() + contextoMateriais + (opcoes?.contexto ?? '');
-  const messages = montarMensagensFollowup(history, tentativaAtual, nomeCtx, cursoCtx);
+  const planoCarreira = opcoes ? planejarFollowupCarreira(curso, lead.jornada?.followup_carreira) : null;
+  const contextoTemporal = montarContextoTemporal() + contextoMateriais + (opcoes?.contexto ?? '')
+    + (planoCarreira ? contextoFollowupCarreira(planoCarreira) : '');
+  const messages = montarMensagensFollowup(history, tentativaAtual, nomeCtx, cursoCtx, Boolean(opcoes));
 
   const inicio = Date.now();
   // thinking disabled EXPLÍCITO: no Sonnet 5, omitir liga o adaptativo — o follow-up
@@ -359,8 +366,15 @@ export async function gerarFollowup(
     provedor = null;
     resp = await chamarAnthropic(pedido, {}, null, PRAZO_MODELO_PILOTO_MS);
   }
-  const out = ['max_tokens', 'refusal'].includes(resp?.stop_reason)
-    ? { message: '', final_answer: 'resposta_incompleta' } : parseResposta(resp);
+  let out = ['max_tokens', 'refusal'].includes(resp?.stop_reason)
+    ? { message: '', final_answer: 'resposta_incompleta', pergunta_id: '' } : parseResposta(resp);
+  if (planoCarreira) {
+    const motivo = validarFollowupCarreira(out.message, out.pergunta_id, planoCarreira, history);
+    if (motivo) {
+      tel.registrar('followup_conteudo_recusado', { motivo, pergunta_id: out.pergunta_id });
+      out = { message: '', final_answer: motivo, pergunta_id: '' };
+    }
+  }
   tel.registrar('llm_chamada', {
     volta: 1,
     agente: 'followup',
@@ -376,7 +390,10 @@ export async function gerarFollowup(
     cache_lido: resp?.usage?.cache_read_input_tokens ?? null,
     cache_escrito: resp?.usage?.cache_creation_input_tokens ?? null,
   }, Date.now() - inicio);
-  return { ...out, provedorResposta: provedor?.nome === 'openai' ? 'openai' : 'anthropic' };
+  return { message: out.message, final_answer: out.final_answer, provedorResposta: provedor?.nome === 'openai' ? 'openai' : 'anthropic',
+    ...(planoCarreira && out.message && out.pergunta_id !== 'pendencia'
+      ? { perguntaCarreira: { escopo: planoCarreira.escopo, pergunta_id: out.pergunta_id } } : {}),
+  };
 }
 
 // ── processa um lead (sob lock, com revalidação fresca) ─────────────────────
@@ -456,7 +473,7 @@ export async function processarFollowupLead(supabase: any, leadSel: any, stageSe
         }
       }
     }
-    const { message, final_answer, provedorResposta } = await gerarFollowup(supabase, leadGeracao, stage, tel, history, contextoMateriais,
+    const { message, final_answer, provedorResposta, perguntaCarreira } = await gerarFollowup(supabase, leadGeracao, stage, tel, history, contextoMateriais,
       provedor ? { provedor, contexto: contextoPiloto } : undefined);
     // Gerar leva tempo: uma resposta, pausa ou reunião no intervalo
     // cancela esta retomada. Não consumir o toque da conversa que acabou de reabrir.
@@ -514,7 +531,20 @@ export async function processarFollowupLead(supabase: any, leadSel: any, stageSe
     }
     // Fala do follow no histórico (pro próximo toque detectar o estilo usado).
     await gravarMensagem(supabase, remotejid, { role: 'assistant', content: [{ type: 'text', text: message }] });
-    tel.registrar('followup_enviado', { stage, final_answer, conta: contaLead, message: resumir(message, 300) });
+    if (perguntaCarreira) {
+      try {
+        const registrada = await registrarNaJornada(supabase, telefone, j => ({ ...j, followup_carreira: [
+          ...(Array.isArray(j.followup_carreira) ? j.followup_carreira : [])
+            .filter(p => !(p.escopo === perguntaCarreira.escopo && p.pergunta_id === perguntaCarreira.pergunta_id)),
+          { ...perguntaCarreira, enviado_em: new Date().toISOString() },
+        ] }));
+        if (!registrada) throw new Error('jornada_ausente');
+      } catch {
+        // A fala aceita continua no histórico; nunca reenviar por falha posterior de memória.
+        tel.registrar('followup_carreira_memoria_falhou', perguntaCarreira);
+      }
+    }
+    tel.registrar('followup_enviado', { stage, final_answer, conta: contaLead, ...(perguntaCarreira ?? {}), message: resumir(message, 300) });
     return true;
   } catch (e) {
     tel.registrar('erro', { onde: 'processarFollowupLead', remotejid }, undefined, (e as Error).message);

@@ -360,6 +360,19 @@ describe('geração isolada de followup', () => {
     await expect(executarFollowupSimulado(validarEntradaSimulacao(base), { gerar, humanizar: (texto) => texto })).rejects.toThrow('banco indisponível');
   });
 
+  it('repassa OpenAI, coleta e pós da aula ao gerador sem tocar banco ou envio', async () => {
+    const provedor = { nome: 'openai' as const, formato: 'openai' as const, modelo: 'luna-teste', base: 'https://modelo.invalid', chave: 'sintetica' };
+    const gerar = vi.fn(async () => ({ message: '', final_answer: 'sem_pergunta_util', provedorResposta: 'openai' }));
+    const entrada = validarEntradaSimulacao({ ...base, provedor: 'openai', persona: 'aula', curso: 'Curso antigo',
+      aula: { titulo: 'Nutrição', inicio_em: '2099-09-30T22:00:00Z', curso_nome: 'Reprodução, Nutrição e Gestão de Bovinos (3em1)' },
+      mocks: { jornada: { coleta: { area_atuacao: 'nutrição' } } } });
+    const resultado = await executarFollowupSimulado(entrada, { gerar, provedor, humanizar: t => t });
+    expect(gerar).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ curso_interesse_original: 'Reprodução, Nutrição e Gestão de Bovinos (3em1)', jornada: entrada.mocks.jornada }), 1,
+      expect.anything(), expect.anything(), '', expect.objectContaining({ provedor, contexto: expect.stringContaining('nutrição') }));
+    expect(resultado.provedorResposta).toBe('openai');
+    expect(resultado.tools_chamadas).toEqual([]);
+  });
+
   it('registra só metadados permitidos em memória e filtra a mensagem', async () => {
     const resultado = await executarFollowupSimulado(validarEntradaSimulacao(base), {
       gerar: async (_banco, lead, stage, tel, history) => {

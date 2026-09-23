@@ -3,6 +3,8 @@
 // Somente texto externo é aceito: tool_use/result e thinking só podem nascer do modelo.
 import { sanitizarHistorico, type Msg } from '../crm-agente-sdr/historico.ts';
 import type { Telemetria } from '../crm-agente-sdr/eventos.ts';
+import type { ProvedorIA } from '../crm-agente-sdr/agente.ts';
+import { contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from '../crm-agente-sdr/contextoAulaPiloto.ts';
 import { avaliarEvidenciaSemGraduacao, bloqueioSemEvidenciaGraduacao } from '../crm-agente-sdr/evidenciaFormacao.ts';
 import { respostaDoEncerramento, toolConcluida, type Encerramento } from '../crm-agente-sdr/encerramento.ts';
 import { comPresenteNaDespedida } from '../crm-agente-sdr/escolaGratuita.ts';
@@ -280,8 +282,10 @@ export async function executarSimulacao(entrada: EntradaSimulacao, deps: Depende
 }
 
 export type DependenciasFollowupSimulado = {
-  gerar: (banco: unknown, lead: Record<string, unknown>, stage: number, tel: Telemetria, history: Msg[]) => Promise<{ message: string; final_answer: string }>;
+  gerar: (banco: unknown, lead: Record<string, unknown>, stage: number, tel: Telemetria, history: Msg[], materiais?: string,
+    opcoes?: { provedor: ProvedorIA; contexto: string }) => Promise<{ message: string; final_answer: string; provedorResposta?: string; perguntaCarreira?: { escopo: string; pergunta_id: string } }>;
   humanizar: (texto: string) => string;
+  provedor?: ProvedorIA | null;
 };
 
 export async function executarFollowupSimulado(entrada: EntradaSimulacao, deps: DependenciasFollowupSimulado) {
@@ -306,16 +310,23 @@ export async function executarFollowupSimulado(entrada: EntradaSimulacao, deps: 
       eventos.push(evento);
     },
   };
+  const aula = entrada.persona === 'aula' ? entrada.aula : null;
+  const jornada = entrada.mocks?.jornada && typeof entrada.mocks.jornada === 'object' ? entrada.mocks.jornada as Record<string, unknown> : {};
+  const contexto = '\n\nDADOS JÁ COLETADOS (não perguntar de novo): ' + JSON.stringify(jornada.coleta ?? {})
+    + (aula ? '\n\n' + INSTRUCAO_AULA_PILOTO + contextoAulaPiloto(aula) : '');
   const resultado = await deps.gerar(bancoBloqueado, {
     remotejid: 'simulacao-followup-sem-destino',
     nome: entrada.nome_lead,
-    curso_interesse_original: entrada.curso,
+    curso_interesse_original: aula ? aula.curso_nome ?? '' : entrada.curso,
     formacao_academica: entrada.formacao_academica,
-  }, entrada.followup_stage, tel, entrada.historico_inicial.map((m) => ({ ...m })));
+    jornada,
+  }, entrada.followup_stage, tel, entrada.historico_inicial.map((m) => ({ ...m })), '', deps.provedor ? { provedor: deps.provedor, contexto } : undefined);
   const message = deps.humanizar(resultado.message);
   return {
     ok: true, modo: 'followup', agente: 'followup',
     message, final_answer: resultado.final_answer,
+    ...(resultado.provedorResposta ? { provedorResposta: resultado.provedorResposta } : {}),
+    ...(resultado.perguntaCarreira ? { pergunta_carreira: resultado.perguntaCarreira } : {}),
     transcript: message ? [{ quem: 'joao', texto: message }] : [],
     tools_chamadas: [], routers: [], eventos,
     historico_inicial_turnos: entrada.historico_inicial.length,

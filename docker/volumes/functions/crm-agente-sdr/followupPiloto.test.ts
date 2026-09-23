@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.hoisted(() => { (globalThis as any).Deno = { env: { get: () => '' } }; });
 vi.mock('./agente.ts', () => ({ chamarAnthropic: vi.fn(), MODELO_AGENTE: 'claude-teste' }));
 vi.mock('./pilotoOpenai.ts', () => ({ selecionarProvedorDoLead: vi.fn() }));
+vi.mock('./fichaAtendimento.ts', async (original) => ({ ...await original<any>(), registrarNaJornada: vi.fn() }));
 vi.mock('./saida.ts', () => ({ enviarResposta: vi.fn() }));
 vi.mock('./conta.ts', () => ({ contaDoLead: vi.fn(async () => 'conta-atual'), dadosDaConta: vi.fn(), phoneVariants: (t: string) => [t] }));
 vi.mock('./trocaDeNumero.ts', () => ({ carregarModoTrocaNumero: vi.fn(async () => 'off'), carregarSinalTrocaDeNumero: vi.fn(), notaTrocaDeNumero: vi.fn(), resumoDoSinal: vi.fn() }));
@@ -17,9 +18,10 @@ import { enviarResposta } from './saida';
 import { carregarAulaParaFollowup } from './contextoAulaPiloto';
 import { FOLLOWUP_SYSTEM } from './prompts-followup';
 import { FOLLOWUP_PILOTO_SYSTEM } from './followupPiloto';
+import { registrarNaJornada } from './fichaAtendimento';
 
 const provedor = { nome: 'openai', formato: 'openai' as const, modelo: 'gpt-5.6-luna', esforco: 'high', base: 'https://api.openai.com', chave: 'simulada' };
-const fala = { content: [{ type: 'text', text: '{"message":"quer que eu confira o último horário para hoje?","final_answer":"horario"}' }], stop_reason: 'end_turn' };
+const fala = { content: [{ type: 'text', text: '{"message":"quer que eu confira o último horário para hoje?","final_answer":"horario","pergunta_id":"pendencia"}' }], stop_reason: 'end_turn' };
 const tel = { rodadaId: 'rodada', registrar: vi.fn() };
 const banco = { rpc: vi.fn(async () => ({ data: true })), from: () => {
   const q: any = { then: (ok: any) => Promise.resolve({ data: [], error: null }).then(ok) };
@@ -36,6 +38,7 @@ beforeEach(() => {
   vi.mocked(carregarHistorico).mockResolvedValue([{ role: 'user', content: 'qual o último horário?' }, { role: 'assistant', content: 'vou consultar os horários' }]);
   vi.mocked(chamarAnthropic).mockReset().mockResolvedValue(fala);
   vi.mocked(selecionarProvedorDoLead).mockResolvedValue(provedor);
+  vi.mocked(registrarNaJornada).mockImplementation(async (_banco, _telefone, mutar) => mutar(lead.jornada));
   vi.mocked(enviarResposta).mockImplementation(async (_ctx, _texto, _renovar, telemetria) => {
     telemetria?.registrar('chunk_enviado', { ok: true });
     return { aceitos: 1, canal: 'texto', estado: 'aceito' };
@@ -43,6 +46,26 @@ beforeEach(() => {
 });
 
 describe('follow-up do piloto chega ao mesmo pipeline de voz', () => {
+  it('persiste a pergunta de carreira só depois do áudio aceito', async () => {
+    lead.curso_interesse_original = 'Reprodução, Nutrição e Gestão de Bovinos (3em1)';
+    vi.mocked(chamarAnthropic).mockResolvedValue({ ...fala, content: [{ type: 'text', text: JSON.stringify({ message: 'como você imagina seu trabalho com bovinos no futuro?', final_answer: 'futuro', pergunta_id: 'bovinos_3em1:futuro' }) }] });
+    vi.mocked(enviarResposta).mockImplementation(async (_ctx, _texto, _renovar, telemetria) => {
+      expect(registrarNaJornada).not.toHaveBeenCalled();
+      telemetria?.registrar('chunk_enviado', { ok: true, canal: 'audio' });
+      return { aceitos: 1, canal: 'audio', estado: 'aceito' };
+    });
+    expect(await processarFollowupLead(banco, lead, 1)).toBe(true);
+    const mutar = vi.mocked(registrarNaJornada).mock.calls[0][2];
+    expect(mutar(lead.jornada).followup_carreira).toEqual([expect.objectContaining({ escopo: 'bovinos_3em1', pergunta_id: 'bovinos_3em1:futuro' })]);
+    expect(mutar(lead.jornada).coleta).toEqual(lead.jornada.coleta);
+  });
+  it('envio recusado não marca pergunta de carreira como entregue', async () => {
+    lead.curso_interesse_original = 'Sanidade Avícola';
+    vi.mocked(chamarAnthropic).mockResolvedValue({ ...fala, content: [{ type: 'text', text: JSON.stringify({ message: 'como se imagina trabalhando com sanidade avícola no futuro?', final_answer: 'futuro', pergunta_id: 'sanidade_avicola:futuro' }) }] });
+    vi.mocked(enviarResposta).mockResolvedValue({ aceitos: 0, canal: 'texto', estado: 'cancelado' });
+    expect(await processarFollowupLead(banco, lead, 1)).toBe(false);
+    expect(registrarNaJornada).not.toHaveBeenCalled();
+  });
   it('usa Luna e transmite o provedor efetivo para permitir áudio pela cadência', async () => {
     expect(await processarFollowupLead(banco, lead, 1)).toBe(true);
     expect(chamarAnthropic).toHaveBeenCalledWith(expect.objectContaining({ system: expect.arrayContaining([{ type: 'text', text: FOLLOWUP_PILOTO_SYSTEM }]) }), {}, provedor);

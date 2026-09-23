@@ -284,7 +284,10 @@ Deno.serve(async (req) => {
     try {
       // Não passar supabase real: a geração recebe um banco bloqueado e telemetria
       // em memória. Nenhuma função da esteira, elegibilidade, lock ou envio é chamada.
-      return json({ ...(await executarFollowupSimulado(entrada, { gerar: gerarFollowup, humanizar: humanizarTexto })), modelo: MODELO_AGENTE, provedor: entrada.provedor, esforco: provedorAlternativo?.formato === 'openai' ? provedorAlternativo.esforco : null, memoria_versao: VERSAO_MEMORIA_HUMANA });
+      const resultado = await executarFollowupSimulado(entrada, { gerar: gerarFollowup, humanizar: humanizarTexto, provedor: provedorAlternativo });
+      return json({ ...resultado, modelo: resultado.eventos.at(-1)?.modelo ?? provedorAlternativo?.modelo ?? MODELO_AGENTE,
+        provedor: resultado.provedorResposta ?? entrada.provedor,
+        esforco: provedorAlternativo?.formato === 'openai' ? 'none' : null, memoria_versao: VERSAO_MEMORIA_HUMANA });
     } catch {
       return json({ error: 'falha na simulação de followup; nenhuma ação comercial foi executada' }, 502);
     }
