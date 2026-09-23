@@ -140,7 +140,7 @@ export async function tentarEnviarVoz(opts: {
       return 'cancelado';
     }
     referencia = estado.inbound;
-    // A frequência é controlada pelo ciclo 3–5 persistido no banco. O antigo
+    // A frequência é controlada por origem no banco: conversa 3–5, follow-up 2. O antigo
     // teto de um áudio diário impediria o intervalo pedido pelo usuário.
     const { data: ultimas, error: erroUltima } = await opcoes.supabase.from('crm_whatsapp_messages')
       .select('tipo,wa_message_id').eq('wa_account_id', ctx.waAccountId).in('telefone', phoneVariants(ctx.telefone))

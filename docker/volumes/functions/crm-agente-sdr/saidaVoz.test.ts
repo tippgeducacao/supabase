@@ -23,6 +23,34 @@ beforeEach(() => {
 });
 
 describe('saída com voz e fallback', () => {
+  it('usa contador de follow-up e entrega a segunda mensagem como áudio', async () => {
+    const followup = { ...opcoes, origem: 'followup' as const };
+    vi.mocked(planejarCadenciaVoz).mockResolvedValue({ audioDevido: true, concluida: false, alvo: 2, interacoes: 1 });
+    vi.mocked(tentarEnviarVoz).mockResolvedValue('aceito');
+    expect((await saida.enviarResposta(ctx, texto, vi.fn(), undefined, undefined, followup, 'codigo')).canal).toBe('audio');
+    expect(planejarCadenciaVoz).toHaveBeenCalledWith(opcoes.supabase, expect.objectContaining({ origem: 'followup' }));
+    expect(confirmarInteracaoVoz).toHaveBeenCalledWith(opcoes.supabase, expect.objectContaining({ origem: 'followup' }), 'audio', undefined);
+    expect(tentarEnviarVoz).toHaveBeenCalledWith(expect.objectContaining({ cadenciaAtingida: true }));
+    expect(transporte).not.toHaveBeenCalled();
+  });
+  it('primeiro follow-up é texto e só conta após aceite', async () => {
+    vi.mocked(planejarCadenciaVoz).mockResolvedValue({ audioDevido: false, concluida: false, alvo: 2, interacoes: 0 });
+    vi.mocked(tentarEnviarVoz).mockResolvedValue('texto');
+    transporte.mockResolvedValueOnce(new Response(JSON.stringify({ success: true, wa_message_id: 'wamid-followup-texto' })));
+    expect((await saida.enviarResposta(ctx, texto, vi.fn(), undefined, undefined, { ...opcoes, origem: 'followup' }, 'codigo')).canal).toBe('texto');
+    expect(tentarEnviarVoz).toHaveBeenCalledWith(expect.objectContaining({ cadenciaAtingida: false }));
+    expect(confirmarInteracaoVoz).toHaveBeenCalledExactlyOnceWith(opcoes.supabase,
+      expect.objectContaining({ origem: 'followup' }), 'texto', 'wamid-followup-texto');
+  });
+  it('falha de síntese no segundo follow-up confirma somente texto na origem correta', async () => {
+    vi.mocked(planejarCadenciaVoz).mockResolvedValue({ audioDevido: true, concluida: false, alvo: 2, interacoes: 1 });
+    vi.mocked(tentarEnviarVoz).mockResolvedValue('texto_revalidar');
+    vi.mocked(conferirEstadoVoz).mockResolvedValue({ permitido: true, motivo: 'estado_valido' });
+    transporte.mockResolvedValueOnce(new Response(JSON.stringify({ success: true, wa_message_id: 'wamid-fallback-followup' })));
+    expect((await saida.enviarResposta(ctx, texto, vi.fn(), undefined, undefined, { ...opcoes, origem: 'followup' }, 'codigo')).canal).toBe('texto');
+    expect(confirmarInteracaoVoz).toHaveBeenCalledExactlyOnceWith(opcoes.supabase,
+      expect.objectContaining({ origem: 'followup' }), 'texto', 'wamid-fallback-followup');
+  });
   it('fallback de áudio mantém vc e kkk na mensagem escrita original', async () => {
     vi.mocked(tentarEnviarVoz).mockResolvedValue('texto_revalidar');
     vi.mocked(conferirEstadoVoz).mockResolvedValue({ permitido: true, motivo: 'estado_valido' });

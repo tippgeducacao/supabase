@@ -504,10 +504,10 @@ export async function enviarResposta(
   let plano: PlanoCadenciaVoz | null = null;
   let chave: ChaveCadenciaVoz | null = null;
   if (voz && ctx.waAccountId && ctx.canal !== 'webchat' && configurarVoz(ctx.telefone, (nome) => Deno.env.get(nome), voz.provedorResposta)) {
-    chave = { contaId: ctx.waAccountId, telefone: ctx.telefone, interacaoId: voz.interacaoId ?? crypto.randomUUID() };
+    chave = { contaId: ctx.waAccountId, telefone: ctx.telefone, interacaoId: voz.interacaoId ?? crypto.randomUUID(), origem: voz.origem };
     try {
       plano = await planejarCadenciaVoz(voz.supabase, chave);
-      tel?.registrar('voz_cadencia', { alvo: plano.alvo, interacoes: plano.interacoes, audio_devido: plano.audioDevido, concluida: plano.concluida });
+      tel?.registrar('voz_cadencia', { origem: voz.origem, alvo: plano.alvo, interacoes: plano.interacoes, audio_devido: plano.audioDevido, concluida: plano.concluida });
       if (plano.concluida) return { aceitos: 0, canal: 'texto', estado: 'cancelado' };
     } catch {
       // Sem contador confiável, seguir por texto e nunca sortear de novo no isolate.

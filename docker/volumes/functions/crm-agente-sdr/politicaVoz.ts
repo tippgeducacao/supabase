@@ -10,7 +10,7 @@ export type OpcoesPoliticaVoz = {
   /** Texto final já aprovado pelas guardas de conteúdo, nunca raciocínio ou tool result. */
   texto: string;
   historico?: readonly Msg[];
-  /** Contador persistido confirma o intervalo sorteado de 3 a 5 interações. Ausência conserva texto. */
+  /** Contador confirma 3–5 respostas de conversa ou 2 follow-ups. Ausência conserva texto. */
   cadenciaAtingida?: boolean;
   /** @deprecated A etapa de follow-up não autoriza voz; use cadenciaAtingida. */
   etapaFollowup?: number;
@@ -129,8 +129,8 @@ export function avaliarPoliticaVoz(opcoes: OpcoesPoliticaVoz): DecisaoPoliticaVo
   const enviados = opcoes.audiosEnviadosNaRodada ?? 0;
   if (!Number.isInteger(enviados) || enviados < 0 || enviados >= 1) return negar('limite_rodada');
   if (opcoes.ultimoEnvioFoiAudio === true) return negar('audio_consecutivo');
-  // 22/09/2026: conversa e follow-up compartilham o intervalo de 3 a 5 interações,
-  // sorteado e contado pelo chamador no banco. Pedido explícito só pode desfazer
+  // 23/09/2026: conversa mantém 3–5; follow-up usa contador próprio de 2 envios,
+  // calculado pelo chamador no banco. Pedido explícito só pode desfazer
   // preferência por texto; não antecipa a cadência nem cria um novo disparo.
   if (opcoes.cadenciaAtingida !== true) return negar('intervalo_nao_atingido');
   return { permitido: true, motivo: 'cadencia_atingida' };
