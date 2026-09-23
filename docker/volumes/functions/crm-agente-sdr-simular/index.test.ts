@@ -20,7 +20,7 @@ afterAll(() => vi.unstubAllGlobals());
 beforeEach(() => {
   vi.resetAllMocks();
   mocks.from.mockImplementation((tabela: string) => {
-    if (!['crm_agente_sdr_config', 'lista_tools_claude'].includes(tabela)) throw new Error('Banco inesperado');
+    if (!['crm_agente_sdr_config', 'lista_tools_claude', 'lista_tools_openai'].includes(tabela)) throw new Error('Banco inesperado');
     const consulta = {
       select: () => consulta,
       eq: () => consulta,
@@ -36,6 +36,25 @@ beforeEach(() => {
 });
 
 describe('contrato do mock de consulta de valor', () => {
+  it('aula do piloto recebe a mesma missão de conexão usada na produção', async () => {
+    mocks.fetch.mockImplementation(async (url: string) => {
+      if (url !== 'https://api.openai.com/v1/responses') throw new Error('Transporte inesperado');
+      return Response.json({ status: 'completed', model: 'modelo-openai-teste',
+        output: [{ type: 'message', content: [{ type: 'output_text', text: 'o que te chamou a atenção na nutrição de bovinos?' }] }] });
+    });
+    const res = await handler(new Request('https://harness.invalid', {
+      method: 'POST', headers: { 'x-followup-key': 'harness-local' },
+      body: JSON.stringify({ persona: 'aula', provedor: 'openai', ficha: true, nome_lead: 'Gustavo',
+        curso: 'Reprodução, Nutrição e Gestão de Bovinos (3em1)', mensagens: ['Quero saber da aula'],
+        aula: { titulo: 'Nutrição na prática', inicio_em: '2099-09-30T22:00:00Z', curso_nome: 'Reprodução, Nutrição e Gestão de Bovinos (3em1)' } }),
+    }));
+    expect(res.status).toBe(200);
+    const pedido = JSON.parse(mocks.fetch.mock.calls[0][1].body);
+    expect(JSON.stringify(pedido)).toContain('Condução do piloto de aulas');
+    expect(JSON.stringify(pedido)).toContain('MISSÃO DA CAMPANHA');
+    expect(JSON.stringify(pedido)).toContain('Nutrição na prática');
+    expect(mocks.from.mock.calls.map(([tabela]) => tabela)).toEqual(['crm_agente_sdr_config', 'lista_tools_openai']);
+  });
   it('informa preço ao modelo sem simular envio de cronograma ou de mensagem ao cliente', async () => {
     const respostas = [
       { content: [{ type: 'tool_use', id: 'consulta-valor', name: 'envia_informacoes',

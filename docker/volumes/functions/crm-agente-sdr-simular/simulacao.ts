@@ -175,11 +175,11 @@ export function extrairUso(usage: unknown): Record<string, number> {
 }
 
 type BlocoModelo = { type: string; text?: string; id?: string; name?: string; input?: unknown; [campo: string]: unknown };
-type Rodada = { promptAgente: string; contextoTemporal: string; tools: unknown[]; agente: string; comFicha?: boolean };
+type Rodada = { promptAgente: string; contextoTemporal: string; tools: unknown[]; agente: string; comFicha?: boolean; instrucaoFicha?: string };
 export type DependenciasSimulacao = {
   prepararRodada: (messages: Msg[], turno: number) => Promise<Rodada>;
   chamarPrincipal: (opts: {
-    promptAgente: string; contextoTemporal: string; tools: unknown[]; messages: Msg[]; contextoFicha?: string; comFicha?: boolean;
+    promptAgente: string; contextoTemporal: string; tools: unknown[]; messages: Msg[]; contextoFicha?: string; comFicha?: boolean; instrucaoFicha?: string;
   }) => Promise<{
     content?: BlocoModelo[]; model?: string; usage?: unknown; stop_reason?: string;
   }>;

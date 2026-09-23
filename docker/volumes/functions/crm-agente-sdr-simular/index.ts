@@ -29,6 +29,7 @@ import {
 import { humanizarTexto } from '../crm-agente-sdr/saida.ts';
 import { limparParaRouter } from '../crm-agente-sdr/historico.ts';
 import { gerarFollowup } from '../crm-agente-sdr/followup.ts';
+import { contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from '../crm-agente-sdr/contextoAulaPiloto.ts';
 import { VERSAO_MEMORIA_HUMANA } from '../crm-agente-sdr/memoriaHumana.ts';
 import { montarRetornoInformacoes } from '../crm-agente-sdr/envioMateriais.ts';
 import { instrucaoResultadoMaterial } from '../_shared/resultadoEnvioMaterial.ts';
@@ -300,6 +301,7 @@ Deno.serve(async (req) => {
     cadastro: String(entrada.mocks?.cadastro ?? entrada.formacao_academica ?? '').trim() || null,
     inicioRodada: new Date().toISOString(),
   } : null;
+  const aulaPiloto = Boolean(fichaSim && entrada.persona === 'aula' && provedorAlternativo?.nome === 'openai');
   const blocoDaFicha = () => {
     if (!fichaSim) return undefined;
     const entradaFicha = { cadastro: fichaSim.cadastro, jornada: fichaSim.jornada, inicioRodada: fichaSim.inicioRodada };
@@ -402,10 +404,12 @@ Deno.serve(async (req) => {
           tools = [...tools, ...extras];
         }
         // Canário: gancho do primeiro lote + CONVITE DE AGENDA, como em crm-agente-sdr/index.ts.
-        const promptFinal = fichaSim ? comGanchoDoLote(promptAgente, { nome: vars.nome, curso: vars.curso_interesse_original }).prompt : promptAgente;
+        const promptFinal = fichaSim && !aulaPiloto ? comGanchoDoLote(promptAgente, { nome: vars.nome, curso: vars.curso_interesse_original }).prompt : promptAgente;
         const contextoBase = comNotaNoContexto(montarContextoTemporal() + notaDoNome(vars.nome) + notaDoCurso(vars.curso_interesse_original), notaTroca);
-        const contextoFinal = fichaSim ? `${contextoBase}\n\n${blocoConviteAgenda()}` : contextoBase;
-        return { agente: agenteTools, promptAgente: promptFinal, contextoTemporal: contextoFinal, tools, comFicha: Boolean(fichaSim) };
+        const contextoFinal = aulaPiloto ? contextoBase + contextoAulaPiloto(entrada.aula)
+          : fichaSim ? `${contextoBase}\n\n${blocoConviteAgenda()}` : contextoBase;
+        return { agente: agenteTools, promptAgente: promptFinal, contextoTemporal: contextoFinal, tools, comFicha: Boolean(fichaSim),
+          ...(aulaPiloto ? { instrucaoFicha: INSTRUCAO_AULA_PILOTO } : {}) };
       },
       chamarPrincipal: (opts: Parameters<typeof chamarAgentePrincipal>[0]) => chamarAgentePrincipal({ ...opts, provedor: provedorAlternativo }),
       humanizar: humanizarTexto,
