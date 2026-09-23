@@ -32,6 +32,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3';
 import { rodarEsteiraFollowup } from '../crm-agente-sdr/followup.ts';
 import { rodarEsteiraFollowupTemplate } from '../crm-agente-sdr/followup-template.ts';
+import { executarTesteFollowup } from '../crm-agente-sdr/testeFollowup.ts';
 
 declare const EdgeRuntime: { waitUntil?: (p: Promise<unknown>) => void } | undefined;
 
@@ -69,10 +70,20 @@ Deno.serve(async (req) => {
 
   const url = new URL(req.url);
   const mode = url.searchParams.get('mode');
-  if (mode !== 'followup' && mode !== 'followup-template') {
+  if (mode !== 'followup' && mode !== 'followup-template' && mode !== 'followup-teste') {
     return json({ error: 'mode inválido (use followup | followup-template)' }, 400);
   }
   if (!(await autorizado(req))) return json({ error: 'unauthorized' }, 401);
+
+  if (mode === 'followup-teste') {
+    let body: unknown;
+    try { body = await req.json(); } catch { return json({ error: 'pedido_invalido' }, 400); }
+    try { return json(await executarTesteFollowup(supabase, body)); }
+    catch (erro) {
+      const codigo = erro instanceof Error && /^[a-z_]{1,80}$/.test(erro.message) ? erro.message : 'teste_interrompido';
+      return json({ error: codigo }, 409);
+    }
+  }
 
   const limite = numeroOuUndefined(url.searchParams.get('limite'));
   const enfileirar = url.searchParams.get('queue') === '1';
