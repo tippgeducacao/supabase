@@ -312,14 +312,22 @@ Deno.serve(async (req) => {
     // --- Motor Gmail: resolve a caixa conectada e o token ------------------------
     let accessToken = "";
     if (provider === "gmail") {
-      const { data: integ } = await supabaseAdmin
+      // A mesma caixa costuma ter VÁRIAS linhas (uma por reconexão/agenda) e mais de uma
+      // com is_primary=true — a secretaria@ chegou a 16 linhas, 4 "primárias", só 1 viva.
+      // Ordenar só por is_primary deixava o Postgres escolher uma qualquer do empate e,
+      // de 22/09 em diante, era sempre uma de refresh token morto: 0 boas-vindas da
+      // Escola enviadas. updated_at sobe a cada renovação (trigger), então a mais
+      // recente é a viva; e se mesmo assim ela recusar, tentamos a próxima.
+      const { data: candidatas } = await supabaseAdmin
         .from("calendar_integrations")
         .select("id, oauth_access_token, oauth_refresh_token, oauth_token_expires_at, scopes, account_email")
         .eq("account_email", caixaEmail)
         .not("oauth_refresh_token", "is", null)
         .order("is_primary", { ascending: false })
-        .limit(1)
-        .maybeSingle();
+        .order("updated_at", { ascending: false })
+        .limit(10);
+      const comEnvio = (candidatas ?? []).filter((c) => !c.scopes || c.scopes.includes("gmail.send"));
+      const integ = comEnvio[0] ?? candidatas?.[0];
 
       if (!integ?.oauth_refresh_token) {
         return new Response(JSON.stringify({
@@ -334,21 +342,27 @@ Deno.serve(async (req) => {
         }), { status: 412, headers: { ...corsHeaders, "Content-Type": "application/json" } });
       }
 
-      // Renova token se expirado/quase
-      accessToken = integ.oauth_access_token as string;
-      const expiresAt = integ.oauth_token_expires_at ? new Date(integ.oauth_token_expires_at).getTime() : 0;
-      if (!accessToken || expiresAt - Date.now() < 60_000) {
-        const refreshed = await refreshGoogleToken(integ.oauth_refresh_token as string);
-        if (!refreshed) {
-          return new Response(JSON.stringify({ error: "Falha ao renovar token Google" }), {
-            status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
-          });
+      // Renova token se expirado/quase — na primeira candidata que o Google aceitar.
+      accessToken = "";
+      for (const cand of comEnvio) {
+        const expiresAt = cand.oauth_token_expires_at ? new Date(cand.oauth_token_expires_at).getTime() : 0;
+        if (cand.oauth_access_token && expiresAt - Date.now() >= 60_000) {
+          accessToken = cand.oauth_access_token as string;
+          break;
         }
+        const refreshed = await refreshGoogleToken(cand.oauth_refresh_token as string);
+        if (!refreshed) continue;
         accessToken = refreshed.access_token;
         await supabaseAdmin.from("calendar_integrations").update({
           oauth_access_token: accessToken,
           oauth_token_expires_at: new Date(Date.now() + refreshed.expires_in * 1000).toISOString(),
-        }).eq("id", integ.id);
+        }).eq("id", cand.id);
+        break;
+      }
+      if (!accessToken) {
+        return new Response(JSON.stringify({ error: "Falha ao renovar token Google" }), {
+          status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
       }
       // `provider === "ses"` não precisa de checagem prévia: a AWS só é contatada no
       // envio, e sem credencial o SDK devolve erro nomeado que o catch traduz.
