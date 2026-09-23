@@ -68,8 +68,11 @@ export async function conferirEstadoVoz(
   if (opcoes.interrompido && await opcoes.interrompido()) return { permitido: false, motivo: 'conversa_interrompida' };
   const s = opcoes.supabase;
   const lead = await buscarLead(s, ctx.remotejid);
-  if (!lead || lead.iniciar_atendimento !== true || pausaVigente(lead) || lead.nao_perturbe || lead.atendimento_finalizado || lead.agendado
-    || (opcoes.origem === 'followup' && (lead.followup_ativado !== true || lead.modo_recontato))) {
+  // `agendado` só barra o FOLLOW-UP. Na conversa o lead que acabou de marcar ainda
+  // pergunta e confirma — barrar aqui fazia o "fechou então, te aguardamos" sumir
+  // (sem áudio e sem texto) no piloto de voz (auditoria de 23/09/2026).
+  if (!lead || lead.iniciar_atendimento !== true || pausaVigente(lead) || lead.nao_perturbe || lead.atendimento_finalizado
+    || (opcoes.origem === 'followup' && (lead.agendado || lead.followup_ativado !== true || lead.modo_recontato))) {
     return { permitido: false, motivo: 'lead_indisponivel' };
   }
   const { data: bloqueio, error: erroBloqueio } = await s.rpc('crm_bloqueio_disparo', { p_telefone: ctx.telefone });
@@ -107,6 +110,14 @@ export async function conferirEstadoVoz(
     if (humanas?.length) return { permitido: false, motivo: 'humano_respondeu' };
   }
   return { permitido: true, motivo: 'estado_valido', inbound };
+}
+
+// Falha de LEITURA não é motivo para calar a conversa: nada foi enviado ainda, e o
+// `texto_revalidar` só deixa o texto sair se a pausa/entrada nova puder ser relida
+// (erro na releitura conta como pausado). O follow-up segue fechado: ele volta no
+// próximo tick, a conversa não.
+function seLeituraFalhou(opcoes: OpcoesVozSdr): ResultadoVoz {
+  return opcoes.origem === 'conversa' ? 'texto_revalidar' : 'cancelado';
 }
 
 export async function tentarEnviarVoz(opts: {
@@ -163,7 +174,7 @@ export async function tentarEnviarVoz(opts: {
     }
   } catch {
     tel?.registrar('voz_cancelada', { motivo: 'estado_indisponivel' });
-    return 'cancelado';
+    return seLeituraFalhou(opcoes);
   }
 
   let audio: Awaited<ReturnType<typeof prepararVozElevenlabs>> | undefined;
@@ -195,7 +206,7 @@ export async function tentarEnviarVoz(opts: {
     await opts.renovarLock();
   } catch {
     tel?.registrar('voz_cancelada', { motivo: 'estado_indisponivel' });
-    return 'cancelado';
+    return seLeituraFalhou(opcoes);
   }
   if (!audio) return 'texto_revalidar';
 

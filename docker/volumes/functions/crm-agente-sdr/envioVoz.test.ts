@@ -200,6 +200,24 @@ describe('envio de áudio preserva o contrato do SDR', () => {
     supabase.rpc.mockResolvedValue({ data: null, error: { message: 'erro' } } as never);
     await expect(conferirEstadoVoz(ctx, opts.opcoes)).rejects.toThrow('voz_estado_indisponivel');
   });
+  it('lead agendado: a conversa ainda fala, o follow-up não', async () => {
+    const conversa = preparar();
+    conversa.filas.cliente_ppg_leads_sdr = [0, 1].map(() => ({ data: [{ remotejid: ctx.remotejid, iniciar_atendimento: true, agendado: true }] }));
+    expect(await tentarEnviarVoz({ ...conversa.opts, opcoes: { ...conversa.opts.opcoes, origem: 'conversa' } })).toBe('aceito');
+    const followup = preparar();
+    followup.filas.cliente_ppg_leads_sdr = [0, 1].map(() => ({ data: [{ remotejid: ctx.remotejid, iniciar_atendimento: true, followup_ativado: true, agendado: true }] }));
+    expect(await tentarEnviarVoz(followup.opts)).toBe('cancelado');
+    expect(followup.opts.fetchImpl).not.toHaveBeenCalled();
+  });
+  it('erro de leitura: a conversa cai para texto revalidado, o follow-up cancela', async () => {
+    const conversa = preparar();
+    conversa.supabase.rpc.mockResolvedValue({ data: null, error: { message: 'erro' } } as never);
+    expect(await tentarEnviarVoz({ ...conversa.opts, opcoes: { ...conversa.opts.opcoes, origem: 'conversa' } })).toBe('texto_revalidar');
+    expect(conversa.opts.fetchImpl).not.toHaveBeenCalled();
+    const followup = preparar();
+    followup.supabase.rpc.mockResolvedValue({ data: null, error: { message: 'erro' } } as never);
+    expect(await tentarEnviarVoz(followup.opts)).toBe('cancelado');
+  });
   it('antes de atingir a cadência não gasta síntese nem consulta guardas de envio de áudio', async () => {
     const { opts, supabase } = preparar();
     expect(await tentarEnviarVoz({ ...opts, cadenciaAtingida: false })).toBe('texto');

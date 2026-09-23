@@ -422,6 +422,11 @@ Deno.serve(async (req) => {
       origem,
       // O dispatcher informa só o id; autoria é conferida no registro real abaixo.
       mensagem_agendada_id,
+      // Só o crm-agendadas-dispatch manda (23/09/2026): recusa 130429 ("Rate limit hit",
+      // Meta NÃO aceitou) volta SEM gravar linha em crm_whatsapp_messages — a fila reagenda
+      // com backoff e a falha só é registrada na última tentativa. Sem isso cada tentativa
+      // deixava uma "falha" na aba Entregas de uma mensagem que depois saiu.
+      adiar_rate_limit,
       // Fluxo (crm_fluxos) que originou o envio. Vai pra metadata.fluxo_id e é o que permite
       // a aba Entregas contar mensagem SEM template (texto/mídia) — que não tem template_name
       // por onde casar. Só o motor do fluxo manda (crm_fluxo_exec_acao).
@@ -1054,6 +1059,18 @@ Deno.serve(async (req) => {
       waResp = await r.json().catch(() => ({}));
     }
     console.log("[crm-whatsapp-send] <- Meta status:", r.status);
+
+    // 130429 = teto de vazão do número na Meta. É transitório e a Meta NÃO aceitou (não há
+    // wamid), então reenviar não duplica. Quem pediu (a fila) reagenda; aqui nada é gravado.
+    if (!r.ok && adiar_rate_limit === true && Number(waResp?.error?.code) === 130429) {
+      console.warn("[crm-whatsapp-send] 130429 adiado para nova tentativa da fila:", mensagem_agendada_id ?? "-");
+      return json({
+        error: waResp?.error?.message || "Rate limit hit",
+        meta_code: 130429,
+        reagendavel: true,
+        status: r.status,
+      }, 422);
+    }
 
     const waMsgId = waResp?.messages?.[0]?.id ?? null;
     const nowIso = new Date().toISOString();

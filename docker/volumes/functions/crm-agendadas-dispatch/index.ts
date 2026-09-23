@@ -19,6 +19,10 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { AUTOR_REENVIO_MATERIAL, LIMITE_REENVIO_MS, proximaTentativaMaterial } from '../_shared/reenvioMaterial.ts';
 import { interpretarEnvioMaterial } from '../_shared/resultadoEnvioMaterial.ts';
 import { phoneVariants } from '../crm-whatsapp-send/telefoneConversa.ts';
+import {
+  chaveDaConta, CODIGO_RATE_LIMIT, criarRitmo, intercalarPorConta,
+  MAX_REAGENDAMENTOS_RATE_LIMIT, proximaTentativaRateLimit,
+} from './ritmo.ts';
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -56,8 +60,20 @@ type Agendada = {
   mime_type: string | null;
   criado_por_nome?: string | null;
   criado_em?: string;
-  contexto_campanha?: { persona?: string; aula_id?: string; header_media_url?: string; header_media_format?: string } | null;
+  // origem='fluxo' (23/09/2026): template da ação "Enviar mensagem WhatsApp" do Fluxo, que
+  // saiu do net.http_post direto para esta fila (ver ritmo.ts).
+  contexto_campanha?: {
+    persona?: string; aula_id?: string; origem?: string; fluxo_id?: string;
+    header_media_url?: string; header_media_format?: string;
+  } | null;
+  // Reagendamentos já feitos por 130429. Ausente = migration 20260923200000 ainda não
+  // aplicada ⇒ o dispatcher não adia (comportamento antigo: a falha é gravada).
+  tentativas_rate_limit?: number | null;
 };
+
+/** Novos envios só começam até aqui; o resto volta para 'agendado' (nunca saiu). */
+const PRAZO_INICIO_MS = 45_000;
+const dormir = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // Tipo Meta da mídia: do mime_type e, na falta dele, da extensão do arquivo.
 function tipoDaMidia(mime: string | null, url: string, filename: string | null): string {
@@ -88,17 +104,28 @@ Deno.serve(async (req) => {
     //    tem trava de 1 template/24h por número: se a Meta JÁ recebeu, o reenvio é PULADO
     //    (não duplica). Sem isso, um disparo em massa perdia milhares de órfãos como erro.
     //  • TEXTO LIVRE → 'erro' (sem trava 24h, reenviar duplicaria a mensagem).
+    //  ⚠️ 23/09/2026: "preso há >5min" é medido pelo CLAIM (processando_desde), não pelo
+    //  enviar_em. Com fila acumulada (Fluxo grande), uma linha agendada há 6 min e agarrada
+    //  agora ainda está EM VOO — resetá-la pelo enviar_em fazia a próxima execução enviá-la
+    //  de novo. A trava 1 template/24h citada acima foi REMOVIDA da crm-whatsapp-send, então
+    //  nada mais protegia contra essa duplicata. Coluna ausente (migration não aplicada) ⇒
+    //  cai na régua antiga.
     const presoDesde = new Date(Date.now() - 5 * 60_000).toISOString();
-    await admin
-      .from("crm_mensagens_agendadas")
-      .update({ status: "agendado", enviar_em: new Date().toISOString(), erro_detalhe: null })
-      .eq("status", "enviando").eq("tipo_mensagem", "template")
-      .lt("enviar_em", presoDesde);
-    await admin
-      .from("crm_mensagens_agendadas")
-      .update({ status: "erro", erro_detalhe: "Envio interrompido (timeout). Reagende se necessário." })
-      .eq("status", "enviando").neq("tipo_mensagem", "template")
-      .lt("enviar_em", presoDesde);
+    const limparOrfaos = async (coluna: "processando_desde" | "enviar_em") => {
+      const r1 = await admin
+        .from("crm_mensagens_agendadas")
+        .update({ status: "agendado", enviar_em: new Date().toISOString(), erro_detalhe: null })
+        .eq("status", "enviando").eq("tipo_mensagem", "template")
+        .lt(coluna, presoDesde);
+      if (r1?.error) return r1.error;
+      await admin
+        .from("crm_mensagens_agendadas")
+        .update({ status: "erro", erro_detalhe: "Envio interrompido (timeout). Reagende se necessário." })
+        .eq("status", "enviando").neq("tipo_mensagem", "template")
+        .lt(coluna, presoDesde);
+      return null;
+    };
+    if (await limparOrfaos("processando_desde")) await limparOrfaos("enviar_em");
 
     // Claim atômico via RPC: marca 'enviando' e devolve as linhas, num único UPDATE
     // server-side (FOR UPDATE SKIP LOCKED). Evita o `.in([ids])` na URL — que com
@@ -113,18 +140,34 @@ Deno.serve(async (req) => {
     if (claimErr) throw claimErr;
     if (!claimed?.length) return jsonResp({ processed: 0 });
 
-    // Processa em LOTES PARALELOS (CONC por vez) — CONC controla a concorrência contra a Meta.
-    const rows = (claimed ?? []) as Agendada[];
+    // CONC trabalhadores em paralelo, mas cada CONTA no seu ritmo (ritmo.ts): antes eram
+    // blocos de 40 simultâneos sem olhar o número, e o Fluxo nem passava por aqui.
+    const inicio = Date.now();
+    const rows = intercalarPorConta((claimed ?? []) as Agendada[]);
     const results: Record<string, string> = {};
+    const naoIniciadas: string[] = [];
+    const ritmo = criarRitmo();
     const CONC = 40;
-    for (let i = 0; i < rows.length; i += CONC) {
-      const chunk = rows.slice(i, i + CONC);
-      const settled = await Promise.all(
-        chunk.map((row) => processarUma(admin, row).then((res) => [row.id, res] as const)),
-      );
-      for (const [id, res] of settled) results[id] = res;
+    let cursor = 0;
+    const trabalhador = async () => {
+      while (cursor < rows.length) {
+        const row = rows[cursor++];
+        const conta = chaveDaConta(row);
+        const espera = ritmo.reservar(conta);
+        if (Date.now() + espera - inicio > PRAZO_INICIO_MS) { naoIniciadas.push(row.id); continue; }
+        if (espera > 0) await dormir(espera);
+        const res = await processarUma(admin, row);
+        if (res === "reagendado_rate_limit") ritmo.penalizar(conta);
+        results[row.id] = res;
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(CONC, rows.length) }, trabalhador));
+    // Não iniciadas nunca chegaram à crm-whatsapp-send: devolver à fila é seguro.
+    for (let i = 0; i < naoIniciadas.length; i += 100) {
+      await admin.from("crm_mensagens_agendadas").update({ status: "agendado" })
+        .in("id", naoIniciadas.slice(i, i + 100)).eq("status", "enviando");
     }
-    return jsonResp({ processed: Object.keys(results).length, results });
+    return jsonResp({ processed: Object.keys(results).length, devolvidas: naoIniciadas.length, results });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.log("[crm-agendadas-dispatch] fatal:", msg);
@@ -203,6 +246,14 @@ export async function processarUma(
         sendBody.fluxo_id = row.automacao_id;
         sendBody.header_media_url = row.contexto_campanha.header_media_url || undefined;
         sendBody.header_media_format = row.contexto_campanha.header_media_format || undefined;
+      } else if (row.contexto_campanha?.origem === 'fluxo') {
+        // Template do Fluxo: mesmo corpo que o net.http_post direto mandava. fluxo_id é o que
+        // a aba Entregas e o "liberar falhas" usam para casar a mensagem com o fluxo. Sem
+        // `origem` de propósito: o envio direto não carimbava, e os painéis contam assim.
+        delete sendBody.origem;
+        sendBody.fluxo_id = row.contexto_campanha.fluxo_id || row.automacao_id || undefined;
+        sendBody.header_media_url = row.contexto_campanha.header_media_url || undefined;
+        sendBody.header_media_format = row.contexto_campanha.header_media_format || undefined;
       }
     } else if (row.tipo_mensagem === "midia") {
       // MÍDIA (imagem/vídeo/documento). Quem enfileira hoje é a ação "Enviar texto livre" do
@@ -236,6 +287,13 @@ export async function processarUma(
       if (!protecao.permitido) return "cancelado";
     }
 
+    // 130429: a crm-whatsapp-send devolve sem gravar e esta fila reagenda. Só com a coluna
+    // de contagem presente (migration aplicada) e nunca na última tentativa, que grava a falha.
+    const feitasRateLimit = typeof row.tentativas_rate_limit === 'number' ? row.tentativas_rate_limit : null;
+    const adiarRateLimit = !reenvioSdr && !row.wa_conexao_id && feitasRateLimit !== null
+      && feitasRateLimit < MAX_REAGENDAMENTOS_RATE_LIMIT;
+    if (adiarRateLimit) sendBody.adiar_rate_limit = true;
+
     console.log("[crm-agendadas-dispatch] ->", row.id, JSON.stringify(sendBody));
     const r = await fetch(`${SUPABASE_URL}/functions/v1/crm-whatsapp-send`, {
       method: "POST",
@@ -253,6 +311,19 @@ export async function processarUma(
         await admin.from('crm_mensagens_agendadas').update({ status: 'agendado', enviar_em: proxima,
           erro_detalhe: 'Envio recusado; nova tentativa registrada.' }).eq('id', row.id);
         return 'reagendado';
+      }
+    }
+
+    if (adiarRateLimit && (resp as any)?.reagendavel === true
+        && Number((resp as any)?.meta_code) === CODIGO_RATE_LIMIT) {
+      const feitas = feitasRateLimit ?? 0;
+      const proxima = proximaTentativaRateLimit(feitas);
+      if (proxima) {
+        await admin.from('crm_mensagens_agendadas').update({
+          status: 'agendado', enviar_em: proxima, tentativas_rate_limit: feitas + 1,
+          erro_detalhe: `Limite de envio por segundo da Meta (130429). Nova tentativa ${feitas + 2} de ${MAX_REAGENDAMENTOS_RATE_LIMIT + 1}.`,
+        }).eq('id', row.id);
+        return 'reagendado_rate_limit';
       }
     }
 
