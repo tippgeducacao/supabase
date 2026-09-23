@@ -364,14 +364,14 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   // prompt da aula com os dados dela (quando ocorre, link, pós vinculada); o fechamento
   // segue com o qualificador, pelo mesmo router e ratchet. Lead sem contexto = tudo como antes.
   // Falha ao carregar a aula NÃO cala o agente: cai na persona padrão e registra o motivo.
-  const campanha = (lead?.contexto_campanha ?? null) as { persona?: string; aula_id?: string } | null;
+  const campanha = (lead?.contexto_campanha ?? null) as { persona?: string; aula_id?: string; origem?: string } | null;
   const aulaPiloto = Boolean(ctx.ficha && campanha?.persona === 'aula' && !lead?.modo_recontato && doUltimoCom('agente_ia_persona') !== 'recontato');
   let aulaDaCampanha: AulaParaPrompt | null = null;
   if (campanha?.persona === 'aula' && campanha.aula_id) {
     try {
       const { data, error } = await supabase
         .from('crm_aulas')
-        .select('titulo, tema, inicio_em, link, certificado_instrucoes, monitor_nome, cursos(nome)')
+        .select('titulo, tema, inicio_em, link, certificado_link, certificado_instrucoes, monitor_nome, cursos(nome)')
         .eq('id', campanha.aula_id)
         .eq('ativo', true)
         .maybeSingle();
@@ -380,6 +380,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
         aulaDaCampanha = {
           titulo: data.titulo, tema: data.tema ?? null, inicio_em: data.inicio_em, link: data.link ?? null,
           certificado_instrucoes: data.certificado_instrucoes ?? null, monitor_nome: data.monitor_nome ?? null,
+          certificado_link: data.certificado_link ?? null,
           curso_nome: data.cursos?.nome ?? null,
         };
       } else {
@@ -461,6 +462,9 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   // modelo — vai junto do contexto temporal, fora do cache, relido a cada volta.
   if (ctx.ficha && !aulaPiloto) contextoEfetivo = `${contextoEfetivo}\n\n${blocoConviteAgenda()}`;
   if (aulaPiloto) contextoEfetivo += contextoAulaPiloto(aulaDaCampanha);
+  if (persona === 'aula' && campanha?.origem === 'convite_base') {
+    contextoEfetivo += '\n\nORIGEM DA CAMPANHA: convite enviado à base. Receber esse convite não comprova inscrição. Não diga que ele se inscreveu nem pergunte por que se cadastrou sem ele confirmar. Pergunte o que chamou a atenção no tema ou sua relação com a área.';
+  }
   let agenteEfetivo: string;
 
   if (persona === 'recontato') {

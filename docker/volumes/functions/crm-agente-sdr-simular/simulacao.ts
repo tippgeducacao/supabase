@@ -81,6 +81,7 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
     aulaSimulada = {
       titulo: a.titulo, inicio_em: a.inicio_em, tema: opcional(a.tema, 'tema'), link: opcional(a.link, 'link'),
       certificado_instrucoes: opcional(a.certificado_instrucoes, 'certificado_instrucoes'),
+      certificado_link: opcional(a.certificado_link, 'certificado_link'),
       monitor_nome: opcional(a.monitor_nome, 'monitor_nome'), curso_nome: opcional(a.curso_nome, 'curso_nome'),
     };
   }

@@ -56,6 +56,7 @@ type Agendada = {
   mime_type: string | null;
   criado_por_nome?: string | null;
   criado_em?: string;
+  contexto_campanha?: { persona?: string; aula_id?: string; header_media_url?: string; header_media_format?: string } | null;
 };
 
 // Tipo Meta da mídia: do mime_type e, na falta dele, da extensão do arquivo.
@@ -195,6 +196,14 @@ export async function processarUma(
       sendBody.template_name = row.template_name;
       sendBody.template_lang = row.template_lang || "pt_BR";
       sendBody.template_components = Array.isArray(row.template_components) ? row.template_components : [];
+      if (row.contexto_campanha?.persona === 'aula') {
+        // Revalidar o cadastro no momento do envio, além da validação do Fluxo.
+        const { error } = await admin.rpc('crm_aula_contexto_disparo', { p_aula_id: row.contexto_campanha.aula_id });
+        if (error) return await falhar('Cadastro da aula incompleto ou indisponível. Revise a aula antes de reenviar.');
+        sendBody.fluxo_id = row.automacao_id;
+        sendBody.header_media_url = row.contexto_campanha.header_media_url || undefined;
+        sendBody.header_media_format = row.contexto_campanha.header_media_format || undefined;
+      }
     } else if (row.tipo_mensagem === "midia") {
       // MÍDIA (imagem/vídeo/documento). Quem enfileira hoje é a ação "Enviar texto livre" do
       // FLUXO no modo "mensagens separadas": o texto já saiu por net.http_post e a mídia vem
@@ -255,6 +264,9 @@ export async function processarUma(
     }
     if (!r.ok || (resp as any)?.error || !(resp as any)?.success) {
       return await falhar(String((resp as any)?.error ?? `Falha no envio (status ${r.status})`));
+    }
+    if (row.contexto_campanha?.persona === 'aula' && !String((resp as any)?.wa_message_id ?? '').trim()) {
+      return await falhar('Envio da aula sem identificador de aceite do WhatsApp.');
     }
 
     await admin.from("crm_mensagens_agendadas")

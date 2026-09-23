@@ -1219,6 +1219,7 @@ Deno.serve(async (req) => {
         payload_enviado: waPayload,
         ...(origemFinal ? { origem: origemFinal } : {}),
         ...(fluxo_id ? { fluxo_id: String(fluxo_id) } : {}),
+        ...(mensagem_agendada_id ? { mensagem_agendada_id: String(mensagem_agendada_id) } : {}),
         ...(sac_v2_automacao_id ? { sac_v2_automacao_id: String(sac_v2_automacao_id) } : {}),
         ...(enviadoPorId ? { enviado_por_id: enviadoPorId, enviado_por_nome: enviadoPorNome } : {}),
       },

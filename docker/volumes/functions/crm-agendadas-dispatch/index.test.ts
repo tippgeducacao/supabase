@@ -59,6 +59,24 @@ async function chamar() {
 }
 
 describe('reenvio do cronograma na fila real, com transporte simulado', () => {
+  it('envio de aula mantém identificação do fluxo e cabeçalho, sem ativar contexto antes do aceite', async () => {
+    linha = { ...linha, tipo_mensagem: 'template', template_name: 'convite_aula', criado_por_nome: 'Fluxo de aula', automacao_id: 'fluxo-1',
+      contexto_campanha: { persona: 'aula', aula_id: 'aula-1', header_media_url: 'https://imagem.invalid/aula.jpg', header_media_format: 'IMAGE' } };
+    flags = { permitido: true };
+    expect(await chamar()).toBe('enviado');
+    expect(mocks.rpc).toHaveBeenCalledWith('crm_aula_contexto_disparo', { p_aula_id: 'aula-1' });
+    expect(JSON.parse(mocks.fetch.mock.calls[0][1].body)).toMatchObject({ fluxo_id: 'fluxo-1', mensagem_agendada_id: 'fila-1', header_media_url: 'https://imagem.invalid/aula.jpg' });
+    expect(alteracoes.at(-1)).toMatchObject({ status: 'enviado', wa_message_id: 'wamid.reenvio' });
+  });
+  it.each(['incompleta', 'sem_wamid'])('aula %s não é marcada enviada', async (falha) => {
+    linha = { ...linha, tipo_mensagem: 'template', template_name: 'convite_aula', criado_por_nome: 'Fluxo de aula',
+      contexto_campanha: { persona: 'aula', aula_id: 'aula-1' } };
+    if (falha === 'incompleta') mocks.rpc.mockImplementation(async (nome: string) => ({ data: nome === 'crm_agendadas_claim' ? [linha] : null, error: nome === 'crm_aula_contexto_disparo' ? { message: 'Sem certificado' } : null }));
+    else mocks.fetch.mockResolvedValue(new Response(JSON.stringify({ success: true })));
+    expect(await chamar()).toMatch(/^erro:/);
+    expect(alteracoes.at(-1)?.status).toBe('erro');
+    if (falha === 'incompleta') expect(mocks.fetch).not.toHaveBeenCalled();
+  });
   it('envia pela conta original e registra o aceite com id', async () => {
     expect(await chamar()).toBe('enviado');
     expect(JSON.parse(mocks.fetch.mock.calls[0][1].body)).toMatchObject({

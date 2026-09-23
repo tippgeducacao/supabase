@@ -40,6 +40,11 @@ describe("quandoOcorre", () => {
 });
 
 describe("ficha da pós e vars", () => {
+  it('entrega o link do certificado gratuito e não inventa ausência quando falta cadastro', () => {
+    expect(montarVarsAula({ ...aula, certificado_link: 'https://escola.exemplo.com/certificado' }).aula_certificado)
+      .toContain('Certificado gratuito: https://escola.exemplo.com/certificado');
+    expect(montarVarsAula(aula).aula_certificado).toContain('Não afirme que não existe certificado');
+  });
   it("casa a pós pelo nome do catálogo (com prefixo e acento) e carrega o tom obrigatório", () => {
     const ficha = fichaDaPos("PÓS | CANNABIS MEDICINAL VETERINÁRIA");
     expect(ficha).toContain("TERAPIA ADJUVANTE");

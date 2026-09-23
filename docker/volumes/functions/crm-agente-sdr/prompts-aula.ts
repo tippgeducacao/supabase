@@ -33,6 +33,7 @@ export type AulaParaPrompt = {
   /** Um link só: a aula é ao vivo no YouTube e fica gravada no canal, no MESMO link. */
   link: string | null;
   certificado_instrucoes?: string | null;
+  certificado_link?: string | null;
   monitor_nome?: string | null;
   curso_nome?: string | null; // pós vinculada (cursos.nome); null = aula sem pós
 };
@@ -89,7 +90,8 @@ export function montarVarsAula(aula: AulaParaPrompt, agora: Date = new Date()): 
     aula_tema: aula.tema ?? "",
     aula_quando: quandoOcorre(aula, agora),
     aula_link: aula.link ?? "",
-    aula_certificado: aula.certificado_instrucoes ?? "",
+    aula_certificado: [aula.certificado_link ? `Certificado gratuito: ${aula.certificado_link}` : '', aula.certificado_instrucoes ?? ''].filter(Boolean).join('\n')
+      || 'Informações do certificado ainda não cadastradas. Não afirme que não existe certificado nem invente link ou requisitos.',
     aula_monitor: aula.monitor_nome ?? "",
     curso_interesse_original: aula.curso_nome ?? "",
     aula_ficha_pos: fichaDaPos(aula.curso_nome) || SEM_FICHA,
@@ -129,7 +131,7 @@ const PAPEL = [
   "- Aula: **{{ $json.aula_titulo }}** · {{ $json.aula_tema }}",
   "- Quando ocorre: **{{ $json.aula_quando }}**",
   "- Link no YouTube: {{ $json.aula_link }} (é o mesmo link antes, durante e depois: a aula é ao vivo no canal e **fica gravada nele**)",
-  "- Certificado: {{ $json.aula_certificado }} (vazio = não há certificado; não prometa)",
+  "- Certificado: {{ $json.aula_certificado }} (use o link e as orientações cadastradas, sem inventar requisitos)",
   "- Monitor: {{ $json.aula_monitor }}",
   "- Pós ligada a esta aula: **{{ $json.curso_interesse_original }}** (vazio = aula sem pós; nesse caso o material é o **portfólio da PPGVET**, ver seção AULA SEM PÓS)",
   "",
