@@ -350,6 +350,57 @@ describe('SDR: texto de ferramenta nunca vira despedida', () => {
       expect(fronteiras.enviar).toHaveBeenCalledOnce();
     });
 
+  describe('confirmação de agendamento em código', () => {
+    const confirmacao = { data: 'sexta-feira, 25/09/2026 às 16:30', monitor: 'Ana', link: 'https://meet.google.com/abc-defg-hij' };
+    const agendar = (agendamentoId: string | null = 'ag-1') => {
+      fronteiras.tools.mockResolvedValue([{ name: 'confirmar_agendamento' }]);
+      fronteiras.executar.mockResolvedValue({ id: 'ag', resultado: 'Agendamento confirmado.', agendamento_id: agendamentoId, confirmacao });
+      fronteiras.chamarPrincipal.mockResolvedValueOnce({ stop_reason: 'tool_use', content: [
+        { type: 'tool_use', id: 'ag', name: 'confirmar_agendamento', input: {} },
+      ] });
+    };
+    const eventos = () => fronteiras.registrar.mock.calls.map(([tipo, dados]) => ({ tipo, dados }));
+
+    it('modelo calado (ou barrado) depois de agendar: data, monitor e link saem em código, sem outra volta', async () => {
+      agendar();
+      fronteiras.chamarPrincipal.mockResolvedValueOnce({ stop_reason: 'end_turn', content: [] });
+      await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
+      expect(fronteiras.chamarPrincipal).toHaveBeenCalledTimes(2);
+      expect(fronteiras.enviar).toHaveBeenCalledOnce();
+      const enviada = fronteiras.enviar.mock.calls[0][1];
+      expect(enviada).toMatch(/^Horário reservado pra você:/);
+      expect(enviada).toContain('🔗 Link do meet: https://meet.google.com/abc-defg-hij');
+      expect(eventos()).toContainEqual({ tipo: 'confirmacao_agendamento_em_codigo', dados: { motivo: 'silencio_apos_agendamento', com_link: true } });
+      expect(eventos().some((e) => e.tipo === 'silencio_indevido_reinstruido')).toBe(false);
+    });
+
+    it('fala sem o link: a confirmação vai logo depois; fala com o link não duplica', async () => {
+      agendar();
+      fronteiras.chamarPrincipal.mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'show, fechado com a Ana na sexta' }] });
+      await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
+      expect(fronteiras.enviar.mock.calls.map((c) => c[1])).toEqual([
+        'show, fechado com a Ana na sexta', expect.stringContaining('https://meet.google.com/abc-defg-hij'),
+      ]);
+
+      vi.clearAllMocks();
+      agendar();
+      fronteiras.chamarPrincipal.mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'fechado! link: https://meet.google.com/abc-defg-hij' }] });
+      await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
+      expect(fronteiras.enviar).toHaveBeenCalledOnce();
+      expect(eventos().some((e) => e.tipo === 'confirmacao_agendamento_em_codigo')).toBe(false);
+    });
+
+    it('sem agendamento criado (modo teste / erro) a rede não age: segue a reinstrução de silêncio', async () => {
+      agendar(null);
+      fronteiras.chamarPrincipal.mockResolvedValueOnce({ stop_reason: 'end_turn', content: [] })
+        .mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'vou confirmar e já te aviso' }] });
+      await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
+      expect(eventos().some((e) => e.tipo === 'silencio_indevido_reinstruido')).toBe(true);
+      expect(eventos().some((e) => e.tipo === 'confirmacao_agendamento_em_codigo')).toBe(false);
+      expect(fronteiras.enviar.mock.calls.map((c) => c[1])).toEqual(['vou confirmar e já te aviso']);
+    });
+  });
+
   it('encerramento desconhecido exige nova resposta e desliga tools de negócio', async () => {
     fronteiras.executar.mockResolvedValue({ id: 'pausa', status: 'pausado' });
     fronteiras.chamarPrincipal.mockResolvedValueOnce({ stop_reason: 'tool_use', content: [

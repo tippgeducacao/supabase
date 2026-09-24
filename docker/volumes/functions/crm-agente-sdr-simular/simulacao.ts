@@ -9,6 +9,7 @@ import { contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from '../crm-agente-sdr/con
 import { avaliarEvidenciaSemGraduacao, bloqueioSemEvidenciaGraduacao } from '../crm-agente-sdr/evidenciaFormacao.ts';
 import { respostaDoEncerramento, toolConcluida, type Encerramento } from '../crm-agente-sdr/encerramento.ts';
 import { comPresenteNaDespedida } from '../crm-agente-sdr/escolaGratuita.ts';
+import { confirmacaoDoResultado, falaEntregaConfirmacao, textoConfirmacaoAgendamento, type ConfirmacaoAgendamento } from '../crm-agente-sdr/confirmacaoAgendamento.ts';
 
 export const MAX_TURNOS_SIMULACAO = 100;
 export const MAX_CARACTERES_SIMULACAO = 200_000;
@@ -304,6 +305,16 @@ export async function executarSimulacao(entrada: EntradaSimulacao, deps: Depende
     const rodada = await deps.prepararRodada(messages, turno);
     agente = rodada.agente;
     let encerrou = false;
+    // Espelho do index.ts: reunião criada neste turno que a fala do modelo não entregou.
+    let confirmacaoPendente: ConfirmacaoAgendamento | null = null;
+    const publicarConfirmacao = (motivo: string) => {
+      if (!confirmacaoPendente) return;
+      const fala = deps.humanizar(textoConfirmacaoAgendamento(confirmacaoPendente));
+      const final = deps.prepararFala?.(fala) ?? fala;
+      transcript.push({ quem: 'joao', texto: final, turno, confirmacao_em_codigo: motivo });
+      messages.push({ role: 'assistant', content: [{ type: 'text', text: final }] });
+      confirmacaoPendente = null;
+    };
     for (let volta = 0; volta < 6; volta++) {
       const contextoFicha = deps.fichaDaVolta?.();
       const resp = await deps.chamarPrincipal({
@@ -332,6 +343,10 @@ export async function executarSimulacao(entrada: EntradaSimulacao, deps: Depende
       });
       if (!toolUses.length) {
         if (texto) deps.aoResponder?.(texto);
+        if (confirmacaoPendente && (!texto || !falaEntregaConfirmacao(texto, confirmacaoPendente))) {
+          publicarConfirmacao(texto ? 'fala_sem_link' : 'silencio_apos_agendamento');
+        }
+        confirmacaoPendente = null;
         break;
       }
 
@@ -348,6 +363,7 @@ export async function executarSimulacao(entrada: EntradaSimulacao, deps: Depende
           if (objeto && typeof objeto === 'object' && !Array.isArray(objeto)) retornoTool = objeto;
         } catch { /* Mocks legados devolvem texto simples. */ }
         const bloqueado = bloqueadoPelaGuarda || retornoTool.status === 'bloqueado';
+        if (tu.name === 'confirmar_agendamento' && !bloqueado) confirmacaoPendente = confirmacaoDoResultado(retornoTool) ?? confirmacaoPendente;
         transcript.push({ quem: 'tool', nome: tu.name, input: tu.input, resultado, simulado: true, turno, ...(bloqueado ? { bloqueado: true } : {}) });
         results.push({ type: 'tool_result', tool_use_id: tu.id, content: resultado });
         if (!bloqueado && toolConcluida(retornoTool)) toolsConcluidas.push({ tool: tu.name, input: (tu.input ?? {}) as Record<string, unknown> });
@@ -376,6 +392,7 @@ export async function executarSimulacao(entrada: EntradaSimulacao, deps: Depende
       }
       if (volta === 5) limites.push({ turno, motivo: 'limite de 6 chamadas do agente atingido' });
     }
+    publicarConfirmacao('limite_de_voltas');
   }
   return {
     ok: true, modo: 'principal', persona: entrada.persona, agente, transcript,

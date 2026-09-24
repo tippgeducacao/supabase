@@ -19,6 +19,7 @@ import { AGENTE_CAMPANHA_DIRETA } from './prompts-campanha-direta.ts';
 import { AGENTE_AULA, type AulaParaPrompt, montarVarsAula } from './prompts-aula.ts';
 import { comBlocoDaEscola, comLinkPedido, comPresenteNaDespedida, jaTemOPresente, LINK_ESCOLA_GRATUITA } from './escolaGratuita.ts';
 import { respostaDoEncerramento, toolConcluida, type Encerramento } from './encerramento.ts';
+import { confirmacaoDoResultado, falaEntregaConfirmacao, textoConfirmacaoAgendamento, type ConfirmacaoAgendamento } from './confirmacaoAgendamento.ts';
 import { comContinuidadeWebchat } from './continuidadeWebchat.ts';
 import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoCurso, notaDoNome, renderPrompt } from './contexto.ts';
 import { atualizarAgenteComRatchet, atualizarLead, avaliarFimDoHistorico, buscarLead, carregarHistorico, comEntradaPendente, criarLead, excluirDadosLead, gravarMensagem, limparParaRouter, sanitizarHistorico } from './historico.ts';
@@ -697,6 +698,35 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   let corrigiuHorario = false; // guarda de horário inventado: re-instrui só 1x
   let corrigiuVazio = false;   // resposta 100% bastidor: pede de novo 1x antes de calar
   let corrigiuSilencio = false; // silêncio explícito com pergunta do lead no ar: pede a fala 1x
+  // CONFIRMAÇÃO DE AGENDAMENTO EM CÓDIGO (24/09/2026): a reunião criada por confirmar_agendamento
+  // já existe na agenda do monitor — o lead não pode ficar sem data, monitor e link porque a fala
+  // do modelo falhou (calou, foi barrada como bastidor ou saiu sem o link). Ver
+  // confirmacaoAgendamento.ts para os casos medidos. Respeita pausa de atendente.
+  let confirmacaoPendente: ConfirmacaoAgendamento | null = null;
+  const enviarConfirmacaoEmCodigo = async (motivo: string): Promise<boolean> => {
+    const pendente = confirmacaoPendente;
+    confirmacaoPendente = null;
+    if (!pendente) return false;
+    if (!pausouPorTool && await iaPausada(remotejid)) {
+      tel.registrar('envio_abortado_pausa', { onde: 'confirmacao_agendamento', motivo: 'IA pausada durante a geração' });
+      return false;
+    }
+    const textoConfirmacao = textoConfirmacaoAgendamento(pendente);
+    tel.registrar('confirmacao_agendamento_em_codigo', { motivo, com_link: Boolean(pendente.link) });
+    if (!aberturaControlada) await gravarMensagem(supabase, remotejid, { role: 'assistant', content: textoConfirmacao });
+    const enviada = await enviarComAberturaNumero({
+      banco: supabase, telefone, interacaoId: tel.rodadaId, texto: humanizarTexto(textoConfirmacao),
+      sinal: aberturaControlada && aplicarTroca ? sinalTroca : null,
+      registrar: (tipo, dados) => tel.registrar(tipo, dados),
+      enviar: (fala, controle) => enviarResposta(ctx, fala, renovar, tel,
+        pausouPorTool ? undefined : () => iaPausada(remotejid), undefined,
+        aberturaControlada ? 'codigo' : fracionamentoAtual(), controle),
+    });
+    if (aberturaControlada && enviada.envio.aceitos) {
+      await gravarMensagem(supabase, remotejid, { role: 'assistant', content: enviada.texto });
+    }
+    return true;
+  };
   // SILÊNCIO INDEVIDO (21/09/2026, teste do usuário): o lead perguntou "mais cedo?", o modelo consultou
   // a agenda duas vezes e fechou a volta com responder_ao_cliente VAZIO — a conversa travou sem erro
   // nenhum. Silêncio só é resposta válida quando a rodada encerrou por tool (a despedida já saiu) ou
@@ -890,6 +920,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
           input: resumir(tu.input, 800),
           output: resumir(output, 1200),
         }, Date.now() - inicioTool);
+        if (tu.name === 'confirmar_agendamento') confirmacaoPendente = confirmacaoDoResultado(output) ?? confirmacaoPendente;
         outputs.push(output);
       }
       await gravarMensagem(supabase, remotejid, { role: 'user', content: montarToolResults(outputs) });
@@ -938,6 +969,13 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       .map((b: any) => b.text)
       .join('\n')
       .trim();
+    // Reunião criada e o modelo calado ou barrado (19 e 21/09): a confirmação sai em código,
+    // sem gastar outra volta pedindo a fala.
+    if (!texto && confirmacaoPendente) {
+      const enviou = await enviarConfirmacaoEmCodigo('silencio_apos_agendamento');
+      tel.registrar('rodada_fim', { voltas_llm: rodada + 1, respondeu: enviou }, Date.now() - inicioRodada);
+      return;
+    }
     if (!texto && !encerrouPorTool && !levaSoReacao && !corrigiuSilencio) {
       corrigiuSilencio = true;
       tel.registrar('silencio_indevido_reinstruido', { canal: resp.canal_resposta ?? null, volta: rodada + 1 });
@@ -979,7 +1017,8 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       }
       if (inventados.length) {
         tel.registrar('horario_inventado', { horarios: inventados, acao: 'descartado', texto: resumir(texto, 600) });
-        tel.registrar('rodada_fim', { voltas_llm: rodada + 1, respondeu: false }, Date.now() - inicioRodada);
+        const enviou = await enviarConfirmacaoEmCodigo('fala_descartada_apos_agendamento');
+        tel.registrar('rodada_fim', { voltas_llm: rodada + 1, respondeu: enviou }, Date.now() - inicioRodada);
         return;
       }
       // Resposta que só existia como bastidor: pede de novo em vez de calar.
@@ -1032,6 +1071,12 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
           tel.registrar('rodada_fim', { voltas_llm: rodada + 1, respondeu: false, motivo: envio?.estado ?? 'envio_sem_aceite' }, Date.now() - inicioRodada);
           return;
         }
+        // A fala saiu, mas sem o link ("show", "fechado então, terça às 19h" — 10 de 206 em 14 dias):
+        // a confirmação completa vai logo depois, em código.
+        if (confirmacaoPendente && !falaEntregaConfirmacao(textoEnviado ?? comLink.texto, confirmacaoPendente)) {
+          await enviarConfirmacaoEmCodigo('fala_sem_link');
+        }
+        confirmacaoPendente = null;
         // Ficha: o que o João acabou de perguntar vira estado — "pergunta uma vez" da coleta e a
         // pergunta da pós só contam quando a pergunta saiu de fato no texto enviado.
         if (ctx.ficha && ficha) {
@@ -1047,6 +1092,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     tel.registrar('rodada_fim', { voltas_llm: rodada + 1, respondeu: Boolean(texto) }, Date.now() - inicioRodada);
     return;
   }
+  await enviarConfirmacaoEmCodigo('limite_de_voltas');
   tel.registrar('erro', { onde: 'loop' }, Date.now() - inicioRodada, `limite de ${MAX_RODADAS_TOOLS} rodadas de tools atingido`);
   console.error(`[crm-agente-sdr] ${remotejid}: limite de ${MAX_RODADAS_TOOLS} rodadas de tools atingido.`);
 }

@@ -144,6 +144,34 @@ describe('agenda do ensaio segue a janela da sdr-api', () => {
 });
 
 describe('replay sem envio e diagnóstico sem thinking', () => {
+  describe('confirmação de agendamento em código (espelho do index.ts)', () => {
+    const confirmacao = { data: 'sexta-feira, 25/09/2026 às 16:30', monitor: 'Ana', link: 'https://meet.google.com/ppg-harness-sim' };
+    const agendou = JSON.stringify({ resultado: 'Agendamento confirmado.', agendamento_id: 'harness-agendamento', confirmacao });
+    const cenario = (final: string) => {
+      const deps = dependencias();
+      vi.mocked(deps.chamarPrincipal)
+        .mockResolvedValueOnce({ content: [{ type: 'tool_use', id: 'ag-1', name: 'confirmar_agendamento', input: {} }] })
+        .mockResolvedValueOnce({ content: final ? [{ type: 'text', text: final }] : [] });
+      vi.mocked(deps.mockTool).mockResolvedValue(agendou);
+      return deps;
+    };
+    const falasDoJoao = (r: Awaited<ReturnType<typeof executarSimulacao>>) => r.transcript.filter((t) => t.quem === 'joao');
+
+    it('modelo calado depois de agendar: a confirmação sai em código', async () => {
+      const r = await executarSimulacao(validarEntradaSimulacao({ mensagens: ['pode ser 16h30'] }), cenario(''));
+      expect(falasDoJoao(r)).toEqual([expect.objectContaining({ confirmacao_em_codigo: 'silencio_apos_agendamento' })]);
+      expect(String(falasDoJoao(r)[0].texto)).toContain('🔗 Link do meet: https://meet.google.com/ppg-harness-sim');
+    });
+
+    it('fala sem o link: a confirmação vai logo depois; com o link, nada é duplicado', async () => {
+      const semLink = await executarSimulacao(validarEntradaSimulacao({ mensagens: ['pode ser 16h30'] }), cenario('show, fechado com a Ana'));
+      expect(falasDoJoao(semLink).map((t) => t.confirmacao_em_codigo ?? 'modelo')).toEqual(['modelo', 'fala_sem_link']);
+      const comLink = await executarSimulacao(validarEntradaSimulacao({ mensagens: ['pode ser 16h30'] }),
+        cenario('Horário reservado pra você: https://meet.google.com/ppg-harness-sim'));
+      expect(falasDoJoao(comLink)).toHaveLength(1);
+    });
+  });
+
   it('nunca publica texto intermediário junto de ferramenta, mesmo sem tags de raciocínio', async () => {
     const deps = dependencias();
     vi.mocked(deps.chamarPrincipal)

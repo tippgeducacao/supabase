@@ -27,6 +27,7 @@ import { INSTRUCAO_FALHA_COMPATIBILIDADE } from './falhaCompatibilidade.ts';
 import { temDorFinanceira } from './objecaoFinanceira.ts';
 import { montarRetornoInformacoes } from './envioMateriais.ts';
 import { consultarCatalogo } from './catalogoCursos.ts';
+import { resultadoConfirmacao } from './confirmacaoAgendamento.ts';
 import {
   type ContextoElegibilidade, iniciarAvaliacao, finalizarAvaliacao, consultarAprovacao,
   recusaElegibilidade, VERSAO_REGRA_ELEGIBILIDADE,
@@ -409,9 +410,17 @@ async function confirmarAgendamento(supabase: any, input: any, ctx: CtxConversa,
     }
 
     const vendedor = ag.vendedor?.name || ag.vendedor_id || 'monitor';
+    // `confirmacao` estruturada: se a fala do modelo não entregar data/monitor/link, o
+    // index.ts manda a confirmação em código (confirmacaoAgendamento.ts).
+    const confirmacao = {
+      data: formataBrasiliaDataHora(ag.data_agendamento),
+      monitor: String(vendedor),
+      link: String(evento.hangoutLink ?? ag.link_reuniao ?? ''),
+    };
     return {
-      resultado: `Agendamento confirmado. id: ${ag.id}, data: ${formataBrasiliaDataHora(ag.data_agendamento)}, monitor: ${vendedor}, link: ${evento.hangoutLink ?? ag.link_reuniao ?? ''}`,
+      resultado: resultadoConfirmacao(ag.id, confirmacao),
       agendamento_id: ag.id,
+      confirmacao,
       id: toolUseId,
     };
   } catch (e) {

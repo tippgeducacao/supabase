@@ -43,6 +43,7 @@ import {
 import { comGanchoDoLote } from '../crm-agente-sdr/ganchoLote.ts';
 import { bloqueioProximaTurmaDeEstudante } from '../crm-agente-sdr/tools.ts';
 import { blocoConviteAgenda } from '../crm-agente-sdr/contexto.ts';
+import { resultadoConfirmacao } from '../crm-agente-sdr/confirmacaoAgendamento.ts';
 import { diagnosticoDoProvedor, disponibilidadeSimulada, executarFollowupSimulado, executarSimulacao, extrairUso, MAX_CARACTERES_SIMULACAO, validarEntradaSimulacao, type AgenteRouter } from './simulacao.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
@@ -236,7 +237,9 @@ async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimula
       if (!ano || !mes || !dia || !/^\d{2}:\d{2}$/.test(hora)) return 'Erro ao agendar: data_escolhida (AAAA-MM-DD) e horario_escolhido (HH:MM) são obrigatórios.';
       const semana = new Intl.DateTimeFormat('pt-BR', { timeZone: 'UTC', weekday: 'long' }).format(new Date(`${ano}-${mes}-${dia}T12:00:00Z`));
       const monitor = ({ v1: 'Ana', v2: 'Bruno', v3: 'Carla' } as Record<string, string>)[String(input?.vendedor_id ?? '')] ?? 'monitor';
-      return `Agendamento confirmado. id: harness-agendamento, data: ${semana}, ${dia}/${mes}/${ano} às ${hora}, monitor: ${monitor}, link: https://meet.google.com/ppg-harness-sim`;
+      // Mesmo objeto do executor: `confirmacao` alimenta a confirmação em código do ensaio.
+      const confirmacao = { data: `${semana}, ${dia}/${mes}/${ano} às ${hora}`, monitor, link: 'https://meet.google.com/ppg-harness-sim' };
+      return JSON.stringify({ resultado: resultadoConfirmacao('harness-agendamento', confirmacao), agendamento_id: 'harness-agendamento', confirmacao });
     }
     default:
       return `Tool ${nome} executada.`;
