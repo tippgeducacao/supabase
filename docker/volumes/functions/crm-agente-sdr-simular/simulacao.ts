@@ -191,6 +191,70 @@ export function diagnosticoDoProvedor(erro: unknown): Record<string, unknown> | 
   }
 }
 
+// Agenda do ensaio, espelho de consulta_disponibilidade (crm-agente-sdr/tools.ts) + sdr-api
+// (janelaDeDataPeriodo). Regras que o mock já tinha e continuam: datas FUTURAS calculadas na
+// hora (o mock fixo em "30/07" venceu e o agente reconsultava em loop), só DIA ÚTIL (sábado
+// só tem manhã e o agente rejeitava 15h, com razão) e UM vendedor por padrão — a agenda é a do
+// dono do contato; `mocks.disponibilidade = 'pool'` devolve vários (fallback e webchat).
+// Novo (24/09/2026): com `data_desejada`, a janela é SÓ aquele dia, recortada por
+// `horario_inicio_desejado` (dali até o fim do dia) ou pelo período — manhã 0–12h,
+// tarde 12–19h, noite 19–24h; dia sem horário devolve o mesmo texto de agenda vazia da tool.
+export function disponibilidadeSimulada(entrada: unknown, mocksDoEnsaio: unknown, agora: Date = new Date()): string {
+  const input = (entrada ?? {}) as Record<string, unknown>;
+  const mocks = (mocksDoEnsaio ?? {}) as Record<string, unknown>;
+  const fuso = 'America/Sao_Paulo';
+  const isoSP = (d: Date) => new Intl.DateTimeFormat('en-CA', { timeZone: fuso, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+  const semanaCurta = (d: Date) => new Intl.DateTimeFormat('en-US', { timeZone: fuso, weekday: 'short' }).format(d);
+  const proximoUtil = (dias: number) => {
+    const d = new Date(agora.getTime() + dias * 86_400_000);
+    while (semanaCurta(d) === 'Sat' || semanaCurta(d) === 'Sun') d.setTime(d.getTime() + 86_400_000);
+    return d;
+  };
+  const pool = mocks.disponibilidade === 'pool';
+  const agenda = ([
+    [1, '15:00', '15h', 'v1', 'Ana'],
+    [1, '16:30', '16h30', pool ? 'v2' : 'v1', pool ? 'Bruno' : 'Ana'],
+    [2, '10:00', '10h', pool ? 'v3' : 'v1', pool ? 'Carla' : 'Ana'],
+  ] as const).map(([dias, hora, rotulo, vid, nome]) => {
+    const d = proximoUtil(dias);
+    const semana = new Intl.DateTimeFormat('pt-BR', { timeZone: fuso, weekday: 'long' }).format(d).replace('-feira', '');
+    return { data: isoSP(d), hora, rotulo, vid, nome, semana };
+  });
+
+  const hoje = isoSP(agora);
+  const dataPedida = String(input.data_desejada ?? '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dataPedida) && dataPedida < hoje) {
+    return `⚠️ A data consultada (${dataPedida}) JÁ PASSOU. HOJE é ${hoje}. Refaça a consulta com a data de HOJE ou uma futura — `
+      + 'e, se você afirmou outra data/dia da semana ao lead, corrija com naturalidade usando o HOJE informado aqui (nunca insista na data errada).';
+  }
+  let janela = agenda;
+  if (dataPedida) {
+    const inicio = String(input.horario_inicio_desejado ?? '').trim().slice(0, 5);
+    const periodo = String(input.periodo_desejado ?? '').trim().toLowerCase();
+    const [de, ate] = /^\d{2}:\d{2}$/.test(inicio) ? [inicio, '23:59']
+      : periodo === 'manhã' || periodo === 'manha' ? ['00:00', '12:00']
+      : periodo === 'tarde' ? ['12:00', '19:00']
+      : periodo === 'noite' ? ['19:00', '23:59']
+      : ['00:00', '23:59'];
+    janela = agenda.filter((s) => s.data === dataPedida && s.hora >= de && s.hora <= ate);
+  }
+  if (!janela.length) {
+    return `Nenhum horário disponível para a conversa com o monitor no período solicitado. Isso não informa nem altera o horário de aula ou evento. (Referência: HOJE é ${hoje}.)`;
+  }
+  const lista = janela.map((s) => `- ${s.rotulo} de ${s.semana}, dia ${s.data} (vendedor_id: ${s.vid}, nome: ${s.nome})`).join('\n');
+  const conteudo = `Horários disponíveis para a conversa com o monitor (Brasília):\n${lista}\n`
+    + '(O dia da semana informado acima é o correto — use-o exatamente, não recalcule.)\n'
+    + 'Ao apresentar as opções, diga que são para a conversa com o monitor. Não são horários de aula ou evento e não alteram a programação do convite. Só ofereça após aceite específico para essa conversa.';
+  // Graduação ainda não verificada ⇒ o horário é OPÇÃO, não combinado (caso Matheus
+  // 2026-08-08). Liga com `mocks.formacao_nao_verificada: true`.
+  return mocks.formacao_nao_verificada
+    ? conteudo + '\n⚠️ A graduação deste lead ainda NÃO foi verificada. Se ele já propôs ou escolheu '
+      + 'um dia e horário que apareceu disponível, preserve essa preferência e pergunte somente a formação/conclusão que falta, sem pedir outra escolha. '
+      + 'Se ainda não escolheu, apresente opções. NÃO responda como se estivesse fechado ("show, 10h30 então"): '
+      + 'a elegibilidade precisa ser verificada ANTES de confirmar a reunião.'
+    : conteudo;
+}
+
 // Somente contagens conhecidas saem no diagnóstico; nunca a resposta crua do provedor.
 export function extrairUso(usage: unknown): Record<string, number> {
   const resultado: Record<string, number> = {};

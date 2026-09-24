@@ -43,7 +43,7 @@ import {
 import { comGanchoDoLote } from '../crm-agente-sdr/ganchoLote.ts';
 import { bloqueioProximaTurmaDeEstudante } from '../crm-agente-sdr/tools.ts';
 import { blocoConviteAgenda } from '../crm-agente-sdr/contexto.ts';
-import { diagnosticoDoProvedor, executarFollowupSimulado, executarSimulacao, extrairUso, MAX_CARACTERES_SIMULACAO, validarEntradaSimulacao, type AgenteRouter } from './simulacao.ts';
+import { diagnosticoDoProvedor, disponibilidadeSimulada, executarFollowupSimulado, executarSimulacao, extrairUso, MAX_CARACTERES_SIMULACAO, validarEntradaSimulacao, type AgenteRouter } from './simulacao.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
@@ -189,39 +189,11 @@ async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimula
     // ⚠️ UM vendedor só por padrão: desde 2026-08-07 a agenda oferecida é a do DONO do
     // contato (fn_sdr_api_dono_do_contato). mocks.disponibilidade='pool' devolve vários
     // vendedores — é o fallback (dono sem slot na janela) e o webchat, que segue no rodízio.
-    case 'consulta_disponibilidade': {
-      const pool = mocks?.disponibilidade === 'pool';
-      // ⚠️ Só DIA ÚTIL: com "amanhã" caindo no sábado, o mock oferecia 15h — horário que
-      // o expediente de sábado (só manhã) não tem. O agente REJEITAVA o slot (certo!) e
-      // reconsultava em loop, e o harness lia isso como "não agendou". O mock tem que ser
-      // coerente com as regras que o próprio prompt conhece.
-      const semanaSP = (d: Date) =>
-        new Intl.DateTimeFormat('en-US', { timeZone: 'America/Sao_Paulo', weekday: 'short' }).format(d);
-      const proximoUtil = (dias: number) => {
-        const d = new Date(Date.now() + dias * 86_400_000);
-        while (semanaSP(d) === 'Sat' || semanaSP(d) === 'Sun') d.setDate(d.getDate() + 1);
-        return d;
-      };
-      const slot = (dias: number, hora: string, vid: string, nome: string) => {
-        const d = proximoUtil(dias);
-        const f = (o: Intl.DateTimeFormatOptions) =>
-          new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', ...o }).format(d);
-        const [dd, mm, yyyy] = f({ day: '2-digit', month: '2-digit', year: 'numeric' }).split('/');
-        const semana = f({ weekday: 'long' }).replace('-feira', '');
-        return `- ${hora} de ${semana}, dia ${yyyy}-${mm}-${dd} (vendedor_id: ${vid}, nome: ${nome})`;
-      };
-      const lista = pool
-        ? [slot(1, '15h', 'v1', 'Ana'), slot(1, '16h30', 'v2', 'Bruno'), slot(2, '10h', 'v3', 'Carla')].join('\n')
-        : [slot(1, '15h', 'v1', 'Ana'), slot(1, '16h30', 'v1', 'Ana'), slot(2, '10h', 'v1', 'Ana')].join('\n');
-      // Espelho do executor real: com a graduação ainda não verificada, a tool avisa que
-      // o horário é OPÇÃO, não combinado (caso Matheus 2026-08-08). Liga com
-      // `mocks.formacao_nao_verificada: true`.
-      return mocks?.formacao_nao_verificada
-        ? lista + '\n⚠️ A graduação deste lead ainda NÃO foi verificada. Ofereça os horários como '
-          + 'OPÇÕES e, se ele escolher um, NÃO responda como se estivesse fechado ("show, 10h30 então") '
-          + '— pergunte a graduação ANTES de confirmar qualquer horário, porque ela ainda pode reprovar.'
-        : lista;
-    }
+    // ⚠️ 5ª armadilha (24/09/2026): o mock ignorava data/período e devolvia a tarde para
+    // "amanhã de manhã"; a Luna reconsultava com o mesmo input diante da contradição, que a
+    // API real não cria. Hoje a janela segue a sdr-api — ver disponibilidadeSimulada.
+    case 'consulta_disponibilidade':
+      return disponibilidadeSimulada(input, mocks);
     case 'consulta_objecoes': {
       if (ficha) ficha.jornada = contarObjecaoNaJornada(ficha.jornada, String(input?.tipo_objecao ?? ''));
       // Com a ficha, a quebra de TEMPO é a mesma instrução do executor real (com gatilho, sem material).

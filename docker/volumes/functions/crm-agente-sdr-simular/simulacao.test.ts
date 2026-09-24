@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { diagnosticoDoProvedor, executarFollowupSimulado, executarSimulacao, extrairUso, validarEntradaSimulacao, type DependenciasSimulacao } from './simulacao';
+import { diagnosticoDoProvedor, disponibilidadeSimulada, executarFollowupSimulado, executarSimulacao, extrairUso, validarEntradaSimulacao, type DependenciasSimulacao } from './simulacao';
 
 // Exercita gerarFollowup de produção com a API e o transporte bloqueados no teste.
 vi.mock('../crm-agente-sdr/agente.ts', () => ({ chamarAnthropic: vi.fn(), MODELO_AGENTE: 'modelo-teste' }));
@@ -98,6 +98,50 @@ function dependencias(): DependenciasSimulacao {
     humanizar: (texto) => texto,
   };
 }
+
+describe('agenda do ensaio segue a janela da sdr-api', () => {
+  // Quinta, 24/09/2026, 14h em Brasília: +1 útil = sexta 25; +2 = sábado ⇒ segunda 28.
+  const agora = new Date('2026-09-24T17:00:00Z');
+  const agenda = (input: Record<string, unknown>, mocks: Record<string, unknown> = {}) => disponibilidadeSimulada(input, mocks, agora);
+
+  it('sem data: próximos horários úteis, um vendedor só', () => {
+    const texto = agenda({ curso_escolhido: 'X' });
+    expect(texto).toContain('- 15h de sexta, dia 2026-09-25 (vendedor_id: v1, nome: Ana)');
+    expect(texto).toContain('- 16h30 de sexta, dia 2026-09-25 (vendedor_id: v1, nome: Ana)');
+    expect(texto).toContain('- 10h de segunda, dia 2026-09-28 (vendedor_id: v1, nome: Ana)');
+    expect(texto).toContain('conversa com o monitor');
+  });
+
+  it('manhã de um dia só com tarde livre: agenda vazia, como a tool real (nunca a tarde)', () => {
+    const texto = agenda({ data_desejada: '2026-09-25', periodo_desejado: 'manhã' });
+    expect(texto).toBe('Nenhum horário disponível para a conversa com o monitor no período solicitado. Isso não informa nem altera o horário de aula ou evento. (Referência: HOJE é 2026-09-24.)');
+  });
+
+  it('data + período recorta o dia; horario_inicio vale dali até o fim do dia', () => {
+    const tarde = agenda({ data_desejada: '2026-09-25', periodo_desejado: 'tarde' });
+    expect(tarde).toContain('15h de sexta');
+    expect(tarde).toContain('16h30 de sexta');
+    expect(tarde).not.toContain('segunda');
+    expect(agenda({ data_desejada: '2026-09-28', periodo_desejado: 'manha' })).toContain('- 10h de segunda, dia 2026-09-28');
+    const apos16 = agenda({ data_desejada: '2026-09-25', periodo_desejado: 'tarde', horario_inicio_desejado: '16:00' });
+    expect(apos16).toContain('16h30');
+    expect(apos16).not.toContain('- 15h');
+    expect(agenda({ data_desejada: '2026-09-25', periodo_desejado: 'noite' })).toContain('Nenhum horário disponível');
+  });
+
+  it('data passada devolve a correção com o HOJE, sem horários', () => {
+    const texto = agenda({ data_desejada: '2026-09-23', periodo_desejado: 'tarde' });
+    expect(texto).toMatch(/^⚠️ A data consultada \(2026-09-23\) JÁ PASSOU\. HOJE é 2026-09-24\./);
+    expect(texto).not.toContain('vendedor_id');
+  });
+
+  it('pool e formação não verificada continuam valendo', () => {
+    const texto = agenda({}, { disponibilidade: 'pool', formacao_nao_verificada: true });
+    expect(texto).toContain('nome: Bruno');
+    expect(texto).toContain('nome: Carla');
+    expect(texto).toContain('A graduação deste lead ainda NÃO foi verificada');
+  });
+});
 
 describe('replay sem envio e diagnóstico sem thinking', () => {
   it('nunca publica texto intermediário junto de ferramenta, mesmo sem tags de raciocínio', async () => {
