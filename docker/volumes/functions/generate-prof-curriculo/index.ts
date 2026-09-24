@@ -378,6 +378,10 @@ ${
         bio_gerada_em: nowIso,
         bio_status: "completed",
         bio_error: null,
+        // A revisão à mão era de OUTRO texto — o carimbo não pode sobreviver à
+        // regeração, senão os tópicos tratariam como "aprovado pelo professor"
+        // uma bio que ele nunca leu.
+        bio_revisada_em: null,
         descricao_ia: descricao, // espelho legado
         descricao_ia_atualizada_em: nowIso,
       })
@@ -422,6 +426,10 @@ async function generateTopicos(professor_id: string) {
       (prof as any).descricao_ia,
     ].find((b: unknown): b is string => typeof b === "string" && !!b.trim() && !RECUSA_RE.test(b)) ?? null;
   const anotacoes: string | null = (prof as any).anotacoes_internas || null;
+  // A bio final foi revisada À MÃO no cadastro (pedagógico, normalmente depois de
+  // o professor reclamar do texto)? Então ela é a verdade, e as ementas das aulas
+  // — a origem das palavras que ele não reconhece — deixam de poder contrariá-la.
+  const bioRevisada = !!bioFormal && !!(prof as any).bio_revisada_em;
 
   const systemPrompt = `Você cria o "CURRÍCULO PROFISSIONAL EM TÓPICOS" de um(a) professor(a) de cursos da área de ciências agrárias e da saúde animal (medicina veterinária, zootecnia, agronomia, biologia, nutrição, produção animal, saúde pública e afins). Esse currículo é usado em CRONOGRAMAS e na APRESENTAÇÃO COMERCIAL para um lead interessado no curso: o objetivo é gerar AUTORIDADE, criar CONEXÃO e deixar claro COMO o professor vai ajudar o aluno nas aulas.
 
@@ -453,7 +461,13 @@ REGRAS:
   const userPrompt = `Gere o currículo profissional em tópicos do(a) professor(a) abaixo. Use somente os dados fornecidos; não invente.
 ${
   bioFormal
-    ? `\nBIO FORMAL JÁ GERADA (fonte PRINCIPAL — extraia dela formação, titulação, instituições e marcos; resuma em tópicos, não copie frases inteiras):\n"""${bioFormal}"""\n`
+    ? `\nBIO FORMAL${
+        bioRevisada ? " (REVISADA E APROVADA À MÃO PELA COORDENAÇÃO, junto com o(a) próprio(a) professor(a))" : " JÁ GERADA"
+      } (fonte PRINCIPAL — extraia dela formação, titulação, instituições e marcos; resuma em tópicos, não copie frases inteiras):\n"""${bioFormal}"""\n${
+        bioRevisada
+          ? `\n⚠️ ATENÇÃO — ESTA BIO FOI REVISADA À MÃO E É A VERDADE FINAL sobre este(a) professor(a):\n- NÃO contradiga nada do que está nela e NÃO acrescente credencial, número, instituição ou especialidade que ela não sustente;\n- prefira as palavras dela;\n- as AULAS/EMENTAS abaixo servem SOMENTE para o tópico "Nas aulas", e só no que for compatível com esta bio — se a ementa falar de assunto que a bio não sustenta, IGNORE a ementa.\n`
+          : ""
+      }`
     : "\n(Bio formal ainda não gerada — use apenas os dados de cadastro, histórico e aulas abaixo.)\n"
 }
 NOME (apenas para flexão de gênero, não citar): ${(prof as any).nome}
