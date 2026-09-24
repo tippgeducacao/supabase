@@ -27,24 +27,36 @@ async function getConfig(supabase: ReturnType<typeof createClient>, chave: strin
 }
 
 /**
- * Troca o auth_code por token. O nome do grant_type mudou entre versões da API do TikTok e
- * a documentação não é consistente — em vez de apostar num, tenta os três conhecidos e
- * devolve o primeiro que o TikTok aceitar.
+ * Troca o auth_code por token.
+ *
+ * ⚠️ UMA tentativa só, e SEM `grant_type`. Este endpoint da Marketing API aceita apenas
+ * `app_id` + `secret` + `auth_code` (JSON; form-urlencoded não serve) — `grant_type` é de
+ * OUTRA API do TikTok, a de conta orgânica. A versão anterior tentava três valores de
+ * `grant_type` em sequência "por segurança", e isso era o contrário de seguro: o
+ * `auth_code` da Marketing API vale UMA HORA e é de **uso único**, então uma primeira
+ * tentativa recusada pode QUEIMAR o código e derrubar as outras duas — a pessoa teria de
+ * refazer a autorização inteira sem entender por quê (achado em 24/09/2026, antes de
+ * qualquer uso real; o fluxo OAuth nunca chegou a rodar contra o TikTok).
+ *
+ * `return_advertiser_ids` faz o próprio TikTok já devolver as contas autorizadas, o que
+ * salva o fluxo quando /oauth2/advertiser/get/ falha.
  */
 async function trocarCodigo(appId: string, secret: string, authCode: string) {
-  const tentativas = ["auth_code", "authorized_code", "authorization_code"];
-  let ultimo = "";
-  for (const grant of tentativas) {
-    const resp = await fetch(`${API}/oauth2/access_token/`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ app_id: appId, secret, auth_code: authCode, grant_type: grant }),
-    });
-    const corpo = await resp.json().catch(() => ({}));
-    if (corpo?.code === 0 && corpo?.data?.access_token) return corpo.data;
-    ultimo = `code ${corpo?.code ?? "?"}: ${corpo?.message || "sem mensagem"}`;
-  }
-  throw new Error(ultimo || "o TikTok não devolveu token");
+  const resp = await fetch(`${API}/oauth2/access_token/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      app_id: appId,
+      secret,
+      auth_code: authCode,
+      return_advertiser_ids: true,
+    }),
+  });
+  const corpo = await resp.json().catch(() => ({}));
+  if (corpo?.code === 0 && corpo?.data?.access_token) return corpo.data;
+  throw new Error(
+    `code ${corpo?.code ?? "?"}: ${corpo?.message || "o TikTok não devolveu token"}`,
+  );
 }
 
 Deno.serve(async (req) => {
