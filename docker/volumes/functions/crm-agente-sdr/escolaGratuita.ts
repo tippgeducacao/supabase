@@ -49,7 +49,7 @@ export const BLOCO_ESCOLA_GRATUITA = [
   '',
   '> "antes de te deixar ir: a ppgvet tem uma biblioteca de conteúdo aberta e'
     + ' totalmente gratuita, que fica à sua disposição de qualquer jeito.',
-  '> são mais de 30 cursos gratuitos, além de artigos científicos, resumos, e-books, materiais'
+  '> são mais de 10 cursos gratuitos, além de artigos científicos, resumos, e-books, materiais'
     + ' didáticos, aulas abertas de pós-graduação e certificados, tudo num lugar só.',
   `> ${LINK_ESCOLA_GRATUITA}`,
   '> é um presente da ppgvet educação pra vc, aproveita."',
@@ -88,7 +88,7 @@ export function comPresenteEscola(promptRenderizado: string): string {
 export const CONVITE_ESCOLA = [
   'antes de te deixar ir: a ppgvet tem uma biblioteca de conteúdo aberta e totalmente'
     + ' gratuita, que fica à sua disposição de qualquer jeito.',
-  'são mais de 30 cursos gratuitos, além de artigos científicos, resumos, e-books,'
+  'são mais de 10 cursos gratuitos, além de artigos científicos, resumos, e-books,'
     + ' materiais didáticos, aulas abertas de pós-graduação e certificados, tudo num lugar só.',
   LINK_ESCOLA_GRATUITA,
   'é um presente da ppgvet educação pra vc, aproveita.',

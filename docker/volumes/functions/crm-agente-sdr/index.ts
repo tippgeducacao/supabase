@@ -644,7 +644,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
         + 'presente da Escola (a conversa acabou sem reunião), por exemplo: '
         + '"tranquilo, agradeço sua preferência pelo Grupo PPG e fico à disposição se precisar no futuro. '
         + 'antes de te deixar ir: a ppgvet tem uma biblioteca de conteúdo aberta e totalmente gratuita, '
-        + 'com mais de 30 cursos, artigos, e-books, aulas abertas de pós e certificados. '
+        + 'com mais de 10 cursos, artigos, e-books, aulas abertas de pós e certificados. '
         + 'é um presente da ppgvet educação pra vc, aproveita: ' + LINK_ESCOLA_GRATUITA + '"\n'
         + 'Se você JÁ mandou o convite da Escola nesta conversa, não repita — mande só a despedida.\n')
     + 'Se a despedida já foi enviada, responda com texto vazio.\n'

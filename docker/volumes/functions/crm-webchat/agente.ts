@@ -556,7 +556,7 @@ function instrucaoPosPausa(produto: Produto): string {
     // ⛔ a pessoa JÁ está dentro da Escola — convidá-la pra lá seria absurdo.
     ? "NÃO convide pra Escola de Especialização nem mande link dela: a pessoa já está dentro."
     : "Se ainda não convidou nesta conversa, inclua o presente da Escola: "
-      + `"a ppgvet tem uma biblioteca aberta e gratuita, com mais de 30 cursos, artigos, e-books e certificados — aproveita: ${LINK_ESCOLA_GRATUITA}"`;
+      + `"a ppgvet tem uma biblioteca aberta e gratuita, com mais de 10 cursos, artigos, e-books e certificados — aproveita: ${LINK_ESCOLA_GRATUITA}"`;
   return [
     "[SISTEMA — você acabou de encerrar/pausar este atendimento. NÃO relate isso e NÃO descreva o estado do atendimento.]",
     'Escreva SÓ a despedida curta ao visitante, no seu tom (ex.: "tranquilo, agradeço sua preferência pelo Grupo PPG e fico à disposição se precisar").',
@@ -689,7 +689,7 @@ export async function responderWebchat(
       if (despedida && produto !== "escola" && ehDespedidaDeVerdade(encerramento)) {
         chunks.push(
           "antes de te deixar ir, um presente: a ppgvet tem uma biblioteca aberta e gratuita, "
-          + `com mais de 30 cursos, artigos, e-books e certificados — aproveita: ${LINK_ESCOLA_GRATUITA}`,
+          + `com mais de 10 cursos, artigos, e-books e certificados — aproveita: ${LINK_ESCOLA_GRATUITA}`,
         );
       }
       // ESCOLA: link de matrícula só sai se a pessoa pediu (régua em código — ver escola.ts).
