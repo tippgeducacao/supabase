@@ -255,6 +255,17 @@ async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimula
         + `. O lead fica fora dos disparos até lá e o time o retoma no dia. `
         + `Confirme a data com ele e despeça-se. NÃO chame pausa_ia.`;
     }
+    // Espelho do retorno do executor real (tools.ts, confirmarAgendamento). O genérico
+    // "Tool executada." deixava o modelo sem data/monitor/link: nos dois braços do A/B de
+    // 24/09/2026 a confirmação saiu com "não recebi um link de meet válido" ou em silêncio.
+    case 'confirmar_agendamento': {
+      const [ano, mes, dia] = String(input?.data_escolhida ?? '').split('-');
+      const hora = String(input?.horario_escolhido ?? '').slice(0, 5);
+      if (!ano || !mes || !dia || !/^\d{2}:\d{2}$/.test(hora)) return 'Erro ao agendar: data_escolhida (AAAA-MM-DD) e horario_escolhido (HH:MM) são obrigatórios.';
+      const semana = new Intl.DateTimeFormat('pt-BR', { timeZone: 'UTC', weekday: 'long' }).format(new Date(`${ano}-${mes}-${dia}T12:00:00Z`));
+      const monitor = ({ v1: 'Ana', v2: 'Bruno', v3: 'Carla' } as Record<string, string>)[String(input?.vendedor_id ?? '')] ?? 'monitor';
+      return `Agendamento confirmado. id: harness-agendamento, data: ${semana}, ${dia}/${mes}/${ano} às ${hora}, monitor: ${monitor}, link: https://meet.google.com/ppg-harness-sim`;
+    }
     default:
       return `Tool ${nome} executada.`;
   }
