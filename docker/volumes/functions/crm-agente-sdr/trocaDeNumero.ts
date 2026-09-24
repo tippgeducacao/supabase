@@ -213,11 +213,11 @@ export function notaTrocaDeNumero(
       + `A conversa anterior com esta pessoa aconteceu ${porOutroNumero} ${humanizarGap(sinal.gapMin)}. ${origem}`,
     'Como agir nesta resposta:',
     lead.aberturaControlada
-      ? '- O sistema acrescenta uma das três frases de abertura antes da sua resposta. Não escreva outro aviso de troca de número, não se reapresente e não repita uma abertura que aparece no histórico.'
+      ? '- O sistema acrescenta uma das três frases de abertura antes da sua resposta. Não escreva outro aviso de troca de número e não repita uma abertura que aparece no histórico. Não se reapresente espontaneamente; se ele perguntar com quem fala, identifique-se e retome o motivo conhecido do contato.'
       : '- Diga, em UMA frase curta e natural, que a PPGVET já tinha conversado com ele por outro número (ex.: "vi aqui que a gente já tinha se falado por outro número da PPG"). Não cite horários, nome de atendente nem detalhes daquele atendimento — ele pode ter sido com um vendedor humano.',
     '- Horários propostos ou discutidos no outro número que NÃO viraram reunião confirmada NÃO estão pendentes aqui: não peça confirmação, não diga "ficou faltando", "aquele horário" nem "como combinamos". Se fizer sentido avançar para a reunião, recomece pela consulta de disponibilidade ou espere o lead trazer o assunto.',
     `- ${reuniao}`,
-    '- Nome, curso de interesse, formação e materiais já enviados continuam valendo: não se reapresente nem pergunte de novo o que ele já respondeu.',
+    '- Nome, curso de interesse, formação e materiais já enviados continuam valendo: não se reapresente sem ele perguntar quem fala nem pergunte de novo o que ele já respondeu.',
     '- Responda ao que ele trouxe agora (o template respondido ou a pergunta dele), no tom de quem retoma um contato — não de quem cobra uma pendência.',
   ].join('\n');
 }
