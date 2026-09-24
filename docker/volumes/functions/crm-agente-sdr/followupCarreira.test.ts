@@ -54,6 +54,13 @@ describe('follow-up sobre a pessoa na área escolhida', () => {
     expect(perguntaRepetida('como você imagina sua rotina profissional trabalhando com bovinos?', [{ role: 'assistant', content: [{ type: 'text', text: 'Como você imagina sua rotina profissional trabalhando com bovinos?' }] }])).toBe(true);
     expect(perguntaRepetida('qual próximo passo quer dar na carreira?', [{ role: 'assistant', content: 'qual a sua graduação?' }])).toBe(false);
   });
+  it('recusa a mesma pergunta após introduções diferentes, sem confundir perguntas novas', () => {
+    const history = [{ role: 'assistant' as const, content: 'como você está terminando a formação em outubro e quer entrar na área de bovinos, qual avanço gostaria de conquistar primeiro?' }];
+    expect(perguntaRepetida('como você quer entrar na área de bovinos depois da formação, qual avanço gostaria de conquistar primeiro?', history)).toBe(true);
+    expect(perguntaRepetida('qual avanço gostaria de conquistar primeiro?', history)).toBe(true);
+    expect(perguntaRepetida('pensando na área de bovinos, qual critério pesa na escolha de uma formação?', history)).toBe(false);
+    expect(validarFollowupCarreira('como você quer entrar na área de bovinos depois da formação, qual avanço gostaria de conquistar primeiro?', 'bovinos_3em1:mercado', planejarFollowupCarreira('Reprodução, Nutrição e Gestão de Bovinos (3em1)', []), history)).toBe('pergunta_repetida');
+  });
   it('curso sem perfil não recebe promessa, dado salarial nem conteúdo de outra pós', () => {
     const contexto = contextoFollowupCarreira(planejarFollowupCarreira('Curso desconhecido', null));
     expect(contexto).toContain('"area":null');

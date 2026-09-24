@@ -31,6 +31,15 @@ function textosAssistant(history: readonly Msg[]): string[] {
 const normalizar = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
 const palavras = (s: string) => new Set(normalizar(s).split(' ').filter(p => p.length > 2 && !['voce', 'pra', 'para', 'que', 'uma', 'seu', 'sua', 'com', 'mais', 'hoje'].includes(p)));
 
+// A introdução pode mudar entre texto e áudio sem mudar a pergunta. Comparar
+// só a frase inteira deixava passar "como você ... bovinos, qual avanço ...?".
+function nucleoDaPergunta(pergunta: string): string {
+  const partes = pergunta.split(/[,;:]\s*/);
+  const final = partes.at(-1) ?? pergunta;
+  return partes.length > 1 && /^(?:qual|quais|o que|que|como|quanto|quando|onde|voce|vc)\b/.test(normalizar(final))
+    && palavras(final).size >= 4 ? final : pergunta;
+}
+
 function pressuposicaoDePreco(texto: string, history: readonly Msg[]): boolean {
   const preco = /\b(?:cobrar mais|aumentar (?:o )?(?:preco|valor)|valor cobrado|aumento de preco)\b/;
   const premissa = /\b(?:alem de|ja que|agora que|como voce (?:quer|vai|decidiu))\b/;
@@ -45,6 +54,7 @@ export function perguntaRepetida(texto: string, history: readonly Msg[]): boolea
   const termos = palavras(atual);
   return textosAssistant(history).some(anterior => (anterior.match(/[^.!?\n]*\?/g) ?? []).some(pergunta => {
     if (normalizar(pergunta) === normalizar(atual)) return true;
+    if (normalizar(nucleoDaPergunta(pergunta)) === normalizar(nucleoDaPergunta(atual))) return true;
     const outros = palavras(pergunta);
     if (termos.size < 4 || outros.size < 4) return false;
     const comuns = [...termos].filter(p => outros.has(p)).length;

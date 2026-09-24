@@ -228,6 +228,21 @@ function contarTentativas(history: Msg[]): number {
   return n;
 }
 
+/** No piloto, uma resposta real reabre o ciclo. Marcadores de testes/campanhas
+ * anteriores não transformam o primeiro follow-up deste atendimento no quinto. */
+export function contarTentativasDoCiclo(history: Msg[]): number {
+  let n = 0;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const m = history[i];
+    if (m.role !== 'user') continue;
+    const texto = blocosParaTexto(m.content);
+    if (texto.includes(MARCADOR_FOLLOWUP)) { n++; continue; }
+    if (texto.startsWith('[CORRECAO_INTERNA_AUTO_IGNORE]') || texto === INICIO_HISTORICO_HUMANO) continue;
+    if (ehMensagemRealDoLead(m)) break;
+  }
+  return n;
+}
+
 // ── GUARDA DE DESINTERESSE: retenção pendente = SILÊNCIO (2026-07-14) ───────
 // Caso real (lead Lucas): o lead mandou um áudio dizendo que não é o momento
 // ("tô com a neném pequena, gasta bastante"), o João fez a pergunta de retenção
@@ -326,7 +341,7 @@ export async function gerarFollowup(
   opcoes?: { provedor: ProvedorIA; contexto: string },
 ): Promise<{ message: string; final_answer: string; provedorResposta: 'openai' | 'anthropic'; perguntaCarreira?: { escopo: string; pergunta_id: string } }> {
   const remotejid = lead.remotejid;
-  const tentativaAtual = contarTentativas(history) + 1;
+  const tentativaAtual = (opcoes ? contarTentativasDoCiclo(history) : contarTentativas(history)) + 1;
 
   const nome = extrairPrimeiroNome(lead.nome);
   const curso = (lead.curso_interesse_original ?? '').trim();

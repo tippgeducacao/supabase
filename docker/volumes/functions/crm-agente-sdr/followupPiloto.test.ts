@@ -10,7 +10,7 @@ vi.mock('./contextoAulaPiloto.ts', async (original) => ({ ...await original<any>
 vi.mock('./historico.ts', async (original) => ({ ...await original<any>(), buscarLead: vi.fn(), carregarHistorico: vi.fn(), atualizarLead: vi.fn(), gravarMensagem: vi.fn() }));
 vi.mock('./envioMateriais.ts', async (original) => ({ ...await original<any>(), carregarStatusMateriais: vi.fn(async () => '') }));
 vi.mock('./eventos.ts', () => ({ criarTelemetria: () => ({ rodadaId: 'rodada-teste', registrar: vi.fn() }), resumir: (s: string) => s }));
-import { gerarFollowup, processarFollowupLead } from './followup';
+import { contarTentativasDoCiclo, gerarFollowup, processarFollowupLead } from './followup';
 import { chamarAnthropic } from './agente';
 import { selecionarProvedorDoLead } from './pilotoOpenai';
 import { buscarLead, carregarHistorico, MARCADOR_FOLLOWUP } from './historico';
@@ -49,6 +49,15 @@ beforeEach(() => {
 });
 
 describe('follow-up do piloto chega ao mesmo pipeline de voz', () => {
+  it('nova resposta reinicia a preferência do ciclo sem apagar histórico ou temas usados', () => {
+    const antigo = [{ role: 'user' as const, content: 'quero conhecer' }, { role: 'user' as const, content: MARCADOR_FOLLOWUP }];
+    expect(contarTentativasDoCiclo(antigo)).toBe(1);
+    const atual = [...antigo, { role: 'user' as const, content: 'sim, quero atuar com bovinos' }];
+    expect(contarTentativasDoCiclo(atual)).toBe(0);
+    expect(contarTentativasDoCiclo([...atual, { role: 'user', content: MARCADOR_FOLLOWUP },
+      { role: 'user', content: '[CORRECAO_INTERNA_AUTO_IGNORE] instrução interna' },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'resultado' }] }])).toBe(1);
+  });
   it('abertura do follow-up fica registrada e não reaparece no toque seguinte', async () => {
     vi.mocked(carregarModoTrocaNumero).mockResolvedValue('ativo');
     vi.mocked(carregarSinalTrocaDeNumero).mockResolvedValue({ trocou: true, motivo: 'trocou', contaAtual: 'B', contaAnterior: 'A',
