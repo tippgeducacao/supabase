@@ -94,6 +94,14 @@ type FichaSimulada = { jornada: Jornada; cadastro: string | null; inicioRodada: 
 // Retornos plausíveis das tools — texto no MESMO espírito dos executores reais
 // (tools.ts), porque é o texto que guia a próxima decisão do modelo.
 async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimulada | null = null): Promise<string> {
+  // Replay de conversa real (24/09/2026): `mocks.respostas_reais[tool]` é o que a tool REAL
+  // devolveu naquela rodada (agenda, matriz, cronograma…). Se o modelo chamar a mesma tool,
+  // recebe o mesmo fato; tool que a rodada real não chamou cai no mock sintético abaixo.
+  const real = mocks?.respostas_reais?.[nome];
+  if (typeof real === 'string' && real.trim()) {
+    if (nome === 'atualizar_dados_lead' && ficha) ficha.jornada = aplicarColetaNaJornada(ficha.jornada, input ?? {});
+    return real;
+  }
   switch (nome) {
     case 'atualizar_dados_lead': {
       if (ficha) ficha.jornada = aplicarColetaNaJornada(ficha.jornada, input ?? {});
