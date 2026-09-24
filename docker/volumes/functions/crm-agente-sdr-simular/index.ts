@@ -30,6 +30,7 @@ import { humanizarTexto } from '../crm-agente-sdr/saida.ts';
 import { limparParaRouter } from '../crm-agente-sdr/historico.ts';
 import { gerarFollowup } from '../crm-agente-sdr/followup.ts';
 import { contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from '../crm-agente-sdr/contextoAulaPiloto.ts';
+import { contextoEspecialidadeCannabis } from '../crm-agente-sdr/especialidadeCannabis.ts';
 import { VERSAO_MEMORIA_HUMANA } from '../crm-agente-sdr/memoriaHumana.ts';
 import { montarRetornoInformacoes } from '../crm-agente-sdr/envioMateriais.ts';
 import { instrucaoResultadoMaterial } from '../_shared/resultadoEnvioMaterial.ts';
@@ -405,7 +406,8 @@ Deno.serve(async (req) => {
         }
         // Canário: gancho do primeiro lote + CONVITE DE AGENDA, como em crm-agente-sdr/index.ts.
         const promptFinal = fichaSim && !aulaPiloto ? comGanchoDoLote(promptAgente, { nome: vars.nome, curso: vars.curso_interesse_original }).prompt : promptAgente;
-        const contextoBase = comNotaNoContexto(montarContextoTemporal() + notaDoNome(vars.nome) + notaDoCurso(vars.curso_interesse_original), notaTroca);
+        const contextoBase = comNotaNoContexto(montarContextoTemporal() + notaDoNome(vars.nome) + notaDoCurso(vars.curso_interesse_original)
+          + (provedorAlternativo?.nome === 'openai' ? contextoEspecialidadeCannabis(vars.curso_interesse_original) : ''), notaTroca);
         const contextoFinal = aulaPiloto ? contextoBase + contextoAulaPiloto(entrada.aula)
           : fichaSim ? `${contextoBase}\n\n${blocoConviteAgenda()}` : contextoBase;
         return { agente: agenteTools, promptAgente: promptFinal, contextoTemporal: contextoFinal, tools, comFicha: Boolean(fichaSim),

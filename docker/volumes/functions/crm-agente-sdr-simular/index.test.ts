@@ -36,6 +36,22 @@ beforeEach(() => {
 });
 
 describe('contrato do mock de consulta de valor', () => {
+  it('principal OpenAI recebe a distinção entre a pós de Cannabis e o título profissional', async () => {
+    mocks.fetch.mockImplementation(async (url: string) => {
+      if (url !== 'https://api.openai.com/v1/responses') throw new Error('Transporte inesperado');
+      return Response.json({ status: 'completed', model: 'modelo-openai-teste',
+        output: [{ type: 'message', content: [{ type: 'output_text', text: 'o título depende do processo da AMEC-VET' }] }] });
+    });
+    const res = await handler(new Request('https://harness.invalid', {
+      method: 'POST', headers: { 'x-followup-key': 'harness-local' },
+      body: JSON.stringify({ persona: 'validacao', provedor: 'openai', ficha: true, nome_lead: 'Marina',
+        curso: 'Cannabis Medicinal Veterinária', mensagens: ['Essa pós dá o título reconhecido pelo CFMV?'] }),
+    }));
+    expect(res.status).toBe(200);
+    const pedido = JSON.stringify(JSON.parse(mocks.fetch.mock.calls[0][1].body));
+    expect(pedido).toContain('AMEC-VET');
+    expect(pedido).toContain('Concluir a pós da PPG não concede automaticamente');
+  });
   it('aula do piloto recebe a mesma missão de conexão usada na produção', async () => {
     mocks.fetch.mockImplementation(async (url: string) => {
       if (url !== 'https://api.openai.com/v1/responses') throw new Error('Transporte inesperado');

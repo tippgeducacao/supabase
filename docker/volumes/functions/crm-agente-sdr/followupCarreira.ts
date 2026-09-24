@@ -2,6 +2,7 @@ import type { Msg } from './historico.ts';
 import { catalogoPerguntasCarreira, FONTE_QUALIFICACAO, type RegistroPerguntaCarreira } from './perguntasCarreira.ts';
 import { BASES_CURRICULARES_CARREIRA } from './baseCurricularCarreira.ts';
 import { PERGUNTAS_RETOMADA, preferenciaFollowup } from './perguntasRetomada.ts';
+import { contextoEspecialidadeCannabis } from './especialidadeCannabis.ts';
 
 export function planejarFollowupCarreira(curso: string, enviados: unknown) {
   const catalogo = catalogoPerguntasCarreira(curso);
@@ -20,7 +21,7 @@ export function contextoFollowupCarreira(plano: PlanoFollowupCarreira, tentativa
     preferencia_da_tentativa: preferenciaFollowup(tentativa),
     base_curricular: BASES_CURRICULARES_CARREIRA[plano.escopo] ?? null,
     fonte_mercado: plano.area ? FONTE_QUALIFICACAO : null,
-  });
+  }) + (plano.escopo === 'cannabis' ? contextoEspecialidadeCannabis('Cannabis Medicinal Veterinária') : '');
 }
 
 function textosAssistant(history: readonly Msg[]): string[] {

@@ -38,6 +38,7 @@ import { contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from './contextoAulaPiloto.
 import { PRAZO_MODELO_PILOTO_MS, RESPOSTA_MODELO_INDISPONIVEL } from './prazoModelo.ts';
 import { contaDoLead, dadosDaConta, personaDaConta } from './conta.ts';
 import { rodarEsteiraFollowup } from './followup.ts';
+import { contextoEspecialidadeCannabis } from './especialidadeCannabis.ts';
 import { rodarEsteiraFollowupTemplate } from './followup-template.ts';
 import { criarTelemetria, resumir, type Telemetria } from './eventos.ts';
 import { carregarModoTrocaNumero, carregarSinalTrocaDeNumero, comNotaNoContexto, comNotaParaRouter, notaTrocaDeNumero, resumoDoSinal, sinalInerte, type SinalTrocaDeNumero } from './trocaDeNumero.ts';
@@ -394,7 +395,8 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   // Na aula, a pós do lead é a pós VINCULADA à aula (vazia quando a aula não tem pós).
   if (aulaDaCampanha) Object.assign(vars, montarVarsAula(aulaDaCampanha));
   // O nome volta AQUI, a cada turno, e não só no cabeçalho do prompt (ver notaDoNome).
-  const contextoTemporal = montarContextoTemporal() + notaDoNome(vars.nome) + notaDoCurso(vars.curso_interesse_original);
+  const contextoTemporal = montarContextoTemporal() + notaDoNome(vars.nome) + notaDoCurso(vars.curso_interesse_original)
+    + (provedor?.nome === 'openai' ? contextoEspecialidadeCannabis(vars.curso_interesse_original) : '');
 
   // Persona: LEAD em modo_recontato manda (independe do número — espelha o gate de
   // entrada); senão vale a persona do número (relay/buffer). 'recontato' = no-show:

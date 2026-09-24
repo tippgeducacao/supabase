@@ -18,7 +18,7 @@ describe('follow-up sobre a pessoa na área escolhida', () => {
     const plano = planejarFollowupCarreira('Reprodução, Nutrição e Gestão de Bovinos (3em1)', enviados);
     expect(plano.perguntas.some(p => p.id === 'bovinos_3em1:futuro')).toBe(false);
     expect(validarFollowupCarreira('como imagina seu trabalho no campo?', 'bovinos_3em1:futuro', plano, [])).toBe('pergunta_indisponivel');
-    expect(planejarFollowupCarreira('Cannabis Medicinal Veterinária', enviados).perguntas).toHaveLength(5);
+    expect(planejarFollowupCarreira('Cannabis Medicinal Veterinária', enviados).perguntas).toHaveLength(6);
   });
   it('esgotar carreira preserva retomadas úteis e silêncio, sem reiniciar temas usados', () => {
     const inicial = planejarFollowupCarreira('Sanidade Avícola', []);
@@ -71,6 +71,18 @@ describe('follow-up sobre a pessoa na área escolhida', () => {
     expect(postura).not.toContain('Prescrição Veterinária');
     expect(contextoFollowupCarreira(planejarFollowupCarreira('CURSO | CANNABIS', []))).toContain('"base_curricular":null');
     expect(contextoFollowupCarreira(planejarFollowupCarreira('MBA | LIDERANÇA E INTELIGÊNCIA ARTIFICIAL NO AGRONEGÓCIO', []))).toContain('"base_curricular":null');
+  });
+  it('inclui o gancho de especialidade só em Cannabis e o exclui depois de enviado', () => {
+    const plano = planejarFollowupCarreira('Cannabis Medicinal Veterinária', []);
+    const pergunta = plano.perguntas.find(p => p.id === 'cannabis:especialidade')!;
+    expect(pergunta).toBeDefined();
+    expect(validarFollowupCarreira(pergunta.exemplo, pergunta.id, plano, [])).toBeNull();
+    expect(avaliarPoliticaVoz({ habilitada: true, origem: 'followup', texto: pergunta.exemplo, cadenciaAtingida: true }).permitido).toBe(true);
+    const depois = planejarFollowupCarreira('Cannabis Medicinal Veterinária', [{ escopo: 'cannabis', pergunta_id: pergunta.id, enviado_em: '2026-09-24' }]);
+    expect(validarFollowupCarreira(pergunta.exemplo, pergunta.id, depois, [])).toBe('pergunta_indisponivel');
+    expect(contextoFollowupCarreira(plano)).toContain('Concluir a pós da PPG não concede automaticamente');
+    expect(contextoFollowupCarreira(planejarFollowupCarreira('Sanidade Avícola', []))).not.toContain('AMEC-VET');
+    expect(contextoFollowupCarreira(planejarFollowupCarreira('CURSO | CANNABIS', []))).not.toContain('AMEC-VET');
   });
   it.each([
     ['com a pós você vai ganhar o dobro. quer crescer?', 'promessa_de_renda'],

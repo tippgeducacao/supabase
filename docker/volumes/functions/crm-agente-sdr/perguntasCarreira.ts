@@ -2,7 +2,7 @@
 // Temas do catálogo ativo, da grade pedagógica e de src/data/spin; perguntas são possibilidades, nunca
 // diagnóstico do lead, promessa de renda, grade curricular ou autorização profissional.
 // Uma pergunta por curso só volta depois de reset explícito da jornada do teste.
-export type EixoCarreira = 'objetivo' | 'futuro' | 'valorizacao' | 'ganhos' | 'mercado';
+export type EixoCarreira = 'objetivo' | 'futuro' | 'valorizacao' | 'ganhos' | 'mercado' | 'especialidade';
 export type PerfilCarreira = {
   id: string;
   nomes: string[];
@@ -10,6 +10,7 @@ export type PerfilCarreira = {
   perguntas: [string, string, string];
   ganhos?: string;
   mercado?: string;
+  especialidade?: string;
 };
 export type PerguntaCarreira = { id: string; eixo: EixoCarreira; exemplo: string };
 export type RegistroPerguntaCarreira = { escopo: string; pergunta_id: string; enviado_em: string };
@@ -32,6 +33,7 @@ export const PERFIS_CARREIRA: PerfilCarreira[] = [
   ],
     ganhos: 'pensando no acompanhamento dos pacientes com cannabis, que diferença você gostaria que esse trabalho fizesse na sua carreira?',
     mercado: 'os tutores que você atende já procuram orientação sobre o uso de cannabis para os animais?',
+    especialidade: 'a Endocanabinologia Veterinária é uma especialidade reconhecida pelo CFMV. o que buscar esse título representaria para a sua carreira?',
   },
   { id: 'clinica_bovinos', nomes: ['clinica medica e cirurgica de bovinos'], area: 'clínica e cirurgia de bovinos', perguntas: [
     'na clínica de bovinos, qual tipo de atendimento você gostaria de fazer com mais segurança?',
@@ -147,5 +149,6 @@ export function catalogoPerguntasCarreira(nome: string): { escopo: string; area:
   // na conversa; a pesquisa não obriga o lead a falar de salário nem autoriza números.
   perguntas.push({ id: `${escopo}:ganhos`, eixo: 'ganhos', exemplo: perfil?.ganhos ?? 'pensando no caminho profissional que você quer seguir, o que gostaria de mudar nos seus ganhos?' });
   if (perfil) perguntas.push({ id: `${escopo}:mercado`, eixo: 'mercado', exemplo: perfil.mercado ?? 'você já chegou a pesquisar como a qualificação é valorizada nos cargos que gostaria de ocupar?' });
+  if (perfil?.especialidade) perguntas.push({ id: `${escopo}:especialidade`, eixo: 'especialidade', exemplo: perfil.especialidade });
   return { escopo, area: perfil?.area ?? null, perguntas };
 }
