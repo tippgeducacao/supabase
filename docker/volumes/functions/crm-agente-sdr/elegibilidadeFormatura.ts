@@ -119,7 +119,15 @@ function normalizar(v: unknown): string {
  * leituras é obviamente a certa — então não se escolhe uma: pergunta-se o mês e o ano.
  */
 export function lerConclusao(bruto: unknown, agora: Date = new Date()): LeituraConclusao {
-  const t = normalizar(bruto);
+  // 0. Data de INÍCIO do curso não é conclusão (24/09/2026): "iniciei a faculdade no segundo
+  //    semestre de 2024, a faculdade finaliza em 2028" lia o PRIMEIRO ano (2024) como fim, o
+  //    estudante de 2028 saiu apto e a reunião foi marcada. O trecho do verbo de início sai
+  //    até a próxima vírgula/ponto ou "e"/"mas". Só verbos: "início" é substantivo e aparece
+  //    em conclusão ("termino no início de 2027").
+  const t = normalizar(bruto).replace(
+    /\b(?:iniciei|iniciou|comecei|comecou|entrei|entrou|ingressei|ingressou|matriculei)\b[^,.;]*?(?=[,.;]|\s(?:e|mas|porem|so que)\s|$)/g,
+    ' ',
+  ).trim();
   if (!t) return { tipo: 'ilegivel' };
 
   const br = new Date(agora.getTime() - 3 * 60 * 60 * 1000); // Brasília = UTC-3

@@ -317,6 +317,35 @@ describe('posição no curso E data de conclusão na mesma resposta', () => {
   });
 });
 
+describe('data de INÍCIO do curso não é conclusão (24/09/2026)', () => {
+  const agora = new Date('2026-09-24T14:46:00Z');
+  const real = 'iniciei a faculdade no segundo semestre de 2024, a faculdade finaliza em 2028, porem não sei exato o mês';
+
+  it('caso real: início 2024 + fim 2028 ⇒ lê 2028 e reprova (antes: 2024 ⇒ apto ⇒ reunião marcada)', () => {
+    expect(lerConclusao(real, agora)).toMatchObject({ tipo: 'data', via: 'ano' });
+    expect((lerConclusao(real, agora) as { data: Date }).data.getUTCFullYear()).toBe(2028);
+    for (const contexto_qualificacao of ['estudante_fora_do_prazo', 'estudante_apto']) {
+      expect(decidirPrazoEstudante({ contexto_qualificacao, conclusao_graduacao: '12/2028', conclusao_graduacao_bruta: real }, agora).acao).toBe('reprova');
+    }
+  });
+
+  it.each([
+    ['entrei em 2024.1 e termino em 2028.2', 2028],
+    ['comecei em 03/2024, termino em 12/2026', 2026],
+    ['a faculdade começou em março de 2023 e me formo em dezembro de 2027', 2027],
+  ])('outros formatos: %s ⇒ %i', (texto, ano) => {
+    const leitura = lerConclusao(texto, agora);
+    expect(leitura.tipo).toBe('data');
+    expect((leitura as { data: Date }).data.getUTCFullYear()).toBe(ano);
+  });
+
+  it('"início" como substantivo continua sendo conclusão, e só o início sem fim fica indeterminado', () => {
+    expect((lerConclusao('termino no início de 2027', agora) as { data: Date }).data.getUTCFullYear()).toBe(2027);
+    expect(lerConclusao('comecei em 2024', agora)).toEqual({ tipo: 'ilegivel' });
+    expect(decidirPrazoEstudante({ contexto_qualificacao: 'estudante_apto', conclusao_graduacao_bruta: 'comecei em 2024' }, agora).acao).toBe('pergunta_data');
+  });
+});
+
 describe('caso Paulo Renato (21/09/2026): o lead disse o ANO numa fala e o MÊS em outra', () => {
   const agora = new Date('2026-09-20T20:22:00Z');
   it('bruto "Outubro" + normalizado 10/2027 + fora_do_prazo ⇒ reprova (antes: outubro/2026 assumido ⇒ apto ⇒ reunião marcada)', () => {
