@@ -279,6 +279,7 @@ Deno.serve(async (req) => {
   let provedorAlternativo = entrada.provedor === 'deepseek' ? provedorDeepseek()
     : entrada.provedor === 'openai' ? provedorOpenai() : null;
   if (provedorAlternativo?.formato === 'openai' && entrada.esforco) provedorAlternativo = { ...provedorAlternativo, esforco: entrada.esforco };
+  if (provedorAlternativo?.formato === 'openai' && entrada.modelo_openai) provedorAlternativo = { ...provedorAlternativo, modelo: entrada.modelo_openai };
   if (entrada.provedor !== 'anthropic' && !provedorAlternativo) {
     return json({ error: `chave do provedor ${entrada.provedor} ausente no ambiente` }, 400);
   }
@@ -448,7 +449,7 @@ Deno.serve(async (req) => {
       },
     });
     return json({
-      ...resultado, modelo: MODELO_AGENTE, provedor: entrada.provedor, esforco: provedorAlternativo?.formato === 'openai' ? provedorAlternativo.esforco : null,
+      ...resultado, modelo: resultado.chamadas.at(-1)?.modelo ?? (provedorAlternativo?.formato === 'openai' ? provedorAlternativo.modelo : MODELO_AGENTE), provedor: entrada.provedor, esforco: provedorAlternativo?.formato === 'openai' ? provedorAlternativo.esforco : null,
       usar_router: entrada.usar_router, routers, memoria_versao: VERSAO_MEMORIA_HUMANA,
       ...(fichaSim ? { ficha: { cadastro: fichaSim.cadastro, jornada: fichaSim.jornada } } : {}),
     });

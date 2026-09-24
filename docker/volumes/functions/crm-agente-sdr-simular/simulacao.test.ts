@@ -16,12 +16,25 @@ const humano = { role: 'assistant', content: '[ATENDIMENTO_HUMANO] Renata\nEnvie
 const respostaPausa = { role: 'user', content: '[MENSAGEM_LEAD_PAUSA]\nSou veterinária formada desde 2021.' };
 
 describe('contrato textual de simulação com histórico', () => {
+  it.each(['gpt-5.6-luna', 'gpt-6-luna'])('permite ensaio isolado do modelo %s', (modelo) => {
+    const entrada = validarEntradaSimulacao({ mensagens: ['Olá'], provedor: 'openai', modelo_openai: modelo, esforco: 'high' });
+    expect(entrada.modelo_openai).toBe(modelo);
+    expect(entrada.esforco).toBe('high');
+  });
+  it.each([
+    { provedor: 'anthropic', modelo_openai: 'gpt-6-luna' },
+    { provedor: 'openai', modelo_openai: 'gpt-6-astra' },
+    { provedor: 'openai', modelo_openai: ['gpt-6-luna'] },
+  ])('rejeita modelo fora da comparação: %j', (patch) => {
+    expect(() => validarEntradaSimulacao({ mensagens: ['Olá'], ...patch })).toThrow('modelo_openai');
+  });
   it('preserva defaults do endpoint e aceita roteiro legado', () => {
     const entrada = validarEntradaSimulacao({ mensagens: ['Olá'] });
     expect(entrada.persona).toBe('campanha_direta');
     expect(entrada.usar_router).toBe(false);
     expect(entrada.esta_na_escola).toBe(false);
     expect(entrada.historico_inicial).toEqual([]);
+    expect(entrada.modelo_openai).toBeNull();
   });
 
   it('preserva autoria sem converter vendedor em lead', () => {

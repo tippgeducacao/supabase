@@ -4,6 +4,7 @@
 import { sanitizarHistorico, type Msg } from '../crm-agente-sdr/historico.ts';
 import type { Telemetria } from '../crm-agente-sdr/eventos.ts';
 import type { ProvedorIA } from '../crm-agente-sdr/agente.ts';
+import { modeloOpenaiPermitido } from '../crm-agente-sdr/modelosOpenai.ts';
 import { contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from '../crm-agente-sdr/contextoAulaPiloto.ts';
 import { avaliarEvidenciaSemGraduacao, bloqueioSemEvidenciaGraduacao } from '../crm-agente-sdr/evidenciaFormacao.ts';
 import { respostaDoEncerramento, toolConcluida, type Encerramento } from '../crm-agente-sdr/encerramento.ts';
@@ -51,6 +52,8 @@ export type EntradaSimulacao = {
   provedor: 'anthropic' | 'deepseek' | 'openai';
   /** Nível de raciocínio do provedor openai nesta simulação (compara high × xhigh no mesmo deploy). */
   esforco: string | null;
+  /** Substituição exclusiva deste ensaio, sem alterar o piloto nem o ambiente. */
+  modelo_openai: string | null;
   /** Liga a ficha do atendimento (canário): bloco + instrução + trava do cronograma no mock. */
   ficha: boolean;
 };
@@ -66,6 +69,10 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
   const provedor = body.provedor ?? 'anthropic';
   if (provedor !== 'anthropic' && provedor !== 'deepseek' && provedor !== 'openai') throw new Error('provedor inválido');
   const esforco = body.esforco ?? null;
+  const modeloOpenai = body.modelo_openai ?? null;
+  if (modeloOpenai !== null && (provedor !== 'openai' || !modeloOpenaiPermitido(modeloOpenai))) {
+    throw new Error('modelo_openai só aceita gpt-5.6-luna ou gpt-6-luna com provedor openai');
+  }
   if (esforco !== null && (provedor !== 'openai' || !['none', 'low', 'medium', 'high', 'xhigh', 'max'].includes(esforco as string))) {
     throw new Error('esforco só vale com provedor openai: none, low, medium, high, xhigh ou max');
   }
@@ -159,6 +166,7 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
     aula: aulaSimulada,
     provedor,
     esforco: esforco as string | null,
+    modelo_openai: modeloOpenai as string | null,
     ficha: body.ficha === true,
   };
 }
