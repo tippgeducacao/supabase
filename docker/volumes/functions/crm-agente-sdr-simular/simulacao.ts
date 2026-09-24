@@ -54,6 +54,8 @@ export type EntradaSimulacao = {
   esforco: string | null;
   /** Substituição exclusiva deste ensaio, sem alterar o piloto nem o ambiente. */
   modelo_openai: string | null;
+  /** A/B de 24/09/2026: devolve o raciocínio cifrado da Luna junto com o resultado das tools. */
+  raciocinio_encadeado: boolean;
   /** Liga a ficha do atendimento (canário): bloco + instrução + trava do cronograma no mock. */
   ficha: boolean;
 };
@@ -75,6 +77,9 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
   }
   if (esforco !== null && (provedor !== 'openai' || !['none', 'low', 'medium', 'high', 'xhigh', 'max'].includes(esforco as string))) {
     throw new Error('esforco só vale com provedor openai: none, low, medium, high, xhigh ou max');
+  }
+  if (body.raciocinio_encadeado !== undefined && (typeof body.raciocinio_encadeado !== 'boolean' || (body.raciocinio_encadeado && provedor !== 'openai'))) {
+    throw new Error('raciocinio_encadeado deve ser booleano e só vale com provedor openai');
   }
   let aulaSimulada: AulaParaPrompt | null = null;
   if (body.aula !== undefined && body.aula !== null) {
@@ -167,8 +172,23 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
     provedor,
     esforco: esforco as string | null,
     modelo_openai: modeloOpenai as string | null,
+    raciocinio_encadeado: body.raciocinio_encadeado === true,
     ficha: body.ficha === true,
   };
+}
+
+// Recusa do provedor sem o corpo cru: só status e os campos estruturados do erro
+// (ex.: `param: "input[7]"`), o bastante para achar o item mal formado no A/B.
+export function diagnosticoDoProvedor(erro: unknown): Record<string, unknown> | null {
+  const m = /^(OpenAI|Anthropic|deepseek): HTTP (\d{3}): ([\s\S]*)$/.exec(String((erro as Error)?.message ?? ''));
+  if (!m) return null;
+  const campo = (v: unknown) => typeof v === 'string' ? v.slice(0, 120) : null;
+  try {
+    const corpo = JSON.parse(m[3])?.error ?? {};
+    return { provedor: m[1], status: Number(m[2]), tipo: campo(corpo.type), param: campo(corpo.param), codigo: campo(corpo.code) };
+  } catch {
+    return { provedor: m[1], status: Number(m[2]) };
+  }
 }
 
 // Somente contagens conhecidas saem no diagnóstico; nunca a resposta crua do provedor.
@@ -179,6 +199,10 @@ export function extrairUso(usage: unknown): Record<string, number> {
     const valor = (usage as Record<string, unknown>)[campo];
     if (typeof valor === 'number' && Number.isFinite(valor) && valor >= 0) resultado[campo] = valor;
   }
+  // Só a CONTAGEM de raciocínio (já inclusa em output_tokens), nunca o conteúdo.
+  const detalhes = (usage as Record<string, unknown>).output_tokens_details;
+  const pensamento = detalhes && typeof detalhes === 'object' ? (detalhes as Record<string, unknown>).thinking_tokens : undefined;
+  if (typeof pensamento === 'number' && Number.isFinite(pensamento) && pensamento >= 0) resultado.thinking_tokens = pensamento;
   return resultado;
 }
 

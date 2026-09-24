@@ -54,6 +54,27 @@ describe('bastidor editorial fora da memória do modelo', () => {
     expect(origem[1].content).toHaveLength(4);
   });
 
+  it('raciocínio da Luna fica em TODA a cadeia ativa e sai dos turnos anteriores à última fala do lead', () => {
+    const rs = (id: string) => ({ type: 'raciocinio_openai', segue: `fc_${id}`, item: { type: 'reasoning', id: `rs_${id}` } });
+    const tu = (id: string) => ({ type: 'tool_use', id, name: 'consulta_disponibilidade', input: {}, openai_id: `fc_${id}` });
+    const tr = (id: string) => ({ type: 'tool_result', tool_use_id: id, content: 'ok' });
+    const origem: Msg[] = [
+      { role: 'user', content: 'Quero agendar' },
+      { role: 'assistant', content: [rs('a'), tu('a')] },
+      { role: 'user', content: [tr('a')] },
+      { role: 'assistant', content: [{ type: 'text', text: 'Tenho 10h.' }] },
+      { role: 'user', content: 'Pode ser amanhã?' },
+      { role: 'assistant', content: [rs('b'), tu('b')] },
+      { role: 'user', content: [tr('b')] },
+      { role: 'assistant', content: [rs('c'), tu('c')] },
+      { role: 'user', content: [tr('c')] },
+    ];
+    const replay = sanitizarHistorico(origem);
+    expect(replay[1]).toEqual({ role: 'assistant', content: [tu('a')] });
+    expect(replay[5]).toEqual({ role: 'assistant', content: [rs('b'), tu('b')] });
+    expect(replay[7]).toEqual({ role: 'assistant', content: [rs('c'), tu('c')] });
+  });
+
   it('não conserva pensamento sozinho da resposta textual rejeitada', () => {
     expect(filtrarBastidorDoHistorico([{ role: 'assistant', content: [
       { type: 'thinking', thinking: 'privado', signature: 'assinatura' }, { type: 'text', text: vazamento },

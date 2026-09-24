@@ -98,6 +98,12 @@ describe('fronteira entre raciocínio, ações e mensagem ao cliente', () => {
     expect(transporte).toHaveBeenCalledTimes(1);
   });
 
+  it('cadeia da Luna: o raciocínio cifrado fica com a tool de negócio; o canal concorrente sai', () => {
+    const raciocinio = { type: 'raciocinio_openai', segue: 'fc_1', item: { type: 'reasoning', id: 'rs_1' } };
+    const decisao = avaliarCanalResposta(modelo([raciocinio, { ...pausa, openai_id: 'fc_1' }, final()]), () => false, false, new Set(['pausa_ia']));
+    expect(decisao).toEqual({ tipo: 'tools', content: [raciocinio, { ...pausa, openai_id: 'fc_1' }], motivo: 'resposta_concorrente_descartada' });
+  });
+
   it('preserva uma ação oferecida normalmente sem exigir tool de resposta no mesmo turno', async () => {
     responder(modelo([pensamento, pausa]));
     expect(await chamarAgentePrincipal(entrada())).toMatchObject({

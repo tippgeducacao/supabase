@@ -43,7 +43,7 @@ import {
 import { comGanchoDoLote } from '../crm-agente-sdr/ganchoLote.ts';
 import { bloqueioProximaTurmaDeEstudante } from '../crm-agente-sdr/tools.ts';
 import { blocoConviteAgenda } from '../crm-agente-sdr/contexto.ts';
-import { executarFollowupSimulado, executarSimulacao, extrairUso, MAX_CARACTERES_SIMULACAO, validarEntradaSimulacao, type AgenteRouter } from './simulacao.ts';
+import { diagnosticoDoProvedor, executarFollowupSimulado, executarSimulacao, extrairUso, MAX_CARACTERES_SIMULACAO, validarEntradaSimulacao, type AgenteRouter } from './simulacao.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
@@ -280,6 +280,7 @@ Deno.serve(async (req) => {
     : entrada.provedor === 'openai' ? provedorOpenai() : null;
   if (provedorAlternativo?.formato === 'openai' && entrada.esforco) provedorAlternativo = { ...provedorAlternativo, esforco: entrada.esforco };
   if (provedorAlternativo?.formato === 'openai' && entrada.modelo_openai) provedorAlternativo = { ...provedorAlternativo, modelo: entrada.modelo_openai };
+  if (provedorAlternativo?.formato === 'openai' && entrada.raciocinio_encadeado) provedorAlternativo = { ...provedorAlternativo, raciocinio: true };
   if (entrada.provedor !== 'anthropic' && !provedorAlternativo) {
     return json({ error: `chave do provedor ${entrada.provedor} ausente no ambiente` }, 400);
   }
@@ -450,11 +451,13 @@ Deno.serve(async (req) => {
     });
     return json({
       ...resultado, modelo: resultado.chamadas.at(-1)?.modelo ?? (provedorAlternativo?.formato === 'openai' ? provedorAlternativo.modelo : MODELO_AGENTE), provedor: entrada.provedor, esforco: provedorAlternativo?.formato === 'openai' ? provedorAlternativo.esforco : null,
+      raciocinio_encadeado: provedorAlternativo?.formato === 'openai' && provedorAlternativo.raciocinio === true,
       usar_router: entrada.usar_router, routers, memoria_versao: VERSAO_MEMORIA_HUMANA,
       ...(fichaSim ? { ficha: { cadastro: fichaSim.cadastro, jornada: fichaSim.jornada } } : {}),
     });
-  } catch {
+  } catch (e) {
     // Não devolver body cru de falha da API nem histórico/credenciais em logs.
-    return json({ error: 'falha na simulação; nenhuma ação comercial foi executada' }, 502);
+    const diagnostico = diagnosticoDoProvedor(e);
+    return json({ error: 'falha na simulação; nenhuma ação comercial foi executada', ...(diagnostico ? { diagnostico_provedor: diagnostico } : {}) }, 502);
   }
 });

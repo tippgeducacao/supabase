@@ -182,10 +182,23 @@ export function sanitizarHistorico(brutas: Msg[]): Msg[] {
   for (let i = brutas.length - 1; i >= 0; i--) {
     if (brutas[i]?.role === 'assistant') { idxUltimoAssistant = i; break; }
   }
+  // Raciocínio da Luna (`raciocinio_openai`): a doc da OpenAI pede TODOS os itens desde a
+  // última fala do usuário — a cadeia de tools ativa inteira, não só o último assistant.
+  let idxUltimaFalaUser = -1;
+  for (let i = brutas.length - 1; i >= 0; i--) {
+    const m = brutas[i];
+    if (m?.role === 'user' && (!Array.isArray(m.content) || m.content.some((b: any) => b?.type !== 'tool_result'))) {
+      idxUltimaFalaUser = i; break;
+    }
+  }
   brutas = brutas
     .map((m, i) => {
-      if (!m || m.role !== 'assistant' || !Array.isArray(m.content) || i === idxUltimoAssistant) return m;
-      const semThinking = m.content.filter((b: any) => b?.type !== 'thinking' && b?.type !== 'redacted_thinking');
+      if (!m || m.role !== 'assistant' || !Array.isArray(m.content)) return m;
+      const manterThinking = i === idxUltimoAssistant;
+      const manterOpenai = i > idxUltimaFalaUser;
+      if (manterThinking && manterOpenai) return m;
+      const semThinking = m.content.filter((b: any) => b?.type === 'raciocinio_openai'
+        ? manterOpenai : manterThinking || (b?.type !== 'thinking' && b?.type !== 'redacted_thinking'));
       if (semThinking.length === m.content.length) return m;
       return semThinking.length ? { ...m, content: semThinking } : null;
     })

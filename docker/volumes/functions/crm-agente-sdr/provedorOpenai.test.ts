@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { paraPedidoOpenai, paraRespostaAnthropic } from './provedorOpenai';
+import { paraPedidoOpenai, paraRespostaAnthropic, semRaciocinioOpenai } from './provedorOpenai';
 
 const cfg = { modelo: 'gpt-5.6-luna', esforco: 'high' };
 const pedidoAnthropic = () => ({
@@ -121,6 +121,69 @@ describe('resposta Responses API → Anthropic', () => {
     expect(paraRespostaAnthropic({ status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [] }).stop_reason).toBe('max_tokens');
     expect(paraRespostaAnthropic({ status: 'incomplete', incomplete_details: { reason: 'content_filter' }, output: [] }).stop_reason).toBe('refusal');
     expect(paraRespostaAnthropic({ status: 'completed', output: [{ type: 'message', content: [{ type: 'refusal', refusal: 'não' }] }] }).stop_reason).toBe('refusal');
+  });
+});
+
+describe('raciocínio encadeado (A/B de 24/09/2026)', () => {
+  const comRaciocinio = { ...cfg, raciocinio: true };
+  const rs = (id: string, segue: string) => ({
+    type: 'raciocinio_openai', segue,
+    item: { type: 'reasoning', id, summary: [], encrypted_content: `CIFRADO_${id}` },
+  });
+  const tu = (id: string, openaiId?: string) => ({
+    type: 'tool_use', id, name: 'consulta_disponibilidade', input: { dia: 'amanhã' }, ...(openaiId ? { openai_id: openaiId } : {}),
+  });
+  const cadeia = (assistant: unknown[]) => ({ messages: [
+    { role: 'user', content: 'Quero agendar' },
+    { role: 'assistant', content: assistant },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_1', content: '10h' }, { type: 'tool_result', tool_use_id: 'call_2', content: '14h' }] },
+  ] });
+
+  it('resposta: o item cifrado vira bloco próprio, amarrado ao id do function_call seguinte', () => {
+    const r = paraRespostaAnthropic({
+      status: 'completed',
+      output: [
+        { type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'CIFRADO' },
+        { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'consulta_disponibilidade', arguments: '{}' },
+      ],
+    }, comRaciocinio);
+    expect(r.content).toEqual([
+      { type: 'raciocinio_openai', item: { type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'CIFRADO' }, segue: 'fc_1' },
+      { type: 'tool_use', id: 'call_1', name: 'consulta_disponibilidade', input: {}, openai_id: 'fc_1' },
+    ]);
+  });
+
+  it('pedido: raciocínio volta antes do function_call, que leva o id; paralelas da mesma resposta também', () => {
+    const pedido = paraPedidoOpenai(cadeia([rs('rs_1', 'fc_1'), tu('call_1', 'fc_1'), tu('call_2', 'fc_2')]), comRaciocinio) as { input: unknown[]; include?: unknown };
+    expect(pedido.include).toEqual(['reasoning.encrypted_content']);
+    expect(pedido.input).toEqual([
+      { role: 'user', content: 'Quero agendar' },
+      { type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'CIFRADO_rs_1' },
+      { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'consulta_disponibilidade', arguments: '{"dia":"amanhã"}' },
+      { type: 'function_call', id: 'fc_2', call_id: 'call_2', name: 'consulta_disponibilidade', arguments: '{"dia":"amanhã"}' },
+      { type: 'function_call_output', call_id: 'call_1', output: '10h' },
+      { type: 'function_call_output', call_id: 'call_2', output: '14h' },
+    ]);
+  });
+
+  it('desligado (produção): mesmo histórico sai como antes — sem raciocínio, sem id, sem include', () => {
+    const pedido = paraPedidoOpenai(cadeia([rs('rs_1', 'fc_1'), tu('call_1', 'fc_1')]), cfg) as { input: Record<string, unknown>[]; include?: unknown };
+    expect(pedido.include).toBeUndefined();
+    expect(JSON.stringify(pedido.input)).not.toMatch(/CIFRADO|fc_1|"reasoning"/);
+  });
+
+  it('raciocínio cujo item seguinte saiu do histórico não volta, e o function_call vai sem id', () => {
+    // Ex.: o seguinte era responder_ao_cliente, descartado pelo canal junto da tool de negócio.
+    const pedido = paraPedidoOpenai(cadeia([rs('rs_1', 'fc_responder'), tu('call_1', 'fc_1')]), comRaciocinio) as { input: Record<string, unknown>[] };
+    expect(pedido.input[1]).toEqual({ type: 'function_call', call_id: 'call_1', name: 'consulta_disponibilidade', arguments: '{"dia":"amanhã"}' });
+    expect(JSON.stringify(pedido.input)).not.toContain('CIFRADO');
+  });
+
+  it('caminho Anthropic (reserva): bloco e openai_id saem; nada muda sem eles', () => {
+    const corpo = cadeia([rs('rs_1', 'fc_1'), tu('call_1', 'fc_1')]);
+    expect(semRaciocinioOpenai(corpo).messages[1]).toEqual({ role: 'assistant', content: [tu('call_1')] });
+    const limpo = { messages: [{ role: 'user', content: 'Oi' }] };
+    expect(semRaciocinioOpenai(limpo)).toBe(limpo);
   });
 });
 

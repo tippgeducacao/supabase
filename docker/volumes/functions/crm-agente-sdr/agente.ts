@@ -19,7 +19,7 @@ import {
   avaliarCanalResposta, INSTRUCAO_CANAL_RESPOSTA, NOME_TOOL_RESPOSTA,
   normalizarRespostaCanal, somarUsoModelo, TOOL_RESPONDER_AO_CLIENTE,
 } from './canalResposta.ts';
-import { paraPedidoOpenai, paraRespostaAnthropic } from './provedorOpenai.ts';
+import { paraPedidoOpenai, paraRespostaAnthropic, semRaciocinioOpenai } from './provedorOpenai.ts';
 
 const ANTHROPIC_KEY = Deno.env.get('AGENTE_SDR_ANTHROPIC_KEY') ?? Deno.env.get('ANTHROPIC_API_KEY') ?? '';
 // Override por env se um dia mudar. ⚠️ Sonnet 5: budget_tokens e temperature≠default
@@ -36,7 +36,9 @@ export const MODELO_AGENTE = Deno.env.get('AGENTE_SDR_MODEL') ?? 'claude-sonnet-
 //    resposta volta no formato da Anthropic; quem chama não percebe a diferença.
 export type ProvedorIA =
   | { nome: string; formato: 'anthropic'; base: string; chave: string }
-  | { nome: string; formato: 'openai'; base: string; chave: string; modelo: string; esforco: string };
+  | { nome: string; formato: 'openai'; base: string; chave: string; modelo: string; esforco: string;
+    /** Devolve o raciocínio cifrado junto com o resultado das tools (provedorOpenai.ts). */
+    raciocinio?: boolean };
 export function provedorDeepseek(): ProvedorIA | null {
   const chave = Deno.env.get('AGENTE_SDR_DEEPSEEK_KEY') ?? '';
   return chave ? { nome: 'deepseek', formato: 'anthropic', base: 'https://api.deepseek.com/anthropic', chave } : null;
@@ -82,13 +84,13 @@ export async function chamarAnthropic(
           'content-type': 'application/json',
           ...extraHeaders,
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify(semRaciocinioOpenai(body)),
       });
     sinal?.throwIfAborted();
     if (res.ok) {
       const dados = await res.json();
       sinal?.throwIfAborted();
-      return openai ? paraRespostaAnthropic(dados) : dados;
+      return openai ? paraRespostaAnthropic(dados, openai) : dados;
     }
     ultimoErro = `HTTP ${res.status}: ${await res.text()}`;
     sinal?.throwIfAborted();

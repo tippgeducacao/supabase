@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { executarFollowupSimulado, executarSimulacao, extrairUso, validarEntradaSimulacao, type DependenciasSimulacao } from './simulacao';
+import { diagnosticoDoProvedor, executarFollowupSimulado, executarSimulacao, extrairUso, validarEntradaSimulacao, type DependenciasSimulacao } from './simulacao';
 
 // Exercita gerarFollowup de produção com a API e o transporte bloqueados no teste.
 vi.mock('../crm-agente-sdr/agente.ts', () => ({ chamarAnthropic: vi.fn(), MODELO_AGENTE: 'modelo-teste' }));
@@ -35,6 +35,20 @@ describe('contrato textual de simulação com histórico', () => {
     expect(entrada.esta_na_escola).toBe(false);
     expect(entrada.historico_inicial).toEqual([]);
     expect(entrada.modelo_openai).toBeNull();
+    expect(entrada.raciocinio_encadeado).toBe(false);
+  });
+  it('raciocínio encadeado: só booleano e só com a Luna', () => {
+    expect(validarEntradaSimulacao({ mensagens: ['Olá'], provedor: 'openai', raciocinio_encadeado: true }).raciocinio_encadeado).toBe(true);
+    expect(() => validarEntradaSimulacao({ mensagens: ['Olá'], raciocinio_encadeado: true })).toThrow('raciocinio_encadeado');
+    expect(() => validarEntradaSimulacao({ mensagens: ['Olá'], provedor: 'openai', raciocinio_encadeado: 'sim' })).toThrow('raciocinio_encadeado');
+  });
+  it('recusa do provedor vira diagnóstico estruturado, sem o texto do erro', () => {
+    const corpo = JSON.stringify({ error: { message: 'DETALHE COM DADO DO LEAD', type: 'invalid_request_error', param: 'input[3]', code: null } });
+    expect(diagnosticoDoProvedor(new Error(`OpenAI: HTTP 400: ${corpo}`))).toEqual({
+      provedor: 'OpenAI', status: 400, tipo: 'invalid_request_error', param: 'input[3]', codigo: null,
+    });
+    expect(diagnosticoDoProvedor(new Error('OpenAI: HTTP 502: <html>'))).toEqual({ provedor: 'OpenAI', status: 502 });
+    expect(diagnosticoDoProvedor(new Error('outra falha'))).toBeNull();
   });
 
   it('preserva autoria sem converter vendedor em lead', () => {

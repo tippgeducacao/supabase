@@ -68,9 +68,11 @@ export function avaliarCanalResposta(
     if (resposta.stop_reason !== 'tool_use') return { tipo: 'bloquear', motivo: 'ferramenta_fora_de_turno' };
     // Mantém os blocos nativos assinados, necessários ao replay de tool_result,
     // e os ids das tools de negócio. A tool local e todo texto ficam fora do banco.
+    // `raciocinio_openai` = o equivalente cifrado da Luna (provedorOpenai.ts).
     return {
       tipo: 'tools',
       content: blocos.filter((bloco) => bloco.type === 'thinking' || bloco.type === 'redacted_thinking'
+        || bloco.type === 'raciocinio_openai'
         || (bloco.type === 'tool_use' && bloco.name !== NOME_TOOL_RESPOSTA)),
       motivo: finais.length ? 'resposta_concorrente_descartada' : 'ferramentas_de_negocio',
     };
