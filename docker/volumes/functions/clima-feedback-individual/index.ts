@@ -1,4 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
+import { ErroAcessoResultados, exigirAcessoResultados, respostaAcessoRecusado } from "../_shared/acessoResultadosAvaliacoes.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -9,6 +11,13 @@ serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
+    // Só é chamada do painel de resultados (Setor do Amanhã) e gasta créditos de IA: mesma
+    // régua do painel (23/09/2026). Antes, atendia qualquer um.
+    await exigirAcessoResultados(req.headers.get("Authorization"), createClient, {
+      url: Deno.env.get("SUPABASE_URL")!,
+      chavePublica: Deno.env.get("SUPABASE_ANON_KEY") ?? "",
+    });
+
     const { tipo, nome, trimestre, scores, pontos_fortes, pontos_desenvolver, sugestoes, nota_geral, media_geral, equipe_ranking } = await req.json();
 
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
@@ -219,6 +228,7 @@ Gere um JSON com esta estrutura EXATA (sem markdown, apenas JSON válido):
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (e) {
+    if (e instanceof ErroAcessoResultados) return respostaAcessoRecusado(e, corsHeaders);
     console.error("clima-feedback-individual error:", e);
     return new Response(JSON.stringify({ error: e instanceof Error ? e.message : "Unknown error" }), {
       status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },

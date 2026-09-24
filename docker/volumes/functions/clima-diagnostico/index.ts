@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { ErroAcessoResultados, exigirAcessoResultados, respostaAcessoRecusado } from "../_shared/acessoResultadosAvaliacoes.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -10,6 +11,13 @@ serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
+    // ⚠️ Lê TODAS as respostas do trimestre com a chave de serviço e devolve a análise (com
+    // amostra das respostas abertas): só para quem é do Setor do Amanhã (23/09/2026).
+    await exigirAcessoResultados(req.headers.get("Authorization"), createClient, {
+      url: Deno.env.get("SUPABASE_URL")!,
+      chavePublica: Deno.env.get("SUPABASE_ANON_KEY") ?? "",
+    });
+
     const { trimestre, setor_id } = await req.json();
     if (!trimestre) throw new Error("trimestre is required");
 
@@ -238,6 +246,7 @@ Retorne um JSON com exatamente esta estrutura (sem markdown, apenas JSON puro):
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (e) {
+    if (e instanceof ErroAcessoResultados) return respostaAcessoRecusado(e, corsHeaders);
     console.error("clima-diagnostico error:", e);
     return new Response(JSON.stringify({ error: e instanceof Error ? e.message : "Unknown error" }), {
       status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },

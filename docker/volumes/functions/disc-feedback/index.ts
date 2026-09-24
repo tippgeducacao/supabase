@@ -3,6 +3,7 @@
 // Saída em 3 blocos de 3 itens: hábitos, esportes e estudos.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
+import { ErroAcessoResultados, exigirAcessoResultados, respostaAcessoRecusado } from "../_shared/acessoResultadosAvaliacoes.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -49,6 +50,13 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
+    // Só é chamada do painel de resultados (Setor do Amanhã) e gasta créditos de IA: mesma
+    // régua do painel (23/09/2026). Antes, atendia qualquer um.
+    await exigirAcessoResultados(req.headers.get("Authorization"), createClient, {
+      url: SUPABASE_URL,
+      chavePublica: Deno.env.get("SUPABASE_ANON_KEY") ?? "",
+    });
+
     const { nome, perfil_d, perfil_i, perfil_s, perfil_c, perfil_dominante, setor } = await req.json();
 
     const sb = createClient(SUPABASE_URL, SERVICE_KEY);
@@ -190,6 +198,7 @@ IMPORTANTE:
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (e) {
+    if (e instanceof ErroAcessoResultados) return respostaAcessoRecusado(e, corsHeaders);
     console.error("disc-feedback error:", e);
     return new Response(JSON.stringify({ error: e instanceof Error ? e.message : "Unknown error" }), {
       status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
