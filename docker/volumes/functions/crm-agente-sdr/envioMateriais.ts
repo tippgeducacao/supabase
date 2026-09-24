@@ -11,7 +11,8 @@ Quando o envio for aceito/entregue/lido, pergunte se o arquivo apareceu e abriu,
 // todo lead recebia exatamente o mesmo texto. Mesmo sentido e mesmo tom; o sorteio é em código.
 const FRASES_VALOR = [
   (integral: string) => `o valor integral da pós é ${integral}.`,
-  (integral: string) => `a pós sai por ${integral} no valor integral.`,
+  // O valor da API já traz as parcelas ("R$ 27.429 em até 24x no cartão"): nada pode vir depois dele.
+  (integral: string) => `sem nenhuma condição aplicada, a pós sai por ${integral}.`,
   (integral: string) => `no valor integral, a pós fica ${integral}.`,
 ];
 const FRASES_CONDICAO = [
