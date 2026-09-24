@@ -107,6 +107,10 @@ async function abrirConversa(
 }
 
 // ── Saída: grava o que foi (ou não foi) para o direct ─────────────────────────
+// ⚠️ `ig_mensagens.status_entrega` tem CHECK: só 'sent' | 'delivered' | 'read' | 'failed'.
+// Em 24/09/2026 este código gravava 'enviado', o banco recusava, o eco da própria IA
+// ficava como "humano" e a IA se pausava depois da 1ª resposta. Se esta escrita falha, a
+// IA se desconhece: por isso o erro vai para o log em voz alta.
 async function registrarSaida(c: Conversa, texto: string, envio: ResultadoEnvioIg, metadata: Record<string, unknown>) {
   const base = {
     conta_id: c.contaId,
@@ -121,13 +125,13 @@ async function registrarSaida(c: Conversa, texto: string, envio: ResultadoEnvioI
     // como "humano", esta escrita corrige para a origem certa. É isso que impede a IA de
     // achar que um humano assumiu e se pausar sozinha.
     ? await supabase.from("ig_mensagens").upsert(
-      { ...base, mid: envio.mid, status_entrega: "enviado", metadata: { is_echo: false, ...metadata } },
+      { ...base, mid: envio.mid, status_entrega: "sent", metadata: { is_echo: false, ...metadata } },
       { onConflict: "mid" },
     )
     : await supabase.from("ig_mensagens").insert(
-      { ...base, mid: null, status_entrega: "erro", erro: envio.erro, metadata: { is_echo: false, ...metadata } },
+      { ...base, mid: null, status_entrega: "failed", erro: envio.erro, metadata: { is_echo: false, ...metadata } },
     );
-  if (error) log("não gravou a saída:", error.message);
+  if (error) console.error("[ig-agente] NÃO GRAVOU A SAÍDA — o eco vai parecer humano e pausar a IA:", error.message);
 }
 
 async function estaPausada(c: Conversa): Promise<boolean> {

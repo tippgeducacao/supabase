@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Exercita o ig-agente de ponta a ponta com banco, rede e o João simulados: nenhuma DM
 // sai de verdade, nenhuma linha é escrita.
@@ -9,15 +9,30 @@ const mocks = vi.hoisted(() => ({
   rpc: vi.fn(),
   estado: {} as {
     config: Linha | null; conta: Linha | null; perfil: Linha | null; segredo: Linha | null;
-    mensagens: Linha[]; conversa: Linha | null; escritas: { tabela: string; op: string; payload: any }[];
+    mensagens: Linha[]; conversa: Linha | null;
+    escritas: { tabela: string; op: string; payload: any; violacao?: string }[];
   },
 }));
 
+// Os CHECKs das tabelas REAIS. Sem eles este teste passou gravando status_entrega =
+// 'enviado', que o banco recusa — e em produção a IA se pausou depois da 1ª resposta
+// (24/09/2026), porque o eco da própria mensagem ficou parecendo de um humano.
+const CHECKS: Record<string, (p: Linha) => string | null> = {
+  ig_mensagens: (p) => {
+    if (!['sent', 'delivered', 'read', 'failed'].includes(p.status_entrega ?? 'sent')) return 'ig_mensagens_status_entrega_check';
+    if (!['inbound', 'outbound'].includes(p.direcao)) return 'ig_mensagens_direcao_check';
+    return null;
+  },
+  ig_conversa_ia: (p) => (p.estagio !== undefined && !['validacao', 'qualificador'].includes(p.estagio)
+    ? 'ig_conversa_ia_estagio_check' : null),
+};
+
 // Query builder mínimo do supabase-js: guarda filtros e responde conforme a tabela.
 function builder(tabela: string) {
-  const q: any = { op: 'select', filtros: {} as Record<string, unknown>, payload: null };
+  const q: any = { op: 'select', filtros: {} as Record<string, unknown>, payload: null, violacao: null };
   const e = mocks.estado;
   const resolver = (single: boolean) => {
+    if (q.violacao) return { data: null, error: { message: `new row violates check constraint "${q.violacao}"` } };
     if (q.op === 'upsert' || q.op === 'insert') return { data: null, error: null };
     if (q.op === 'update') {
       if (tabela === 'ig_conversa_ia' && e.conversa && e.conversa.pausada === q.filtros['eq:pausada']) {
@@ -43,7 +58,8 @@ function builder(tabela: string) {
   };
   const registrar = (op: string, payload: any) => {
     q.op = op; q.payload = payload;
-    e.escritas.push({ tabela, op, payload });
+    q.violacao = op === 'update' ? null : CHECKS[tabela]?.(payload) ?? null;
+    e.escritas.push({ tabela, op, payload, ...(q.violacao ? { violacao: q.violacao } : {}) });
     return q;
   };
   Object.assign(q, {
@@ -76,6 +92,10 @@ beforeAll(async () => {
   await import('./index');
 });
 afterAll(() => vi.unstubAllGlobals());
+// Nenhum teste pode terminar com uma escrita que o banco real recusaria.
+afterEach(() => {
+  expect(mocks.estado.escritas.filter((w) => w.violacao)).toEqual([]);
+});
 
 const INBOUND_EM = '2026-09-24T12:00:00.000Z';
 let reservas: Linha[];
@@ -137,8 +157,8 @@ describe('ig-agente: DM de quem está no teste', () => {
     expect(mocks.fetch.mock.calls[0][1].headers.Authorization).toBe('Bearer IGAA-sintetico');
 
     const saidas = mocks.estado.escritas.filter((w) => w.tabela === 'ig_mensagens');
-    expect(saidas.map((w) => [w.op, w.payload.mid, w.payload.metadata.origem])).toEqual([
-      ['upsert', 'saida-1', 'ia'], ['upsert', 'saida-2', 'ia'],
+    expect(saidas.map((w) => [w.op, w.payload.mid, w.payload.status_entrega, w.payload.metadata.origem])).toEqual([
+      ['upsert', 'saida-1', 'sent', 'ia'], ['upsert', 'saida-2', 'sent', 'ia'],
     ]);
     expect(liberacao()).toMatchObject({ p_respondido_ate: INBOUND_EM, p_estagio: 'validacao' });
   });
@@ -203,7 +223,7 @@ describe('ig-agente: envio', () => {
     await inbound();
     expect(textosEnviados()).toEqual(['oi, gustavo!']);
     const erro = mocks.estado.escritas.find((w) => w.tabela === 'ig_mensagens');
-    expect(erro).toMatchObject({ op: 'insert', payload: { status_entrega: 'erro', mid: null } });
+    expect(erro).toMatchObject({ op: 'insert', payload: { status_entrega: 'failed', mid: null } });
     expect(liberacao()).toMatchObject({ p_respondido_ate: null });
   });
 
