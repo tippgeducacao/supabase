@@ -13,9 +13,9 @@ describe('perguntas já feitas na conversa', () => {
     ];
     expect(blocoPerguntasRecentes(historico)).toBe(
       '[PERGUNTAS JÁ FEITAS NESTA CONVERSA — tirado do histórico; não é fala do lead]\n'
-      + '- você: "antes, qual é a sua graduação?" → lead: "sou veterinário formado"\n'
-      + 'Não refaça nenhuma pergunta que já tem resposta acima, nem com outras palavras: use a resposta e siga. '
-      + 'Pergunta ainda sem resposta pode ser retomada uma vez, de outro jeito.',
+      + '- você: "antes, qual é a sua graduação?" → o lead escreveu depois: "sou veterinário formado"\n'
+      + 'Se o que o lead escreveu depois já responde a pergunta, não a refaça, nem com outras palavras: use a resposta e siga. '
+      + 'Se não responde, você pode retomá-la uma vez, de outro jeito.',
     );
   });
 
@@ -25,7 +25,7 @@ describe('perguntas já feitas na conversa', () => {
       { role: 'user', content: '[Em resposta à mensagem: "vc atua com bovinos de leite ou de corte?"] leite' },
       { role: 'user', content: '[CORRECAO_INTERNA_AUTO_IGNORE] responda de novo' },
     ];
-    expect(blocoPerguntasRecentes(historico)).toContain('- atendente: "vc atua com bovinos de leite ou de corte?" → lead: "leite"');
+    expect(blocoPerguntasRecentes(historico)).toContain('- atendente: "vc atua com bovinos de leite ou de corte?" → o lead escreveu depois: "leite"');
     expect(blocoPerguntasRecentes(historico)).not.toContain('CORRECAO');
   });
 
@@ -37,7 +37,7 @@ describe('perguntas já feitas na conversa', () => {
     ];
     const bloco = blocoPerguntasRecentes(historico);
     expect(bloco.match(/formado em medicina/g)).toHaveLength(1);
-    expect(bloco).toContain('(ainda sem resposta)');
+    expect(bloco).toContain('(nada ainda)');
     const muitas: Msg[] = [
       'qual é a sua graduação?', 'vc atua com bovinos hoje?', 'em que cidade vc mora?', 'já fez alguma pós antes?',
       'o que te chamou atenção na aula?', 'prefere conversar de manhã?', 'conhece o app do nasem?',

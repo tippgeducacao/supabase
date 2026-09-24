@@ -76,11 +76,11 @@ export function blocoPerguntasRecentes(messages: readonly Msg[], limite = MAX_PE
   const corta = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
   const linhas = ultimas.map((p) => {
     const quem = p.autor === 'voce' ? 'você' : 'atendente';
-    const resposta = p.respostas.length ? `"${corta(p.respostas.join(' / '), 160)}"` : '(ainda sem resposta)';
-    return `- ${quem}: "${corta(p.pergunta, 160)}" → lead: ${resposta}`;
+    const depois = p.respostas.length ? `"${corta(p.respostas.join(' / '), 160)}"` : '(nada ainda)';
+    return `- ${quem}: "${corta(p.pergunta, 160)}" → o lead escreveu depois: ${depois}`;
   });
   return '[PERGUNTAS JÁ FEITAS NESTA CONVERSA — tirado do histórico; não é fala do lead]\n'
     + linhas.join('\n')
-    + '\nNão refaça nenhuma pergunta que já tem resposta acima, nem com outras palavras: use a resposta e siga. '
-    + 'Pergunta ainda sem resposta pode ser retomada uma vez, de outro jeito.';
+    + '\nSe o que o lead escreveu depois já responde a pergunta, não a refaça, nem com outras palavras: use a resposta e siga. '
+    + 'Se não responde, você pode retomá-la uma vez, de outro jeito.';
 }
