@@ -44,6 +44,7 @@ import { comGanchoDoLote } from '../crm-agente-sdr/ganchoLote.ts';
 import { bloqueioProximaTurmaDeEstudante } from '../crm-agente-sdr/tools.ts';
 import { blocoConviteAgenda } from '../crm-agente-sdr/contexto.ts';
 import { resultadoConfirmacao } from '../crm-agente-sdr/confirmacaoAgendamento.ts';
+import { blocoPerguntasRecentes } from '../crm-agente-sdr/perguntasRecentes.ts';
 import { diagnosticoDoProvedor, disponibilidadeSimulada, executarFollowupSimulado, executarSimulacao, extrairUso, MAX_CARACTERES_SIMULACAO, validarEntradaSimulacao, type AgenteRouter } from './simulacao.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
@@ -130,6 +131,7 @@ async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimula
         },
       }, 'valor', 'harness-consulta-valor', {
         condicao: ficha ? 'a condição do primeiro lote promocional' : 'a condição especial que a secretaria liberou hoje',
+        variante: Math.floor(Math.random() * 3),
       }));
       // Ficha: espelho da trava do executor real — sem o dado da coleta o cronograma não sai;
       // bloqueio em turno anterior + lead insistiu ⇒ libera.
@@ -431,7 +433,11 @@ Deno.serve(async (req) => {
         aberturaPendente = false;
         return comAberturaNumero(texto, 0);
       },
-      fichaDaVolta: blocoDaFicha,
+      // Mesma composição da produção: ficha + perguntas já feitas, derivadas do histórico da volta.
+      fichaDaVolta: (messages) => {
+        const base = blocoDaFicha();
+        return base ? [base, blocoPerguntasRecentes(messages)].filter(Boolean).join('\n\n') : undefined;
+      },
       aoResponder: (texto) => {
         if (!fichaSim) return;
         const entradaFicha = { cadastro: fichaSim.cadastro, jornada: fichaSim.jornada, inicioRodada: fichaSim.inicioRodada };

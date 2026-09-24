@@ -7,7 +7,24 @@ Não reenvie espontaneamente nem repita chamadas na mesma rodada. Consulta com c
 FALHA NO MATERIAL NÃO ENCERRA O ATENDIMENTO: explique que não está conseguindo enviar o cronograma pelo WhatsApp agora (se desconhecido, que não conseguiu confirmar). Se reenvio_agendado_id estiver presente no resultado atual, diga que assim que o envio normalizar tenta enviar novamente; sem esse registro não prometa envio automático. Não invente uma instabilidade geral do WhatsApp para arquivo ausente ou erro de configuração. Pergunte "Enquanto isso, podemos continuar com o agendamento?" e encerre a resposta nessa única pergunta. Não emende coleta de dados, qualificação, horários ou argumento de venda: espere uma nova mensagem do lead. Se o lead aceitar, retome a qualificação/agenda sem exigir que o PDF tenha aberto, mantendo elegibilidade e escolha explícita de dia e horário. Se preferir aguardar o material, respeite sem insistir. Não chame pausa_ia, não anuncie ajuda humana nem despeça apenas por falha do arquivo. Pedido explícito de humano ou de parar mantém o tratamento normal.
 Quando o envio for aceito/entregue/lido, pergunte se o arquivo apareceu e abriu, e aguarde a confirmação de acesso antes de retomar Meet, leitura ou retorno, salvo se o lead já aceitou continuar apesar da dificuldade de envio. Um status atualizado prevalece sobre tool_result antigo ou frase antiga dizendo "enviado com sucesso". Estas regras prevalecem sobre exemplos antigos e descrições de ferramentas que mandem pausar por falha de material.`;
 
-// Mantém informações de preço em chamadas mistas, mesmo quando o PDF falha.
+// Três versões de cada frase (24/09/2026): a Luna copia o guia ao pé da letra, então sem isto
+// todo lead recebia exatamente o mesmo texto. Mesmo sentido e mesmo tom; o sorteio é em código.
+const FRASES_VALOR = [
+  (integral: string) => `o valor integral da pós é ${integral}.`,
+  (integral: string) => `a pós sai por ${integral} no valor integral.`,
+  (integral: string) => `no valor integral, a pós fica ${integral}.`,
+];
+const FRASES_CONDICAO = [
+  (condicao: string) => `${condicao} é apresentada na conversa rápida com o monitor.`,
+  (condicao: string) => `quem te apresenta ${condicao} é o monitor, numa conversa rápida.`,
+  (condicao: string) => `${condicao} eu não consigo passar por aqui, ela é liberada na conversa rápida com o monitor.`,
+];
+const FRASES_MATRICULA = [
+  (matricula: string, link: string) => `se preferir garantir sua vaga direto no valor integral, a matrícula ${matricula} nesse link: ${link}`,
+  (matricula: string, link: string) => `e se quiser já garantir sua vaga no valor integral, a matrícula ${matricula} por aqui: ${link}`,
+  (matricula: string, link: string) => `caso prefira fechar direto no valor integral, a matrícula ${matricula} nesse link: ${link}`,
+];
+
 /**
  * Como responder à pergunta de preço (24/09/2026, teste do Gustavo com a Luna). Só os fatos
  * ("Valor integral… Matrícula… link") viravam um parágrafo único copiado na mesma ordem, sem
@@ -15,7 +32,7 @@ Quando o envio for aceito/entregue/lido, pergunte se o arquivo apareceu e abriu,
  * divisor em código só corta em linha em branco ou acima de 240 caracteres). A Luna segue o
  * retorno da tool ao pé da letra, então o formato vai aqui, no ponto de uso.
  */
-export function guiaRespostaValor(d: Record<string, unknown>, condicao: string): string | null {
+export function guiaRespostaValor(d: Record<string, unknown>, condicao: string, variante = 0): string | null {
   const integral = typeof d.valor_integral === 'string' ? d.valor_integral.trim() : '';
   if (!integral) return null;
   // A API às vezes manda "R$ 492,50 e o link da matrícula https://…" num campo só.
@@ -23,11 +40,12 @@ export function guiaRespostaValor(d: Record<string, unknown>, condicao: string):
   const link = (typeof d.link_matricula === 'string' && d.link_matricula.trim())
     || matriculaBruta.match(/https?:\/\/[^\s<>]+/)?.[0]?.replace(/[.,;:!?)]+$/, '') || '';
   const valorMatricula = matriculaBruta.match(/R\$\s*[\d.,]*\d/)?.[0] ?? '';
+  // Três versões inteiras (A, B, C): as frases de uma versão foram escritas para ler bem juntas.
+  const v = ((Math.trunc(variante) % 3) + 3) % 3;
   const passos = [
-    `1) o valor: "o valor integral da pós é ${integral}."`,
-    `2) a condição: "${condicao} é apresentada na conversa rápida com o monitor."`,
-    ...(link ? [`3) o caminho direto, numa mensagem só dele: "se preferir garantir sua vaga direto no valor integral, `
-      + `a matrícula ${valorMatricula ? `é ${valorMatricula} ` : 'é feita '}nesse link: ${link}"`] : []),
+    `1) o valor: "${FRASES_VALOR[v](integral)}"`,
+    `2) a condição: "${FRASES_CONDICAO[v](condicao)}"`,
+    ...(link ? [`3) o caminho direto, numa mensagem só dele: "${FRASES_MATRICULA[v](valorMatricula ? `é ${valorMatricula}` : 'é feita', link)}"`] : []),
     `${link ? 4 : 3}) a ação: UMA pergunta convidando pra conversa com o monitor, no tempo do convite de agenda do contexto (hoje ou amanhã).`,
   ];
   return 'COMO RESPONDER ao lead: mensagens curtas, separadas por UMA LINHA EM BRANCO, no seu tom:\n'
@@ -35,8 +53,9 @@ export function guiaRespostaValor(d: Record<string, unknown>, condicao: string):
     + '\nNunca mande tudo num parágrafo só nem termine a resposta no link.';
 }
 
+// Mantém informações de preço em chamadas mistas, mesmo quando o PDF falha.
 export function montarRetornoInformacoes(httpOk: boolean, valor: unknown, conteudo: string, id: string,
-  opcoes: { condicao?: string } = {}) {
+  opcoes: { condicao?: string; variante?: number } = {}) {
   const body = objetoMaterial(valor);
   const d = objetoMaterial(body.data ?? body);
   const pedeMaterial = conteudo !== 'valor';
@@ -67,7 +86,7 @@ export function montarRetornoInformacoes(httpOk: boolean, valor: unknown, conteu
     if (!erroEnvelope && d.valor_matricula) partes.push(`Matrícula: ${d.valor_matricula}. Nunca diga que esse valor pode ser reduzido ou negociado.`);
     if (!erroEnvelope && d.link_matricula) partes.push(`Link da matrícula no valor integral: ${d.link_matricula}.`);
     // Só na consulta de VALOR: com cronograma junto, quem manda na resposta é a instrução do envio.
-    const guia = conteudo === 'valor' && !erroEnvelope ? guiaRespostaValor(d, opcoes.condicao ?? 'a condição especial') : null;
+    const guia = conteudo === 'valor' && !erroEnvelope ? guiaRespostaValor(d, opcoes.condicao ?? 'a condição especial', opcoes.variante ?? 0) : null;
     if (guia) partes.push(`\n${guia}`);
   }
   return { id, ...envio, ...reenvio,

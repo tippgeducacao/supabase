@@ -61,6 +61,20 @@ describe('contrato de envio do cronograma', () => {
     expect(retorno.resultado).toContain('Nunca mande tudo num parágrafo só nem termine a resposta no link.');
   });
 
+  it('três versões do guia de valor, todas com os mesmos fatos, link e pergunta no fim', () => {
+    const d = { valor_integral: 'R$ 27.429 em até 24x no cartão de crédito', valor_matricula: 'R$ 492,50 e o link da matrícula https://go.eduq.tec.br/r/x' };
+    const versoes = [0, 1, 2].map((v) => guiaRespostaValor(d, 'a condição do primeiro lote promocional', v)!);
+    expect(new Set(versoes).size).toBe(3);
+    for (const guia of versoes) {
+      expect(guia).toContain('R$ 27.429 em até 24x no cartão de crédito');
+      expect(guia).toContain('a condição do primeiro lote promocional');
+      expect(guia).toContain('R$ 492,50');
+      expect(guia).toContain('https://go.eduq.tec.br/r/x"');
+      expect(guia).toContain('a ação: UMA pergunta');
+    }
+    expect(guiaRespostaValor(d, 'a condição do primeiro lote promocional', 3)).toBe(versoes[0]); // fora da faixa volta ao começo
+  });
+
   it('guia de valor: sem link a matrícula some e a ação vira o passo 3; com cronograma junto não há guia', () => {
     expect(guiaRespostaValor({ valor_integral: 'R$ 4.200' }, 'a condição especial')).toContain('3) a ação');
     expect(guiaRespostaValor({}, 'x')).toBeNull();

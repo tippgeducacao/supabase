@@ -982,6 +982,8 @@ async function enviaInformacoes(supabase: any, input: any, ctx: CtxConversa, too
   // Mesmo nome da condição que o prompt da conversa usa: gancho do lote no canário (ganchoLote.ts).
   return montarRetornoInformacoes(res.ok, body, conteudo, toolUseId, {
     condicao: ctx.ficha ? 'a condição do primeiro lote promocional' : 'a condição especial que a secretaria liberou hoje',
+    // Versão das frases do guia de preço sorteada a cada consulta (envioMateriais.ts).
+    variante: Math.floor(Math.random() * 3),
   });
 }
 

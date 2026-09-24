@@ -20,6 +20,7 @@ import { AGENTE_AULA, type AulaParaPrompt, montarVarsAula } from './prompts-aula
 import { comBlocoDaEscola, comLinkPedido, comPresenteNaDespedida, jaTemOPresente, LINK_ESCOLA_GRATUITA } from './escolaGratuita.ts';
 import { respostaDoEncerramento, toolConcluida, type Encerramento } from './encerramento.ts';
 import { confirmacaoDoResultado, falaEntregaConfirmacao, textoConfirmacaoAgendamento, type ConfirmacaoAgendamento } from './confirmacaoAgendamento.ts';
+import { blocoPerguntasRecentes } from './perguntasRecentes.ts';
 import { comContinuidadeWebchat } from './continuidadeWebchat.ts';
 import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoCurso, notaDoNome, renderPrompt } from './contexto.ts';
 import { atualizarAgenteComRatchet, atualizarLead, avaliarFimDoHistorico, buscarLead, carregarHistorico, comEntradaPendente, criarLead, excluirDadosLead, gravarMensagem, limparParaRouter, sanitizarHistorico } from './historico.ts';
@@ -824,11 +825,13 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     const instrucaoEncerramento = retornoPorFormatura ? INSTRUCAO_POS_RETORNO : INSTRUCAO_POS_PAUSA;
     const inicioLlm = Date.now();
     tel.registrar('llm_inicio', { volta: rodada + 1, provedor: provedor?.nome ?? 'anthropic' });
+    const baseFicha = aulaPiloto ? `DADOS COLETADOS (não são um roteiro): ${JSON.stringify(ficha?.entrada ?? {})}` : ficha?.texto;
     const pedidoPrincipal = {
       promptAgente,
       contextoEntregaMateriais,
       // Sem o bloco (leitura falhou), a instrução também fica de fora: ela aponta para ele.
-      contextoFicha: aulaPiloto ? `DADOS COLETADOS (não são um roteiro): ${JSON.stringify(ficha?.entrada ?? {})}` : ficha?.texto,
+      // Perguntas já feitas + respostas vêm do histórico a cada volta (perguntasRecentes.ts).
+      contextoFicha: baseFicha ? [baseFicha, blocoPerguntasRecentes(messages)].filter(Boolean).join('\n\n') : undefined,
       comFicha: Boolean(ficha) || aulaPiloto,
       ...(aulaPiloto ? { instrucaoFicha: INSTRUCAO_AULA_PILOTO } : {}),
       // Encerramento vence reação: a despedida é o que importa nessa volta.

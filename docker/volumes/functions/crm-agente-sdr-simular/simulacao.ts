@@ -286,7 +286,7 @@ export type DependenciasSimulacao = {
   /** Decora apenas a fala final (ex.: abertura de troca), com estado local do ensaio. */
   prepararFala?: (texto: string) => string;
   /** Ficha do atendimento da VOLTA (não do turno): a tool da volta anterior pode ter mudado a coleta, como na produção. */
-  fichaDaVolta?: () => string | undefined;
+  fichaDaVolta?: (messages: Msg[]) => string | undefined;
   /** Texto final do João no turno (o que o lead leria): a ficha anota as perguntas feitas, como na produção. */
   aoResponder?: (texto: string) => void;
 };
@@ -316,7 +316,7 @@ export async function executarSimulacao(entrada: EntradaSimulacao, deps: Depende
       confirmacaoPendente = null;
     };
     for (let volta = 0; volta < 6; volta++) {
-      const contextoFicha = deps.fichaDaVolta?.();
+      const contextoFicha = deps.fichaDaVolta?.(sanitizarHistorico(messages));
       const resp = await deps.chamarPrincipal({
         ...rodada, tools: encerrou ? [] : rodada.tools, messages: sanitizarHistorico(messages),
         ...(contextoFicha ? { contextoFicha } : {}),
