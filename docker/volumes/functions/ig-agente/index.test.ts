@@ -1,30 +1,36 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { TEXTOS } from './fluxo';
 
-// Exercita o ig-agente de ponta a ponta com banco, rede e o João simulados: nenhuma DM
-// sai de verdade, nenhuma linha é escrita.
+// Exercita o ig-agente de ponta a ponta com banco, rede e classificador simulados:
+// nenhuma DM sai de verdade, nenhuma linha é escrita.
 type Linha = Record<string, any>;
 const mocks = vi.hoisted(() => ({
-  responder: vi.fn(),
+  classificar: vi.fn(),
   fetch: vi.fn(),
   rpc: vi.fn(),
   estado: {} as {
     config: Linha | null; conta: Linha | null; perfil: Linha | null; segredo: Linha | null;
-    mensagens: Linha[]; conversa: Linha | null;
-    escritas: { tabela: string; op: string; payload: any; violacao?: string }[];
+    mensagens: Linha[]; conversa: Linha | null; conversaComErro?: boolean;
+    escritas: { tabela: string; op: string; payload: any; filtros: Record<string, unknown>; violacao?: string }[];
   },
 }));
 
 // Os CHECKs das tabelas REAIS. Sem eles este teste passou gravando status_entrega =
 // 'enviado', que o banco recusa — e em produção a IA se pausou depois da 1ª resposta
 // (24/09/2026), porque o eco da própria mensagem ficou parecendo de um humano.
+const ETAPAS = ['boas_vindas', 'pergunta_formacao', 'pergunta_whatsapp', 'escola_enviada', 'whatsapp_enviado', 'encerrada'];
 const CHECKS: Record<string, (p: Linha) => string | null> = {
   ig_mensagens: (p) => {
     if (!['sent', 'delivered', 'read', 'failed'].includes(p.status_entrega ?? 'sent')) return 'ig_mensagens_status_entrega_check';
     if (!['inbound', 'outbound'].includes(p.direcao)) return 'ig_mensagens_direcao_check';
     return null;
   },
-  ig_conversa_ia: (p) => (p.estagio !== undefined && !['validacao', 'qualificador'].includes(p.estagio)
-    ? 'ig_conversa_ia_estagio_check' : null),
+  ig_conversa_ia: (p) => {
+    if (p.estagio !== undefined && !['validacao', 'qualificador'].includes(p.estagio)) return 'ig_conversa_ia_estagio_check';
+    if (p.fluxo_etapa !== undefined && !ETAPAS.includes(p.fluxo_etapa)) return 'ig_conversa_ia_fluxo_etapa_check';
+    if (p.situacao != null && !['formado', 'estudante'].includes(p.situacao)) return 'ig_conversa_ia_situacao_check';
+    return null;
+  },
 };
 
 // Query builder mínimo do supabase-js: guarda filtros e responde conforme a tabela.
@@ -35,9 +41,15 @@ function builder(tabela: string) {
     if (q.violacao) return { data: null, error: { message: `new row violates check constraint "${q.violacao}"` } };
     if (q.op === 'upsert' || q.op === 'insert') return { data: null, error: null };
     if (q.op === 'update') {
-      if (tabela === 'ig_conversa_ia' && e.conversa && e.conversa.pausada === q.filtros['eq:pausada']) {
-        Object.assign(e.conversa, q.payload);
-        return { data: [{ igsid: e.conversa.igsid }], error: null };
+      if (tabela === 'ig_conversa_ia' && e.conversa) {
+        const bate = Object.entries(q.filtros).every(([k, v]) => {
+          const campo = k.replace(/^eq:/, '');
+          return !(campo in e.conversa!) || e.conversa![campo] === v;
+        });
+        if (bate) {
+          Object.assign(e.conversa, q.payload);
+          return { data: [{ igsid: e.conversa.igsid }], error: null };
+        }
       }
       return { data: [], error: null };
     }
@@ -46,8 +58,10 @@ function builder(tabela: string) {
     else if (tabela === 'ig_contas') dado = e.conta;
     else if (tabela === 'ig_perfis') dado = e.perfil;
     else if (tabela === 'ig_contas_secrets') dado = e.segredo;
-    else if (tabela === 'ig_conversa_ia') dado = e.conversa;
-    else if (tabela === 'ig_mensagens') {
+    else if (tabela === 'ig_conversa_ia') {
+      if (e.conversaComErro) return { data: null, error: { message: 'banco fora' } };
+      dado = e.conversa;
+    } else if (tabela === 'ig_mensagens') {
       if (q.filtros['eq:mid']) dado = e.mensagens.find((m) => m.mid === q.filtros['eq:mid']) ?? null;
       else if (q.filtros['neq:tipo']) {
         dado = [...e.mensagens].reverse().find((m) => m.direcao === 'inbound' && m.tipo !== 'reaction') ?? null;
@@ -58,8 +72,8 @@ function builder(tabela: string) {
   };
   const registrar = (op: string, payload: any) => {
     q.op = op; q.payload = payload;
-    q.violacao = op === 'update' ? null : CHECKS[tabela]?.(payload) ?? null;
-    e.escritas.push({ tabela, op, payload, ...(q.violacao ? { violacao: q.violacao } : {}) });
+    q.violacao = CHECKS[tabela]?.(payload) ?? null;
+    e.escritas.push({ tabela, op, payload, filtros: q.filtros, ...(q.violacao ? { violacao: q.violacao } : {}) });
     return q;
   };
   Object.assign(q, {
@@ -79,7 +93,7 @@ function builder(tabela: string) {
 vi.mock('https://esm.sh/@supabase/supabase-js@2.49.4', () => ({
   createClient: () => ({ from: (t: string) => builder(t), rpc: mocks.rpc }),
 }));
-vi.mock('../crm-webchat/agente.ts', () => ({ responderWebchat: mocks.responder }));
+vi.mock('./classificador.ts', () => ({ classificar: mocks.classificar }));
 
 const SERVICE = 'service-role-sintetica';
 let handler: (req: Request) => Promise<Response>;
@@ -98,6 +112,7 @@ afterEach(() => {
 });
 
 const INBOUND_EM = '2026-09-24T12:00:00.000Z';
+const neutra = { intencao: 'outro', situacao: 'nao_informou', area: null, telefone: null, resposta_pergunta: null };
 let reservas: Linha[];
 beforeEach(() => {
   vi.useFakeTimers();
@@ -107,8 +122,8 @@ beforeEach(() => {
     conta: { ig_user_id: '17841453422080445', ativo: true, agente_ia_ativo: true },
     perfil: { username: 'sutil_gu', nome: 'Gustavo Sutil' },
     segredo: { access_token: 'IGAA-sintetico' },
-    mensagens: [{ mid: 'm1', direcao: 'inbound', tipo: 'text', conteudo: 'oi, quero saber da pós', created_at: INBOUND_EM }],
-    conversa: { igsid: '999', pausada: false },
+    mensagens: [{ mid: 'm1', direcao: 'inbound', tipo: 'text', conteudo: 'quero!', created_at: INBOUND_EM }],
+    conversa: { igsid: '999', pausada: false, fluxo_etapa: 'boas_vindas', fluxo_tentativas: 0, situacao: null, respondido_ate: null, historico_desde: null },
     escritas: [],
   };
   reservas = [
@@ -118,10 +133,7 @@ beforeEach(() => {
   mocks.rpc.mockImplementation(async (nome: string) => (nome === 'ig_ia_reservar'
     ? { data: reservas.shift() ?? { status: 'sem_pendencia' }, error: null }
     : { data: true, error: null }));
-  mocks.responder.mockResolvedValue({
-    chunks: ['oi, gustavo!', 'qual área te interessa?'], estagio: 'validacao',
-    tools: [{ nome: 'consulta_pos_disponiveis', input: {}, mockado: false }],
-  });
+  mocks.classificar.mockResolvedValue({ classificacao: { ...neutra, intencao: 'aceita' }, erro: null });
   let n = 0;
   mocks.fetch.mockImplementation(async () => new Response(JSON.stringify({ recipient_id: '999', message_id: `saida-${++n}` })));
 });
@@ -139,35 +151,65 @@ async function chamar(corpo: Record<string, unknown>, auth = SERVICE) {
 const inbound = (mid = 'm1') => chamar({ evento: 'inbound', conta_id: 'conta-1', igsid: '999', mid });
 const textosEnviados = () => mocks.fetch.mock.calls.map(([, init]) => JSON.parse(init.body).message.text);
 const liberacao = () => mocks.rpc.mock.calls.find(([nome]) => nome === 'ig_ia_liberar')?.[1];
+const gravacaoDaEtapa = () => mocks.estado.escritas.find((w) => w.tabela === 'ig_conversa_ia' && w.op === 'update');
 
-describe('ig-agente: DM de quem está no teste', () => {
-  it('chama o João do chat do site no canal instagram, SEMPRE em modo teste, e responde pelo direct', async () => {
+describe('ig-agente: o roteiro do direct', () => {
+  it('"quero!" na boas-vindas → pergunta da formação com o nome, e a etapa anda', async () => {
     expect((await inbound()).status).toBe(200);
-    expect(mocks.responder).toHaveBeenCalledTimes(1);
-    const args = mocks.responder.mock.calls[0];
-    expect(args[0]).toBe('Gustavo Sutil');
-    expect(args[1]).toMatch(/^000\d{8}$/); // telefone sintético, nunca de um lead
-    expect(args[2]).toBeNull();
-    expect(args[3]).toEqual([{ role: 'user', text: 'oi, quero saber da pós' }]);
-    expect(args[7]).toBe(true); // modoTeste
-    expect(args[9]).toEqual({ canal: 'instagram', elegibilidadeInicial: null });
-
-    expect(textosEnviados()).toEqual(['oi, gustavo!', 'qual área te interessa?']);
+    expect(mocks.classificar).toHaveBeenCalledWith('boas_vindas', [], ['quero!']);
+    expect(textosEnviados()).toEqual([TEXTOS.perguntaFormacaoAceite('Gustavo')]);
     expect(mocks.fetch.mock.calls[0][0]).toContain('graph.instagram.com');
     expect(mocks.fetch.mock.calls[0][1].headers.Authorization).toBe('Bearer IGAA-sintetico');
 
-    const saidas = mocks.estado.escritas.filter((w) => w.tabela === 'ig_mensagens');
-    expect(saidas.map((w) => [w.op, w.payload.mid, w.payload.status_entrega, w.payload.metadata.origem])).toEqual([
-      ['upsert', 'saida-1', 'sent', 'ia'], ['upsert', 'saida-2', 'sent', 'ia'],
-    ]);
-    expect(liberacao()).toMatchObject({ p_respondido_ate: INBOUND_EM, p_estagio: 'validacao' });
+    const saida = mocks.estado.escritas.find((w) => w.tabela === 'ig_mensagens');
+    expect(saida).toMatchObject({ op: 'upsert', payload: { mid: 'saida-1', status_entrega: 'sent' } });
+    expect(saida!.payload.metadata).toMatchObject({ origem: 'ia', modo_teste: true, fluxo_etapa: 'pergunta_formacao' });
+
+    // A etapa só é gravada por quem segura a trava.
+    expect(gravacaoDaEtapa()).toMatchObject({ payload: { fluxo_etapa: 'pergunta_formacao', fluxo_tentativas: 0 } });
+    expect(Object.keys(gravacaoDaEtapa()!.filtros)).toContain('eq:reserva_token');
+    expect(liberacao()).toMatchObject({ p_respondido_ate: INBOUND_EM, p_estagio: null });
+    expect(liberacao().p_tools[0]).toMatchObject({ nome: 'roteiro', etapa: 'boas_vindas', proxima: 'pergunta_formacao' });
   });
 
-  it('elegibilidade simulada de uma rodada anterior volta para o João', async () => {
-    const estado = { curso: 'Sanidade Avícola', decisao: 'aprovado', motivo: 'ok', regra_versao: (await import('../crm-agente-sdr/elegibilidadeAgendamento')).VERSAO_REGRA_ELEGIBILIDADE };
-    reservas[0].teste_tool_chamadas = [{ nome: 'verificar_compatibilidade_curso', elegibilidade_teste: estado }];
+  it('só as mensagens NOVAS vão para o classificador; o resto é contexto', async () => {
+    mocks.estado.conversa!.respondido_ate = '2026-09-24T11:59:00.000Z';
+    mocks.estado.mensagens = [
+      { mid: 'm0', direcao: 'inbound', tipo: 'text', conteudo: 'oi', created_at: '2026-09-24T11:58:00.000Z' },
+      { mid: 'e0', direcao: 'outbound', tipo: 'text', conteudo: 'Quer receber o acesso?', created_at: '2026-09-24T11:58:30.000Z' },
+      { mid: 'm1', direcao: 'inbound', tipo: 'text', conteudo: 'quero!', created_at: INBOUND_EM },
+    ];
     await inbound();
-    expect(mocks.responder.mock.calls[0][9]).toEqual({ canal: 'instagram', elegibilidadeInicial: estado });
+    expect(mocks.classificar).toHaveBeenCalledWith('boas_vindas',
+      [{ role: 'user', text: 'oi' }, { role: 'assistant', text: 'Quer receber o acesso?' }], ['quero!']);
+  });
+
+  it('passou o WhatsApp → confirma no direct, grava o número e registra o envio SIMULADO', async () => {
+    Object.assign(mocks.estado.conversa!, { fluxo_etapa: 'pergunta_whatsapp', situacao: 'formado' });
+    mocks.estado.mensagens[0].conteudo = '46 9 9988-2268';
+    mocks.classificar.mockResolvedValue({ classificacao: neutra, erro: null });
+    await inbound();
+    expect(textosEnviados()).toEqual([TEXTOS.confirmacaoWhatsapp]);
+    expect(gravacaoDaEtapa()!.payload).toMatchObject({ fluxo_etapa: 'whatsapp_enviado', telefone: '5546999882268' });
+    expect(gravacaoDaEtapa()!.payload.whatsapp_enviado_em).toBeTruthy();
+    expect(liberacao().p_tools[0].whatsapp).toEqual({ simulado: true });
+  });
+
+  it('nem formado nem estudante → link da Escola e fim, sem WhatsApp', async () => {
+    mocks.estado.conversa!.fluxo_etapa = 'pergunta_formacao';
+    mocks.classificar.mockResolvedValue({ classificacao: { ...neutra, situacao: 'nenhum' }, erro: null });
+    await inbound();
+    expect(textosEnviados()).toEqual([TEXTOS.escola]);
+    expect(gravacaoDaEtapa()!.payload).toMatchObject({ fluxo_etapa: 'escola_enviada' });
+    expect(liberacao().p_tools[0].whatsapp).toBeUndefined();
+  });
+
+  it('classificador fora do ar → segue com a classificação neutra (repergunta), sem desculpa', async () => {
+    mocks.estado.conversa!.fluxo_etapa = 'pergunta_formacao';
+    mocks.classificar.mockResolvedValue({ classificacao: neutra, erro: 'Anthropic HTTP 529' });
+    await inbound();
+    expect(textosEnviados()).toEqual([TEXTOS.reperguntarFormacao]);
+    expect(liberacao().p_tools[0]).toMatchObject({ erro_classificador: 'Anthropic HTTP 529' });
   });
 });
 
@@ -181,7 +223,7 @@ describe('ig-agente: quando NÃO fala', () => {
   ])('%s', async (_caso, preparar) => {
     preparar();
     await inbound();
-    expect(mocks.responder).not.toHaveBeenCalled();
+    expect(mocks.classificar).not.toHaveBeenCalled();
     expect(mocks.fetch).not.toHaveBeenCalled();
     expect(mocks.rpc).not.toHaveBeenCalled();
   });
@@ -189,60 +231,66 @@ describe('ig-agente: quando NÃO fala', () => {
   it('chegou mensagem mais nova: a execução dela responde, não esta', async () => {
     mocks.estado.mensagens.push({ mid: 'm2', direcao: 'inbound', tipo: 'text', conteudo: 'e o valor?', created_at: '2026-09-24T12:00:03.000Z' });
     await inbound('m1');
-    expect(mocks.responder).not.toHaveBeenCalled();
+    expect(mocks.classificar).not.toHaveBeenCalled();
   });
 
   it('reação mais nova não rouba a vez da mensagem', async () => {
     mocks.estado.mensagens.push({ mid: 'r1', direcao: 'inbound', tipo: 'reaction', conteudo: '❤️', created_at: '2026-09-24T12:00:03.000Z' });
     await inbound('m1');
-    expect(mocks.responder).toHaveBeenCalledTimes(1);
+    expect(mocks.classificar).toHaveBeenCalledTimes(1);
   });
 
   it('pedido sem service_role é recusado', async () => {
     const r = await chamar({ evento: 'inbound', conta_id: 'conta-1', igsid: '999', mid: 'm1' }, 'anon');
     expect(r.status).toBe(401);
-    expect(mocks.responder).not.toHaveBeenCalled();
+    expect(mocks.classificar).not.toHaveBeenCalled();
   });
 });
 
 describe('ig-agente: envio', () => {
   it('humano assumiu no meio da rodada: para de mandar balão', async () => {
+    mocks.classificar.mockResolvedValue({ classificacao: { ...neutra, intencao: 'pergunta', resposta_pergunta: 'É gratuita, sim!' }, erro: null });
     mocks.fetch.mockImplementationOnce(async () => {
       mocks.estado.conversa!.pausada = true;
       return new Response(JSON.stringify({ message_id: 'saida-1' }));
     });
     await inbound();
-    expect(textosEnviados()).toEqual(['oi, gustavo!']);
+    expect(textosEnviados()).toEqual(['É gratuita, sim!']);
     expect(liberacao()).toMatchObject({ p_respondido_ate: INBOUND_EM });
   });
 
-  it('token morto: grava o erro e NÃO dá a mensagem como respondida', async () => {
+  it('token morto: grava a falha e NÃO dá a mensagem nem a etapa como resolvidas', async () => {
     mocks.fetch.mockImplementation(async () => new Response(JSON.stringify({
       error: { message: 'Error validating access token', code: 190 },
     }), { status: 400 }));
     await inbound();
-    expect(textosEnviados()).toEqual(['oi, gustavo!']);
-    const erro = mocks.estado.escritas.find((w) => w.tabela === 'ig_mensagens');
-    expect(erro).toMatchObject({ op: 'insert', payload: { status_entrega: 'failed', mid: null } });
+    expect(textosEnviados()).toEqual([TEXTOS.perguntaFormacaoAceite('Gustavo')]);
+    const falha = mocks.estado.escritas.find((w) => w.tabela === 'ig_mensagens');
+    expect(falha).toMatchObject({ op: 'insert', payload: { status_entrega: 'failed', mid: null } });
+    expect(gravacaoDaEtapa()).toBeUndefined();
     expect(liberacao()).toMatchObject({ p_respondido_ate: null });
   });
 
-  it('João falhou: manda a desculpa, marcada como sistema', async () => {
-    mocks.responder.mockRejectedValue(new Error('Anthropic fora'));
+  it('banco fora ao ler o estado: manda a desculpa, marcada como sistema', async () => {
+    mocks.estado.conversaComErro = true;
     await inbound();
     expect(textosEnviados()).toEqual(['Desculpa, tive um problema aqui e não consegui responder. Pode mandar de novo? 🙏']);
     const saida = mocks.estado.escritas.find((w) => w.tabela === 'ig_mensagens');
-    expect(saida!.payload.metadata).toMatchObject({ origem: 'sistema', erro_cerebro: 'Anthropic fora' });
+    expect(saida!.payload.metadata).toMatchObject({ origem: 'sistema' });
+    expect(saida!.payload.metadata.erro_cerebro).toContain('banco fora');
   });
 });
 
 describe('ig-agente: /reset', () => {
-  it('zera a conversa, tira a pausa e confirma — sem chamar o João', async () => {
+  it('zera a conversa e o roteiro, tira a pausa e confirma — sem classificar', async () => {
     mocks.estado.mensagens[0].conteudo = ' /RESET ';
     await inbound();
-    expect(mocks.responder).not.toHaveBeenCalled();
+    expect(mocks.classificar).not.toHaveBeenCalled();
     const reset = mocks.estado.escritas.find((w) => w.tabela === 'ig_conversa_ia');
-    expect(reset).toMatchObject({ op: 'upsert', payload: { pausada: false, estagio: 'validacao', teste_tool_chamadas: [] } });
+    expect(reset).toMatchObject({
+      op: 'upsert',
+      payload: { pausada: false, fluxo_etapa: 'boas_vindas', fluxo_tentativas: 0, situacao: null, telefone: null, teste_tool_chamadas: [] },
+    });
     expect(reset!.payload.historico_desde).toBeTruthy();
     expect(textosEnviados()[0]).toContain('conversa zerada');
     const saida = mocks.estado.escritas.find((w) => w.tabela === 'ig_mensagens');

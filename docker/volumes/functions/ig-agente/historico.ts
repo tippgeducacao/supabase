@@ -1,7 +1,5 @@
 // Peças PURAS do ig-agente (testáveis sem banco nem rede): como a conversa do direct
-// vira o histórico que o João lê, qual elegibilidade simulada vale na rodada, o
-// telefone sintético do teste e o ritmo entre balões.
-import { type EstadoElegibilidade, VERSAO_REGRA_ELEGIBILIDADE } from "../crm-agente-sdr/elegibilidadeAgendamento.ts";
+// vira o histórico que o classificador lê, a janela de 24 h e o ritmo entre balões.
 
 export type LinhaIg = {
   direcao: string | null;
@@ -63,37 +61,6 @@ export function montarHistoricoIg(linhas: LinhaIg[]): TurnoHistorico[] {
     }
   }
   return turnos.slice(-MAX_MENSAGENS_HISTORICO);
-}
-
-/**
- * Última decisão de elegibilidade SIMULADA registrada nesta conversa. No modo teste o
- * agendamento só "confirma" depois de uma análise aprovada do mesmo curso — e a análise
- * pode acontecer numa mensagem e a confirmação em outra. Mesma leitura que o webchat faz
- * de `webchat_sessoes.teste_tool_chamadas`.
- */
-export function ultimaElegibilidadeTeste(chamadas: unknown): EstadoElegibilidade | null {
-  if (!Array.isArray(chamadas)) return null;
-  let ultima: EstadoElegibilidade | null = null;
-  for (const chamada of chamadas) {
-    // deno-lint-ignore no-explicit-any
-    const estado = (chamada as any)?.elegibilidade_teste;
-    if (estado?.regra_versao === VERSAO_REGRA_ELEGIBILIDADE
-      && typeof estado.curso === "string"
-      && ["aprovado", "reprovado", "pendente"].includes(estado.decisao)) {
-      ultima = { ...estado };
-    }
-  }
-  return ultima;
-}
-
-/**
- * Telefone SINTÉTICO do teste: começa com 000, então nunca é o número de ninguém. As
- * tools que consultam de verdade no teste (horários, cursos, objeções) recebem este; as
- * que teriam efeito são simuladas (crm-webchat/modoTeste.ts).
- */
-export function telefoneTesteIg(igsid: string): string {
-  const digitos = String(igsid ?? "").replace(/\D/g, "");
-  return `000${digitos.slice(-8).padStart(8, "0")}`;
 }
 
 /** Pausa antes de cada balão depois do primeiro: parece digitação, sem arrastar a conversa. */

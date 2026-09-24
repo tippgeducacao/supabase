@@ -1,35 +1,31 @@
-// ig-agente — o João no DIRECT DO INSTAGRAM (FASE DE TESTE, 24/09/2026)
+// ig-agente — a IA do DIRECT DO INSTAGRAM (FASE DE TESTE, desde 24/09/2026)
 // ----------------------------------------------------------------------------
 // Quem chama: o ig-webhook, com service_role, em dois eventos:
 //   inbound  DM de alguém que passou no gate (ig_agente_config + ig_contas + @ do teste)
 //   echo     mensagem NOSSA numa conversa em que a IA já está. Se não foi a IA que
 //            mandou, foi alguém do time pelo app do Instagram: a IA pausa ali.
 //
-// O cérebro é o do chat do site (crm-webchat/agente.ts → responderWebchat, canal
-// 'instagram'), SEMPRE em modo teste: consulta de verdade (horários, cursos, objeções),
-// mas agendamento, cronograma, dados do lead e pausa são SIMULADOS. Nada entra no CRM,
-// na agenda de um monitor nem no WhatsApp de ninguém.
+// O cérebro é o ROTEIRO do Instagram (fluxo.ts, desenhado pelo Gustavo): a IA só entende
+// a resposta da pessoa (classificador.ts) e as frases são fixas. Objetivo do roteiro:
+// saber se a pessoa é formada ou estudante e pegar o WhatsApp, o canal de vendas.
+// ⚠️ Nesta fase o efeito do WhatsApp é SIMULADO: nada entra no CRM e nenhum template sai
+// até o template do portfólio ser aprovado pela Meta (ver enviarParaWhatsapp()).
 //
 // Uma DM, do começo ao fim (o "canvas"):
 //   gate → token → "/reset"? → espera N s de silêncio → reserva a conversa (trava) →
-//   histórico das últimas 24 h → João → balões pela API do Instagram → libera a trava
-//   (cursor + estágio + tools) → chegou mensagem nova no meio? repete.
+//   histórico das últimas 24 h → classificador → roteiro decide o próximo passo →
+//   balões pela API do Instagram → grava a etapa e libera a trava → chegou mensagem
+//   nova no meio? repete.
 //
 // Responde 200 na hora e trabalha em background (EdgeRuntime.waitUntil), como o
 // crm-agente-sdr. Deploy por git push (deploy-edges.yml). Mapa: docs/Instagram (IA + Chat).md
 // ----------------------------------------------------------------------------
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
-import { responderWebchat, type WebchatToolChamada } from "../crm-webchat/agente.ts";
 import { avaliarGateIg } from "../_shared/igAgenteGate.ts";
 import { dividirPorBytes, ehTokenInvalido, enviarTextoIg, type ResultadoEnvioIg } from "../_shared/igMensageria.ts";
-import {
-  atrasoEntreBaloesMs,
-  inicioDaJanela,
-  type LinhaIg,
-  montarHistoricoIg,
-  telefoneTesteIg,
-  ultimaElegibilidadeTeste,
-} from "./historico.ts";
+import { classificar } from "./classificador.ts";
+import { decidirPasso, type EtapaFluxo, type Passo } from "./fluxo.ts";
+import { atrasoEntreBaloesMs, inicioDaJanela, type LinhaIg, montarHistoricoIg } from "./historico.ts";
 
 declare const EdgeRuntime: { waitUntil?: (p: Promise<unknown>) => void } | undefined;
 
@@ -155,6 +151,12 @@ async function zerarConversa(c: Conversa) {
     reserva_token: null,
     reserva_ate: null,
     teste_tool_chamadas: [],
+    fluxo_etapa: "boas_vindas",
+    fluxo_tentativas: 0,
+    situacao: null,
+    area: null,
+    telefone: null,
+    whatsapp_enviado_em: null,
     updated_at: agora,
   }, { onConflict: "conta_id,igsid" });
   if (error) {
@@ -166,16 +168,44 @@ async function zerarConversa(c: Conversa) {
   await registrarSaida(c, texto, envio, { origem: "sistema", comando: "reset" });
 }
 
-// ── Uma rodada: histórico → João → balões → libera a trava ────────────────────
+// ── WhatsApp capturado: CRM + template do portfólio ───────────────────────────
+// ⚠️ SIMULADO nesta fase (24/09/2026): o template com o PDF do portfólio e o botão
+// "Receber acesso" ainda não existe na Meta. Quando for aprovado, aqui entram: criar a
+// oportunidade no funil 1.5 INSTAGRAM (etapa Formados | Na graduação) e mandar o
+// template pelo número "João PPGVET". Hoje só registra o que FARIA.
+function enviarParaWhatsapp(c: Conversa, passo: Passo, situacaoSalva: string | null) {
+  log("WhatsApp capturado (SIMULADO — sem CRM e sem template ainda):", JSON.stringify({
+    igsid: c.igsid,
+    telefone: passo.telefone,
+    situacao: passo.situacao ?? situacaoSalva,
+    etapa_crm: (passo.situacao ?? situacaoSalva) === "estudante" ? "Na graduação" : "Formados",
+  }));
+  return { simulado: true };
+}
+
+function instante(v: string | null | undefined): number {
+  const t = v ? new Date(v).getTime() : NaN;
+  return Number.isFinite(t) ? t : -Infinity;
+}
+
+// ── Uma rodada: histórico → classificador → roteiro → balões → libera a trava ──
 // Devolve false quando não adianta tentar a próxima leva (token da conta morto).
 async function responderRodada(c: Conversa, tokenReserva: string, reserva: Reserva): Promise<boolean> {
-  const estagioSalvo = reserva.estagio === "qualificador" ? "qualificador" : "validacao";
   let chunks: string[] = [];
-  let estagio: "validacao" | "qualificador" = estagioSalvo;
-  let tools: WebchatToolChamada[] = [];
+  let passo: Passo | null = null;
+  let etapa: EtapaFluxo = "boas_vindas";
+  let situacaoSalva: string | null = null;
+  let registro: Record<string, unknown> = {};
   let erroCerebro: string | null = null;
 
   try {
+    const { data: estado, error: erroEstado } = await supabase.from("ig_conversa_ia")
+      .select("fluxo_etapa, fluxo_tentativas, situacao, respondido_ate, historico_desde")
+      .eq("conta_id", c.contaId).eq("igsid", c.igsid).maybeSingle();
+    if (erroEstado) throw new Error(`estado: ${erroEstado.message}`);
+    etapa = (estado?.fluxo_etapa ?? "boas_vindas") as EtapaFluxo;
+    situacaoSalva = estado?.situacao ?? null;
+
     const { data: linhas, error } = await supabase.from("ig_mensagens")
       .select("direcao, tipo, conteudo, created_at")
       .eq("conta_id", c.contaId)
@@ -185,32 +215,35 @@ async function responderRodada(c: Conversa, tokenReserva: string, reserva: Reser
       .order("created_at", { ascending: true })
       .limit(200);
     if (error) throw new Error(`histórico: ${error.message}`);
-    const resposta = await responderWebchat(
-      c.nome,
-      telefoneTesteIg(c.igsid),
-      null,
-      montarHistoricoIg((linhas ?? []) as LinhaIg[]),
-      estagioSalvo,
-      null,
-      "pos",
-      true, // SEMPRE teste: agendamento, cronograma e dados do lead são simulados
-      null,
-      { canal: "instagram", elegibilidadeInicial: ultimaElegibilidadeTeste(reserva.teste_tool_chamadas) },
-    );
-    chunks = resposta.chunks;
-    estagio = resposta.estagio;
-    tools = resposta.tools;
+
+    // O que esta rodada responde = o que a pessoa mandou depois da última resposta.
+    const corte = Math.max(instante(estado?.respondido_ate), instante(estado?.historico_desde));
+    const todas = (linhas ?? []) as LinhaIg[];
+    const ehNova = (l: LinhaIg) => l.direcao === "inbound" && instante(l.created_at) > corte;
+    const novas = montarHistoricoIg(todas.filter(ehNova)).map((t) => t.text);
+    const historico = montarHistoricoIg(todas.filter((l) => !ehNova(l)));
+
+    const { classificacao, erro } = await classificar(etapa, historico, novas);
+    if (erro) log("classificador:", erro);
+    passo = decidirPasso(etapa, classificacao, {
+      nomePerfil: c.nome,
+      textoNovo: novas.join("\n"),
+      tentativas: Number(estado?.fluxo_tentativas ?? 0),
+    });
+    chunks = passo.mensagens;
+    registro = { nome: "roteiro", etapa, classificacao, proxima: passo.proximaEtapa, erro_classificador: erro };
   } catch (e) {
     erroCerebro = (e instanceof Error ? e.message : String(e)).slice(0, 500);
-    log("o João falhou:", erroCerebro);
+    log("a rodada falhou:", erroCerebro);
     chunks = [DESCULPA];
   }
+
+  if (passo?.enviarWhatsapp) registro.whatsapp = enviarParaWhatsapp(c, passo, situacaoSalva);
 
   const metadata = {
     origem: erroCerebro ? "sistema" : "ia",
     modo_teste: true,
-    estagio,
-    tools: tools.map((t) => t.nome),
+    fluxo_etapa: passo?.proximaEtapa ?? etapa,
     ...(erroCerebro ? { erro_cerebro: erroCerebro } : {}),
   };
   const baloes = chunks.flatMap((chunk) => dividirPorBytes(chunk));
@@ -236,15 +269,28 @@ async function responderRodada(c: Conversa, tokenReserva: string, reserva: Reser
   }
 
   // O cursor só anda se a rodada resolveu: respondeu, escolheu o silêncio ou o humano
-  // assumiu. Envio que falhou deixa a mensagem pendente para a próxima DM tentar de novo.
+  // assumiu. Envio que falhou deixa a mensagem pendente para a próxima DM tentar de novo
+  // — e a etapa do roteiro também não anda, para a pergunta ser refeita.
   const resolveu = baloes.length === 0 || enviados > 0 || humanoAssumiu;
+  if (resolveu && passo) {
+    const agora = new Date().toISOString();
+    const { error: erroEtapa } = await supabase.from("ig_conversa_ia").update({
+      fluxo_etapa: passo.proximaEtapa,
+      fluxo_tentativas: passo.tentativas,
+      ...(passo.situacao ? { situacao: passo.situacao } : {}),
+      ...(passo.area ? { area: passo.area } : {}),
+      ...(passo.telefone ? { telefone: passo.telefone, whatsapp_enviado_em: agora } : {}),
+      updated_at: agora,
+    }).eq("conta_id", c.contaId).eq("igsid", c.igsid).eq("reserva_token", tokenReserva);
+    if (erroEtapa) log("não gravou a etapa do roteiro:", erroEtapa.message);
+  }
   const { error } = await supabase.rpc("ig_ia_liberar", {
     p_conta_id: c.contaId,
     p_igsid: c.igsid,
     p_token: tokenReserva,
     p_respondido_ate: resolveu ? reserva.ultimo_inbound_em : null,
-    p_estagio: estagio,
-    p_tools: tools.map((t) => ({ ...t, em: new Date().toISOString() })),
+    p_estagio: null,
+    p_tools: [{ ...registro, em: new Date().toISOString() }],
   });
   if (error) log("não liberou a trava:", error.message);
   return resolveu && !tokenMorto;
