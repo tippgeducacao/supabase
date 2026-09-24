@@ -8,7 +8,35 @@ FALHA NO MATERIAL NÃO ENCERRA O ATENDIMENTO: explique que não está conseguind
 Quando o envio for aceito/entregue/lido, pergunte se o arquivo apareceu e abriu, e aguarde a confirmação de acesso antes de retomar Meet, leitura ou retorno, salvo se o lead já aceitou continuar apesar da dificuldade de envio. Um status atualizado prevalece sobre tool_result antigo ou frase antiga dizendo "enviado com sucesso". Estas regras prevalecem sobre exemplos antigos e descrições de ferramentas que mandem pausar por falha de material.`;
 
 // Mantém informações de preço em chamadas mistas, mesmo quando o PDF falha.
-export function montarRetornoInformacoes(httpOk: boolean, valor: unknown, conteudo: string, id: string) {
+/**
+ * Como responder à pergunta de preço (24/09/2026, teste do Gustavo com a Luna). Só os fatos
+ * ("Valor integral… Matrícula… link") viravam um parágrafo único copiado na mesma ordem, sem
+ * pergunta no fim e com o link fechando a mensagem — robotizado, sem ação e num balão só (o
+ * divisor em código só corta em linha em branco ou acima de 240 caracteres). A Luna segue o
+ * retorno da tool ao pé da letra, então o formato vai aqui, no ponto de uso.
+ */
+export function guiaRespostaValor(d: Record<string, unknown>, condicao: string): string | null {
+  const integral = typeof d.valor_integral === 'string' ? d.valor_integral.trim() : '';
+  if (!integral) return null;
+  // A API às vezes manda "R$ 492,50 e o link da matrícula https://…" num campo só.
+  const matriculaBruta = typeof d.valor_matricula === 'string' ? d.valor_matricula : '';
+  const link = (typeof d.link_matricula === 'string' && d.link_matricula.trim())
+    || matriculaBruta.match(/https?:\/\/[^\s<>]+/)?.[0]?.replace(/[.,;:!?)]+$/, '') || '';
+  const valorMatricula = matriculaBruta.match(/R\$\s*[\d.,]*\d/)?.[0] ?? '';
+  const passos = [
+    `1) o valor: "o valor integral da pós é ${integral}."`,
+    `2) a condição: "${condicao} é apresentada na conversa rápida com o monitor."`,
+    ...(link ? [`3) o caminho direto, numa mensagem só dele: "se preferir garantir sua vaga direto no valor integral, `
+      + `a matrícula ${valorMatricula ? `é ${valorMatricula} ` : 'é feita '}nesse link: ${link}"`] : []),
+    `${link ? 4 : 3}) a ação: UMA pergunta convidando pra conversa com o monitor, no tempo do convite de agenda do contexto (hoje ou amanhã).`,
+  ];
+  return 'COMO RESPONDER ao lead: mensagens curtas, separadas por UMA LINHA EM BRANCO, no seu tom:\n'
+    + passos.join('\n')
+    + '\nNunca mande tudo num parágrafo só nem termine a resposta no link.';
+}
+
+export function montarRetornoInformacoes(httpOk: boolean, valor: unknown, conteudo: string, id: string,
+  opcoes: { condicao?: string } = {}) {
   const body = objetoMaterial(valor);
   const d = objetoMaterial(body.data ?? body);
   const pedeMaterial = conteudo !== 'valor';
@@ -38,6 +66,9 @@ export function montarRetornoInformacoes(httpOk: boolean, valor: unknown, conteu
     else partes.push('Valor integral não disponível nesta consulta. Não invente preço.');
     if (!erroEnvelope && d.valor_matricula) partes.push(`Matrícula: ${d.valor_matricula}. Nunca diga que esse valor pode ser reduzido ou negociado.`);
     if (!erroEnvelope && d.link_matricula) partes.push(`Link da matrícula no valor integral: ${d.link_matricula}.`);
+    // Só na consulta de VALOR: com cronograma junto, quem manda na resposta é a instrução do envio.
+    const guia = conteudo === 'valor' && !erroEnvelope ? guiaRespostaValor(d, opcoes.condicao ?? 'a condição especial') : null;
+    if (guia) partes.push(`\n${guia}`);
   }
   return { id, ...envio, ...reenvio,
     cronograma_entregue: ['entregue', 'lido'].includes(efetivo),

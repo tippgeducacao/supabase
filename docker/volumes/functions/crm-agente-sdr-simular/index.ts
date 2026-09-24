@@ -122,9 +122,15 @@ async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimula
       // 14/09/2026: consultar preço não envia mensagem nem PDF. O mock antigo
       // dizia "cronograma enviado" até para valor e induzia a pular a informação
       // pedida. Usa o mesmo contrato do executor, com preço sintético do ensaio.
+      // Formato da API real (24/09/2026): matrícula e link chegam no mesmo campo.
       if (input?.conteudo === 'valor') return JSON.stringify(montarRetornoInformacoes(true, {
-        data: { curso: input?.curso_escolhido ?? null, valor_integral: 'R$ 4.200,00' },
-      }, 'valor', 'harness-consulta-valor'));
+        data: {
+          curso: input?.curso_escolhido ?? null, valor_integral: 'R$ 4.200,00 em até 24x no cartão de crédito',
+          valor_matricula: 'R$ 200,00 e o link da matrícula https://go.eduq.tec.br/r/harness-simulador',
+        },
+      }, 'valor', 'harness-consulta-valor', {
+        condicao: ficha ? 'a condição do primeiro lote promocional' : 'a condição especial que a secretaria liberou hoje',
+      }));
       // Ficha: espelho da trava do executor real — sem o dado da coleta o cronograma não sai;
       // bloqueio em turno anterior + lead insistiu ⇒ libera.
       if (ficha) {

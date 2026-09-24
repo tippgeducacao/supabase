@@ -979,7 +979,10 @@ async function enviaInformacoes(supabase: any, input: any, ctx: CtxConversa, too
     ({ res, body, d } = await chamar(cursoOp));
   }
 
-  return montarRetornoInformacoes(res.ok, body, conteudo, toolUseId);
+  // Mesmo nome da condição que o prompt da conversa usa: gancho do lote no canário (ganchoLote.ts).
+  return montarRetornoInformacoes(res.ok, body, conteudo, toolUseId, {
+    condicao: ctx.ficha ? 'a condição do primeiro lote promocional' : 'a condição especial que a secretaria liberou hoje',
+  });
 }
 
 // ── pausa_ia ────────────────────────────────────────────────────────────────

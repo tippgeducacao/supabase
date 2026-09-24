@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { carregarStatusMateriais, INSTRUCAO_ENVIO_MATERIAIS, montarRetornoInformacoes } from './envioMateriais';
+import { carregarStatusMateriais, guiaRespostaValor, INSTRUCAO_ENVIO_MATERIAIS, montarRetornoInformacoes } from './envioMateriais';
 import { interpretarEnvioMaterial } from '../_shared/resultadoEnvioMaterial';
 import { AGENTE_VALIDACAO, AGENTE_QUALIFICADOR } from './prompts';
 import { AGENTE_RECONTATO } from './prompts-recontato';
@@ -48,6 +48,26 @@ describe('contrato de envio do cronograma', () => {
     expect(retorno.resultado).toContain('R$ 4.200,00');
     expect(retorno.resultado).toContain('R$ 200,00');
   });
+  it('consulta de valor traz o guia de resposta: partes separadas, link em mensagem própria e pergunta no fim', () => {
+    const retorno = montarRetornoInformacoes(true, { data: {
+      valor_integral: 'R$ 27.429 em até 24x no cartão de crédito',
+      valor_matricula: 'R$ 492,50 e o link da matrícula https://go.eduq.tec.br/r/8dec7174083ccab.',
+    } }, 'valor', 'tool-1', { condicao: 'a condição do primeiro lote promocional' });
+    expect(retorno.resultado).toContain('COMO RESPONDER');
+    expect(retorno.resultado).toContain('"o valor integral da pós é R$ 27.429 em até 24x no cartão de crédito."');
+    expect(retorno.resultado).toContain('"a condição do primeiro lote promocional é apresentada na conversa rápida com o monitor."');
+    expect(retorno.resultado).toContain('a matrícula é R$ 492,50 nesse link: https://go.eduq.tec.br/r/8dec7174083ccab"');
+    expect(retorno.resultado).toContain('4) a ação: UMA pergunta');
+    expect(retorno.resultado).toContain('Nunca mande tudo num parágrafo só nem termine a resposta no link.');
+  });
+
+  it('guia de valor: sem link a matrícula some e a ação vira o passo 3; com cronograma junto não há guia', () => {
+    expect(guiaRespostaValor({ valor_integral: 'R$ 4.200' }, 'a condição especial')).toContain('3) a ação');
+    expect(guiaRespostaValor({}, 'x')).toBeNull();
+    const junto = montarRetornoInformacoes(true, { data: { valor_integral: 'R$ 4.200', cronograma_enviado: true } }, 'cronograma_e_valor', 'tool-1');
+    expect(junto.resultado).not.toContain('COMO RESPONDER');
+  });
+
   it('consulta só de valor nunca confirma material', () => {
     const retorno = montarRetornoInformacoes(true, { data: { valor_integral: 'R$ 4.200,00', cronograma_enviado: true } }, 'valor', 'tool-1');
     expect(retorno).toMatchObject({ cronograma_enviado: false, cronograma_status: 'nao_solicitado' });
