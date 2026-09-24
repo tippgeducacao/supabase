@@ -2,11 +2,21 @@
 // formulário fechado (tool forçada). Ele não escreve a conversa — as frases são fixas, em
 // fluxo.ts. A única coisa que ele redige é uma resposta curta quando a pessoa pergunta algo
 // fora do roteiro, e mesmo essa só com os fatos listados aqui.
+//
+// MODELO (24/09/2026, pedido do Gustavo): a LUNA (GPT-5.6, API da OpenAI), a mesma do
+// piloto do João — `provedorOpenai()` lê AGENTE_SDR_OPENAI_KEY / AGENTE_SDR_OPENAI_MODEL
+// (hoje gpt-5.6-luna). O pedido sai no formato da Anthropic e o `chamarAnthropic` do João
+// traduz para a Responses API (provedorOpenai.ts). Se a Luna falhar ou não houver chave,
+// o CLAUDE (AGENTE_SDR_MODEL) responde no lugar — mesma regra do piloto.
+import { chamarAnthropic, type ProvedorIA, provedorOpenai } from "../crm-agente-sdr/agente.ts";
 import type { Classificacao, EtapaFluxo, Intencao, Situacao } from "./fluxo.ts";
 import type { TurnoHistorico } from "./historico.ts";
 
-const ANTHROPIC_KEY = Deno.env.get("AGENTE_SDR_ANTHROPIC_KEY") ?? Deno.env.get("ANTHROPIC_API_KEY") ?? "";
-const MODELO = Deno.env.get("AGENTE_SDR_MODEL") ?? "claude-sonnet-5";
+const MODELO_CLAUDE = Deno.env.get("AGENTE_SDR_MODEL") ?? "claude-sonnet-5";
+// Prazo por tentativa. O do piloto do WhatsApp (45 s) não cabe aqui: robô no direct tem
+// de responder em até 30 s (política da Meta), e ainda tem a espera de silêncio antes.
+const PRAZO_LUNA_MS = 15_000;
+const PRAZO_CLAUDE_MS = 12_000;
 
 const O_QUE_A_IA_ACABOU_DE_PERGUNTAR: Record<EtapaFluxo, string> = {
   boas_vindas:
@@ -107,38 +117,57 @@ function montarPedido(etapa: EtapaFluxo, historico: TurnoHistorico[], novas: str
   ].join("\n");
 }
 
-/** Falha de rede/modelo nunca derruba a conversa: volta a classificação neutra. */
+export type ResultadoClassificacao = {
+  classificacao: Classificacao;
+  /** Falhas no caminho (inclusive a da Luna quando o Claude cobriu). null = tudo certo. */
+  erro: string | null;
+  /** Quem classificou de fato (ex.: "gpt-5.6-luna"); null = ninguém, valeu a neutra. */
+  modelo: string | null;
+};
+
+/**
+ * Luna primeiro; Claude se ela falhar; classificação neutra se os dois falharem. Nunca
+ * lança: um modelo fora do ar não pode derrubar a conversa (a neutra faz a IA repetir a
+ * pergunta da etapa).
+ */
 export async function classificar(
   etapa: EtapaFluxo,
   historico: TurnoHistorico[],
   novas: string[],
-  f: typeof fetch = fetch,
-): Promise<{ classificacao: Classificacao; erro: string | null }> {
-  if (!ANTHROPIC_KEY) return { classificacao: CLASSIFICACAO_NEUTRA, erro: "sem chave da Anthropic" };
-  try {
-    const r = await f("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: MODELO,
-        max_tokens: 500,
-        // disabled EXPLÍCITO: no Sonnet 5, omitir liga o thinking adaptativo (ver crm-webchat).
-        thinking: { type: "disabled" },
-        system: INSTRUCOES,
-        tools: [TOOL_CLASSIFICAR],
-        tool_choice: { type: "tool", name: TOOL_CLASSIFICAR.name, disable_parallel_tool_use: true },
-        messages: [{ role: "user", content: montarPedido(etapa, historico, novas) }],
-      }),
-      signal: AbortSignal.timeout(20_000),
-    });
-    // deno-lint-ignore no-explicit-any
-    const b: any = await r.json().catch(() => ({}));
-    if (!r.ok) return { classificacao: CLASSIFICACAO_NEUTRA, erro: `Anthropic HTTP ${r.status}: ${String(b?.error?.message ?? "").slice(0, 200)}` };
-    // deno-lint-ignore no-explicit-any
-    const uso = (b?.content ?? []).find((c: any) => c?.type === "tool_use" && c?.name === TOOL_CLASSIFICAR.name);
-    if (!uso) return { classificacao: CLASSIFICACAO_NEUTRA, erro: "modelo não preencheu o formulário" };
-    return { classificacao: normalizarClassificacao(uso.input), erro: null };
-  } catch (e) {
-    return { classificacao: CLASSIFICACAO_NEUTRA, erro: (e instanceof Error ? e.message : String(e)).slice(0, 200) };
+): Promise<ResultadoClassificacao> {
+  const pedido = {
+    model: MODELO_CLAUDE, // no caminho da Luna, o tradutor troca pelo modelo do provedor
+    max_tokens: 500,
+    // disabled EXPLÍCITO: no Sonnet 5, omitir liga o thinking adaptativo; na Luna vira
+    // reasoning.effort = "none" (paraPedidoOpenai) — classificar não precisa raciocinar.
+    thinking: { type: "disabled" },
+    system: INSTRUCOES,
+    tools: [TOOL_CLASSIFICAR],
+    tool_choice: { type: "tool", name: TOOL_CLASSIFICAR.name, disable_parallel_tool_use: true },
+    messages: [{ role: "user", content: montarPedido(etapa, historico, novas) }],
+  };
+  const luna = provedorOpenai();
+  const tentativas: { nome: string; provedor: ProvedorIA | null; prazo: number }[] = [
+    ...(luna ? [{ nome: "Luna", provedor: luna, prazo: PRAZO_LUNA_MS }] : []),
+    { nome: "Claude", provedor: null, prazo: PRAZO_CLAUDE_MS },
+  ];
+  const erros: string[] = luna ? [] : ["Luna: sem AGENTE_SDR_OPENAI_KEY"];
+  for (const t of tentativas) {
+    try {
+      const resposta = await chamarAnthropic(pedido, {}, t.provedor, t.prazo);
+      // deno-lint-ignore no-explicit-any
+      const uso = (resposta?.content ?? []).find((c: any) => c?.type === "tool_use" && c?.name === TOOL_CLASSIFICAR.name);
+      if (uso) {
+        return {
+          classificacao: normalizarClassificacao(uso.input),
+          erro: erros.length ? erros.join("; ") : null,
+          modelo: String(resposta?.model ?? (t.provedor?.formato === "openai" ? t.provedor.modelo : MODELO_CLAUDE)),
+        };
+      }
+      erros.push(`${t.nome}: não preencheu o formulário`);
+    } catch (e) {
+      erros.push(`${t.nome}: ${(e instanceof Error ? e.message : String(e)).slice(0, 200)}`);
+    }
   }
+  return { classificacao: CLASSIFICACAO_NEUTRA, erro: erros.join("; "), modelo: null };
 }

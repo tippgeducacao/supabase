@@ -6,7 +6,8 @@
 //            mandou, foi alguém do time pelo app do Instagram: a IA pausa ali.
 //
 // O cérebro é o ROTEIRO do Instagram (fluxo.ts, desenhado pelo Gustavo): a IA só entende
-// a resposta da pessoa (classificador.ts) e as frases são fixas. Objetivo do roteiro:
+// a resposta da pessoa (classificador.ts — Luna 5.6 pela API da OpenAI, Claude de
+// reserva) e as frases são fixas. Objetivo do roteiro:
 // saber se a pessoa é formada ou estudante e pegar o WhatsApp, o canal de vendas.
 // ⚠️ Nesta fase o efeito do WhatsApp é SIMULADO: nada entra no CRM e nenhum template sai
 // até o template do portfólio ser aprovado pela Meta (ver enviarParaWhatsapp()).
@@ -223,7 +224,7 @@ async function responderRodada(c: Conversa, tokenReserva: string, reserva: Reser
     const novas = montarHistoricoIg(todas.filter(ehNova)).map((t) => t.text);
     const historico = montarHistoricoIg(todas.filter((l) => !ehNova(l)));
 
-    const { classificacao, erro } = await classificar(etapa, historico, novas);
+    const { classificacao, erro, modelo } = await classificar(etapa, historico, novas);
     if (erro) log("classificador:", erro);
     passo = decidirPasso(etapa, classificacao, {
       nomePerfil: c.nome,
@@ -231,7 +232,7 @@ async function responderRodada(c: Conversa, tokenReserva: string, reserva: Reser
       tentativas: Number(estado?.fluxo_tentativas ?? 0),
     });
     chunks = passo.mensagens;
-    registro = { nome: "roteiro", etapa, classificacao, proxima: passo.proximaEtapa, erro_classificador: erro };
+    registro = { nome: "roteiro", etapa, classificacao, proxima: passo.proximaEtapa, modelo, erro_classificador: erro };
   } catch (e) {
     erroCerebro = (e instanceof Error ? e.message : String(e)).slice(0, 500);
     log("a rodada falhou:", erroCerebro);

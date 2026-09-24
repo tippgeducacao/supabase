@@ -133,7 +133,7 @@ beforeEach(() => {
   mocks.rpc.mockImplementation(async (nome: string) => (nome === 'ig_ia_reservar'
     ? { data: reservas.shift() ?? { status: 'sem_pendencia' }, error: null }
     : { data: true, error: null }));
-  mocks.classificar.mockResolvedValue({ classificacao: { ...neutra, intencao: 'aceita' }, erro: null });
+  mocks.classificar.mockResolvedValue({ classificacao: { ...neutra, intencao: 'aceita' }, erro: null, modelo: 'gpt-5.6-luna' });
   let n = 0;
   mocks.fetch.mockImplementation(async () => new Response(JSON.stringify({ recipient_id: '999', message_id: `saida-${++n}` })));
 });
@@ -169,7 +169,7 @@ describe('ig-agente: o roteiro do direct', () => {
     expect(gravacaoDaEtapa()).toMatchObject({ payload: { fluxo_etapa: 'pergunta_formacao', fluxo_tentativas: 0 } });
     expect(Object.keys(gravacaoDaEtapa()!.filtros)).toContain('eq:reserva_token');
     expect(liberacao()).toMatchObject({ p_respondido_ate: INBOUND_EM, p_estagio: null });
-    expect(liberacao().p_tools[0]).toMatchObject({ nome: 'roteiro', etapa: 'boas_vindas', proxima: 'pergunta_formacao' });
+    expect(liberacao().p_tools[0]).toMatchObject({ nome: 'roteiro', etapa: 'boas_vindas', proxima: 'pergunta_formacao', modelo: 'gpt-5.6-luna' });
   });
 
   it('só as mensagens NOVAS vão para o classificador; o resto é contexto', async () => {
