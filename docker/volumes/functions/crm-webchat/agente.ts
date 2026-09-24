@@ -114,6 +114,26 @@ export type WebchatToolChamada = {
 type ResultadoToolWebchat = Record<string, unknown> & Pick<WebchatToolChamada, "efeito_whatsapp">;
 type Msg = { role: "user" | "assistant"; content: any };
 
+/**
+ * Por onde a conversa chega. O roteiro é o MESMO (prompts-webchat.ts); muda só a nota de
+ * canal. 'instagram' = direct do Instagram, em TESTE desde 24/09/2026: quem chama é a edge
+ * ig-agente, sempre com modoTeste. Ver docs/Instagram (IA + Chat).md.
+ */
+export type CanalConversa = "site" | "instagram";
+export type OpcoesResposta = {
+  canal?: CanalConversa;
+  /**
+   * Elegibilidade simulada de uma rodada anterior, para quem não tem `webchat_sessoes`
+   * (o direct guarda em `ig_conversa_ia.teste_tool_chamadas`). Só vale no modo teste.
+   */
+  elegibilidadeInicial?: EstadoElegibilidade | null;
+};
+
+// Regras que valem nos DOIS canais (site e direct). Constantes para a nota do site sair
+// idêntica, caractere por caractere, à de antes da nota do Instagram existir.
+const REGRA_CATALOGO = "- ⛔ Catálogo é SÓ agro/veterinária/agronegócio. Em dúvida do curso, use `consulta_pos_disponiveis`. Área fora do escopo (odontologia, direito, medicina humana…) → diga com gentileza que a PPG é especializada em agro/vet, sem inventar curso.";
+const REGRA_NAO_REPETIR = "- ⛔ NUNCA REPITA o que você JÁ disse nesta conversa. Antes de responder, RELEIA suas mensagens anteriores: valor integral, link de matrícula, condição especial da secretaria e a oferta do Meet só podem aparecer UMA vez cada — depois disso, apenas REFERENCIE em meia frase ('o valor é o que te passei acima'). Se o lead insistir num ponto já respondido, responda SÓ o que há de NOVO na mensagem dele, em 1-2 frases curtas, com outras palavras — re-enviar o mesmo bloco soa robótico e irrita.";
+const REGRA_RESPOSTA_CURTA = "- Cada resposta sua deve ser CURTA (1 a 3 frases) e reagir à ÚLTIMA mensagem do lead — não re-apresente o pitch inteiro a cada turno.";
 
 // Nota do CANAL apensada ao prompt real (o João de WhatsApp não sabe que aqui é chat de site).
 function notaCanal(curso: string | null): string {
@@ -122,14 +142,36 @@ function notaCanal(curso: string | null): string {
     "", "---",
     "## ⚙️ CANAL: CHAT DO SITE (não é WhatsApp)",
     "- O visitante te vê em TEMPO REAL na página; seja ágil. Confirmações/lembretes da reunião chegam pelo WhatsApp dele (já temos o número).",
-    "- ⛔ Catálogo é SÓ agro/veterinária/agronegócio. Em dúvida do curso, use `consulta_pos_disponiveis`. Área fora do escopo (odontologia, direito, medicina humana…) → diga com gentileza que a PPG é especializada em agro/vet, sem inventar curso.",
-    "- ⛔ NUNCA REPITA o que você JÁ disse nesta conversa. Antes de responder, RELEIA suas mensagens anteriores: valor integral, link de matrícula, condição especial da secretaria e a oferta do Meet só podem aparecer UMA vez cada — depois disso, apenas REFERENCIE em meia frase ('o valor é o que te passei acima'). Se o lead insistir num ponto já respondido, responda SÓ o que há de NOVO na mensagem dele, em 1-2 frases curtas, com outras palavras — re-enviar o mesmo bloco soa robótico e irrita.",
-    "- Cada resposta sua deve ser CURTA (1 a 3 frases) e reagir à ÚLTIMA mensagem do lead — não re-apresente o pitch inteiro a cada turno.",
+    REGRA_CATALOGO,
+    REGRA_NAO_REPETIR,
+    REGRA_RESPOSTA_CURTA,
     cursoLimpo ? `- ⭐ Esta conversa veio da página da pós **"${cursoLimpo}"** — ancore nela.` : "",
   ].filter(Boolean).join("\n");
 }
 
-function promptDoEstagio(nome: string, curso: string | null, estagio: Estagio, produto: Produto = "pos"): string {
+// Nota do CANAL no DIRECT DO INSTAGRAM (teste, 24/09/2026). A situação é a do chat do
+// site — a pessoa chega sem dados e fala primeiro —, por isso o roteiro é o mesmo e aqui
+// só entra o que é FATO do canal. O fluxo próprio do Instagram (quando pedir o WhatsApp,
+// onde entregar o material) ainda não existe: é desenhado com o comercial depois do teste.
+function notaCanalInstagram(): string {
+  return [
+    "---",
+    "## ⚙️ CANAL: DIRECT DO INSTAGRAM (não é WhatsApp nem o chat do site)",
+    "- A pessoa te escreveu no direct do Instagram da PPGVET. Você sabe só o nome do perfil dela: o curso de interesse você NÃO sabe (descubra conversando, sem inventar) e o WhatsApp dela você também não tem.",
+    "- Escreva como se escreve no direct: frases curtas e sem markdown (asterisco, lista e título aparecem crus no Instagram).",
+    REGRA_CATALOGO,
+    REGRA_NAO_REPETIR,
+    REGRA_RESPOSTA_CURTA,
+  ].join("\n");
+}
+
+function promptDoEstagio(
+  nome: string,
+  curso: string | null,
+  estagio: Estagio,
+  produto: Produto = "pos",
+  canal: CanalConversa = "site",
+): string {
   const base = estagio === "qualificador" ? WEBCHAT_QUALIFICADOR : WEBCHAT_VALIDACAO;
   const rendered = renderPrompt(base, {
     nome: (nome || "").trim(),
@@ -142,7 +184,7 @@ function promptDoEstagio(nome: string, curso: string | null, estagio: Estagio, p
   // Presente da Escola (2026-08-05): mesma régua do WhatsApp — conversa que acaba sem
   // reunião leva o convite da biblioteca gratuita junto da despedida. Fonte única em
   // crm-agente-sdr/escolaGratuita.ts; apensado DEPOIS do render (o bloco não tem placeholder).
-  return comPresenteEscola(rendered) + notaCanal(curso);
+  return comPresenteEscola(rendered) + (canal === "instagram" ? notaCanalInstagram() : notaCanal(curso));
 }
 
 // ⚠️ canal:'webchat' — marca o canal pras tools compartilhadas. Efeito hoje: a
@@ -540,7 +582,10 @@ export async function responderWebchat(
   // Escopo de CONVERSA pro cronograma: sem ele não dá pra saber que já foi enviado
   // nesta sessão, e o mesmo PDF sai duas vezes (cron-03).
   sessaoId: string | null = null,
+  // Canal e estado de teste herdado, para quem chama sem webchat_sessoes (ig-agente).
+  opcoes: OpcoesResposta = {},
 ): Promise<{ chunks: string[]; estagio: Estagio; tools: WebchatToolChamada[] }> {
+  const canal: CanalConversa = opcoes.canal === "instagram" ? "instagram" : "site";
   const chamadas: WebchatToolChamada[] = [];
   const raw: Msg[] = history.map((m) => ({ role: m.role, content: m.text })).filter((m) => m.content);
   if (!ANTHROPIC_KEY || !raw.length) {
@@ -549,7 +594,13 @@ export async function responderWebchat(
   // A conversa do webchat começa com a ABERTURA (assistant); a Anthropic exige início
   // 'user'. Prepende um marcador de abertura (o limparParaRouter/sanitizarHistorico do
   // agente real cuidam do resto: fundir turnos, parear tools, primeira msg user).
-  if (raw[0].role === "assistant") raw.unshift({ role: "user", content: "[o visitante abriu o chat]" });
+  // No direct, começar por nós = alguém do time mandou a 1ª mensagem pelo app.
+  if (raw[0].role === "assistant") {
+    raw.unshift({
+      role: "user",
+      content: canal === "instagram" ? "[a conversa no direct começou por uma mensagem nossa]" : "[o visitante abriu o chat]",
+    });
+  }
   const base = sanitizarHistorico(raw);
 
   // ratchet: se já é qualificador, não chama o router (não regride); senão roteia.
@@ -560,7 +611,7 @@ export async function responderWebchat(
     } catch { estagio = "validacao"; }
   }
   const agente = estagio === "qualificador" ? "agente_qualificador" : "agente_validacao";
-  const promptAgente = promptDoEstagio(nome, curso, estagio, produto);
+  const promptAgente = promptDoEstagio(nome, curso, estagio, produto, canal);
   // O nome vai JUNTO do contexto temporal porque este bloco é reinjetado a cada turno, no
   // fim do contexto. No topo do prompt ele fica a dezenas de mensagens de distância, e foi
   // assim que a Flávia virou "vitória" numa conversa de 28 mensagens (21/08/2026).
@@ -588,6 +639,9 @@ export async function responderWebchat(
         }
       }
     }
+  } else if (modoTeste && opcoes.elegibilidadeInicial) {
+    // Mesmo papel do bloco acima para quem não tem sessão de webchat (o direct).
+    ctx.ultimaElegibilidade = { ...opcoes.elegibilidadeInicial };
   }
 
   let tools: any[] = [];

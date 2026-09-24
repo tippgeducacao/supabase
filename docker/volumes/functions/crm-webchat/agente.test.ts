@@ -552,3 +552,52 @@ describe('responderWebchat: elegibilidade isolada do harness', () => {
     expect(mocks.fetch).not.toHaveBeenCalled();
   });
 });
+
+describe('responderWebchat: canal instagram (direct do Instagram, teste de 24/09/2026)', () => {
+  const historico = [{ role: 'user' as const, text: 'oi, quero saber da pós' }];
+
+  it('troca SÓ a nota de canal: o direct no lugar do chat do site', async () => {
+    await responderWebchat('Gustavo', '00012345678', null, historico, 'validacao', null, 'pos', true, null, { canal: 'instagram' });
+    const prompt = mocks.principal.mock.calls[0][0].promptAgente as string;
+    expect(prompt).toContain('CANAL: DIRECT DO INSTAGRAM');
+    expect(prompt).not.toContain('CHAT DO SITE');
+    expect(prompt).toContain('NUNCA REPITA');
+    expect(prompt).toContain('Catálogo é SÓ agro');
+  });
+
+  it('sem opções continua sendo o chat do site', async () => {
+    await responderWebchat('Gustavo', '5546999999999', 'Clínica de Bovinos', historico, 'validacao');
+    const prompt = mocks.principal.mock.calls[0][0].promptAgente as string;
+    expect(prompt).toContain('CANAL: CHAT DO SITE');
+    expect(prompt).toContain('Esta conversa veio da página da pós **"Clínica de Bovinos"**');
+    expect(prompt).not.toContain('DIRECT DO INSTAGRAM');
+  });
+
+  it('conversa que começou por uma mensagem nossa no direct ganha o marcador do direct', async () => {
+    await responderWebchat('Gustavo', '00012345678', null, [
+      { role: 'assistant', text: 'oi! vi seu perfil' }, { role: 'user', text: 'oi' },
+    ], 'validacao', null, 'pos', true, null, { canal: 'instagram' });
+    const mensagens = mocks.principal.mock.calls[0][0].messages;
+    expect(JSON.stringify(mensagens[0])).toContain('começou por uma mensagem nossa');
+    expect(JSON.stringify(mensagens)).not.toContain('abriu o chat');
+  });
+
+  it('elegibilidade herdada libera a confirmação SIMULADA sem webchat_sessoes', async () => {
+    const aprovado: EstadoElegibilidade = {
+      curso: 'Clínica de Bovinos', decisao: 'aprovado', motivo: 'ok', regra_versao: VERSAO_REGRA_ELEGIBILIDADE,
+    } as EstadoElegibilidade;
+    mocks.principal.mockResolvedValueOnce({ content: [chamada('confirmar_agendamento', { curso_escolhido: 'Clínica de Bovinos' })] });
+    const r = await responderWebchat('Gustavo', '00012345678', null, historico, 'qualificador', null, 'pos', true, null, {
+      canal: 'instagram', elegibilidadeInicial: aprovado,
+    });
+    expect(r.tools[0]).toMatchObject({ nome: 'confirmar_agendamento', mockado: true });
+    expect(r.tools[0].resultado).toContain('Agendamento confirmado');
+    expect(mocks.executarTool).not.toHaveBeenCalled();
+  });
+
+  it('sem elegibilidade herdada a confirmação simulada continua recusada', async () => {
+    mocks.principal.mockResolvedValueOnce({ content: [chamada('confirmar_agendamento', { curso_escolhido: 'Clínica de Bovinos' })] });
+    const r = await responderWebchat('Gustavo', '00012345678', null, historico, 'qualificador', null, 'pos', true, null, { canal: 'instagram' });
+    expect(r.tools[0].resultado).not.toContain('Agendamento confirmado');
+  });
+});

@@ -13,8 +13,12 @@
 // Padrões espelhados de crm-whatsapp-webhook (HMAC + protocolo Meta) e
 // wa-uazapi-webhook (log-first). Deploy por git push (deploy-edges.yml);
 // NUNCA usar o "Deploy" do Dokploy (apaga functions).
+//
+// IA do direct (TESTE, 24/09/2026): depois de gravar a DM, aciona a edge ig-agente
+// só para quem passa no gate (_shared/igAgenteGate.ts) — ver acionarAgenteIg().
 // ----------------------------------------------------------------------------
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
+import { avaliarGateIg } from "../_shared/igAgenteGate.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -175,6 +179,70 @@ async function processarMensagens(admin: any, contaId: string | null, igUserId: 
   }
 }
 
+// ── IA do direct (teste) ─────────────────────────────────────────────────────
+// Roda DEPOIS de gravar a DM e buscar o @ de quem mandou (o gate do teste é pelo @).
+//   DM recebida  → só chama o ig-agente se passar no gate. DM de fora do teste nem
+//                  chega na edge.
+//   eco (nosso)  → só interessa se a IA já está nessa conversa: lá o ig-agente confere
+//                  se foi ela ou alguém do time pelo app (humano assumiu = IA pausa).
+// BEST-EFFORT: erro aqui nunca derruba o webhook.
+async function acionarAgenteIg(admin: any, contaId: string | null, igUserId: string, messaging: any[]) {
+  if (!contaId) return;
+  const eventos = (messaging ?? []).filter((ev: any) =>
+    ev?.message?.mid && !ev.message.is_deleted && !ev.message.is_unsupported
+  );
+  if (!eventos.length) return;
+  try {
+    const { data: cfg } = await admin.from("ig_agente_config")
+      .select("modo, usernames_teste").eq("id", 1).maybeSingle();
+    if (!cfg || cfg.modo === "desligado") return;
+    const { data: conta } = await admin.from("ig_contas")
+      .select("ativo, agente_ia_ativo").eq("id", contaId).maybeSingle();
+    const contaIaAtiva = conta?.ativo === true && conta?.agente_ia_ativo === true;
+    if (!contaIaAtiva) return;
+
+    for (const ev of eventos) {
+      const eco = !!ev.message.is_echo;
+      const igsid = String((eco ? ev?.recipient?.id : ev?.sender?.id) ?? "");
+      if (!igsid || igsid === igUserId) continue;
+      if (eco) {
+        const { data: conversa } = await admin.from("ig_conversa_ia")
+          .select("pausada").eq("conta_id", contaId).eq("igsid", igsid).maybeSingle();
+        if (!conversa || conversa.pausada) continue;
+      } else {
+        const { data: perfil } = await admin.from("ig_perfis")
+          .select("username").eq("igsid", igsid).maybeSingle();
+        const gate = avaliarGateIg({
+          modo: cfg.modo,
+          usernamesTeste: cfg.usernames_teste,
+          contaIaAtiva,
+          username: perfil?.username,
+        });
+        if (!gate.liberado) continue;
+      }
+      await dispararAgenteIg({ evento: eco ? "echo" : "inbound", conta_id: contaId, igsid, mid: String(ev.message.mid) });
+    }
+  } catch (e) {
+    console.warn("[ig-webhook] acionarAgenteIg:", e instanceof Error ? e.message : String(e));
+  }
+}
+
+// O ig-agente responde na hora e trabalha em background — esperar a resposta não segura
+// o webhook.
+async function dispararAgenteIg(corpo: Record<string, string>) {
+  try {
+    const r = await fetch(`${SUPABASE_URL}/functions/v1/ig-agente`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SERVICE_ROLE}`, "Content-Type": "application/json" },
+      body: JSON.stringify(corpo),
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!r.ok) console.warn("[ig-webhook] ig-agente respondeu", r.status, (await r.text()).slice(0, 200));
+  } catch (e) {
+    console.warn("[ig-webhook] ig-agente inacessível:", e instanceof Error ? e.message : String(e));
+  }
+}
+
 async function processarComentario(admin: any, contaId: string | null, igUserId: string, value: any) {
   try {
     if (!value?.id) return;
@@ -267,6 +335,7 @@ Deno.serve(async (req) => {
             .map((ev: any) => String(ev.sender.id)),
         );
         await enriquecerPerfis(admin, contaId, inboundIds);
+        await acionarAgenteIg(admin, contaId, igUserId, entry.messaging);
       }
       // Comentários / menções (entry.changes[])
       if (Array.isArray(entry?.changes)) {
