@@ -9,10 +9,11 @@
 //   compatibilidade e o GPT-6 já exige a primeira para tool calling.
 // - `function_call` vai SEM `id`: é o `id` que amarra o item ao raciocínio que o gerou
 //   (e o João relê o histórico do banco a cada volta, sem raciocínio). Só `call_id`.
-//   EXCEÇÃO — `raciocinio` ligado (24/09/2026, por ora só no simulador): a doc da OpenAI
+//   EXCEÇÃO — `raciocinio` ligado (24/09/2026, canário com chave desligada): a doc da OpenAI
 //   manda devolver os itens `reasoning` junto com o resultado das tools ("must also be
-//   passed back with tool call outputs"). Aí o item cifrado volta como bloco
-//   `raciocinio_openai` e o function_call leva o `id` dele — os dois juntos ou nenhum.
+//   passed back with tool call outputs"). O item cifrado fica na memória da rodada e
+//   hidrata uma cópia do pedido com `raciocinio_openai`; o function_call leva o `id`
+//   dele — os dois juntos ou nenhum. O histórico persistido continua sem esses campos.
 // - `strict` vem da PRÓPRIA tool e é sempre explícito (a referência não documenta o padrão):
 //   as linhas de `lista_tools_openai` nascem com false (têm campo opcional, e o modo estrito
 //   exige todos em required); `responder_ao_cliente` é true e cumpre as exigências — é o que
@@ -22,10 +23,88 @@
 
 // deno-lint-ignore-file no-explicit-any
 
-export type ConfigOpenai = { modelo: string; esforco: string; raciocinio?: boolean };
+export type ItemReasoning = {
+  type: 'reasoning';
+  id: string;
+  summary: unknown[];
+  encrypted_content: string;
+};
 
-/** Raciocínio cifrado da Luna, guardado só na cadeia de tools ativa (sanitizarHistorico). */
+/** Cada provedor recebe seu Map por rodada; nunca compartilhar entre leads/turnos. */
+export type MemoriaRaciocinio = Map<string, {
+  openaiId: string;
+  item?: ItemReasoning;
+  /** Identifica o grupo mesmo se o canal descartou sua primeira tool. Só existe na memória. */
+  ancoraCallId?: string;
+}>;
+
+export type ConfigOpenai = {
+  modelo: string;
+  esforco: string;
+  raciocinio?: boolean;
+  memoriaRaciocinio?: MemoriaRaciocinio;
+};
+
+/** Bloco transitório do tradutor; na produção nunca atravessa para o histórico do lead. */
 export const BLOCO_RACIOCINIO_OPENAI = 'raciocinio_openai';
+
+function itemReasoning(item: any): ItemReasoning | undefined {
+  if (item?.type !== 'reasoning' || typeof item.id !== 'string' || typeof item.encrypted_content !== 'string') return undefined;
+  return {
+    type: 'reasoning', id: item.id,
+    summary: Array.isArray(item.summary) ? structuredClone(item.summary) : [],
+    encrypted_content: item.encrypted_content,
+  };
+}
+
+/** Registra só o necessário para reconstruir a cadeia, sem alterar a resposta original. */
+export function registrarRaciocinio(memoria: MemoriaRaciocinio, respostaOpenai: any): void {
+  const saida: any[] = Array.isArray(respostaOpenai?.output) ? respostaOpenai.output : [];
+  let ancoraCallId: string | undefined;
+  for (const [i, item] of saida.entries()) {
+    if (item?.type !== 'function_call' || typeof item.call_id !== 'string' || typeof item.id !== 'string') {
+      ancoraCallId = undefined;
+      continue;
+    }
+    // Uma resposta pode ter tools paralelas: só a primeira recebe o raciocínio. O
+    // tradutor mantém os ids das seguintes enquanto a cadeia contígua estiver válida.
+    const raciocinio = itemReasoning(saida[i - 1]);
+    if (raciocinio) ancoraCallId = item.call_id;
+    memoria.set(item.call_id, {
+      openaiId: item.id,
+      ...(raciocinio ? { item: raciocinio } : {}),
+      ...(ancoraCallId ? { ancoraCallId } : {}),
+    });
+  }
+}
+
+/** Enriquece somente a cópia enviada à OpenAI; `messages` segue limpo para gravarMensagem. */
+export function hidratarRaciocinio(messages: readonly any[], memoria: MemoriaRaciocinio): any[] {
+  return messages.map((mensagem) => {
+    if (!Array.isArray(mensagem?.content)) return { ...mensagem };
+    let ancoraAtiva: string | undefined;
+    const content = mensagem.content.flatMap((bloco: any) => {
+      const copia = bloco && typeof bloco === 'object' ? { ...bloco } : bloco;
+      if (copia?.type === 'tool_use') delete copia.openai_id;
+      const registro = mensagem.role === 'assistant' && bloco?.type === 'tool_use' ? memoria.get(bloco.id) : undefined;
+      if (registro?.item && (!registro.ancoraCallId || registro.ancoraCallId === bloco.id)) {
+        ancoraAtiva = bloco.id;
+        return [
+          { type: BLOCO_RACIOCINIO_OPENAI, item: structuredClone(registro.item), segue: registro.openaiId },
+          { ...copia, openai_id: registro.openaiId },
+        ];
+      }
+      // Se B1 foi descartada, B2 não pode herdar a cadeia de A que ficou logo antes
+      // no histórico. A âncora explícita distingue grupos sem depender da ordem do Map.
+      if (registro?.ancoraCallId && registro.ancoraCallId === ancoraAtiva) {
+        return [{ ...copia, openai_id: registro.openaiId }];
+      }
+      ancoraAtiva = undefined;
+      return [copia];
+    });
+    return { ...mensagem, content };
+  });
+}
 
 // Anthropic (e o endpoint compatível da DeepSeek) recusa bloco e campo desconhecidos:
 // se a volta cair na reserva no meio de uma cadeia da Luna, o raciocínio dela fica para trás.
@@ -145,13 +224,16 @@ export function paraPedidoOpenai(body: Record<string, any>, cfg: ConfigOpenai): 
   return pedido;
 }
 
-export function paraRespostaAnthropic(resp: any, cfg?: Pick<ConfigOpenai, 'raciocinio'>): Record<string, unknown> {
+export function paraRespostaAnthropic(resp: any, cfg?: Pick<ConfigOpenai, 'raciocinio' | 'memoriaRaciocinio'>): Record<string, unknown> {
   const content: any[] = [];
+  // Sem memória, preserva o protocolo legado do simulador. Com memória, o resto
+  // do agente nunca vê o conteúdo cifrado nem o id nativo da Responses.
+  const blocosNoHistorico = cfg?.raciocinio === true && !cfg.memoriaRaciocinio;
   let recusou = false;
   const saida: any[] = Array.isArray(resp?.output) ? resp.output : [];
   for (const [i, item] of saida.entries()) {
     if (item?.type === 'reasoning') {
-      if (cfg?.raciocinio === true && typeof item.encrypted_content === 'string' && typeof item.id === 'string') {
+      if (blocosNoHistorico && typeof item.encrypted_content === 'string' && typeof item.id === 'string') {
         content.push({
           type: BLOCO_RACIOCINIO_OPENAI,
           item: { type: 'reasoning', id: item.id, summary: Array.isArray(item.summary) ? item.summary : [], encrypted_content: item.encrypted_content },
@@ -170,7 +252,7 @@ export function paraRespostaAnthropic(resp: any, cfg?: Pick<ConfigOpenai, 'racio
       try { input = JSON.parse(item.arguments); } catch { /* segue cru */ }
       content.push({
         type: 'tool_use', id: item.call_id, name: item.name, input,
-        ...(cfg?.raciocinio === true && typeof item.id === 'string' ? { openai_id: item.id } : {}),
+        ...(blocosNoHistorico && typeof item.id === 'string' ? { openai_id: item.id } : {}),
       });
     }
   }

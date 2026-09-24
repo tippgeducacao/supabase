@@ -19,7 +19,7 @@ import {
   avaliarCanalResposta, INSTRUCAO_CANAL_RESPOSTA, NOME_TOOL_RESPOSTA,
   normalizarRespostaCanal, somarUsoModelo, TOOL_RESPONDER_AO_CLIENTE,
 } from './canalResposta.ts';
-import { paraPedidoOpenai, paraRespostaAnthropic, semRaciocinioOpenai } from './provedorOpenai.ts';
+import { hidratarRaciocinio, paraPedidoOpenai, paraRespostaAnthropic, registrarRaciocinio, semRaciocinioOpenai, type MemoriaRaciocinio } from './provedorOpenai.ts';
 
 const ANTHROPIC_KEY = Deno.env.get('AGENTE_SDR_ANTHROPIC_KEY') ?? Deno.env.get('ANTHROPIC_API_KEY') ?? '';
 // Override por env se um dia mudar. ⚠️ Sonnet 5: budget_tokens e temperature≠default
@@ -38,7 +38,9 @@ export type ProvedorIA =
   | { nome: string; formato: 'anthropic'; base: string; chave: string }
   | { nome: string; formato: 'openai'; base: string; chave: string; modelo: string; esforco: string;
     /** Devolve o raciocínio cifrado junto com o resultado das tools (provedorOpenai.ts). */
-    raciocinio?: boolean };
+    raciocinio?: boolean;
+    /** Privada da rodada: nunca vai para histórico, telemetria ou outro provedor. */
+    memoriaRaciocinio?: MemoriaRaciocinio };
 export function provedorDeepseek(): ProvedorIA | null {
   const chave = Deno.env.get('AGENTE_SDR_DEEPSEEK_KEY') ?? '';
   return chave ? { nome: 'deepseek', formato: 'anthropic', base: 'https://api.deepseek.com/anthropic', chave } : null;
@@ -65,6 +67,14 @@ export async function chamarAnthropic(
   const base = alternativo?.base ?? 'https://api.anthropic.com';
   const chave = alternativo?.chave ?? ANTHROPIC_KEY;
   const openai = alternativo?.formato === 'openai' ? alternativo : null;
+  const memoria = openai?.raciocinio === true ? openai.memoriaRaciocinio : undefined;
+  // Hidrata uma cópia somente na fronteira da API. O histórico relido do banco
+  // permanece limpo; desligado conserva exatamente o corpo anterior.
+  const pedidoOpenai = openai ? paraPedidoOpenai(memoria
+    ? { ...body, messages: hidratarRaciocinio((body.messages ?? []) as Msg[], memoria) }
+    : body, openai) : null;
+  const raciociniosReenviados = memoria && Array.isArray(pedidoOpenai?.input)
+    ? pedidoOpenai.input.filter((item: any) => item?.type === 'reasoning').length : 0;
   const executar = async (sinal?: AbortSignal) => {
   // retryOnFail do n8n: até 5 tentativas, dentro do mesmo prazo no piloto.
   let ultimoErro = '';
@@ -74,7 +84,7 @@ export async function chamarAnthropic(
       ? await fetch(`${base}/v1/responses`, {
         method: 'POST', ...(sinal ? { signal: sinal } : {}),
         headers: { authorization: `Bearer ${chave}`, 'content-type': 'application/json' },
-        body: JSON.stringify(paraPedidoOpenai(body, openai)),
+        body: JSON.stringify(pedidoOpenai),
       })
       : await fetch(`${base}/v1/messages`, {
         method: 'POST', ...(sinal ? { signal: sinal } : {}),
@@ -90,9 +100,16 @@ export async function chamarAnthropic(
     if (res.ok) {
       const dados = await res.json();
       sinal?.throwIfAborted();
-      return openai ? paraRespostaAnthropic(dados, openai) : dados;
+      if (!openai) return dados;
+      if (memoria) registrarRaciocinio(memoria, dados);
+      const resposta = paraRespostaAnthropic(dados, openai);
+      return memoria ? { ...resposta, raciocinio_encadeado: true, raciocinios_reenviados: raciociniosReenviados } : resposta;
     }
-    ultimoErro = `HTTP ${res.status}: ${await res.text()}`;
+    // Um erro de validação pode ecoar o input. Na cadeia cifrada não levar esse
+    // corpo ao erro/fallback/Debug; o status basta para diagnosticar uma recusa.
+    // Fora da memória nova, conserva o contrato de erros existente.
+    ultimoErro = memoria ? `HTTP ${res.status}: {"error":{}}` : `HTTP ${res.status}: ${await res.text()}`;
+    if (memoria) await res.body?.cancel().catch(() => {});
     sinal?.throwIfAborted();
     // 4xx (exceto 429) não melhora com retry.
     if (res.status >= 400 && res.status < 500 && res.status !== 429) break;
@@ -109,7 +126,7 @@ export async function chamarAnthropic(
 // ── Router: decide validação × qualificador (tool forçada, sem thinking) ─────
 // thinking disabled EXPLÍCITO: no Sonnet 5, omitir liga o adaptativo — o router quer
 // resposta imediata com tool forçada, não raciocínio.
-export type MetadadosRespostaRouter = { model?: string; usage?: Record<string, unknown> };
+export type MetadadosRespostaRouter = { model?: string; usage?: Record<string, unknown>; raciocinio_encadeado?: boolean; raciocinios_reenviados?: number };
 
 export async function chamarRouter(
   historicoLimpo: Msg[],
@@ -144,7 +161,8 @@ export async function chamarRouter(
   }, { 'anthropic-beta': 'structured-outputs-2025-11-13' }, provedor);
 
   // O harness observa modelo/uso sem receber conteúdo ou pensamento do router.
-  aoResponder?.({ model: resp.model, usage: resp.usage });
+  aoResponder?.({ model: resp.model, usage: resp.usage,
+    ...(resp.raciocinio_encadeado === true ? { raciocinio_encadeado: true, raciocinios_reenviados: resp.raciocinios_reenviados ?? 0 } : {}) });
 
   const bloco = (resp.content ?? []).find((b: any) => b.type === 'tool_use');
   const agente = bloco?.input?.agent;
@@ -298,6 +316,10 @@ export async function chamarAgentePrincipal(opts: {
     }, {}, provedor, opts.prazoModeloMs);
     return normalizarRespostaCanal({
       ...corrigida, usage: somarUsoModelo(resposta.usage, corrigida.usage),
+      ...(resposta.raciocinio_encadeado || corrigida.raciocinio_encadeado ? {
+        raciocinio_encadeado: true,
+        raciocinios_reenviados: (resposta.raciocinios_reenviados ?? 0) + (corrigida.raciocinios_reenviados ?? 0),
+      } : {}),
     }, avaliarCanalResposta(corrigida, contemBastidor, true), decisao.motivo);
   } catch {
     // Erro do provedor pode carregar prompt/credencial. Registra-se só o motivo.

@@ -36,6 +36,67 @@ beforeEach(() => {
 });
 
 describe('contrato do mock de consulta de valor', () => {
+  it('reutiliza memória entre tools do turno, renova no próximo e não a passa ao Claude', async () => {
+    const agente = await import('../crm-agente-sdr/agente');
+    // Spy preserva a implementação: o handler, o loop, o adaptador e o mock da
+    // ferramenta continuam reais. Só as respostas HTTP são sintetizadas abaixo.
+    const principal = vi.spyOn(agente, 'chamarAgentePrincipal');
+    const raciocinio = (turno: number) => ({ type: 'reasoning', id: `rs_turno_${turno}`,
+      summary: [], encrypted_content: `CIFRADO_TURNO_${turno}` });
+    const consulta = (turno: number) => [raciocinio(turno), {
+      type: 'function_call', id: `fc_consulta_${turno}`, call_id: `call_consulta_${turno}`,
+      name: 'envia_informacoes', arguments: JSON.stringify({ conteudo: 'valor', curso_escolhido: 'Sanidade Avícola' }),
+    }];
+    const final = (turno: number) => [{ type: 'function_call', id: `fc_fala_${turno}`,
+      call_id: `call_fala_${turno}`, name: 'responder_ao_cliente',
+      arguments: JSON.stringify({ mensagem: 'O valor integral é R$ 4.200,00.' }) }];
+    const saidas = [consulta(1), final(1), consulta(2), final(2)];
+    mocks.fetch.mockImplementation(async (url: string) => {
+      if (url === 'https://api.openai.com/v1/responses' && saidas.length) {
+        return Response.json({ status: 'completed', model: 'gpt-5.6-luna', output: saidas.shift() });
+      }
+      if (url === 'https://api.anthropic.com/v1/messages') {
+        return Response.json({ stop_reason: 'tool_use', content: [{ type: 'tool_use',
+          id: 'fala-claude', name: 'responder_ao_cliente', input: { mensagem: 'Tudo bem, e você?' } }] });
+      }
+      throw new Error('Transporte inesperado; nenhum envio de WhatsApp é permitido');
+    });
+    const requisicao = (body: Record<string, unknown>) => new Request('https://harness.invalid', {
+      method: 'POST', headers: { 'x-followup-key': 'harness-local' }, body: JSON.stringify(body),
+    });
+    try {
+      const resposta = await handler(requisicao({ persona: 'qualificador', provedor: 'openai',
+        modelo_openai: 'gpt-5.6-luna', raciocinio_encadeado: true, curso: 'Sanidade Avícola',
+        mensagens: ['Qual o valor integral?', 'Confirma o valor novamente?'] }));
+      expect(resposta.status).toBe(200);
+      const resultado = await resposta.json();
+      expect(principal).toHaveBeenCalledTimes(4);
+      const provedores = principal.mock.calls.map(([opts]) => opts.provedor);
+      const memorias = provedores.map((p) => p?.formato === 'openai' ? p.memoriaRaciocinio : undefined);
+      expect(memorias[0]).toBeInstanceOf(Map);
+      expect(memorias[0]).toBe(memorias[1]);
+      expect(memorias[2]).toBeInstanceOf(Map);
+      expect(memorias[2]).toBe(memorias[3]);
+      expect(memorias[0]).not.toBe(memorias[2]);
+      expect(memorias[2]?.has('call_consulta_1')).toBe(false);
+      const pedidos = mocks.fetch.mock.calls.map(([, init]) => JSON.parse(String(init.body)));
+      expect(pedidos.map((p) => p.input.filter((item: { type?: string }) => item.type === 'reasoning')))
+        .toEqual([[], [raciocinio(1)], [], [raciocinio(2)]]);
+      expect(pedidos[2].input).toContainEqual({ type: 'function_call', call_id: 'call_consulta_1',
+        name: 'envia_informacoes', arguments: JSON.stringify({ conteudo: 'valor', curso_escolhido: 'Sanidade Avícola' }) });
+      expect(resultado.chamadas.map((c: { turno: number; volta: number; raciocinios_reenviados: number }) =>
+        [c.turno, c.volta, c.raciocinios_reenviados])).toEqual([[1, 1, 0], [1, 2, 1], [2, 1, 0], [2, 2, 1]]);
+      expect(JSON.stringify(resultado)).not.toMatch(/CIFRADO_TURNO_|encrypted_content|openai_id|raciocinio_openai/);
+
+      const claude = await handler(requisicao({ persona: 'qualificador', provedor: 'anthropic', mensagens: ['Tudo bem?'] }));
+      expect(claude.status).toBe(200);
+      expect(principal.mock.calls[4][0].provedor).toBeNull();
+      expect(String(mocks.fetch.mock.calls[4][1].body)).not.toMatch(/CIFRADO_TURNO_|encrypted_content|openai_id|raciocinio_openai/);
+      expect(mocks.fetch).toHaveBeenCalledTimes(5);
+    } finally {
+      principal.mockRestore();
+    }
+  });
   it('piloto acrescenta abertura só na primeira fala e leva o aviso ao histórico do próximo turno', async () => {
     mocks.fetch.mockImplementation(async (url: string) => {
       if (url !== 'https://api.openai.com/v1/responses') throw new Error('Transporte inesperado');

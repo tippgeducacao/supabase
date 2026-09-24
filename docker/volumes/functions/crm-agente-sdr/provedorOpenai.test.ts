@@ -1,5 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { paraPedidoOpenai, paraRespostaAnthropic, semRaciocinioOpenai } from './provedorOpenai';
+import {
+  BLOCO_RACIOCINIO_OPENAI, hidratarRaciocinio, registrarRaciocinio,
+  paraPedidoOpenai, paraRespostaAnthropic, semRaciocinioOpenai,
+  type MemoriaRaciocinio,
+} from './provedorOpenai';
 
 const cfg = { modelo: 'gpt-5.6-luna', esforco: 'high' };
 const pedidoAnthropic = () => ({
@@ -184,6 +188,210 @@ describe('raciocínio encadeado (A/B de 24/09/2026)', () => {
     expect(semRaciocinioOpenai(corpo).messages[1]).toEqual({ role: 'assistant', content: [tu('call_1')] });
     const limpo = { messages: [{ role: 'user', content: 'Oi' }] };
     expect(semRaciocinioOpenai(limpo)).toBe(limpo);
+  });
+});
+
+describe('memória de raciocínio por rodada', () => {
+  const raciocinio = { type: 'reasoning', id: 'rs_1', summary: [{ type: 'summary_text', text: 'RESUMO_SINTETICO' }], encrypted_content: 'CIFRADO_SINTETICO' };
+  const chamada = (n: number) => ({ type: 'function_call', id: `fc_${n}`, call_id: `call_${n}`, name: 'consulta_disponibilidade', arguments: '{}' });
+  const resposta = () => ({ status: 'completed', output: [structuredClone(raciocinio), chamada(1), chamada(2)] });
+  const comMemoria = (memoria: MemoriaRaciocinio) => ({ ...cfg, raciocinio: true, memoriaRaciocinio: memoria });
+  const mensagens = (content: unknown[]) => [
+    { role: 'user', content: 'Quero agendar' },
+    { role: 'assistant', content },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_1', content: '10h' }, { type: 'tool_result', tool_use_id: 'call_2', content: '14h' }] },
+  ];
+  const pedido = (messages: unknown[], memoria: MemoriaRaciocinio) => paraPedidoOpenai({ messages: hidratarRaciocinio(messages, memoria) }, comMemoria(memoria)) as { input: any[] };
+  const congelar = (valor: any): any => {
+    if (valor && typeof valor === 'object') {
+      Object.values(valor).forEach(congelar);
+      Object.freeze(valor);
+    }
+    return valor;
+  };
+
+  it('registra ids das paralelas e ancora o raciocínio só na chamada imediatamente seguinte', () => {
+    const memoria: MemoriaRaciocinio = new Map();
+    registrarRaciocinio(memoria, resposta());
+    expect([...memoria]).toEqual([
+      ['call_1', { openaiId: 'fc_1', item: raciocinio, ancoraCallId: 'call_1' }],
+      ['call_2', { openaiId: 'fc_2', ancoraCallId: 'call_1' }],
+    ]);
+  });
+
+  it('hidrata a cadeia com um raciocínio antes da primeira tool e ids nas duas paralelas', () => {
+    const memoria: MemoriaRaciocinio = new Map();
+    const resp = resposta();
+    registrarRaciocinio(memoria, resp);
+    const limpo = paraRespostaAnthropic(resp, comMemoria(memoria)).content as unknown[];
+    expect(pedido(mensagens(limpo), memoria).input).toEqual([
+      { role: 'user', content: 'Quero agendar' },
+      raciocinio,
+      { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'consulta_disponibilidade', arguments: '{}' },
+      { type: 'function_call', id: 'fc_2', call_id: 'call_2', name: 'consulta_disponibilidade', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'call_1', output: '10h' },
+      { type: 'function_call_output', call_id: 'call_2', output: '14h' },
+    ]);
+  });
+
+  it('o retorno para canal e histórico fica limpo mesmo quando a memória ainda está vazia', () => {
+    const memoria: MemoriaRaciocinio = new Map();
+    const atual = paraRespostaAnthropic(resposta(), comMemoria(memoria));
+    expect(atual).toEqual(paraRespostaAnthropic(resposta()));
+    expect(JSON.stringify(atual)).not.toMatch(/raciocinio_openai|openai_id|CIFRADO|RESUMO_SINTETICO/);
+    expect(memoria.size).toBe(0);
+  });
+
+  it('âncora descartada pelo canal: paralela preservada sai sem raciocínio e sem id nativo', () => {
+    const memoria: MemoriaRaciocinio = new Map();
+    registrarRaciocinio(memoria, resposta());
+    const sobrevivente = { type: 'tool_use', id: 'call_2', name: 'consulta_disponibilidade', input: {} };
+    const itens = pedido(mensagens([sobrevivente]), memoria).input;
+    expect(itens.filter((item) => item.type === 'function_call')).toEqual([
+      { type: 'function_call', call_id: 'call_2', name: 'consulta_disponibilidade', arguments: '{}' },
+    ]);
+    expect(itens.some((item) => item.type === 'reasoning')).toBe(false);
+  });
+
+  it('grupo órfão não herda o raciocínio de outro grupo contíguo na mesma mensagem', () => {
+    const memoria: MemoriaRaciocinio = new Map();
+    const segundoRaciocinio = { ...raciocinio, id: 'rs_2' };
+    const resp = { output: [raciocinio, chamada(1), segundoRaciocinio, { ...chamada(2), name: 'responder_ao_cliente' }, chamada(3)] };
+    registrarRaciocinio(memoria, resp);
+    const limpo = (paraRespostaAnthropic(resp, comMemoria(memoria)).content as any[]).filter((tool) => tool.id !== 'call_2');
+    const hidratadas = hidratarRaciocinio(mensagens(limpo), memoria);
+    expect(hidratadas[1].content.find((tool: any) => tool.id === 'call_3')).not.toHaveProperty('openai_id');
+    expect(pedido(mensagens(limpo), memoria).input.filter((item) => ['reasoning', 'function_call'].includes(item.type))).toEqual([
+      raciocinio,
+      { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'consulta_disponibilidade', arguments: '{}' },
+      { type: 'function_call', call_id: 'call_3', name: 'consulta_disponibilidade', arguments: '{}' },
+    ]);
+  });
+
+  it('duas cadeias contíguas completas preservam cada raciocínio e suas próprias paralelas', () => {
+    const memoria: MemoriaRaciocinio = new Map();
+    const segundoRaciocinio = { ...raciocinio, id: 'rs_2' };
+    const resp = { output: [raciocinio, chamada(1), segundoRaciocinio, chamada(2), chamada(3)] };
+    registrarRaciocinio(memoria, resp);
+    const limpo = paraRespostaAnthropic(resp, comMemoria(memoria)).content as unknown[];
+    expect(pedido(mensagens(limpo), memoria).input.filter((item) => ['reasoning', 'function_call'].includes(item.type))).toEqual([
+      raciocinio,
+      { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'consulta_disponibilidade', arguments: '{}' },
+      segundoRaciocinio,
+      { type: 'function_call', id: 'fc_2', call_id: 'call_2', name: 'consulta_disponibilidade', arguments: '{}' },
+      { type: 'function_call', id: 'fc_3', call_id: 'call_3', name: 'consulta_disponibilidade', arguments: '{}' },
+    ]);
+  });
+
+  it('nova resposta sem raciocínio não herda grupo de uma resposta anterior na memória', () => {
+    const memoria: MemoriaRaciocinio = new Map();
+    registrarRaciocinio(memoria, { output: [raciocinio, chamada(1)] });
+    registrarRaciocinio(memoria, { output: [chamada(2)] });
+    const limpo = paraRespostaAnthropic({ output: [chamada(1), chamada(2)] }, comMemoria(memoria)).content as unknown[];
+    const hidratadas = hidratarRaciocinio(mensagens(limpo), memoria);
+    expect(hidratadas[1].content.find((tool: any) => tool.id === 'call_2')).not.toHaveProperty('openai_id');
+    const chamadas = pedido(mensagens(limpo), memoria).input.filter((item) => item.type === 'function_call');
+    expect(chamadas[0].id).toBe('fc_1');
+    expect(chamadas[1]).not.toHaveProperty('id');
+  });
+
+  it.each([
+    [{ type: 'text', text: 'Preâmbulo entre chamadas' }],
+    [{ type: 'message', id: 'msg_1', content: [] }],
+  ])('a quebra entre chamadas encerra o grupo na resposta e na hidratação: %j', (intervalo) => {
+    const memoria: MemoriaRaciocinio = new Map();
+    registrarRaciocinio(memoria, { output: [raciocinio, chamada(1), intervalo, chamada(2)] });
+    expect(memoria.get('call_2')).not.toHaveProperty('ancoraCallId');
+    const limpo = paraRespostaAnthropic({ output: [chamada(1), chamada(2)] }, comMemoria(memoria)).content as unknown[];
+    expect(hidratarRaciocinio(mensagens(limpo), memoria)[1].content.find((tool: any) => tool.id === 'call_2')).not.toHaveProperty('openai_id');
+
+    registrarRaciocinio(memoria, resposta());
+    const separado = [limpo[0], { type: 'text', text: 'Texto entre chamadas no histórico' }, limpo[1]];
+    expect(hidratarRaciocinio(mensagens(separado), memoria)[1].content.find((tool: any) => tool.id === 'call_2')).not.toHaveProperty('openai_id');
+  });
+
+  it('reasoning que antecede mensagem pública não é associado à tool posterior', () => {
+    const memoria: MemoriaRaciocinio = new Map();
+    registrarRaciocinio(memoria, { output: [raciocinio, { type: 'message', id: 'msg_1', content: [] }, chamada(1)] });
+    expect(memoria.get('call_1')).toEqual({ openaiId: 'fc_1' });
+    const limpo = paraRespostaAnthropic({ output: [chamada(1)] }).content as unknown[];
+    expect(pedido(mensagens(limpo), memoria).input.some((item) => item.type === 'reasoning' || item.id === 'fc_1')).toBe(false);
+  });
+
+  it('memória nova não reenvia o raciocínio nem os ids das chamadas de rodada anterior', () => {
+    const anterior: MemoriaRaciocinio = new Map();
+    registrarRaciocinio(anterior, resposta());
+    const nova: MemoriaRaciocinio = new Map();
+    const limpo = mensagens(paraRespostaAnthropic(resposta()).content as unknown[]);
+    expect(hidratarRaciocinio(limpo, nova)).toEqual(limpo);
+    expect(pedido(limpo, nova).input.some((item) => item.type === 'reasoning' || 'id' in item)).toBe(false);
+    expect(nova.size).toBe(0);
+    expect(anterior.size).toBe(2);
+  });
+
+  it('não altera resposta, histórico ou memória ao preparar a cópia de entrada', () => {
+    const resp = congelar(resposta());
+    const memoria: MemoriaRaciocinio = new Map();
+    registrarRaciocinio(memoria, resp);
+    const historico = congelar(mensagens(paraRespostaAnthropic(resp, comMemoria(memoria)).content as unknown[]));
+    const original = JSON.stringify(historico);
+    const copia = hidratarRaciocinio(historico, memoria);
+    expect(copia).not.toBe(historico);
+    expect(copia[1]).not.toBe(historico[1]);
+    expect(copia[1].content).not.toBe(historico[1].content);
+    expect(JSON.stringify(historico)).toBe(original);
+    expect(original).not.toMatch(/raciocinio_openai|openai_id|CIFRADO/);
+    expect(memoria.get('call_1')?.item).not.toBe(resp.output[0]);
+    copia[1].content[0].item.summary[0].text = 'ALTERADO_NA_COPIA';
+    expect(memoria.get('call_1')?.item).toEqual(raciocinio);
+    expect(resp.output[0]).toEqual(raciocinio);
+  });
+
+  it('não hidrata blocos vindos do user nem chamadas sem ids nativos válidos', () => {
+    const memoria: MemoriaRaciocinio = new Map();
+    registrarRaciocinio(memoria, null);
+    registrarRaciocinio(memoria, { output: [raciocinio, { type: 'function_call', call_id: 'call_sem_id' }, { type: 'function_call', id: 'fc_sem_call' }] });
+    expect(memoria.size).toBe(0);
+    registrarRaciocinio(memoria, resposta());
+    const user = [{ role: 'user', content: [{ type: 'tool_use', id: 'call_1', name: 'x', input: {} }] }];
+    expect(hidratarRaciocinio(user, memoria)).toEqual(user);
+  });
+
+  it('sem item cifrado válido, os ids registrados sozinhos não saem no pedido', () => {
+    const memoria: MemoriaRaciocinio = new Map();
+    const resp = { output: [{ type: 'reasoning', id: 'rs_sem_cifra', summary: [] }, chamada(1)] };
+    registrarRaciocinio(memoria, resp);
+    expect(memoria.get('call_1')).toEqual({ openaiId: 'fc_1' });
+    const itens = pedido(mensagens(paraRespostaAnthropic(resp).content as unknown[]), memoria).input;
+    expect(itens.some((item) => item.type === 'reasoning' || 'id' in item)).toBe(false);
+  });
+
+  it('cada resposta acrescenta sua cadeia sem perder tools das voltas anteriores da mesma rodada', () => {
+    const memoria: MemoriaRaciocinio = new Map();
+    registrarRaciocinio(memoria, resposta());
+    registrarRaciocinio(memoria, { output: [{ ...raciocinio, id: 'rs_2' }, chamada(3)] });
+    expect(memoria.size).toBe(3);
+    expect(memoria.get('call_1')?.item?.id).toBe('rs_1');
+    expect(memoria.get('call_3')?.item?.id).toBe('rs_2');
+  });
+
+  it('desligado mantém o corpo serializado e ignora até memória preenchida fornecida por engano', () => {
+    const memoria: MemoriaRaciocinio = new Map();
+    registrarRaciocinio(memoria, resposta());
+    const corpo = pedidoAnthropic();
+    const atual = JSON.stringify(paraPedidoOpenai(corpo, cfg));
+    expect(JSON.stringify(paraPedidoOpenai(corpo, { ...cfg, raciocinio: false, memoriaRaciocinio: memoria }))).toBe(atual);
+    expect(JSON.stringify(paraRespostaAnthropic(resposta(), { raciocinio: false, memoriaRaciocinio: memoria })))
+      .toBe(JSON.stringify(paraRespostaAnthropic(resposta())));
+  });
+
+  it('a cópia hidratada continua removível integralmente pela defesa da reserva Anthropic', () => {
+    const memoria: MemoriaRaciocinio = new Map();
+    registrarRaciocinio(memoria, resposta());
+    const historico = mensagens(paraRespostaAnthropic(resposta(), comMemoria(memoria)).content as unknown[]);
+    const hidratadas = hidratarRaciocinio(historico, memoria);
+    expect(JSON.stringify(hidratadas)).toContain(BLOCO_RACIOCINIO_OPENAI);
+    expect(semRaciocinioOpenai({ messages: hidratadas })).toEqual({ messages: historico });
   });
 });
 

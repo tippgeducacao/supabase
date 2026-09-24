@@ -7,6 +7,7 @@ const fronteiras = vi.hoisted(() => ({
   registrar: vi.fn(), bufferInserir: vi.fn(), buffer: [] as { id: number; payload: Record<string, unknown> }[],
   pausaNoDebounce: false,
   vozAtiva: false,
+  raciocinioEncadeado: false,
   executar: vi.fn(), tools: vi.fn(), gravar: vi.fn(), historico: vi.fn(),
   humanizar: vi.fn(), horarios: vi.fn(), conversa: vi.fn(),
   sincronizarAudio: vi.fn(), provedorOpenai: vi.fn(), lunaTelefones: [] as string[], lunaDelay: 0 as number | null,
@@ -80,6 +81,7 @@ beforeEach(() => {
   fronteiras.buffer = [];
   fronteiras.pausaNoDebounce = false;
   fronteiras.vozAtiva = false;
+  fronteiras.raciocinioEncadeado = false;
   fronteiras.lunaTelefones = [];
   fronteiras.lunaDelay = 0;
   fronteiras.sincronizarAudio.mockResolvedValue({ estado: 'pronto', esperouMs: 0, pendentes: 0 });
@@ -93,7 +95,7 @@ beforeEach(() => {
   });
   fronteiras.from.mockImplementation((tabela: string) => {
     if (tabela === 'crm_agente_sdr_config') return {
-      select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { teste_telefones: [], luna_telefones: fronteiras.lunaTelefones, luna_delay_segundos: fronteiras.lunaDelay }, error: null }) }) }),
+      select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { teste_telefones: [], luna_telefones: fronteiras.lunaTelefones, luna_delay_segundos: fronteiras.lunaDelay, openai_raciocinio_encadeado: fronteiras.raciocinioEncadeado }, error: null }) }) }),
     };
     if (tabela === 'crm_pipeline_settings') return {
       select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { agente_sdr_delay_segundos: 0 }, error: null }) }) }),
@@ -434,6 +436,23 @@ describe('SDR: texto de ferramenta nunca vira despedida', () => {
     expect(fronteiras.registrar).toHaveBeenCalledWith('provedor_ia', expect.objectContaining({ provedor: 'openai', modelo: 'gpt-5.6-luna' }));
     expect(fronteiras.registrar).toHaveBeenCalledWith('llm_chamada', expect.objectContaining({ provedor: 'openai' }), expect.any(Number));
     expect(fronteiras.enviar).toHaveBeenCalledOnce();
+  });
+
+  it('com a chave ligada a rodada recebe memória privada e publica só contagens na telemetria', async () => {
+    fronteiras.lunaTelefones = [payload.telefone];
+    fronteiras.raciocinioEncadeado = true;
+    fronteiras.provedorOpenai.mockReturnValue(luna);
+    fronteiras.chamarPrincipal.mockImplementationOnce(async ({ provedor }) => {
+      expect(provedor).toMatchObject({ modelo: 'gpt-5.6-luna', esforco: 'high', raciocinio: true });
+      expect(provedor.memoriaRaciocinio).toBeInstanceOf(Map);
+      provedor.memoriaRaciocinio.set('call_teste', { openaiId: 'fc_teste', item: { encrypted_content: 'CIFRADO_NAO_PERSISTIR' } });
+      return { stop_reason: 'end_turn', content: [{ type: 'text', text: 'certo.' }],
+        raciocinio_encadeado: true, raciocinios_reenviados: 2 };
+    });
+    await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
+    expect(fronteiras.registrar).toHaveBeenCalledWith('llm_chamada', expect.objectContaining({ raciocinio_encadeado: true, raciocinios_reenviados: 2 }), expect.any(Number));
+    expect(JSON.stringify(fronteiras.gravar.mock.calls)).not.toMatch(/CIFRADO_NAO_PERSISTIR|openai_id|raciocinio_openai/);
+    expect(JSON.stringify(fronteiras.registrar.mock.calls)).not.toContain('CIFRADO_NAO_PERSISTIR');
   });
 
   it('Luna fora do ar não cala o João: a volta é refeita no Claude e o lead recebe a resposta', async () => {

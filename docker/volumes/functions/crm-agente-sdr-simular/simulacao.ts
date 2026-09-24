@@ -214,6 +214,7 @@ export type DependenciasSimulacao = {
     promptAgente: string; contextoTemporal: string; tools: unknown[]; messages: Msg[]; contextoFicha?: string; comFicha?: boolean; instrucaoFicha?: string;
   }) => Promise<{
     content?: BlocoModelo[]; model?: string; usage?: unknown; stop_reason?: string;
+    raciocinio_encadeado?: boolean; raciocinios_reenviados?: number;
   }>;
   mockTool: (nome: string, input: unknown) => Promise<string>;
   humanizar: (texto: string) => string;
@@ -245,7 +246,8 @@ export async function executarSimulacao(entrada: EntradaSimulacao, deps: Depende
         ...rodada, tools: encerrou ? [] : rodada.tools, messages: sanitizarHistorico(messages),
         ...(contextoFicha ? { contextoFicha } : {}),
       });
-      chamadas.push({ turno, volta: volta + 1, agente, modelo: resp.model ?? null, usage: extrairUso(resp.usage), stop_reason: resp.stop_reason ?? null });
+      chamadas.push({ turno, volta: volta + 1, agente, modelo: resp.model ?? null, usage: extrairUso(resp.usage), stop_reason: resp.stop_reason ?? null,
+        raciocinio_encadeado: resp.raciocinio_encadeado === true, raciocinios_reenviados: resp.raciocinios_reenviados ?? 0 });
       const blocos = resp.content ?? [];
       const textoCru = blocos.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
       let texto = deps.humanizar(textoCru);

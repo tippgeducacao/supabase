@@ -23,7 +23,8 @@ export const TOOL_RESPONDER_AO_CLIENTE = {
 } as const;
 
 type Bloco = Record<string, unknown>;
-export type RespostaModelo = { content?: unknown; stop_reason?: unknown; model?: unknown; usage?: unknown };
+export type RespostaModelo = { content?: unknown; stop_reason?: unknown; model?: unknown; usage?: unknown;
+  raciocinio_encadeado?: unknown; raciocinios_reenviados?: unknown };
 export type DecisaoCanal =
   | { tipo: 'resposta'; mensagem: string; motivo: 'resposta_validada' | 'silencio_explicito' }
   | { tipo: 'tools'; content: Bloco[]; motivo: 'ferramentas_de_negocio' | 'resposta_concorrente_descartada' }
@@ -116,6 +117,13 @@ export function normalizarRespostaCanal(
   return {
     model: typeof resposta.model === 'string' ? resposta.model : undefined,
     usage: somarUsoModelo(resposta.usage),
+    // Só contagem local e flag atravessam; o Map e o item cifrado nunca saem do adaptador.
+    ...(resposta.raciocinio_encadeado === true ? {
+      raciocinio_encadeado: true,
+      raciocinios_reenviados: typeof resposta.raciocinios_reenviados === 'number'
+        && Number.isSafeInteger(resposta.raciocinios_reenviados) && resposta.raciocinios_reenviados >= 0
+        ? resposta.raciocinios_reenviados : 0,
+    } : {}),
     content: decisao.tipo === 'tools' ? decisao.content
       : decisao.tipo === 'resposta' && decisao.mensagem ? [{ type: 'text', text: decisao.mensagem }] : [],
     stop_reason: decisao.tipo === 'tools' ? 'tool_use' : 'end_turn',

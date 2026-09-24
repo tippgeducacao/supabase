@@ -250,6 +250,17 @@ describe('provedor é argumento da chamada, nunca estado global', () => {
 });
 
 describe('normalização defensiva do contrato', () => {
+  it('preserva só flag e contagem do replay, sem memória nem itens cifrados', () => {
+    const bruto = { ...modelo([final()]), raciocinio_encadeado: true, raciocinios_reenviados: 2,
+      memoriaRaciocinio: new Map([['call', 'CIFRADO']]), encrypted_content: 'CIFRADO' };
+    const resposta = normalizarRespostaCanal(bruto, avaliarCanalResposta(bruto, () => false));
+    expect(resposta).toMatchObject({ raciocinio_encadeado: true, raciocinios_reenviados: 2 });
+    expect(JSON.stringify(resposta)).not.toMatch(/CIFRADO|memoriaRaciocinio|encrypted_content/);
+    expect(normalizarRespostaCanal({ ...bruto, raciocinios_reenviados: NaN }, { tipo: 'resposta', mensagem: 'Olá', motivo: 'resposta_validada' }))
+      .toMatchObject({ raciocinios_reenviados: 0 });
+    expect(normalizarRespostaCanal({ ...bruto, raciocinio_encadeado: false }, { tipo: 'resposta', mensagem: 'Olá', motivo: 'resposta_validada' }))
+      .not.toHaveProperty('raciocinios_reenviados');
+  });
   it('remove campos arbitrários e contabiliza apenas números finitos de uso', () => {
     const bruto = { ...modelo([final()]), pensamento: 'PRIVADO' };
     expect(normalizarRespostaCanal(bruto, avaliarCanalResposta(bruto, () => false))).not.toHaveProperty('pensamento');

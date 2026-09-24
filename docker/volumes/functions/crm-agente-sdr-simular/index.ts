@@ -291,7 +291,7 @@ Deno.serve(async (req) => {
     : entrada.provedor === 'openai' ? provedorOpenai() : null;
   if (provedorAlternativo?.formato === 'openai' && entrada.esforco) provedorAlternativo = { ...provedorAlternativo, esforco: entrada.esforco };
   if (provedorAlternativo?.formato === 'openai' && entrada.modelo_openai) provedorAlternativo = { ...provedorAlternativo, modelo: entrada.modelo_openai };
-  if (provedorAlternativo?.formato === 'openai' && entrada.raciocinio_encadeado) provedorAlternativo = { ...provedorAlternativo, raciocinio: true };
+  if (provedorAlternativo?.formato === 'openai' && entrada.raciocinio_encadeado) provedorAlternativo = { ...provedorAlternativo, raciocinio: true, memoriaRaciocinio: new Map() };
   if (entrada.provedor !== 'anthropic' && !provedorAlternativo) {
     return json({ error: `chave do provedor ${entrada.provedor} ausente no ambiente` }, 400);
   }
@@ -337,6 +337,11 @@ Deno.serve(async (req) => {
   try {
     const resultado = await executarSimulacao(entrada, {
       prepararRodada: async (messages, turno) => {
+        // Cada fala do lead equivale a uma invocação de produção. Só as voltas de
+        // ferramentas desse turno compartilham memória, inclusive a correção do canal.
+        if (provedorAlternativo?.formato === 'openai' && provedorAlternativo.raciocinio === true) {
+          provedorAlternativo = { ...provedorAlternativo, memoriaRaciocinio: new Map() };
+        }
         // 16/09/2026: 'aula' abre com o prompt próprio e fecha com o qualificador (igual à
         // campanha direta); o router é consultado como na validação.
         let agente = entrada.persona === 'campanha_direta' ? 'agente_campanha_direta'

@@ -5,6 +5,22 @@ import { provedorOpenai } from './agente';
 
 const banco = (data: unknown, error: unknown = null) => ({ from: () => ({ select: () => ({ eq: () => ({ maybeSingle: async () => ({ data, error }) }) }) }) });
 describe('provedor do piloto, comum ao atendimento e follow-up', () => {
+  it.each([false, undefined, null, 'true'])('só true explícito habilita raciocínio: %s', async (opcao) => {
+    const p = await selecionarProvedorDoLead(banco({ luna_telefones: ['5546988166051'], openai_raciocinio_encadeado: opcao }), '46988166051');
+    expect(p).not.toHaveProperty('raciocinio');
+    expect(p).not.toHaveProperty('memoriaRaciocinio');
+  });
+  it('cria memória exclusiva por rodada, sem mudar modelo/esforço nem liberar outro telefone', async () => {
+    const config = banco({ luna_telefones: ['5546988166051'], openai_raciocinio_encadeado: true });
+    const [p1, p2] = await Promise.all([selecionarProvedorDoLead(config, '46988166051'), selecionarProvedorDoLead(config, '46988166051')]);
+    expect(p1).toMatchObject({ modelo: 'gpt-5.6-luna', esforco: 'high', raciocinio: true });
+    if (p1?.formato !== 'openai' || p2?.formato !== 'openai') throw new Error('Provedores não selecionados');
+    expect(p1.memoriaRaciocinio).toBeInstanceOf(Map);
+    expect(p1.memoriaRaciocinio).not.toBe(p2.memoriaRaciocinio);
+    p1.memoriaRaciocinio!.set('call_1', { openaiId: 'fc_1' });
+    expect(p2.memoriaRaciocinio!.size).toBe(0);
+    expect(await selecionarProvedorDoLead(config, '47988166051')).toBeNull();
+  });
   it('troca o modelo só para o telefone autorizado e preserva o esforço', async () => {
     const config = { luna_telefones: ['5546988166051'], openai_modelo_piloto: 'gpt-6-luna' };
     expect(await selecionarProvedorDoLead(banco(config), '46988166051')).toMatchObject({ modelo: 'gpt-6-luna', esforco: 'high' });
