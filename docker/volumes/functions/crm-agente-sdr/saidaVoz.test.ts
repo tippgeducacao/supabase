@@ -23,6 +23,31 @@ beforeEach(() => {
 });
 
 describe('saída com voz e fallback', () => {
+  it.each(['texto', 'audio'] as const)('confirma abertura uma vez após aceite por %s', async canal => {
+    vi.mocked(tentarEnviarVoz).mockResolvedValue(canal === 'audio' ? 'aceito' : 'texto');
+    transporte.mockResolvedValueOnce(new Response(JSON.stringify({ success: true, wa_message_id: 'wamid-abertura' })));
+    const primeiroAceite = vi.fn(async () => undefined);
+    await saida.enviarResposta(ctx, texto, vi.fn(), undefined, undefined, opcoes, 'codigo', { primeiroAceite });
+    expect(primeiroAceite).toHaveBeenCalledOnce();
+  });
+  it('abertura recusada interrompe o envio antes do restante da resposta', async () => {
+    vi.mocked(configurarVoz).mockReturnValue(null);
+    const primeiroAceite = vi.fn(async () => undefined);
+    transporte.mockResolvedValueOnce(new Response('recusado', { status: 400 }));
+    const r = await saida.enviarResposta(ctx, 'vi que falamos por outro número da PPG\n\nqual área você quer aprofundar?', vi.fn(),
+      undefined, undefined, undefined, 'codigo', { primeiroAceite });
+    expect(r).toMatchObject({ aceitos: 0, estado: 'falhou' });
+    expect(transporte).toHaveBeenCalledOnce();
+    expect(primeiroAceite).not.toHaveBeenCalled();
+  });
+  it('sem comprovante de aceite não confirma abertura, mesmo sem voz ativa', async () => {
+    vi.mocked(configurarVoz).mockReturnValue(null);
+    const primeiroAceite = vi.fn(async () => undefined);
+    transporte.mockResolvedValueOnce(new Response(JSON.stringify({ success: true })));
+    const r = await saida.enviarResposta(ctx, texto, vi.fn(), undefined, undefined, undefined, 'codigo', { primeiroAceite });
+    expect(r.estado).toBe('desconhecido');
+    expect(primeiroAceite).not.toHaveBeenCalled();
+  });
   it('usa contador de follow-up e entrega a segunda mensagem como áudio', async () => {
     const followup = { ...opcoes, origem: 'followup' as const };
     vi.mocked(planejarCadenciaVoz).mockResolvedValue({ audioDevido: true, concluida: false, alvo: 2, interacoes: 1 });

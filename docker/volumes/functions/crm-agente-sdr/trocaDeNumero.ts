@@ -57,6 +57,8 @@ export type SinalTrocaDeNumero = {
   contaAnterior: string | null;
   /** ISO da última fala no número anterior. */
   ultimaFalaAnteriorEm: string | null;
+  /** Identifica a ocorrência; retorno à mesma conta depois gera uma nova abertura. */
+  ultimaFalaAnteriorId?: string | null;
   /** ISO da última fala (não-template) neste número, se houver. */
   ultimaFalaAquiEm: string | null;
   /** Minutos desde a última fala no número anterior. */
@@ -142,6 +144,7 @@ export function detectarTrocaDeNumero(
     ...base,
     contaAnterior: String(falaOutra.wa_account_id),
     ultimaFalaAnteriorEm: String(falaOutra.created_at),
+    ultimaFalaAnteriorId: falaOutra.wa_message_id ?? null,
     gapMin: Math.max(0, Math.round((agora - quando(falaOutra)) / 60_000)),
     templateAtual: template
       ? { nome: template.template_name ?? null, conteudo: template.conteudo ?? null, em: String(template.created_at) }
@@ -192,7 +195,7 @@ function resumirTemplate(conteudo: string | null | undefined, max = 220): string
 export function notaTrocaDeNumero(
   sinal: SinalTrocaDeNumero,
   contas: { atual?: DadosConta | null; anterior?: DadosConta | null },
-  lead: { agendado?: boolean | null; iniciativa?: 'followup' },
+  lead: { agendado?: boolean | null; iniciativa?: 'followup'; aberturaControlada?: boolean },
 ): string {
   const atual = descreverConta(contas.atual);
   const anterior = descreverConta(contas.anterior);
@@ -209,7 +212,9 @@ export function notaTrocaDeNumero(
     `${PREFIXO_NOTA_INTERNA} TROCA DE NÚMERO. ${lead.iniciativa === 'followup' ? 'Esta retomada ocorre' : 'Esta mensagem chegou'} ${porEsteNumero}, e é por ele que você responde agora. `
       + `A conversa anterior com esta pessoa aconteceu ${porOutroNumero} ${humanizarGap(sinal.gapMin)}. ${origem}`,
     'Como agir nesta resposta:',
-    '- Diga, em UMA frase curta e natural, que a PPGVET já tinha conversado com ele por outro número (ex.: "vi aqui que a gente já tinha se falado por outro número da PPG"). Não cite horários, nome de atendente nem detalhes daquele atendimento — ele pode ter sido com um vendedor humano.',
+    lead.aberturaControlada
+      ? '- O sistema acrescenta uma das três frases de abertura antes da sua resposta. Não escreva outro aviso de troca de número, não se reapresente e não repita uma abertura que aparece no histórico.'
+      : '- Diga, em UMA frase curta e natural, que a PPGVET já tinha conversado com ele por outro número (ex.: "vi aqui que a gente já tinha se falado por outro número da PPG"). Não cite horários, nome de atendente nem detalhes daquele atendimento — ele pode ter sido com um vendedor humano.',
     '- Horários propostos ou discutidos no outro número que NÃO viraram reunião confirmada NÃO estão pendentes aqui: não peça confirmação, não diga "ficou faltando", "aquele horário" nem "como combinamos". Se fizer sentido avançar para a reunião, recomece pela consulta de disponibilidade ou espere o lead trazer o assunto.',
     `- ${reuniao}`,
     '- Nome, curso de interesse, formação e materiais já enviados continuam valendo: não se reapresente nem pergunte de novo o que ele já respondeu.',

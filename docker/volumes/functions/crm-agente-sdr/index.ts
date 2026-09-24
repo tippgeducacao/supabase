@@ -42,6 +42,7 @@ import { contextoEspecialidadeCannabis } from './especialidadeCannabis.ts';
 import { rodarEsteiraFollowupTemplate } from './followup-template.ts';
 import { criarTelemetria, resumir, type Telemetria } from './eventos.ts';
 import { carregarModoTrocaNumero, carregarSinalTrocaDeNumero, comNotaNoContexto, comNotaParaRouter, notaTrocaDeNumero, resumoDoSinal, sinalInerte, type SinalTrocaDeNumero } from './trocaDeNumero.ts';
+import { enviarComAberturaNumero, NOTA_ABERTURA_CONTROLADA } from './aberturaTrocaNumero.ts';
 
 declare const EdgeRuntime: { waitUntil?: (p: Promise<unknown>) => void } | undefined;
 
@@ -291,7 +292,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   // A fala final só passa a ser memória depois de pelo menos um envio aceito.
   // `let`: se o provedor alternativo falhar no meio da rodada, o resto dela volta para o Claude.
   let provedor = await provedorDoLead(telefone);
-  const registrarFalaAposEnvio = Boolean(configurarVoz(telefone, (nome) => Deno.env.get(nome), provedor?.nome));
+  let registrarFalaAposEnvio = Boolean(configurarVoz(telefone, (nome) => Deno.env.get(nome), provedor?.nome));
   if (provedor) tel.registrar('provedor_ia', { provedor: provedor.nome, modelo: provedor.formato === 'openai' ? provedor.modelo : null, motivo: 'canario_luna_telefones' });
   const ctx: CtxConversa = {
     remotejid,
@@ -348,10 +349,13 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   // sabe a conta de cada mensagem); o que fazer com ele depende do modo na config. Regra, casos
   // de borda e a nota em trocaDeNumero.ts.
   const modoTroca = await carregarModoTrocaNumero(supabase, telefone);
+  const aberturaControlada = modoTroca === 'ativo' && provedor?.nome === 'openai' && ctx.canal !== 'webchat';
+  registrarFalaAposEnvio ||= aberturaControlada;
   const contasNoLote = new Set(itens.map((i: any) => i?.wa_account_id).filter(Boolean)).size;
   const sinalTroca: SinalTrocaDeNumero = modoTroca === 'off'
     ? sinalInerte(ctx.waAccountId ?? null, contasNoLote, 'desligado')
-    : await carregarSinalTrocaDeNumero(supabase, { telefone, contaAtual: ctx.waAccountId, itens, contasNoLote });
+    : await carregarSinalTrocaDeNumero(supabase, { telefone, contaAtual: ctx.waAccountId, itens, contasNoLote,
+      somenteSaidas: aberturaControlada });
 
   // Contexto do lead + temporal (mesma montagem do node "normalizador").
   const formacaoNormalizada = encontrarFormacao(lead?.formacao_academica ?? '');
@@ -419,18 +423,18 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     : personaDoNumero === 'campanha_direta' ? 'campanha_direta' : 'qualificador';
   const ehCampanha = persona === 'campanha_direta';
   // Só o modo 'ativo' muda comportamento; 'sombra' registra o que faria. Recontato tem missão
-  // fixa e dossiê próprio — não recebe a nota (a telemetria ainda mede a troca).
-  const aplicarTroca = modoTroca === 'ativo' && sinalTroca.trocou && persona !== 'recontato';
+  // fixa e dossiê próprio. No piloto também recebe a abertura, mas conserva o ratchet.
+  const aplicarTroca = modoTroca === 'ativo' && sinalTroca.trocou && (persona !== 'recontato' || aberturaControlada);
   // Ratchet do agente_atual ignorado SÓ nesta rodada e SÓ sem reunião confirmada: o router
   // decide de novo vendo a fronteira; reunião marcada é fato e mantém o fechamento.
-  const agenteAnterior: string | null = aplicarTroca && lead?.agendado !== true ? null : (lead?.agente_atual ?? null);
+  const agenteAnterior: string | null = aplicarTroca && persona !== 'recontato' && lead?.agendado !== true ? null : (lead?.agente_atual ?? null);
   let notaTroca: string | null = null;
   if (aplicarTroca) {
     const [contaAtual, contaAnterior] = await Promise.all([
       dadosDaConta(supabase, sinalTroca.contaAtual),
       dadosDaConta(supabase, sinalTroca.contaAnterior),
     ]);
-    notaTroca = notaTrocaDeNumero(sinalTroca, { atual: contaAtual, anterior: contaAnterior }, { agendado: lead?.agendado === true });
+    notaTroca = notaTrocaDeNumero(sinalTroca, { atual: contaAtual, anterior: contaAnterior }, { agendado: lead?.agendado === true, aberturaControlada });
   }
   if (modoTroca !== 'off' && (sinalTroca.trocou || sinalTroca.contasNoLote > 1)) {
     tel.registrar('troca_de_numero', {
@@ -460,6 +464,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   let tools: any[];
   // A nota vai no bloco de contexto temporal: relido a cada volta, fora do prefixo cacheado.
   let contextoEfetivo = comNotaNoContexto(contextoTemporal, notaTroca);
+  if (aberturaControlada) contextoEfetivo += '\n\n' + NOTA_ABERTURA_CONTROLADA;
   // Canário (19/09/2026): o fecho do convite ("ainda hoje" × "amanhã cedo") vem do relógio, não do
   // modelo — vai junto do contexto temporal, fora do cache, relido a cada volta.
   if (ctx.ficha && !aulaPiloto) contextoEfetivo = `${contextoEfetivo}\n\n${blocoConviteAgenda()}`;
@@ -905,12 +910,18 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
           const comPresente = comPresenteNaDespedida(despedida, encerramento, conversaTexto(messages), estaNaEscola);
           if (comPresente.anexou) tel.registrar('presente_escola_anexado', { onde: 'despedida_com_tool' });
           tel.registrar('despedida_deterministica', { tool: encerramento?.tool });
-          await gravarMensagem(supabase, remotejid, { role: 'assistant', content: comPresente.texto });
-          await enviarResposta(
-            ctx, comPresente.texto, renovar, tel,
-            pausouPorTool ? undefined : () => iaPausada(remotejid),
-            undefined, fracionamentoAtual(),
-          );
+          if (!aberturaControlada) await gravarMensagem(supabase, remotejid, { role: 'assistant', content: comPresente.texto });
+          const despedidaEnviada = await enviarComAberturaNumero({
+            banco: supabase, telefone, interacaoId: tel.rodadaId, texto: humanizarTexto(comPresente.texto),
+            sinal: aberturaControlada && aplicarTroca ? sinalTroca : null,
+            registrar: (tipo, dados) => tel.registrar(tipo, dados),
+            enviar: (fala, controle) => enviarResposta(ctx, fala, renovar, tel,
+              pausouPorTool ? undefined : () => iaPausada(remotejid), undefined,
+              aberturaControlada ? 'codigo' : fracionamentoAtual(), controle),
+          });
+          if (aberturaControlada && despedidaEnviada.envio.aceitos) {
+            await gravarMensagem(supabase, remotejid, { role: 'assistant', content: despedidaEnviada.texto });
+          }
           tel.registrar('rodada_fim', { voltas_llm: rodada + 1, respondeu: true }, Date.now() - inicioRodada);
           return;
         }
@@ -997,16 +1008,21 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
           comPresente.texto, conteudo, estaNaEscola || jaTemOPresente(conversaTexto(messages)),
         );
         if (comLink.anexou) tel.registrar('link_escola_reenviado', { pedido: resumir(conteudo, 200) });
-        const envio = await enviarResposta(ctx, comLink.texto, renovar, tel, pausouPorTool ? undefined : () => iaPausada(remotejid),
+        const { envio, texto: textoEnviado } = await enviarComAberturaNumero({
+          banco: supabase, telefone, interacaoId: tel.rodadaId, texto: humanizarTexto(comLink.texto),
+          sinal: aberturaControlada && aplicarTroca ? sinalTroca : null,
+          registrar: (tipo, dados) => tel.registrar(tipo, dados),
+          enviar: (fala, controle) => enviarResposta(ctx, fala, renovar, tel, pausouPorTool ? undefined : () => iaPausada(remotejid),
           encerrouPorTool ? undefined : {
             supabase, origem: 'conversa', historico, iniciadaEm: inicioRodada,
             provedorResposta: provedor?.nome === 'openai' && provedor.formato === 'openai' ? 'openai' : 'anthropic',
             interacaoId: tel.rodadaId,
             referenciaMensagemId: doUltimoCom('msg_id') ?? undefined,
             interrompido: () => iaPausada(remotejid),
-          }, fracionamentoAtual());
+          }, aberturaControlada ? 'codigo' : fracionamentoAtual(), controle),
+        });
         if (registrarFalaAposEnvio && envio?.aceitos) {
-          await gravarMensagem(supabase, remotejid, { role: 'assistant', content: humanizarTexto(comLink.texto) });
+          await gravarMensagem(supabase, remotejid, { role: 'assistant', content: textoEnviado });
         }
         if (registrarFalaAposEnvio && !envio?.aceitos) {
           tel.registrar('rodada_fim', { voltas_llm: rodada + 1, respondeu: false, motivo: envio?.estado ?? 'envio_sem_aceite' }, Date.now() - inicioRodada);

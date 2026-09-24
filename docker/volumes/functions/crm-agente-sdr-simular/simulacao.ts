@@ -185,6 +185,8 @@ export type DependenciasSimulacao = {
   }>;
   mockTool: (nome: string, input: unknown) => Promise<string>;
   humanizar: (texto: string) => string;
+  /** Decora apenas a fala final (ex.: abertura de troca), com estado local do ensaio. */
+  prepararFala?: (texto: string) => string;
   /** Ficha do atendimento da VOLTA (não do turno): a tool da volta anterior pode ter mudado a coleta, como na produção. */
   fichaDaVolta?: () => string | undefined;
   /** Texto final do João no turno (o que o lead leria): a ficha anota as perguntas feitas, como na produção. */
@@ -214,14 +216,16 @@ export async function executarSimulacao(entrada: EntradaSimulacao, deps: Depende
       chamadas.push({ turno, volta: volta + 1, agente, modelo: resp.model ?? null, usage: extrairUso(resp.usage), stop_reason: resp.stop_reason ?? null });
       const blocos = resp.content ?? [];
       const textoCru = blocos.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
-      const texto = deps.humanizar(textoCru);
+      let texto = deps.humanizar(textoCru);
       const toolUses = blocos.filter((b): b is BlocoModelo & { id: string; name: string } =>
         b.type === 'tool_use' && typeof b.id === 'string' && typeof b.name === 'string');
+      if (!toolUses.length && texto) texto = deps.prepararFala?.(texto) ?? texto;
       const pausasBloqueadas = new Set(toolUses.filter((tu) => tu.name === 'pausa_ia'
         && (tu.input as Record<string, unknown> | undefined)?.tipo === 'sem_graduacao'
         && !avaliarEvidenciaSemGraduacao(messages).autorizada).map((tu) => tu.id));
       // Thinking permanece só na memória necessária para a cadeia ativa de tools.
-      if (blocos.length) messages.push({ role: 'assistant', content: blocos });
+      if (blocos.length) messages.push({ role: 'assistant', content: !toolUses.length && deps.prepararFala && texto
+        ? [{ type: 'text', text: texto }] : blocos });
       // 14/09/2026: texto junto de tool_use é intermediário, mesmo sem tags de
       // raciocínio. Só a resposta final pode aparecer como fala do João no ensaio.
       if (!toolUses.length && (texto || texto !== textoCru)) transcript.push({
@@ -264,7 +268,8 @@ export async function executarSimulacao(entrada: EntradaSimulacao, deps: Depende
         const comPresente = entrada.sem_presente_escola ? despedida : comPresenteNaDespedida(
           despedida, encerramento!, conversaPublicada, entrada.esta_na_escola,
         ).texto;
-        const textoFinal = deps.humanizar(comPresente);
+        const humanizado = deps.humanizar(comPresente);
+        const textoFinal = humanizado ? deps.prepararFala?.(humanizado) ?? humanizado : humanizado;
         if (textoFinal) {
           transcript.push({ quem: 'joao', texto: textoFinal, turno });
           messages.push({ role: 'assistant', content: [{ type: 'text', text: textoFinal }] });

@@ -646,7 +646,7 @@ describe('troca de número: nota ao router e ao principal, ratchet e telemetria'
     const base = fronteiras.from.getMockImplementation()!;
     fronteiras.from.mockImplementation((tabela: string) => {
       if (tabela === 'crm_agente_sdr_config') return {
-        select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { teste_telefones: [], troca_numero_modo: modo }, error: null }) }) }),
+        select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { teste_telefones: [], troca_numero_modo: modo, luna_telefones: fronteiras.lunaTelefones, luna_delay_segundos: 0 }, error: null }) }) }),
       };
       if (tabela === 'crm_whatsapp_accounts') return { select: async () => ({ data: [
         { id: A, agente_ia_persona: 'qualificador', nome: 'IA SDR', numero_display: '+55 46 9970-8477' },
@@ -712,6 +712,33 @@ describe('troca de número: nota ao router e ao principal, ratchet e telemetria'
     expect(fronteiras.chamarPrincipal.mock.calls[0][0].contextoTemporal).not.toContain('TROCA DE NÚMERO');
     expect(fronteiras.registrar).toHaveBeenCalledWith('troca_de_numero', expect.objectContaining({ trocou: true, modo: 'sombra', aplicado: false, ratchet_ignorado: false }));
     expect(fronteiras.registrar).toHaveBeenCalledWith('router_decisao', expect.objectContaining({ efetivo: 'agente_qualificador', troca_numero: true, ratchet_ignorado: false }), expect.anything());
+  });
+
+  it('piloto sem voz guarda abertura aceita e não repete mesmo com o mesmo sinal reprocessado', async () => {
+    prepararRodada('ativo', { agente_atual: 'agente_validacao', agendado: false });
+    fronteiras.lunaTelefones = [payload.telefone];
+    fronteiras.provedorOpenai.mockReturnValue({ nome: 'openai', formato: 'openai', modelo: 'gpt-5.6-luna' });
+    fronteiras.chamarPrincipal.mockResolvedValue({ content: [{ type: 'text', text: 'sobre a Escola, o que você gostaria de saber?' }] });
+    let jornada: Record<string, unknown> = {};
+    const base = fronteiras.from.getMockImplementation()!;
+    fronteiras.from.mockImplementation(tabela => {
+      if (tabela !== 'cliente_ppg_leads_sdr') return base(tabela);
+      const legado = base(tabela);
+      return { ...legado,
+        select: () => ({ ...legado.select(), in: () => ({ order: () => ({ limit: () => ({ maybeSingle: async () => ({ data: { id: 1, jornada }, error: null }) }) }) }) }),
+        update: (campos: Record<string, unknown>) => ({ ...legado.update(campos), eq: async () => { jornada = campos.jornada as Record<string, unknown>; return { error: null }; } }),
+      };
+    });
+    fronteiras.enviar.mockImplementation(async (_ctx, _fala, _r, _tel, _p, _v, _f, controle) => {
+      await controle?.primeiroAceite(); return { aceitos: 1, canal: 'texto', estado: 'aceito' };
+    });
+    await chamar({ wa_account_id: B, agente_ia_persona: 'qualificador' });
+    expect(fronteiras.enviar.mock.calls[0][1]).toContain('vou continuar seu atendimento por aqui');
+    expect(JSON.stringify(jornada)).toContain('enviada');
+    expect(fronteiras.chamarPrincipal.mock.calls[0][0].contextoTemporal).toContain('Não escreva outro aviso');
+    expect(fronteiras.gravar.mock.calls.some(([, , msg]) => String(msg.content).includes('vou continuar seu atendimento por aqui'))).toBe(true);
+    await chamar({ wa_account_id: B, agente_ia_persona: 'qualificador' });
+    expect(fronteiras.enviar.mock.calls[1][1]).toBe('sobre a Escola, o que você gostaria de saber?');
   });
 
   it("modo 'ativo' com reunião confirmada: a nota entra, mas o ratchet segura o qualificador", async () => {

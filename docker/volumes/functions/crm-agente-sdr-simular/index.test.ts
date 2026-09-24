@@ -36,6 +36,26 @@ beforeEach(() => {
 });
 
 describe('contrato do mock de consulta de valor', () => {
+  it('piloto acrescenta abertura só na primeira fala e leva o aviso ao histórico do próximo turno', async () => {
+    mocks.fetch.mockImplementation(async (url: string) => {
+      if (url !== 'https://api.openai.com/v1/responses') throw new Error('Transporte inesperado');
+      return Response.json({ status: 'completed', model: 'modelo-openai-teste',
+        output: [{ type: 'function_call', name: 'responder_ao_cliente', call_id: 'resposta-teste',
+          arguments: JSON.stringify({ mensagem: 'qual área você gostaria de aprofundar?' }) }] });
+    });
+    const res = await handler(new Request('https://harness.invalid', {
+      method: 'POST', headers: { 'x-followup-key': 'harness-local' },
+      body: JSON.stringify({ persona: 'validacao', provedor: 'openai', ficha: true, nome_lead: 'Marina',
+        troca_de_numero: { conta_anterior: 'PPG A', conta_atual: 'PPG B' }, mensagens: ['Oi', 'Nutrição'] }),
+    }));
+    expect(res.status).toBe(200);
+    const falas = (await res.json()).transcript.filter((r: { quem: string }) => r.quem === 'joao');
+    expect(falas).toHaveLength(2);
+    expect(falas[0].texto).toContain('vou continuar seu atendimento por aqui');
+    expect(falas[1].texto).not.toContain('outro número');
+    expect(JSON.stringify(JSON.parse(mocks.fetch.mock.calls[1][1].body))).toContain('vou continuar seu atendimento por aqui');
+    expect(JSON.stringify(JSON.parse(mocks.fetch.mock.calls[0][1].body))).toContain('Não escreva outro aviso');
+  });
   it('principal OpenAI recebe a distinção entre a pós de Cannabis e o título profissional', async () => {
     mocks.fetch.mockImplementation(async (url: string) => {
       if (url !== 'https://api.openai.com/v1/responses') throw new Error('Transporte inesperado');

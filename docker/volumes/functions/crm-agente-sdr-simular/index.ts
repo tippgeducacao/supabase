@@ -31,6 +31,7 @@ import { limparParaRouter } from '../crm-agente-sdr/historico.ts';
 import { gerarFollowup } from '../crm-agente-sdr/followup.ts';
 import { contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from '../crm-agente-sdr/contextoAulaPiloto.ts';
 import { contextoEspecialidadeCannabis } from '../crm-agente-sdr/especialidadeCannabis.ts';
+import { comAberturaNumero, NOTA_ABERTURA_CONTROLADA } from '../crm-agente-sdr/aberturaTrocaNumero.ts';
 import { VERSAO_MEMORIA_HUMANA } from '../crm-agente-sdr/memoriaHumana.ts';
 import { montarRetornoInformacoes } from '../crm-agente-sdr/envioMateriais.ts';
 import { instrucaoResultadoMaterial } from '../_shared/resultadoEnvioMaterial.ts';
@@ -303,6 +304,8 @@ Deno.serve(async (req) => {
     inicioRodada: new Date().toISOString(),
   } : null;
   const aulaPiloto = Boolean(fichaSim && entrada.persona === 'aula' && provedorAlternativo?.nome === 'openai');
+  const aberturaControlada = provedorAlternativo?.nome === 'openai';
+  let aberturaPendente = aberturaControlada && Boolean(entrada.troca_de_numero);
   const blocoDaFicha = () => {
     if (!fichaSim) return undefined;
     const entradaFicha = { cadastro: fichaSim.cadastro, jornada: fichaSim.jornada, inicioRodada: fichaSim.inicioRodada };
@@ -349,7 +352,7 @@ Deno.serve(async (req) => {
             templateAtual: troca.template ? { nome: null, conteudo: troca.template, em: new Date().toISOString() } : null },
           { atual: troca.conta_atual ? { id: 'conta-atual-simulada', persona: 'qualificador', nome: troca.conta_atual, numero_display: null } : null,
             anterior: troca.conta_anterior ? { id: 'conta-anterior-simulada', persona: 'qualificador', nome: troca.conta_anterior, numero_display: null } : null },
-          { agendado: troca.agendado },
+          { agendado: troca.agendado, aberturaControlada },
         ) : null;
         const ratchetIgnorado = Boolean(notaTroca) && !troca?.agendado;
         if (entrada.usar_router) {
@@ -407,7 +410,8 @@ Deno.serve(async (req) => {
         // Canário: gancho do primeiro lote + CONVITE DE AGENDA, como em crm-agente-sdr/index.ts.
         const promptFinal = fichaSim && !aulaPiloto ? comGanchoDoLote(promptAgente, { nome: vars.nome, curso: vars.curso_interesse_original }).prompt : promptAgente;
         const contextoBase = comNotaNoContexto(montarContextoTemporal() + notaDoNome(vars.nome) + notaDoCurso(vars.curso_interesse_original)
-          + (provedorAlternativo?.nome === 'openai' ? contextoEspecialidadeCannabis(vars.curso_interesse_original) : ''), notaTroca);
+          + (provedorAlternativo?.nome === 'openai' ? contextoEspecialidadeCannabis(vars.curso_interesse_original) : '')
+          + (aberturaControlada ? '\n\n' + NOTA_ABERTURA_CONTROLADA : ''), notaTroca);
         const contextoFinal = aulaPiloto ? contextoBase + contextoAulaPiloto(entrada.aula)
           : fichaSim ? `${contextoBase}\n\n${blocoConviteAgenda()}` : contextoBase;
         return { agente: agenteTools, promptAgente: promptFinal, contextoTemporal: contextoFinal, tools, comFicha: Boolean(fichaSim),
@@ -415,6 +419,11 @@ Deno.serve(async (req) => {
       },
       chamarPrincipal: (opts: Parameters<typeof chamarAgentePrincipal>[0]) => chamarAgentePrincipal({ ...opts, provedor: provedorAlternativo }),
       humanizar: humanizarTexto,
+      prepararFala: texto => {
+        if (!aberturaPendente) return texto;
+        aberturaPendente = false;
+        return comAberturaNumero(texto, 0);
+      },
       fichaDaVolta: blocoDaFicha,
       aoResponder: (texto) => {
         if (!fichaSim) return;

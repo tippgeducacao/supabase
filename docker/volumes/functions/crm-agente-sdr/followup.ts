@@ -34,7 +34,8 @@ import { FOLLOWUP_PILOTO_SYSTEM } from './followupPiloto.ts';
 import { contextoFollowupCarreira, corrigirPremissaDeCarreira, planejarFollowupCarreira, validarFollowupCarreira } from './followupCarreira.ts';
 import { registrarNaJornada } from './fichaAtendimento.ts';
 import { carregarAulaParaFollowup, contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from './contextoAulaPiloto.ts';
-import { carregarModoTrocaNumero, carregarSinalTrocaDeNumero, notaTrocaDeNumero, resumoDoSinal } from './trocaDeNumero.ts';
+import { carregarModoTrocaNumero, carregarSinalTrocaDeNumero, notaTrocaDeNumero, resumoDoSinal, type SinalTrocaDeNumero } from './trocaDeNumero.ts';
+import { enviarComAberturaNumero, NOTA_ABERTURA_CONTROLADA } from './aberturaTrocaNumero.ts';
 import { PRAZO_MODELO_PILOTO_MS } from './prazoModelo.ts';
 import { extrairPrimeiroNome, montarContextoTemporal } from './contexto.ts';
 import { INSTRUCAO_MEMORIA_HUMANA } from './memoriaHumana.ts';
@@ -457,6 +458,7 @@ export async function processarFollowupLead(supabase: any, leadSel: any, stageSe
     const contextoMateriais = await carregarStatusMateriais(supabase, { telefone, waAccountId: contaLead });
     const provedor = await selecionarProvedorDoLead(supabase, telefone);
     let contextoPiloto = '';
+    let sinalAbertura: SinalTrocaDeNumero | null = null;
     let leadGeracao = lead;
     if (provedor) {
       // A conta escolhida continua sendo a do inbound; não abrir janela nem trocar
@@ -470,10 +472,13 @@ export async function processarFollowupLead(supabase: any, leadSel: any, stageSe
         contextoPiloto += '\n\n' + INSTRUCAO_AULA_PILOTO + contextoAulaPiloto(aula);
       }
       if (await carregarModoTrocaNumero(supabase, telefone) === 'ativo') {
+        const aberturaControlada = provedor.nome === 'openai';
+        if (aberturaControlada) contextoPiloto += '\n\n' + NOTA_ABERTURA_CONTROLADA;
         const sinal = await carregarSinalTrocaDeNumero(supabase, { telefone, contaAtual: contaLead, itens: [], contasNoLote: 1, somenteSaidas: true });
         if (sinal.trocou) {
+          if (aberturaControlada) sinalAbertura = sinal;
           const [atual, anterior] = await Promise.all([dadosDaConta(supabase, contaLead), dadosDaConta(supabase, sinal.contaAnterior)]);
-          contextoPiloto += '\n\n' + notaTrocaDeNumero(sinal, { atual, anterior }, { agendado: lead.agendado, iniciativa: 'followup' });
+          contextoPiloto += '\n\n' + notaTrocaDeNumero(sinal, { atual, anterior }, { agendado: lead.agendado, iniciativa: 'followup', aberturaControlada });
           tel.registrar('troca_de_numero', { ...resumoDoSinal(sinal), origem: 'followup', aplicado: true });
         }
       }
@@ -520,22 +525,21 @@ export async function processarFollowupLead(supabase: any, leadSel: any, stageSe
     // Marcador no histórico (conta a tentativa; o agente principal ignora).
     await gravarMensagem(supabase, remotejid, { role: 'user', content: MARCADOR_FOLLOWUP });
     // Envia pelo MESMO pipeline (fraciona + delay + crm-whatsapp-send).
-    let partesAceitas = 0;
-    const telemetriaEnvio: Telemetria = { ...tel, registrar(tipo, dados, duracao, erro) {
-      if (tipo === 'chunk_enviado' && dados?.ok === true) partesAceitas++;
-      tel.registrar(tipo, dados, duracao, erro);
-    } };
-    await enviarResposta(ctx, message, lockRenovar(supabase, remotejid), telemetriaEnvio, interrompido, {
+    const { envio, texto: textoEnviado } = await enviarComAberturaNumero({
+      banco: supabase, telefone, interacaoId: tel.rodadaId, texto: message, sinal: sinalAbertura,
+      registrar: (tipo, dados) => tel.registrar(tipo, dados),
+      enviar: (fala, controle) => enviarResposta(ctx, fala, lockRenovar(supabase, remotejid), tel, interrompido, {
       supabase, origem: 'followup', historico: history, etapaFollowup: stage, iniciadaEm: inicioRodada, interrompido,
       provedorResposta,
       interacaoId: tel.rodadaId,
-    }, provedorResposta === 'openai' ? 'codigo' : 'modelo');
-    if (!partesAceitas) {
+    }, provedorResposta === 'openai' || sinalAbertura ? 'codigo' : 'modelo', controle),
+    });
+    if (!envio.aceitos) {
       tel.registrar('followup_pulado', { motivo: 'nenhuma_parte_aceita', stage });
       return false;
     }
     // Fala do follow no histórico (pro próximo toque detectar o estilo usado).
-    await gravarMensagem(supabase, remotejid, { role: 'assistant', content: [{ type: 'text', text: message }] });
+    await gravarMensagem(supabase, remotejid, { role: 'assistant', content: [{ type: 'text', text: textoEnviado }] });
     if (perguntaCarreira) {
       try {
         const registrada = await registrarNaJornada(supabase, telefone, j => ({ ...j, followup_carreira: [

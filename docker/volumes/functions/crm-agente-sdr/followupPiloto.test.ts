@@ -17,6 +17,8 @@ import { buscarLead, carregarHistorico, MARCADOR_FOLLOWUP } from './historico';
 import { enviarResposta } from './saida';
 import { carregarAulaParaFollowup } from './contextoAulaPiloto';
 import { FOLLOWUP_SYSTEM } from './prompts-followup';
+import { carregarModoTrocaNumero, carregarSinalTrocaDeNumero } from './trocaDeNumero';
+import { ABERTURAS_TROCA_NUMERO } from './aberturaTrocaNumero';
 import { FOLLOWUP_PILOTO_SYSTEM } from './followupPiloto';
 import { registrarNaJornada } from './fichaAtendimento';
 
@@ -31,6 +33,7 @@ const banco = { rpc: vi.fn(async () => ({ data: true })), from: () => {
 let lead: any;
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(carregarModoTrocaNumero).mockResolvedValue('off');
   lead = { remotejid: '5546988166051@s.whatsapp.net', nome: 'Gustavo', curso_interesse_original: 'Pós antiga',
     iniciar_atendimento: true, followup_ativado: true, timestamp_mensagem: new Date(Date.now() - 20 * 60_000).toISOString(),
     jornada: { coleta: { graduacao: 'Medicina Veterinária', graduacao_concluida: 'sim' } } };
@@ -46,6 +49,23 @@ beforeEach(() => {
 });
 
 describe('follow-up do piloto chega ao mesmo pipeline de voz', () => {
+  it('abertura do follow-up fica registrada e não reaparece no toque seguinte', async () => {
+    vi.mocked(carregarModoTrocaNumero).mockResolvedValue('ativo');
+    vi.mocked(carregarSinalTrocaDeNumero).mockResolvedValue({ trocou: true, motivo: 'trocou', contaAtual: 'B', contaAnterior: 'A',
+      ultimaFalaAnteriorEm: '2026-09-24T12:00:00Z', ultimaFalaAnteriorId: 'ultima-A', ultimaFalaAquiEm: null,
+      gapMin: 30, templateAtual: null, contasNoLote: 1 });
+    vi.mocked(registrarNaJornada).mockImplementation(async (_b, _t, mutar) => (lead.jornada = mutar(lead.jornada)));
+    vi.mocked(enviarResposta).mockImplementation(async (_ctx, _texto, _r, _tel, _p, _v, _f, abertura) => {
+      await abertura?.primeiroAceite();
+      return { aceitos: 1, canal: 'audio', estado: 'aceito' };
+    });
+    expect(await processarFollowupLead(banco, lead, 1)).toBe(true);
+    expect(vi.mocked(enviarResposta).mock.calls[0][1]).toContain(ABERTURAS_TROCA_NUMERO[0]);
+    expect(lead.jornada.aberturas_numero.eventos[0].estado).toBe('enviada');
+    expect(await processarFollowupLead(banco, lead, 1)).toBe(true);
+    expect(vi.mocked(enviarResposta).mock.calls[1][1]).not.toContain(ABERTURAS_TROCA_NUMERO[0]);
+    expect(JSON.stringify(vi.mocked(chamarAnthropic).mock.calls[0][0])).toContain('uma única vez por abertura');
+  });
   it('integra pergunta geral na esteira real e só a consome após o texto aceito', async () => {
     lead.curso_interesse_original = 'Cannabis Medicinal Veterinária';
     vi.mocked(carregarHistorico).mockResolvedValue([

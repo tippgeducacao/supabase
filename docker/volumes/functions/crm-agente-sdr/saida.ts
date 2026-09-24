@@ -14,6 +14,7 @@ import { limparTagsDoCanal } from './canalResposta.ts';
 import { configurarVoz, conferirEstadoVoz, tentarEnviarVoz, type OpcoesVozSdr } from './envioVoz.ts';
 import { confirmarInteracaoVoz, planejarCadenciaVoz, type ChaveCadenciaVoz, type PlanoCadenciaVoz } from './cadenciaVoz.ts';
 import { contemLinkCritico, contemLinkReuniao, fracionarTextoDeterministico, prepararQuebras } from './fracionamentoTexto.ts';
+import type { ControleAceiteAbertura } from './aberturaTrocaNumero.ts';
 export { contemLinkCritico, contemLinkReuniao } from './fracionamentoTexto.ts';
 
 export type ModoFracionamento = 'modelo' | 'codigo';
@@ -482,6 +483,7 @@ export async function enviarResposta(
   pausada?: () => Promise<boolean>,
   voz?: OpcoesVozSdr,
   modoFracionamento: ModoFracionamento = 'modelo',
+  abertura?: ControleAceiteAbertura,
 ): Promise<ResultadoEnvioResposta> {
   // Rótulo da tool (</mensagem>) vazando no texto: fora antes de tudo (16/09/2026).
   const semTagDoCanal = limparTagsDoCanal(texto);
@@ -539,7 +541,10 @@ export async function enviarResposta(
         } catch { return true; }
       };
     } else if (resultado !== 'texto') {
-      if (resultado === 'aceito') await confirmar('audio');
+      if (resultado === 'aceito') {
+        await abertura?.primeiroAceite();
+        await confirmar('audio');
+      }
       return { aceitos: resultado === 'aceito' ? 1 : 0, canal: 'audio', estado: resultado };
     }
   }
@@ -578,10 +583,13 @@ export async function enviarResposta(
       });
       break;
     }
-    const env = await enviarChunk(ctx, chunk, Boolean(plano));
+    const env = await enviarChunk(ctx, chunk, Boolean(plano || abertura));
     if (env.ok) {
       enviados++;
-      if (enviados === 1) await confirmar('texto', env.waMessageId);
+      if (enviados === 1) {
+        await abertura?.primeiroAceite();
+        await confirmar('texto', env.waMessageId);
+      }
     }
     tel?.registrar(
       'chunk_enviado',
@@ -590,6 +598,8 @@ export async function enviarResposta(
       env.ok ? undefined : env.erro,
     );
     if (env.desconhecido) { desconhecido = true; break; }
+    // Se a abertura falhou, não entregar só o corpo nem registrar o aviso como enviado.
+    if (abertura && !env.ok) break;
     await renovarLock(); // rodada longa não pode perder o lock pro TTL
   }
   return { aceitos: enviados, canal: 'texto', estado: enviados ? 'aceito' : cancelado ? 'cancelado' : desconhecido ? 'desconhecido' : 'falhou' };

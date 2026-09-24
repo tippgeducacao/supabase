@@ -37,6 +37,8 @@ export type ColetaJornada = {
   atualizado_em?: string;
 };
 export type Jornada = {
+  /** Cada troca efetiva tem uma abertura própria, mesmo quando volta a uma conta antiga. */
+  aberturas_numero?: import('./aberturaTrocaNumero.ts').MemoriaAberturasNumero;
   /** Perguntas de carreira efetivamente enviadas no piloto, por curso. Não conta geração falha. */
   // Nome preservado: registra também os IDs retomada:* de agenda/perguntas gerais.
   followup_carreira?: { escopo: string; pergunta_id: string; enviado_em: string }[];
