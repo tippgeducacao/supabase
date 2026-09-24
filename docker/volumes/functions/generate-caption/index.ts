@@ -181,7 +181,7 @@ serve(async (req) => {
   );
 
   try {
-    const { user_id, brand_profile_id, context, tom_de_voz, post_type, original_caption, image_description, reference_images, reference_image_urls, operator_name, video_url, video_data, video_mime, ig_handle } = await req.json();
+    const { user_id, brand_profile_id, context, tom_de_voz, post_type, original_caption, image_description, reference_images, reference_image_urls, operator_name, video_url, video_data, video_mime, ig_handle, pilar_chave } = await req.json();
     if (!user_id) {
       return new Response(JSON.stringify({ error: "user_id is required" }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
@@ -219,6 +219,30 @@ serve(async (req) => {
       }
     }
 
+    // 2.5 PILAR da peça (Banco de Conteúdos). É ele que dosa o CTA.
+    //     A reclamação de origem era legenda sempre puxada para venda: a causa
+    //     era o CTA ser obrigatório e vir como primeira regra, sem teto. Agora o
+    //     peso vem do objetivo da peça, e o padrão (sem pilar) já é contido.
+    let pilar: any = null;
+    if (pilar_chave) {
+      const { data } = await supabase
+        .from("marketing_pilares")
+        .select("chave, rotulo, descricao, peso_cta")
+        .eq("chave", pilar_chave)
+        .maybeSingle();
+      pilar = data;
+    }
+    const pesoCta: string = pilar?.peso_cta || "leve";
+    const REGRA_CTA: Record<string, string> = {
+      nenhum:
+        "Esta peça NÃO leva chamada de venda. Ela termina no conteúdo. É PROIBIDO escrever \"clique no link\", \"garanta sua vaga\", \"chame no direct\", \"inscrições abertas\" ou qualquer variação. No máximo, um convite a comentar ou salvar, e só se couber naturalmente.",
+      leve:
+        "No máximo UMA linha de chamada no final, e ela nunca é o assunto da legenda. Pode convidar a comentar, salvar ou seguir para saber mais do tema. NÃO transforme a legenda em anúncio do curso: o conteúdo é o que sustenta a peça.",
+      forte:
+        "Aqui a matrícula É o assunto: pode falar de turma, prazo e condição com clareza, e fechar com uma chamada direta. Ainda assim, entregue pelo menos uma informação de valor real sobre o conteúdo do curso.",
+    };
+    const regraCta = REGRA_CTA[pesoCta] ?? REGRA_CTA.leve;
+
     // 3. Build system prompt
     const tomFinal = tom_de_voz || bp?.tom_de_voz || "Direto e Forte";
     // O travessão não vem só do modelo: os `brand_profiles` usam "—" no próprio
@@ -245,8 +269,8 @@ ${bp?.publico_alvo ? `QUEM É: ${semTravessao(bp.publico_alvo)}` : ""}
 ${bp?.persona_perfil_demografico ? `PERFIL DEMOGRÁFICO: ${semTravessao(bp.persona_perfil_demografico)}` : ""}
 ${bp?.segmento ? `SEGMENTO/NICHO: ${semTravessao(bp.segmento)}` : ""}
 ${bp ? `- Dores: ${semTravessao(bp.persona_dores)}
-- Objeções: ${semTravessao(bp.persona_objecoes)}
 - Desejos: ${semTravessao(bp.persona_desejos)}` : ""}
+${bp && pesoCta === "forte" ? `- Objeções (só porque ESTA peça é de oferta): ${semTravessao(bp.persona_objecoes)}` : ""}
 
 ${bp?.termos_obrigatorios ? `TERMOS OBRIGATÓRIOS (use com naturalidade quando couber): ${semTravessao(bp.termos_obrigatorios)}` : ""}
 ${bp?.termos_proibidos ? `TERMOS PROIBIDOS (NUNCA use): ${semTravessao(bp.termos_proibidos)}` : ""}
@@ -254,7 +278,9 @@ ${bp?.regras_estilo ? `REGRAS DE ESTILO:\n${semTravessao(bp.regras_estilo)}` : "
 
 === REGRAS OBRIGATÓRIAS DA LEGENDA ===
 
-1. **CTA (Call to Action)**: A legenda DEVE terminar com um CTA claro e direto, convidando o leitor a agir (comentar, salvar, compartilhar, clicar no link, etc.).
+0. **OBJETIVO DESTA PEÇA**${pilar ? `: ${pilar.rotulo}. ${semTravessao(pilar.descricao)}` : ": conteúdo de valor para o público, não anúncio."}
+
+1. **CHAMADA (CTA)**: ${regraCta}
 
 2. **5 HASHTAGS PRINCIPAIS**: Ao final da legenda, inclua exatamente 5 hashtags altamente relevantes para o assunto abordado. Escolha hashtags que o público-alvo realmente pesquisa.
 
