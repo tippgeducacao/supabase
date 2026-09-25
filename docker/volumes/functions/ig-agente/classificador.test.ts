@@ -24,8 +24,8 @@ beforeEach(() => {
 describe('normalizarClassificacao: só passa o que o formulário permite', () => {
   it('valores válidos passam', () => {
     expect(mod.normalizarClassificacao({
-      intencao: 'aceita', situacao: 'formado', area: ' medicina veterinária ', telefone: '46 99988-2268', resposta_pergunta: null,
-    })).toEqual({ intencao: 'aceita', situacao: 'formado', area: 'medicina veterinária', telefone: '46 99988-2268', resposta_pergunta: null });
+      intencao: 'aceita', situacao: 'formado', area: ' medicina veterinária ', telefone: '46 99988-2268', conclusao: '07/2027', resposta_pergunta: null,
+    })).toEqual({ intencao: 'aceita', situacao: 'formado', area: 'medicina veterinária', telefone: '46 99988-2268', conclusao: '07/2027', resposta_pergunta: null });
   });
 
   it('valor fora da lista vira o neutro', () => {

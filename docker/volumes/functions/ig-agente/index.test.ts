@@ -18,7 +18,7 @@ const mocks = vi.hoisted(() => ({
 // Os CHECKs das tabelas REAIS. Sem eles este teste passou gravando status_entrega =
 // 'enviado', que o banco recusa — e em produção a IA se pausou depois da 1ª resposta
 // (24/09/2026), porque o eco da própria mensagem ficou parecendo de um humano.
-const ETAPAS = ['boas_vindas', 'pergunta_formacao', 'pergunta_interesse', 'pergunta_whatsapp', 'escola_enviada', 'whatsapp_enviado', 'encerrada'];
+const ETAPAS = ['boas_vindas', 'pergunta_formacao', 'pergunta_data_formacao', 'pergunta_interesse', 'pergunta_whatsapp', 'escola_enviada', 'whatsapp_enviado', 'encerrada'];
 const CHECKS: Record<string, (p: Linha) => string | null> = {
   ig_mensagens: (p) => {
     if (!['sent', 'delivered', 'read', 'failed'].includes(p.status_entrega ?? 'sent')) return 'ig_mensagens_status_entrega_check';
@@ -112,7 +112,7 @@ afterEach(() => {
 });
 
 const INBOUND_EM = '2026-09-24T12:00:00.000Z';
-const neutra = { intencao: 'outro', situacao: 'nao_informou', area: null, telefone: null, resposta_pergunta: null };
+const neutra = { intencao: 'outro', situacao: 'nao_informou', area: null, telefone: null, conclusao: null, resposta_pergunta: null };
 let reservas: Linha[];
 beforeEach(() => {
   vi.useFakeTimers();
@@ -192,7 +192,7 @@ describe('ig-agente: o roteiro do direct', () => {
     expect(textosEnviados()).toEqual([TEXTOS.confirmacaoWhatsapp]);
     expect(gravacaoDaEtapa()!.payload).toMatchObject({ fluxo_etapa: 'whatsapp_enviado', telefone: '5546999882268' });
     expect(gravacaoDaEtapa()!.payload.whatsapp_enviado_em).toBeTruthy();
-    expect(liberacao().p_tools[0].whatsapp).toEqual({ simulado: true });
+    expect(liberacao().p_tools[0].whatsapp).toMatchObject({ simulado: true, situacao: 'formado', etapa_crm: 'Formados' });
   });
 
   it('formado → pergunta se quer o portfólio; "sim" → pede o WhatsApp (o PDF não vai pelo insta)', async () => {
@@ -208,6 +208,26 @@ describe('ig-agente: o roteiro do direct', () => {
     await inbound();
     expect(textosEnviados()).toEqual([TEXTOS.pedirWhatsapp]);
     expect(gravacaoDaEtapa()!.payload).toMatchObject({ fluxo_etapa: 'pergunta_whatsapp' });
+  });
+
+  it('estudante diz quando se forma → a data é gravada e a pergunta do portfólio sai', async () => {
+    Object.assign(mocks.estado.conversa!, { fluxo_etapa: 'pergunta_data_formacao', situacao: 'estudante' });
+    mocks.estado.mensagens[0].conteudo = 'me formo em julho de 2027';
+    mocks.classificar.mockResolvedValue({ classificacao: neutra, erro: null, modelo: 'gpt-5.6-luna' });
+    await inbound();
+    expect(textosEnviados()).toEqual([TEXTOS.perguntaInteresse]);
+    expect(gravacaoDaEtapa()!.payload).toMatchObject({ fluxo_etapa: 'pergunta_interesse', data_formacao: '2027-07-31' });
+  });
+
+  it('estudante que forma depois de jan/2027 passa o número → plano vai para "Forma depois de jan/2027"', async () => {
+    vi.setSystemTime(new Date('2026-09-25T12:00:00Z'));
+    Object.assign(mocks.estado.conversa!, { fluxo_etapa: 'pergunta_whatsapp', situacao: 'estudante', data_formacao: '2027-07-31' });
+    mocks.estado.mensagens[0].conteudo = '46 9 9988-2268';
+    mocks.classificar.mockResolvedValue({ classificacao: neutra, erro: null, modelo: 'gpt-5.6-luna' });
+    await inbound();
+    expect(liberacao().p_tools[0].whatsapp).toMatchObject({
+      simulado: true, situacao: 'estudante', data_formacao: '2027-07-31', etapa_crm: 'Forma depois de jan/2027',
+    });
   });
 
   it('nem formado nem estudante → link da Escola e fim, sem WhatsApp', async () => {

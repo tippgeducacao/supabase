@@ -25,7 +25,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { avaliarGateIg } from "../_shared/igAgenteGate.ts";
 import { dividirPorBytes, ehTokenInvalido, enviarTextoIg, type ResultadoEnvioIg } from "../_shared/igMensageria.ts";
 import { classificar } from "./classificador.ts";
-import { decidirPasso, type EtapaFluxo, type Passo } from "./fluxo.ts";
+import { decidirPasso, etapaCrmInstagram, type EtapaFluxo, type Passo } from "./fluxo.ts";
 import { atrasoEntreBaloesMs, inicioDaJanela, type LinhaIg, montarHistoricoIg } from "./historico.ts";
 
 declare const EdgeRuntime: { waitUntil?: (p: Promise<unknown>) => void } | undefined;
@@ -157,6 +157,7 @@ async function zerarConversa(c: Conversa) {
     situacao: null,
     area: null,
     telefone: null,
+    data_formacao: null,
     whatsapp_enviado_em: null,
     updated_at: agora,
   }, { onConflict: "conta_id,igsid" });
@@ -170,18 +171,17 @@ async function zerarConversa(c: Conversa) {
 }
 
 // ── WhatsApp capturado: CRM + template do portfólio ───────────────────────────
-// ⚠️ SIMULADO nesta fase (24/09/2026): o template com o PDF do portfólio e o botão
-// "Receber acesso" ainda não existe na Meta. Quando for aprovado, aqui entram: criar a
-// oportunidade no funil 1.5 INSTAGRAM (etapa Formados | Na graduação) e mandar o
-// template pelo número "João PPGVET". Hoje só registra o que FARIA.
-function enviarParaWhatsapp(c: Conversa, passo: Passo, situacaoSalva: string | null) {
-  log("WhatsApp capturado (SIMULADO — sem CRM e sem template ainda):", JSON.stringify({
-    igsid: c.igsid,
-    telefone: passo.telefone,
-    situacao: passo.situacao ?? situacaoSalva,
-    etapa_crm: (passo.situacao ?? situacaoSalva) === "estudante" ? "Na graduação" : "Formados",
-  }));
-  return { simulado: true };
+// ⚠️ SIMULADO nesta fase: o template com o PDF do portfólio ainda não existe na Meta.
+// Quando for aprovado, aqui entram: criar a oportunidade no funil 1.5 INSTAGRAM na etapa
+// de etapaCrmInstagram() (Formados | Na graduação | Forma depois de jan/2027), gravar o
+// campo "Data prevista de formação" do contato e mandar o template pelo número "João
+// PPGVET". Hoje só registra o que FARIA.
+function enviarParaWhatsapp(c: Conversa, passo: Passo, situacaoSalva: string | null, dataSalva: string | null) {
+  const situacao = passo.situacao ?? situacaoSalva;
+  const dataFormacao = passo.dataFormacao ?? dataSalva;
+  const plano = { simulado: true, situacao, data_formacao: dataFormacao, etapa_crm: etapaCrmInstagram(situacao, dataFormacao) };
+  log("WhatsApp capturado (SIMULADO — sem CRM e sem template ainda):", JSON.stringify({ igsid: c.igsid, telefone: passo.telefone, ...plano }));
+  return plano;
 }
 
 function instante(v: string | null | undefined): number {
@@ -196,16 +196,18 @@ async function responderRodada(c: Conversa, tokenReserva: string, reserva: Reser
   let passo: Passo | null = null;
   let etapa: EtapaFluxo = "boas_vindas";
   let situacaoSalva: string | null = null;
+  let dataSalva: string | null = null;
   let registro: Record<string, unknown> = {};
   let erroCerebro: string | null = null;
 
   try {
     const { data: estado, error: erroEstado } = await supabase.from("ig_conversa_ia")
-      .select("fluxo_etapa, fluxo_tentativas, situacao, respondido_ate, historico_desde")
+      .select("fluxo_etapa, fluxo_tentativas, situacao, data_formacao, respondido_ate, historico_desde")
       .eq("conta_id", c.contaId).eq("igsid", c.igsid).maybeSingle();
     if (erroEstado) throw new Error(`estado: ${erroEstado.message}`);
     etapa = (estado?.fluxo_etapa ?? "boas_vindas") as EtapaFluxo;
     situacaoSalva = estado?.situacao ?? null;
+    dataSalva = estado?.data_formacao ?? null;
 
     const { data: linhas, error } = await supabase.from("ig_mensagens")
       .select("direcao, tipo, conteudo, created_at")
@@ -239,7 +241,7 @@ async function responderRodada(c: Conversa, tokenReserva: string, reserva: Reser
     chunks = [DESCULPA];
   }
 
-  if (passo?.enviarWhatsapp) registro.whatsapp = enviarParaWhatsapp(c, passo, situacaoSalva);
+  if (passo?.enviarWhatsapp) registro.whatsapp = enviarParaWhatsapp(c, passo, situacaoSalva, dataSalva);
 
   const metadata = {
     origem: erroCerebro ? "sistema" : "ia",
@@ -280,6 +282,7 @@ async function responderRodada(c: Conversa, tokenReserva: string, reserva: Reser
       fluxo_tentativas: passo.tentativas,
       ...(passo.situacao ? { situacao: passo.situacao } : {}),
       ...(passo.area ? { area: passo.area } : {}),
+      ...(passo.dataFormacao ? { data_formacao: passo.dataFormacao } : {}),
       ...(passo.telefone ? { telefone: passo.telefone, whatsapp_enviado_em: agora } : {}),
       updated_at: agora,
     }).eq("conta_id", c.contaId).eq("igsid", c.igsid).eq("reserva_token", tokenReserva);

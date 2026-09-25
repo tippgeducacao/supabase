@@ -1,14 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import {
-  type Classificacao, decidirPasso, type EtapaFluxo, extrairTelefoneBR, LINK_ESCOLA,
+  type Classificacao, decidirPasso, type EtapaFluxo, etapaCrmInstagram, extrairTelefoneBR, LINK_ESCOLA,
   primeiroNomeConfiavel, TEXTOS,
 } from './fluxo';
 
+// Relógio fixo: o corte de "Na graduação" é a régua do João (hoje 31/01/2027) e muda com o tempo.
+const AGORA = new Date('2026-09-25T12:00:00Z');
+
 const cls = (p: Partial<Classificacao> = {}): Classificacao => ({
-  intencao: 'outro', situacao: 'nao_informou', area: null, telefone: null, resposta_pergunta: null, ...p,
+  intencao: 'outro', situacao: 'nao_informou', area: null, telefone: null, conclusao: null, resposta_pergunta: null, ...p,
 });
 const ctx = (p: { nomePerfil?: string | null; textoNovo?: string; tentativas?: number } = {}) => ({
-  nomePerfil: 'Gustavo Sutil', textoNovo: '', tentativas: 0, ...p,
+  nomePerfil: 'Gustavo Sutil', textoNovo: '', tentativas: 0, agora: AGORA, ...p,
 });
 const passo = (etapa: EtapaFluxo, c: Partial<Classificacao>, x: Parameters<typeof ctx>[0] = {}) =>
   decidirPasso(etapa, cls(c), ctx(x));
@@ -44,9 +47,15 @@ describe('boas_vindas: a pessoa respondeu o "Oii, tudo bem?"', () => {
       .toEqual(['Você já se formou e tá trabalhando, ou ainda tá na graduação?']);
   });
 
-  it('já disse que é estudante → pula direto para a pergunta do portfólio', () => {
+  it('já disse que é estudante → pergunta quando se forma', () => {
     expect(passo('boas_vindas', { situacao: 'estudante' })).toMatchObject({
-      mensagens: [TEXTOS.perguntaInteresse], proximaEtapa: 'pergunta_interesse', situacao: 'estudante',
+      mensagens: [TEXTOS.perguntaDataFormacao], proximaEtapa: 'pergunta_data_formacao', situacao: 'estudante',
+    });
+  });
+
+  it('já disse que é formado → pula direto para a pergunta do portfólio', () => {
+    expect(passo('boas_vindas', { situacao: 'formado' })).toMatchObject({
+      mensagens: [TEXTOS.perguntaInteresse], proximaEtapa: 'pergunta_interesse', situacao: 'formado',
     });
   });
 
@@ -80,6 +89,65 @@ describe('pergunta_formacao', () => {
     expect(passo('pergunta_formacao', {}, { tentativas: 1 })).toMatchObject({
       mensagens: [TEXTOS.escola], proximaEtapa: 'escola_enviada',
     });
+  });
+});
+
+describe('pergunta_data_formacao (estudante)', () => {
+  it('estudante → "E você se forma quando? Me fala o mês e o ano 😊"', () => {
+    expect(passo('pergunta_formacao', { situacao: 'estudante' })).toMatchObject({
+      mensagens: ['E você se forma quando? Me fala o mês e o ano 😊'], proximaEtapa: 'pergunta_data_formacao', situacao: 'estudante',
+    });
+  });
+
+  it('estudante que já diz a data junto não é perguntado de novo', () => {
+    expect(passo('pergunta_formacao', { situacao: 'estudante' }, { textoNovo: 'faço vet, me formo em julho de 2027' })).toMatchObject({
+      mensagens: [TEXTOS.perguntaInteresse], proximaEtapa: 'pergunta_interesse', situacao: 'estudante', dataFormacao: '2027-07-31',
+    });
+  });
+
+  it.each([
+    ['julho de 2027', '2027-07-31'],
+    ['12/2026', '2026-12-31'],
+    ['termino em 2028', '2028-12-31'],
+    ['dezembro', '2026-12-31'],
+  ])('"%s" → grava o último dia do mês (%s) e pergunta do portfólio', (texto, data) => {
+    expect(passo('pergunta_data_formacao', {}, { textoNovo: texto })).toMatchObject({
+      mensagens: [TEXTOS.perguntaInteresse], proximaEtapa: 'pergunta_interesse', dataFormacao: data,
+    });
+  });
+
+  it('"tô no 7º período" é posição no curso, não data → pergunta mês e ano UMA vez', () => {
+    expect(passo('pergunta_data_formacao', {}, { textoNovo: 'tô no 7º período' })).toMatchObject({
+      mensagens: [TEXTOS.reperguntarDataFormacao], proximaEtapa: 'pergunta_data_formacao', tentativas: 1,
+    });
+  });
+
+  it('posição no curso ganha do que o modelo "achou" (caso Edinara do João)', () => {
+    expect(passo('pergunta_data_formacao', { conclusao: '12/2026' }, { textoNovo: '2 semestre' }).dataFormacao).toBeUndefined();
+  });
+
+  it('o que o modelo entendeu vale quando o texto não fecha data', () => {
+    expect(passo('pergunta_data_formacao', { conclusao: '07/2027' }, { textoNovo: 'no meio do ano que vem' }).dataFormacao)
+      .toBe('2027-07-31');
+  });
+
+  it('depois de uma repergunta sem data, segue para o portfólio sem travar', () => {
+    const p = passo('pergunta_data_formacao', {}, { textoNovo: 'não sei ainda', tentativas: 1 });
+    expect(p).toMatchObject({ mensagens: [TEXTOS.perguntaInteresse], proximaEtapa: 'pergunta_interesse' });
+    expect(p.dataFormacao).toBeUndefined();
+  });
+});
+
+describe('etapaCrmInstagram: em qual etapa do 1.5 INSTAGRAM', () => {
+  it.each([
+    ['formado', null, 'Formados'],
+    ['estudante', '2026-12-31', 'Na graduação'],
+    ['estudante', '2027-01-31', 'Na graduação'],
+    ['estudante', '2027-02-28', 'Forma depois de jan/2027'],
+    ['estudante', '2028-12-31', 'Forma depois de jan/2027'],
+    ['estudante', null, 'Na graduação'],
+  ])('%s, %s → %s', (situacao, data, esperada) => {
+    expect(etapaCrmInstagram(situacao, data, AGORA)).toBe(esperada);
   });
 });
 

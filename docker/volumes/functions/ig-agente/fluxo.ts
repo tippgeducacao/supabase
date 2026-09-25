@@ -2,24 +2,32 @@
 // "bem mais direto" que a 1ª versão do Gustavo (24/09, oferta da Escola na abertura):
 //
 //   ManyChat (novo seguidor): "Oii, tudo bem?" — só puxa conversa
-//   1. boas_vindas         a pessoa responde            → pergunta a formação
-//   2. pergunta_formacao   formado ou estudante          → pergunta se quer o portfólio
-//                          nem formado nem estudante     → link da Escola (fim, sem CRM)
-//   3. pergunta_interesse  quer                          → pede o WhatsApp ("o PDF não vai pelo insta")
-//                          não quer                      → despedida (fim)
-//   4. pergunta_whatsapp   número válido                 → CRM 1.5 INSTAGRAM + template com
-//                                                          o portfólio no WhatsApp (fim)
+//   1. boas_vindas             a pessoa responde           → pergunta a formação
+//   2. pergunta_formacao       formado                     → pergunta se quer o portfólio
+//                              estudante                   → pergunta QUANDO se forma
+//                              nem formado nem estudante   → link da Escola (fim, sem CRM)
+//   2b. pergunta_data_formacao mês e ano                   → pergunta se quer o portfólio
+//   3. pergunta_interesse      quer                        → pede o WhatsApp ("o PDF não vai pelo insta")
+//                              não quer                    → despedida (fim)
+//   4. pergunta_whatsapp       número válido               → CRM 1.5 INSTAGRAM + template com
+//                                                            o portfólio no WhatsApp (fim)
 //   fins: escola_enviada | whatsapp_enviado | encerrada
+//
+// A data de formação (aprovada pelo Gustavo em 25/09) decide a etapa do CRM: Formados |
+// Na graduação (forma até o limite da régua do João, hoje 31/01/2027) | Forma depois de
+// jan/2027. Quem LÊ a data é o código do João (elegibilidadeFormatura.ts), não o modelo.
 //
 // A IA (classificador.ts) só ENTENDE a resposta da pessoa. As frases são fixas e moram
 // AQUI: o texto é do comercial, não do modelo — o contrário do João do WhatsApp.
 // Módulo puro (sem banco, sem rede): cada passagem tem teste em fluxo.test.ts.
+import { avaliarConclusao, limiteFormatura } from "../crm-agente-sdr/elegibilidadeFormatura.ts";
 
 export const LINK_ESCOLA = "https://escoladeespecializacao.ppgvet.com.br";
 
 export type EtapaFluxo =
   | "boas_vindas"
   | "pergunta_formacao"
+  | "pergunta_data_formacao"
   | "pergunta_interesse"
   | "pergunta_whatsapp"
   | "escola_enviada"
@@ -34,6 +42,11 @@ export type Classificacao = {
   situacao: Situacao;
   area: string | null;
   telefone: string | null;
+  /**
+   * Mês/ano de formação que o MODELO entendeu ("07/2027"). Só é usado quando o texto da
+   * pessoa, lido pelo código, não fecha uma data — a regra é a do João (avaliarConclusao).
+   */
+  conclusao: string | null;
   /** Resposta curta, escrita pelo modelo, SÓ quando a pessoa fez uma pergunta. */
   resposta_pergunta: string | null;
 };
@@ -41,10 +54,12 @@ export type Classificacao = {
 export type ContextoFluxo = {
   /** Nome do perfil do Instagram (ig_perfis.nome), cru. */
   nomePerfil: string | null;
-  /** Texto das mensagens novas da pessoa, juntas — é dele que sai o telefone. */
+  /** Texto das mensagens novas da pessoa, juntas — é dele que sai o telefone e a data. */
   textoNovo: string;
   /** Quantas vezes a IA já repetiu a pergunta DESTA etapa. */
   tentativas: number;
+  /** Relógio (a régua da data depende de hoje). */
+  agora?: Date;
 };
 
 export type Passo = {
@@ -53,6 +68,8 @@ export type Passo = {
   tentativas: number;
   situacao?: "formado" | "estudante";
   area?: string | null;
+  /** Data prevista de formação, AAAA-MM-DD (último dia do mês citado). */
+  dataFormacao?: string;
   /** Canônico: 55 + DDD + número. */
   telefone?: string;
   /** Capturou o WhatsApp: criar a oportunidade e mandar o template do portfólio. */
@@ -69,6 +86,8 @@ export const TEXTOS = {
       : "Você já se formou e tá trabalhando, ou ainda tá na graduação?",
   reperguntarFormacao:
     "Só pra eu te mandar o material certo: você já tem graduação completa ou ainda tá cursando?",
+  perguntaDataFormacao: "E você se forma quando? Me fala o mês e o ano 😊",
+  reperguntarDataFormacao: "Só pra eu anotar certinho: em que mês e ano você se forma?",
   perguntaInteresse:
     "Você tem interesse em conhecer as nossas pós-graduações? Te encaminho o nosso portfólio pra você olhar com calma?",
   pedirWhatsapp:
@@ -119,25 +138,56 @@ function pareceNumeroInvalido(texto: string): boolean {
   return (texto.replace(/\D/g, "").length >= 6) && !extrairTelefoneBR(texto);
 }
 
+// ── Data de formação ───────────────────────────────────────────────────────────
+/**
+ * Lê a data prevista de formação com a régua do João: mês e ano → último dia do mês;
+ * "tô no 7º período" (posição no curso) e "ano que vem" NÃO viram data. O que o modelo
+ * entendeu (`c.conclusao`) só entra se o texto não fechar. Devolve AAAA-MM-DD ou null.
+ */
+export function lerDataFormacao(c: Classificacao, ctx: ContextoFluxo): string | null {
+  const r = avaliarConclusao(ctx.textoNovo, c.conclusao, ctx.agora ?? new Date());
+  return r.leitura.tipo === "data" ? r.leitura.data.toISOString().slice(0, 10) : null;
+}
+
+export type EtapaCrmInstagram = "Formados" | "Na graduação" | "Forma depois de jan/2027";
+
+/**
+ * Etapa do funil 1.5 INSTAGRAM. Estudante sem data vai para "Na graduação": o João do
+ * WhatsApp confere o prazo de novo antes de marcar reunião.
+ */
+export function etapaCrmInstagram(
+  situacao: string | null | undefined,
+  dataFormacao: string | null | undefined,
+  agora: Date = new Date(),
+): EtapaCrmInstagram {
+  if (situacao !== "estudante") return "Formados";
+  if (!dataFormacao) return "Na graduação";
+  const fim = new Date(`${dataFormacao}T23:59:59Z`);
+  return fim <= limiteFormatura(agora) ? "Na graduação" : "Forma depois de jan/2027";
+}
+
 // ── As passagens ─────────────────────────────────────────────────────────────
 function comResposta(c: Classificacao, depois: string[]): string[] {
   const resposta = c.intencao === "pergunta" ? String(c.resposta_pergunta ?? "").trim() : "";
   return resposta ? [resposta, ...depois] : depois;
 }
 
-function capturou(telefone: string, situacao?: "formado" | "estudante", area?: string | null): Passo {
+function capturou(telefone: string): Passo {
   return {
     mensagens: [TEXTOS.confirmacaoWhatsapp],
     proximaEtapa: "whatsapp_enviado",
     tentativas: 0,
     telefone,
     enviarWhatsapp: true,
-    ...(situacao ? { situacao, area } : {}),
   };
 }
 
 function telefoneDe(c: Classificacao, ctx: ContextoFluxo): string | null {
   return extrairTelefoneBR(ctx.textoNovo) ?? extrairTelefoneBR(c.telefone);
+}
+
+function irParaInteresse(c: Classificacao, extra: Partial<Passo> = {}): Passo {
+  return { mensagens: comResposta(c, [TEXTOS.perguntaInteresse]), proximaEtapa: "pergunta_interesse", tentativas: 0, ...extra };
 }
 
 export function decidirPasso(etapa: EtapaFluxo, c: Classificacao, ctx: ContextoFluxo): Passo {
@@ -188,13 +238,32 @@ export function decidirPasso(etapa: EtapaFluxo, c: Classificacao, ctx: ContextoF
     return { mensagens: [], proximaEtapa: "pergunta_interesse", tentativas: ctx.tentativas };
   }
 
+  if (etapa === "pergunta_data_formacao") {
+    const data = lerDataFormacao(c, ctx);
+    if (data) return irParaInteresse(c, { dataFormacao: data });
+    // Pergunta ou resposta que não fecha data ("tô no 7º período", "ano que vem"):
+    // repergunta UMA vez. Depois segue sem a data — não trava a conversa por isso.
+    if (c.intencao === "pergunta" || (ctx.tentativas < 1 && c.intencao !== "recusa")) {
+      return {
+        mensagens: comResposta(c, [ctx.tentativas < 1 ? TEXTOS.reperguntarDataFormacao : TEXTOS.perguntaDataFormacao]),
+        proximaEtapa: "pergunta_data_formacao",
+        tentativas: ctx.tentativas + 1,
+      };
+    }
+    return irParaInteresse(c);
+  }
+
   // boas_vindas e pergunta_formacao: a pessoa pode já ter dito a situação.
-  if (c.situacao === "formado" || c.situacao === "estudante") {
+  if (c.situacao === "formado") return irParaInteresse(c, { situacao: "formado", area: c.area });
+  if (c.situacao === "estudante") {
+    // "Tô na graduação, me formo em julho de 2027": já veio com a data, não pergunta de novo.
+    const data = lerDataFormacao(c, ctx);
+    if (data) return irParaInteresse(c, { situacao: "estudante", area: c.area, dataFormacao: data });
     return {
-      mensagens: comResposta(c, [TEXTOS.perguntaInteresse]),
-      proximaEtapa: "pergunta_interesse",
+      mensagens: comResposta(c, [TEXTOS.perguntaDataFormacao]),
+      proximaEtapa: "pergunta_data_formacao",
       tentativas: 0,
-      situacao: c.situacao,
+      situacao: "estudante",
       area: c.area,
     };
   }

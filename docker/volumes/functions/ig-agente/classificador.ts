@@ -22,6 +22,8 @@ const O_QUE_A_IA_ACABOU_DE_PERGUNTAR: Record<EtapaFluxo, string> = {
   boas_vindas:
     "A PPGVET mandou a boas-vindas a um novo seguidor (\"Oii, tudo bem?\"). Respostas como \"tudo sim, e você?\" são só cumprimento (intencao = outro).",
   pergunta_formacao: "A IA perguntou se a pessoa já se formou e trabalha, ou se ainda está na graduação.",
+  pergunta_data_formacao:
+    "A IA perguntou quando a pessoa se forma (mês e ano). Preencha `conclusao` com o que ela disse, em MM/AAAA.",
   pergunta_interesse:
     "A IA perguntou se a pessoa tem interesse em conhecer as pós-graduações e se pode encaminhar o portfólio (\"sim\", \"quero\", \"pode mandar\" = aceita).",
   pergunta_whatsapp: "A IA pediu o WhatsApp da pessoa (com DDD) para mandar o link e o portfólio em PDF.",
@@ -47,6 +49,7 @@ const INSTRUCOES = [
   "",
   "telefone: copie o número de telefone/WhatsApp que a pessoa escreveu, se houver; senão null.",
   "area: a graduação ou área que a pessoa citou (ex.: \"medicina veterinária\"); senão null.",
+  "conclusao: quando a pessoa disse quando SE FORMA, o mês e o ano em MM/AAAA (ex.: \"julho do ano que vem\" em 2026 → \"07/2027\"). Posição no curso (\"tô no 7º período\") NÃO é data: null. Sem data: null.",
   "",
   "resposta_pergunta: só quando intencao = pergunta. UMA resposta curta (1 a 2 frases), no tom do",
   "direct, sem markdown, usando APENAS estes fatos:",
@@ -68,9 +71,10 @@ export const TOOL_CLASSIFICAR = {
       situacao: { type: "string", enum: ["formado", "estudante", "nenhum", "nao_informou"] },
       area: { type: ["string", "null"] },
       telefone: { type: ["string", "null"] },
+      conclusao: { type: ["string", "null"] },
       resposta_pergunta: { type: ["string", "null"] },
     },
-    required: ["intencao", "situacao", "area", "telefone", "resposta_pergunta"],
+    required: ["intencao", "situacao", "area", "telefone", "conclusao", "resposta_pergunta"],
   },
 } as const;
 
@@ -79,6 +83,7 @@ export const CLASSIFICACAO_NEUTRA: Classificacao = {
   situacao: "nao_informou",
   area: null,
   telefone: null,
+  conclusao: null,
   resposta_pergunta: null,
 };
 
@@ -100,6 +105,7 @@ export function normalizarClassificacao(bruto: unknown): Classificacao {
     situacao: SITUACOES.includes(b.situacao) ? b.situacao : "nao_informou",
     area: texto(b.area, 80),
     telefone: texto(b.telefone, 40),
+    conclusao: texto(b.conclusao, 20),
     resposta_pergunta: intencao === "pergunta" ? texto(b.resposta_pergunta, 400) : null,
   };
 }
@@ -108,7 +114,10 @@ function montarPedido(etapa: EtapaFluxo, historico: TurnoHistorico[], novas: str
   const conversa = historico.slice(-10)
     .map((t) => `${t.role === "user" ? "PESSOA" : "PPGVET"}: ${t.text}`)
     .join("\n");
+  // Hoje em Brasília: "ano que vem" / "dezembro" só viram MM/AAAA sabendo a data.
+  const hoje = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString().slice(0, 10).split("-").reverse().join("/");
   return [
+    `Hoje é ${hoje}.`,
     `Onde a conversa está: ${O_QUE_A_IA_ACABOU_DE_PERGUNTAR[etapa]}`,
     "",
     "Conversa até aqui:",
