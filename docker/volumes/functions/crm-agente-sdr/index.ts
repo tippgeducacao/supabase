@@ -21,6 +21,8 @@ import { comBlocoDaEscola, comLinkPedido, comPresenteNaDespedida, jaTemOPresente
 import { respostaDoEncerramento, toolConcluida, type Encerramento } from './encerramento.ts';
 import { confirmacaoDoResultado, falaEntregaConfirmacao, textoConfirmacaoAgendamento, type ConfirmacaoAgendamento } from './confirmacaoAgendamento.ts';
 import { blocoPerguntasRecentes, falasDoLead } from './perguntasRecentes.ts';
+import { AVISO_CONSULTA_REPETIDA, MemoriaDeConsultas } from './consultaRepetida.ts';
+import { alertaFatoSemFonte } from './fatoSemFonte.ts';
 import { comContinuidadeWebchat } from './continuidadeWebchat.ts';
 import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoCurso, notaDoNome, renderPrompt } from './contexto.ts';
 import { atualizarAgenteComRatchet, atualizarLead, avaliarFimDoHistorico, buscarLead, carregarHistorico, comEntradaPendente, criarLead, excluirDadosLead, gravarMensagem, limparParaRouter, sanitizarHistorico } from './historico.ts';
@@ -781,6 +783,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     tel.registrar('esteiras_suspensas', { motivo: 'retencao_pendente' });
   };
 
+  const consultasDaRodada = ctx.ficha ? new MemoriaDeConsultas() : null;
   // Loop agêntico: igual ao n8n, o histórico é relido do banco a cada volta.
   for (let rodada = 0; rodada < MAX_RODADAS_TOOLS; rodada++) {
     const [historico, contextoEntregaMateriais, fichaLida] = await Promise.all([
@@ -849,7 +852,9 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       contextoEntregaMateriais,
       // Sem o bloco (leitura falhou), a instrução também fica de fora: ela aponta para ele.
       // Perguntas já feitas + respostas vêm do histórico a cada volta (perguntasRecentes.ts).
-      contextoFicha: baseFicha ? [baseFicha, blocoPerguntasRecentes(messages)].filter(Boolean).join('\n\n') : undefined,
+      contextoFicha: baseFicha
+        ? [baseFicha, blocoPerguntasRecentes(messages), alertaFatoSemFonte(falasDoLead(messages).at(-1))].filter(Boolean).join('\n\n')
+        : undefined,
       comFicha: Boolean(ficha) || aulaPiloto,
       ...(aulaPiloto ? { instrucaoFicha: INSTRUCAO_AULA_PILOTO } : {}),
       // Encerramento vence reação: a despedida é o que importa nessa volta.
@@ -935,11 +940,16 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       for (const tu of toolUses) {
         // uma function por vez, em ordem (idem "executa uma function por vez")
         const inicioTool = Date.now();
-        const output = await executarTool(supabase, tu, ctx);
+        // Canário: consulta idêntica já feita nesta rodada não executa de novo (consultaRepetida.ts).
+        const repetida = consultasDaRodada?.repetida(tu.name, tu.input) ?? false;
+        const output = repetida
+          ? { id: tu.id, resultado: AVISO_CONSULTA_REPETIDA }
+          : await executarTool(supabase, tu, ctx);
         tel.registrar('tool_exec', {
           tool: tu.name,
           input: resumir(tu.input, 800),
           output: resumir(output, 1200),
+          ...(repetida ? { repetida: true } : {}),
         }, Date.now() - inicioTool);
         if (tu.name === 'confirmar_agendamento') confirmacaoPendente = confirmacaoDoResultado(output) ?? confirmacaoPendente;
         outputs.push(output);

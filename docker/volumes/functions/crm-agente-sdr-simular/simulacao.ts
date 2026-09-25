@@ -10,6 +10,7 @@ import { avaliarEvidenciaSemGraduacao, bloqueioSemEvidenciaGraduacao } from '../
 import { respostaDoEncerramento, toolConcluida, type Encerramento } from '../crm-agente-sdr/encerramento.ts';
 import { comPresenteNaDespedida } from '../crm-agente-sdr/escolaGratuita.ts';
 import { confirmacaoDoResultado, falaEntregaConfirmacao, textoConfirmacaoAgendamento, type ConfirmacaoAgendamento } from '../crm-agente-sdr/confirmacaoAgendamento.ts';
+import { AVISO_CONSULTA_REPETIDA, MemoriaDeConsultas } from '../crm-agente-sdr/consultaRepetida.ts';
 
 export const MAX_TURNOS_SIMULACAO = 100;
 export const MAX_CARACTERES_SIMULACAO = 200_000;
@@ -315,6 +316,7 @@ export async function executarSimulacao(entrada: EntradaSimulacao, deps: Depende
       messages.push({ role: 'assistant', content: [{ type: 'text', text: final }] });
       confirmacaoPendente = null;
     };
+    const consultasDoTurno = rodada.comFicha ? new MemoriaDeConsultas() : null;
     for (let volta = 0; volta < 6; volta++) {
       const contextoFicha = deps.fichaDaVolta?.(sanitizarHistorico(messages));
       const resp = await deps.chamarPrincipal({
@@ -354,7 +356,11 @@ export async function executarSimulacao(entrada: EntradaSimulacao, deps: Depende
       const toolsConcluidas: Encerramento[] = [];
       for (const tu of toolUses) {
         const bloqueadoPelaGuarda = pausasBloqueadas.has(tu.id);
-        const resultado = bloqueadoPelaGuarda ? JSON.stringify(bloqueioSemEvidenciaGraduacao(tu.id)) : await deps.mockTool(tu.name, tu.input);
+        // Espelho do index.ts (canário): consulta idêntica já feita neste turno não executa de novo.
+        const repetida = !bloqueadoPelaGuarda && (consultasDoTurno?.repetida(tu.name, tu.input) ?? false);
+        const resultado = bloqueadoPelaGuarda ? JSON.stringify(bloqueioSemEvidenciaGraduacao(tu.id))
+          : repetida ? JSON.stringify({ resultado: AVISO_CONSULTA_REPETIDA })
+          : await deps.mockTool(tu.name, tu.input);
         let retornoTool: Record<string, unknown> = { resultado };
         // Retorno estruturado do mock também pode recusar uma ação; tentar pausar
         // não significa que ela foi concluída (mesmo contrato do executor real).

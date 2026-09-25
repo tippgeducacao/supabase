@@ -46,6 +46,7 @@ import { bloqueioProximaTurmaDeEstudante } from '../crm-agente-sdr/tools.ts';
 import { blocoConviteAgenda } from '../crm-agente-sdr/contexto.ts';
 import { resultadoConfirmacao } from '../crm-agente-sdr/confirmacaoAgendamento.ts';
 import { blocoPerguntasRecentes, falasDoLead } from '../crm-agente-sdr/perguntasRecentes.ts';
+import { alertaFatoSemFonte } from '../crm-agente-sdr/fatoSemFonte.ts';
 import { diagnosticoDoProvedor, disponibilidadeSimulada, executarFollowupSimulado, executarSimulacao, extrairUso, MAX_CARACTERES_SIMULACAO, validarEntradaSimulacao, type AgenteRouter } from './simulacao.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
@@ -100,7 +101,12 @@ async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimula
   // devolveu naquela rodada (agenda, matriz, cronograma…). Se o modelo chamar a mesma tool,
   // recebe o mesmo fato; tool que a rodada real não chamou cai no mock sintético abaixo.
   const real = mocks?.respostas_reais?.[nome];
-  if (typeof real === 'string' && real.trim()) {
+  // A agenda real só vale para o DIA que a rodada real consultou: o replay roda dias depois e
+  // "amanhã" já é outra data. Horário de outro dia contradiz o pedido e o modelo repetia a consulta
+  // até esgotar as voltas (duelo de 25/09, silêncio). Dia diferente ⇒ agenda sintética abaixo.
+  const agendaDeOutroDia = nome === 'consulta_disponibilidade' && typeof real === 'string'
+    && Boolean(input?.data_desejada) && !real.includes(String(input.data_desejada));
+  if (typeof real === 'string' && real.trim() && !agendaDeOutroDia) {
     // Mesmo acréscimo do executor real no canário: o próximo passo da coleta (proximoPassoColeta.ts).
     if (nome === 'atualizar_dados_lead' && ficha) {
       ficha.jornada = aplicarColetaNaJornada(ficha.jornada, input ?? {});
@@ -447,7 +453,9 @@ Deno.serve(async (req) => {
           fichaSim.jornada = aplicarDeclaracaoNaJornada(fichaSim.jornada);
         }
         const base = blocoDaFicha();
-        return base ? [base, blocoPerguntasRecentes(messages)].filter(Boolean).join('\n\n') : undefined;
+        return base
+          ? [base, blocoPerguntasRecentes(messages), alertaFatoSemFonte(falasDoLead(messages).at(-1))].filter(Boolean).join('\n\n')
+          : undefined;
       },
       aoResponder: (texto) => {
         if (!fichaSim) return;
