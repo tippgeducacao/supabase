@@ -98,6 +98,9 @@ export async function pensarRodada(entrada: {
     nomePerfil: entrada.nomePerfil,
     textoNovo: novas.join("\n"),
     tentativas: estado.tentativas,
+    situacaoSalva: estado.situacao,
+    areaSalva: estado.area,
+    dataSalva: estado.dataFormacao,
   });
   return {
     ...resultado,

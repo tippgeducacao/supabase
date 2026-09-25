@@ -31,6 +31,7 @@ export const NOME_AGENTE = "Flávia";
 export type EtapaFluxo =
   | "boas_vindas"
   | "pergunta_formacao"
+  | "pergunta_curso"
   | "pergunta_data_formacao"
   | "pergunta_interesse"
   | "pergunta_whatsapp"
@@ -64,6 +65,10 @@ export type ContextoFluxo = {
   tentativas: number;
   /** Relógio (a régua da data depende de hoje). */
   agora?: Date;
+  /** O que o roteiro já guardou em rodadas anteriores (ig_conversa_ia). */
+  situacaoSalva?: string | null;
+  areaSalva?: string | null;
+  dataSalva?: string | null;
 };
 
 export type Passo = {
@@ -93,6 +98,11 @@ export const TEXTOS = {
       : "Você já se formou e tá trabalhando, ou ainda tá na graduação?",
   reperguntarFormacao:
     "Só pra eu te mandar o material certo: você já tem graduação completa ou ainda tá cursando?",
+  // "A IA está assumindo qualquer coisa na graduação, tinha que perguntar qual é"
+  // (Gustavo, 25/09/2026): sem o curso dito, a IA pergunta antes de seguir.
+  perguntaCursoFormado: "Show! E qual é a sua formação?",
+  perguntaCursoEstudante: "Legal! E qual curso você faz?",
+  reperguntarCurso: "Me conta qual é o curso da sua graduação? Por exemplo: medicina veterinária, zootecnia, agronomia…",
   perguntaDataFormacao: "E você se forma quando? Me fala o mês e o ano 😊",
   reperguntarDataFormacao: "Só pra eu anotar certinho: em que mês e ano você se forma?",
   perguntaInteresse:
@@ -223,6 +233,23 @@ function irParaInteresse(c: Classificacao, extra: Partial<Passo> = {}): Passo {
   return { mensagens: comResposta(c, [TEXTOS.perguntaInteresse]), proximaEtapa: "pergunta_interesse", tentativas: 0, ...extra };
 }
 
+/** Curso resolvido (ou desistido): formado vai ao portfólio; estudante ainda precisa da data. */
+function depoisDoCurso(
+  c: Classificacao,
+  situacao: "formado" | "estudante",
+  area: string | null,
+  data: string | null,
+): Passo {
+  const base = { situacao, ...(area ? { area } : {}) };
+  if (situacao === "formado" || data) return irParaInteresse(c, { ...base, ...(data ? { dataFormacao: data } : {}) });
+  return {
+    mensagens: comResposta(c, [TEXTOS.perguntaDataFormacao]),
+    proximaEtapa: "pergunta_data_formacao",
+    tentativas: 0,
+    ...base,
+  };
+}
+
 export function decidirPasso(etapa: EtapaFluxo, c: Classificacao, ctx: ContextoFluxo): Passo {
   const passo = decidirPassoSemApresentacao(etapa, c, ctx);
   // Primeira resposta da IA (respondendo o "Oii, tudo bem?" do ManyChat): a Flávia se
@@ -281,6 +308,23 @@ function decidirPassoSemApresentacao(etapa: EtapaFluxo, c: Classificacao, ctx: C
     return { mensagens: [], proximaEtapa: "pergunta_interesse", tentativas: ctx.tentativas };
   }
 
+  if (etapa === "pergunta_curso") {
+    const situacao = c.situacao === "formado" || c.situacao === "estudante"
+      ? c.situacao
+      : (ctx.situacaoSalva === "formado" ? "formado" : "estudante");
+    const data = situacao === "estudante" ? (lerDataFormacao(c, ctx) ?? ctx.dataSalva ?? null) : null;
+    if (c.area) return depoisDoCurso(c, situacao, c.area, data);
+    // Sem curso claro: pergunta de novo UMA vez; depois segue sem ele (não trava).
+    if (c.intencao === "pergunta" || (ctx.tentativas < 1 && c.intencao !== "recusa")) {
+      return {
+        mensagens: comResposta(c, [TEXTOS.reperguntarCurso]),
+        proximaEtapa: "pergunta_curso",
+        tentativas: ctx.tentativas + 1,
+      };
+    }
+    return depoisDoCurso(c, situacao, null, data);
+  }
+
   if (etapa === "pergunta_data_formacao") {
     const data = lerDataFormacao(c, ctx);
     if (data) return irParaInteresse(c, { dataFormacao: data });
@@ -296,19 +340,22 @@ function decidirPassoSemApresentacao(etapa: EtapaFluxo, c: Classificacao, ctx: C
     return irParaInteresse(c);
   }
 
-  // boas_vindas e pergunta_formacao: a pessoa pode já ter dito a situação.
-  if (c.situacao === "formado") return irParaInteresse(c, { situacao: "formado", area: c.area });
-  if (c.situacao === "estudante") {
-    // "Tô na graduação, me formo em julho de 2027": já veio com a data, não pergunta de novo.
-    const data = lerDataFormacao(c, ctx);
-    if (data) return irParaInteresse(c, { situacao: "estudante", area: c.area, dataFormacao: data });
-    return {
-      mensagens: comResposta(c, [TEXTOS.perguntaDataFormacao]),
-      proximaEtapa: "pergunta_data_formacao",
-      tentativas: 0,
-      situacao: "estudante",
-      area: c.area,
-    };
+  // boas_vindas e pergunta_formacao: a pessoa pode já ter dito a situação (e o curso).
+  if (c.situacao === "formado" || c.situacao === "estudante") {
+    const situacao = c.situacao;
+    const data = situacao === "estudante" ? lerDataFormacao(c, ctx) : null;
+    if (!c.area) {
+      // "Tô na graduação" / "sou formado" sem dizer o quê: pergunta o curso. Uma data dita
+      // junto ("me formo em julho de 2027") já fica guardada.
+      return {
+        mensagens: comResposta(c, [situacao === "formado" ? TEXTOS.perguntaCursoFormado : TEXTOS.perguntaCursoEstudante]),
+        proximaEtapa: "pergunta_curso",
+        tentativas: 0,
+        situacao,
+        ...(data ? { dataFormacao: data } : {}),
+      };
+    }
+    return depoisDoCurso(c, situacao, c.area, data);
   }
   if (c.situacao === "nenhum") {
     return { mensagens: [TEXTOS.escola], proximaEtapa: "escola_enviada", tentativas: 0 };

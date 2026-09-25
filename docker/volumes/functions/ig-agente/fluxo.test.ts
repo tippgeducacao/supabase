@@ -10,7 +10,10 @@ const AGORA = new Date('2026-09-25T12:00:00Z');
 const cls = (p: Partial<Classificacao> = {}): Classificacao => ({
   intencao: 'outro', situacao: 'nao_informou', area: null, telefone: null, conclusao: null, resposta_pergunta: null, ...p,
 });
-const ctx = (p: { nomePerfil?: string | null; textoNovo?: string; tentativas?: number } = {}) => ({
+const ctx = (p: {
+  nomePerfil?: string | null; textoNovo?: string; tentativas?: number;
+  situacaoSalva?: string | null; areaSalva?: string | null; dataSalva?: string | null;
+} = {}) => ({
   nomePerfil: 'Gustavo Sutil', textoNovo: '', tentativas: 0, agora: AGORA, ...p,
 });
 const passo = (etapa: EtapaFluxo, c: Partial<Classificacao>, x: Parameters<typeof ctx>[0] = {}) =>
@@ -53,13 +56,13 @@ describe('boas_vindas: a pessoa respondeu o "Oii, tudo bem?"', () => {
 
   it('já disse que é estudante → pergunta quando se forma', () => {
     expect(passo('boas_vindas', { situacao: 'estudante' })).toMatchObject({
-      mensagens: [TEXTOS.apresentacao, TEXTOS.perguntaDataFormacao], proximaEtapa: 'pergunta_data_formacao', situacao: 'estudante',
+      mensagens: [TEXTOS.apresentacao, TEXTOS.perguntaCursoEstudante], proximaEtapa: 'pergunta_curso', situacao: 'estudante',
     });
   });
 
   it('já disse que é formado → pula direto para a pergunta do portfólio', () => {
-    expect(passo('boas_vindas', { situacao: 'formado' })).toMatchObject({
-      mensagens: [TEXTOS.apresentacao, TEXTOS.perguntaInteresse], proximaEtapa: 'pergunta_interesse', situacao: 'formado',
+    expect(passo('boas_vindas', { situacao: 'formado', area: 'zootecnia' })).toMatchObject({
+      mensagens: [TEXTOS.apresentacao, TEXTOS.perguntaInteresse], proximaEtapa: 'pergunta_interesse', situacao: 'formado', area: 'zootecnia',
     });
   });
 
@@ -69,7 +72,7 @@ describe('boas_vindas: a pessoa respondeu o "Oii, tudo bem?"', () => {
   });
 
   it('a apresentação da Flávia só sai na PRIMEIRA resposta da IA', () => {
-    expect(passo('pergunta_formacao', { situacao: 'formado' }).mensagens).toEqual([TEXTOS.perguntaInteresse]);
+    expect(passo('pergunta_formacao', { situacao: 'formado', area: 'zootecnia' }).mensagens).toEqual([TEXTOS.perguntaInteresse]);
   });
 
   it('não quer papo → despedida e encerra, sem apresentação', () => {
@@ -100,15 +103,71 @@ describe('pergunta_formacao', () => {
   });
 });
 
+describe('pergunta_curso: "qual é a sua graduação?" (25/09/2026)', () => {
+  it('"tô na graduação" sem curso → "Legal! E qual curso você faz?"', () => {
+    expect(passo('pergunta_formacao', { situacao: 'estudante' }, { textoNovo: 'to na graduação' })).toMatchObject({
+      mensagens: ['Legal! E qual curso você faz?'], proximaEtapa: 'pergunta_curso', situacao: 'estudante',
+    });
+  });
+
+  it('"sou formado" sem curso → "Show! E qual é a sua formação?"', () => {
+    expect(passo('pergunta_formacao', { situacao: 'formado' })).toMatchObject({
+      mensagens: ['Show! E qual é a sua formação?'], proximaEtapa: 'pergunta_curso', situacao: 'formado',
+    });
+  });
+
+  it('estudante que deu a data mas não o curso: guarda a data e pergunta o curso', () => {
+    expect(passo('pergunta_formacao', { situacao: 'estudante' }, { textoNovo: 'tô na graduação, termino em dezembro de 2027' })).toMatchObject({
+      mensagens: [TEXTOS.perguntaCursoEstudante], proximaEtapa: 'pergunta_curso', dataFormacao: '2027-12-31',
+    });
+  });
+
+  it('estudante diz o curso → pergunta a data', () => {
+    expect(passo('pergunta_curso', { area: 'medicina veterinária' }, { situacaoSalva: 'estudante' })).toMatchObject({
+      mensagens: [TEXTOS.perguntaDataFormacao], proximaEtapa: 'pergunta_data_formacao', situacao: 'estudante', area: 'medicina veterinária',
+    });
+  });
+
+  it('estudante diz o curso e a data já estava guardada → portfólio', () => {
+    expect(passo('pergunta_curso', { area: 'zootecnia' }, { situacaoSalva: 'estudante', dataSalva: '2027-12-31' })).toMatchObject({
+      mensagens: [TEXTOS.perguntaInteresse], proximaEtapa: 'pergunta_interesse', area: 'zootecnia', dataFormacao: '2027-12-31',
+    });
+  });
+
+  it('estudante diz curso e data juntos → portfólio', () => {
+    expect(passo('pergunta_curso', { area: 'agronomia' }, { situacaoSalva: 'estudante', textoNovo: 'agronomia, me formo em 06/2028' })).toMatchObject({
+      proximaEtapa: 'pergunta_interesse', area: 'agronomia', dataFormacao: '2028-06-30',
+    });
+  });
+
+  it('formado diz a formação → portfólio', () => {
+    expect(passo('pergunta_curso', { area: 'medicina veterinária' }, { situacaoSalva: 'formado' })).toMatchObject({
+      mensagens: [TEXTOS.perguntaInteresse], proximaEtapa: 'pergunta_interesse', situacao: 'formado', area: 'medicina veterinária',
+    });
+  });
+
+  it('resposta vaga → repergunta UMA vez; depois segue sem o curso', () => {
+    expect(passo('pergunta_curso', {}, { situacaoSalva: 'formado', tentativas: 0 })).toMatchObject({
+      mensagens: [TEXTOS.reperguntarCurso], proximaEtapa: 'pergunta_curso', tentativas: 1,
+    });
+    expect(passo('pergunta_curso', {}, { situacaoSalva: 'formado', tentativas: 1 })).toMatchObject({
+      mensagens: [TEXTOS.perguntaInteresse], proximaEtapa: 'pergunta_interesse',
+    });
+    expect(passo('pergunta_curso', {}, { situacaoSalva: 'estudante', tentativas: 1 })).toMatchObject({
+      mensagens: [TEXTOS.perguntaDataFormacao], proximaEtapa: 'pergunta_data_formacao',
+    });
+  });
+});
+
 describe('pergunta_data_formacao (estudante)', () => {
   it('estudante → "E você se forma quando? Me fala o mês e o ano 😊"', () => {
-    expect(passo('pergunta_formacao', { situacao: 'estudante' })).toMatchObject({
-      mensagens: ['E você se forma quando? Me fala o mês e o ano 😊'], proximaEtapa: 'pergunta_data_formacao', situacao: 'estudante',
+    expect(passo('pergunta_formacao', { situacao: 'estudante', area: 'agronomia' })).toMatchObject({
+      mensagens: ['E você se forma quando? Me fala o mês e o ano 😊'], proximaEtapa: 'pergunta_data_formacao', situacao: 'estudante', area: 'agronomia',
     });
   });
 
   it('estudante que já diz a data junto não é perguntado de novo', () => {
-    expect(passo('pergunta_formacao', { situacao: 'estudante' }, { textoNovo: 'faço vet, me formo em julho de 2027' })).toMatchObject({
+    expect(passo('pergunta_formacao', { situacao: 'estudante', area: 'medicina veterinária' }, { textoNovo: 'faço vet, me formo em julho de 2027' })).toMatchObject({
       mensagens: [TEXTOS.perguntaInteresse], proximaEtapa: 'pergunta_interesse', situacao: 'estudante', dataFormacao: '2027-07-31',
     });
   });

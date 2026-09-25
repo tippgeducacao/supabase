@@ -22,6 +22,8 @@ const O_QUE_A_IA_ACABOU_DE_PERGUNTAR: Record<EtapaFluxo, string> = {
   boas_vindas:
     "A PPGVET mandou a boas-vindas a um novo seguidor (\"Oii, tudo bem?\"). Respostas como \"tudo sim, e você?\" são só cumprimento (intencao = outro).",
   pergunta_formacao: "A IA perguntou se a pessoa já se formou e trabalha, ou se ainda está na graduação.",
+  pergunta_curso:
+    "A IA perguntou QUAL é o curso da graduação da pessoa (a formação dela, ou o curso que ela faz). Preencha `area` com o curso dito (ex.: \"medicina veterinária\", \"zootecnia\"); se ela não disse o curso, null.",
   pergunta_data_formacao:
     "A IA perguntou quando a pessoa se forma (mês e ano). Preencha `conclusao` com o que ela disse, em MM/AAAA.",
   pergunta_interesse:
@@ -48,7 +50,7 @@ const INSTRUCOES = [
   "- outro: qualquer outra coisa (cumprimento, resposta solta).",
   "",
   "telefone: copie o número de telefone/WhatsApp que a pessoa escreveu, se houver; senão null.",
-  "area: a graduação ou área que a pessoa citou (ex.: \"medicina veterinária\"); senão null.",
+  "area: o CURSO da graduação que a pessoa citou (ex.: \"medicina veterinária\"). \"Tô na graduação\" ou \"sou formado\" sem dizer o curso = null — nunca deduza o curso.",
   "conclusao: quando a pessoa disse quando SE FORMA, o mês e o ano em MM/AAAA (ex.: \"julho do ano que vem\" em 2026 → \"07/2027\"). Posição no curso (\"tô no 7º período\") NÃO é data: null. Sem data: null.",
   "",
   "resposta_pergunta: só quando intencao = pergunta. UMA resposta curta (1 a 2 frases), no tom do",

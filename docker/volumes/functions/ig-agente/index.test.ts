@@ -264,7 +264,7 @@ describe('ig-agente: o roteiro do direct', () => {
 
   it('formado → pergunta se quer o portfólio; "sim" → pede o WhatsApp (o PDF não vai pelo insta)', async () => {
     mocks.estado.conversa!.fluxo_etapa = 'pergunta_formacao';
-    mocks.classificar.mockResolvedValueOnce({ classificacao: { ...neutra, situacao: 'formado' }, erro: null, modelo: 'gpt-5.6-luna' });
+    mocks.classificar.mockResolvedValueOnce({ classificacao: { ...neutra, situacao: 'formado', area: 'medicina veterinária' }, erro: null, modelo: 'gpt-5.6-luna' });
     await inbound();
     expect(textosEnviados()).toEqual([TEXTOS.perguntaInteresse]);
     expect(gravacaoDaEtapa()!.payload).toMatchObject({ fluxo_etapa: 'pergunta_interesse', situacao: 'formado' });
