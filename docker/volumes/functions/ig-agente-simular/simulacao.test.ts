@@ -58,6 +58,7 @@ describe('executarCenario: o histórico que o classificador lê é o da produç�
     expect(m.classificar).toHaveBeenLastCalledWith('pergunta_formacao', [
       { role: 'assistant', text: ABERTURA_MANYCHAT },
       { role: 'user', text: 'tudo sim' },
+      { role: 'assistant', text: TEXTOS.apresentacao },
       { role: 'assistant', text: TEXTOS.perguntaFormacao('Carla') },
     ], ['sou vet']);
   });
@@ -77,7 +78,7 @@ describe('executarCenario: roteiro real, do "tudo bem" ao WhatsApp', () => {
       },
     }));
     expect(s.turnos.map((t) => t.ia)).toEqual([
-      [TEXTOS.perguntaFormacao('Carla')], [TEXTOS.perguntaInteresse], [TEXTOS.pedirWhatsapp], [TEXTOS.confirmacaoWhatsapp],
+      [TEXTOS.apresentacao, TEXTOS.perguntaFormacao('Carla')], [TEXTOS.perguntaInteresse], [TEXTOS.pedirWhatsapp], [TEXTOS.confirmacaoWhatsapp],
     ]);
     expect(s.final).toMatchObject({ etapa: 'whatsapp_enviado', situacao: 'formado', area: 'medicina veterinária', telefone: '5546999881234' });
     expect(s.whatsapp).toMatchObject({ simulado: true, situacao: 'formado', etapa_crm: 'Formados' });

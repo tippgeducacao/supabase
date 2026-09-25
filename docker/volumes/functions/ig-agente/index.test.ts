@@ -168,7 +168,7 @@ describe('ig-agente: o roteiro do direct', () => {
   it('resposta à boas-vindas → pergunta da formação com o nome, e a etapa anda', async () => {
     expect((await inbound()).status).toBe(200);
     expect(mocks.classificar).toHaveBeenCalledWith('boas_vindas', [], ['quero!']);
-    expect(textosEnviados()).toEqual([TEXTOS.perguntaFormacao('Gustavo')]);
+    expect(textosEnviados()).toEqual([TEXTOS.apresentacao, TEXTOS.perguntaFormacao('Gustavo')]);
     expect(mocks.fetch.mock.calls[0][0]).toContain('graph.instagram.com');
     expect(mocks.fetch.mock.calls[0][1].headers.Authorization).toBe('Bearer IGAA-sintetico');
 
@@ -359,7 +359,7 @@ describe('ig-agente: envio', () => {
       return new Response(JSON.stringify({ message_id: 'saida-1' }));
     });
     await inbound();
-    expect(textosEnviados()).toEqual(['É gratuita, sim!']);
+    expect(textosEnviados()).toEqual([TEXTOS.apresentacao]);
     expect(liberacao()).toMatchObject({ p_respondido_ate: INBOUND_EM });
   });
 
@@ -368,7 +368,7 @@ describe('ig-agente: envio', () => {
       error: { message: 'Error validating access token', code: 190 },
     }), { status: 400 }));
     await inbound();
-    expect(textosEnviados()).toEqual([TEXTOS.perguntaFormacao('Gustavo')]);
+    expect(textosEnviados()).toEqual([TEXTOS.apresentacao]);
     const falha = mocks.estado.escritas.find((w) => w.tabela === 'ig_mensagens');
     expect(falha).toMatchObject({ op: 'insert', payload: { status_entrega: 'failed', mid: null } });
     expect(gravacaoDaEtapa()).toBeUndefined();

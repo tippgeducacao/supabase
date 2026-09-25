@@ -25,6 +25,8 @@ import { avaliarConclusao, limiteFormatura } from "../crm-agente-sdr/elegibilida
 import { IG_WA_NUMERO_EXIBIDO } from "../_shared/igWhatsapp.ts";
 
 export const LINK_ESCOLA = "https://escoladeespecializacao.ppgvet.com.br";
+/** A IA do direct se apresenta com este nome (decisão do Gustavo, 25/09/2026). */
+export const NOME_AGENTE = "Flávia";
 
 export type EtapaFluxo =
   | "boas_vindas"
@@ -82,6 +84,9 @@ export const ETAPAS_FINAIS: ReadonlySet<EtapaFluxo> = new Set(["escola_enviada",
 
 // ── As frases (do diretor comercial, 25/09/2026) ────────────────────────────────
 export const TEXTOS = {
+  // 1º balão da IA na conversa: "tava muito seco, falta uma saudação" (25/09/2026). Serve
+  // para "tudo sim" e para "tudo bem?" devolvido.
+  apresentacao: `Tudo ótimo por aqui! 😊 Sou a ${NOME_AGENTE}, da PPGVET.`,
   perguntaFormacao: (nome: string | null) =>
     nome
       ? `${nome}, você já se formou e tá trabalhando, ou ainda tá na graduação?`
@@ -219,6 +224,16 @@ function irParaInteresse(c: Classificacao, extra: Partial<Passo> = {}): Passo {
 }
 
 export function decidirPasso(etapa: EtapaFluxo, c: Classificacao, ctx: ContextoFluxo): Passo {
+  const passo = decidirPassoSemApresentacao(etapa, c, ctx);
+  // Primeira resposta da IA (respondendo o "Oii, tudo bem?" do ManyChat): a Flávia se
+  // apresenta antes de qualquer coisa — menos na despedida de quem não quer papo.
+  if (etapa === "boas_vindas" && passo.proximaEtapa !== "encerrada" && passo.mensagens.length) {
+    return { ...passo, mensagens: [TEXTOS.apresentacao, ...passo.mensagens] };
+  }
+  return passo;
+}
+
+function decidirPassoSemApresentacao(etapa: EtapaFluxo, c: Classificacao, ctx: ContextoFluxo): Passo {
   const nome = primeiroNomeConfiavel(ctx.nomePerfil);
 
   // Fim de roteiro: só responde pergunta; conversa fiada não reabre o fluxo.

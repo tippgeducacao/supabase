@@ -19,7 +19,10 @@ const passo = (etapa: EtapaFluxo, c: Partial<Classificacao>, x: Parameters<typeo
 describe('caminho feliz do diretor comercial (25/09/2026)', () => {
   it('"tudo sim" → formação → "sou vet" → portfólio? → "sim" → WhatsApp → número', () => {
     const p1 = passo('boas_vindas', { intencao: 'outro' });
-    expect(p1).toMatchObject({ mensagens: ['Gustavo, você já se formou e tá trabalhando, ou ainda tá na graduação?'], proximaEtapa: 'pergunta_formacao' });
+    expect(p1).toMatchObject({
+      mensagens: ['Tudo ótimo por aqui! 😊 Sou a Flávia, da PPGVET.', 'Gustavo, você já se formou e tá trabalhando, ou ainda tá na graduação?'],
+      proximaEtapa: 'pergunta_formacao',
+    });
 
     const p2 = passo('pergunta_formacao', { situacao: 'formado', area: 'medicina veterinária' });
     expect(p2).toMatchObject({
@@ -45,27 +48,31 @@ describe('caminho feliz do diretor comercial (25/09/2026)', () => {
 describe('boas_vindas: a pessoa respondeu o "Oii, tudo bem?"', () => {
   it('nome que não é de gente fica de fora', () => {
     expect(passo('boas_vindas', {}, { nomePerfil: 'JS MIMOS' }).mensagens)
-      .toEqual(['Você já se formou e tá trabalhando, ou ainda tá na graduação?']);
+      .toEqual([TEXTOS.apresentacao, 'Você já se formou e tá trabalhando, ou ainda tá na graduação?']);
   });
 
   it('já disse que é estudante → pergunta quando se forma', () => {
     expect(passo('boas_vindas', { situacao: 'estudante' })).toMatchObject({
-      mensagens: [TEXTOS.perguntaDataFormacao], proximaEtapa: 'pergunta_data_formacao', situacao: 'estudante',
+      mensagens: [TEXTOS.apresentacao, TEXTOS.perguntaDataFormacao], proximaEtapa: 'pergunta_data_formacao', situacao: 'estudante',
     });
   });
 
   it('já disse que é formado → pula direto para a pergunta do portfólio', () => {
     expect(passo('boas_vindas', { situacao: 'formado' })).toMatchObject({
-      mensagens: [TEXTOS.perguntaInteresse], proximaEtapa: 'pergunta_interesse', situacao: 'formado',
+      mensagens: [TEXTOS.apresentacao, TEXTOS.perguntaInteresse], proximaEtapa: 'pergunta_interesse', situacao: 'formado',
     });
   });
 
   it('pergunta antes de tudo → responde e faz a pergunta da formação', () => {
     expect(passo('boas_vindas', { intencao: 'pergunta', resposta_pergunta: 'Somos a PPGVET!' }).mensagens)
-      .toEqual(['Somos a PPGVET!', TEXTOS.perguntaFormacao('Gustavo')]);
+      .toEqual([TEXTOS.apresentacao, 'Somos a PPGVET!', TEXTOS.perguntaFormacao('Gustavo')]);
   });
 
-  it('não quer papo → despedida e encerra', () => {
+  it('a apresentação da Flávia só sai na PRIMEIRA resposta da IA', () => {
+    expect(passo('pergunta_formacao', { situacao: 'formado' }).mensagens).toEqual([TEXTOS.perguntaInteresse]);
+  });
+
+  it('não quer papo → despedida e encerra, sem apresentação', () => {
     expect(passo('boas_vindas', { intencao: 'recusa' })).toMatchObject({ mensagens: [TEXTOS.recusa], proximaEtapa: 'encerrada' });
   });
 });
