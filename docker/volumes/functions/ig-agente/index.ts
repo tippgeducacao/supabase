@@ -23,10 +23,10 @@
 // ----------------------------------------------------------------------------
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { avaliarGateIg } from "../_shared/igAgenteGate.ts";
-import { dividirPorBytes, ehTokenInvalido, enviarTextoIg, type ResultadoEnvioIg } from "../_shared/igMensageria.ts";
-import { classificar } from "./classificador.ts";
-import { decidirPasso, etapaCrmInstagram, type EtapaFluxo, type Passo } from "./fluxo.ts";
-import { atrasoEntreBaloesMs, inicioDaJanela, type LinhaIg, montarHistoricoIg } from "./historico.ts";
+import { ehTokenInvalido, enviarTextoIg, type ResultadoEnvioIg } from "../_shared/igMensageria.ts";
+import type { EtapaFluxo, Passo } from "./fluxo.ts";
+import { atrasoEntreBaloesMs, inicioDaJanela, type LinhaIg } from "./historico.ts";
+import { type EstadoRoteiro, pensarRodada, type PlanoWhatsapp, separarNovas } from "./rodada.ts";
 
 declare const EdgeRuntime: { waitUntil?: (p: Promise<unknown>) => void } | undefined;
 
@@ -175,39 +175,37 @@ async function zerarConversa(c: Conversa) {
 // Quando for aprovado, aqui entram: criar a oportunidade no funil 1.5 INSTAGRAM na etapa
 // de etapaCrmInstagram() (Formados | Na graduação | Forma em AAAA/06|01…), gravar o
 // campo "Data prevista de formação" do contato e mandar o template pelo número "João
-// PPGVET". Hoje só registra o que FARIA.
-function enviarParaWhatsapp(c: Conversa, passo: Passo, situacaoSalva: string | null, dataSalva: string | null) {
-  const situacao = passo.situacao ?? situacaoSalva;
-  const dataFormacao = passo.dataFormacao ?? dataSalva;
-  const plano = { simulado: true, situacao, data_formacao: dataFormacao, etapa_crm: etapaCrmInstagram(situacao, dataFormacao) };
+// PPGVET". Hoje só registra o que FARIA (o plano sai de rodada.ts → planoWhatsapp()).
+function enviarParaWhatsapp(c: Conversa, passo: Passo, plano: PlanoWhatsapp) {
   log("WhatsApp capturado (SIMULADO — sem CRM e sem template ainda):", JSON.stringify({ igsid: c.igsid, telefone: passo.telefone, ...plano }));
   return plano;
 }
 
-function instante(v: string | null | undefined): number {
-  const t = v ? new Date(v).getTime() : NaN;
-  return Number.isFinite(t) ? t : -Infinity;
-}
-
 // ── Uma rodada: histórico → classificador → roteiro → balões → libera a trava ──
+// O "pensar" (classificador + roteiro) é rodada.ts, o mesmo que o harness
+// ig-agente-simular roda. Aqui fica só o que toca banco e Instagram.
 // Devolve false quando não adianta tentar a próxima leva (token da conta morto).
 async function responderRodada(c: Conversa, tokenReserva: string, reserva: Reserva): Promise<boolean> {
-  let chunks: string[] = [];
+  let baloes: string[] = [];
   let passo: Passo | null = null;
   let etapa: EtapaFluxo = "boas_vindas";
-  let situacaoSalva: string | null = null;
-  let dataSalva: string | null = null;
   let registro: Record<string, unknown> = {};
   let erroCerebro: string | null = null;
 
   try {
     const { data: estado, error: erroEstado } = await supabase.from("ig_conversa_ia")
-      .select("fluxo_etapa, fluxo_tentativas, situacao, data_formacao, respondido_ate, historico_desde")
+      .select("fluxo_etapa, fluxo_tentativas, situacao, area, data_formacao, telefone, respondido_ate, historico_desde")
       .eq("conta_id", c.contaId).eq("igsid", c.igsid).maybeSingle();
     if (erroEstado) throw new Error(`estado: ${erroEstado.message}`);
     etapa = (estado?.fluxo_etapa ?? "boas_vindas") as EtapaFluxo;
-    situacaoSalva = estado?.situacao ?? null;
-    dataSalva = estado?.data_formacao ?? null;
+    const antes: EstadoRoteiro = {
+      etapa,
+      tentativas: Number(estado?.fluxo_tentativas ?? 0),
+      situacao: estado?.situacao ?? null,
+      area: estado?.area ?? null,
+      dataFormacao: estado?.data_formacao ?? null,
+      telefone: estado?.telefone ?? null,
+    };
 
     const { data: linhas, error } = await supabase.from("ig_mensagens")
       .select("direcao, tipo, conteudo, created_at")
@@ -220,28 +218,26 @@ async function responderRodada(c: Conversa, tokenReserva: string, reserva: Reser
     if (error) throw new Error(`histórico: ${error.message}`);
 
     // O que esta rodada responde = o que a pessoa mandou depois da última resposta.
-    const corte = Math.max(instante(estado?.respondido_ate), instante(estado?.historico_desde));
-    const todas = (linhas ?? []) as LinhaIg[];
-    const ehNova = (l: LinhaIg) => l.direcao === "inbound" && instante(l.created_at) > corte;
-    const novas = montarHistoricoIg(todas.filter(ehNova)).map((t) => t.text);
-    const historico = montarHistoricoIg(todas.filter((l) => !ehNova(l)));
-
-    const { classificacao, erro, modelo } = await classificar(etapa, historico, novas);
-    if (erro) log("classificador:", erro);
-    passo = decidirPasso(etapa, classificacao, {
-      nomePerfil: c.nome,
-      textoNovo: novas.join("\n"),
-      tentativas: Number(estado?.fluxo_tentativas ?? 0),
-    });
-    chunks = passo.mensagens;
-    registro = { nome: "roteiro", etapa, classificacao, proxima: passo.proximaEtapa, modelo, erro_classificador: erro };
+    const { historico, novas } = separarNovas((linhas ?? []) as LinhaIg[], estado?.respondido_ate, estado?.historico_desde);
+    const rodada = await pensarRodada({ estado: antes, historico, novas, nomePerfil: c.nome });
+    if (rodada.erro) log("classificador:", rodada.erro);
+    passo = rodada.passo;
+    baloes = rodada.baloes;
+    registro = {
+      nome: "roteiro",
+      etapa,
+      classificacao: rodada.classificacao,
+      proxima: passo.proximaEtapa,
+      modelo: rodada.modelo,
+      erro_classificador: rodada.erro,
+    };
+    if (rodada.whatsapp) registro.whatsapp = enviarParaWhatsapp(c, passo, rodada.whatsapp);
   } catch (e) {
     erroCerebro = (e instanceof Error ? e.message : String(e)).slice(0, 500);
     log("a rodada falhou:", erroCerebro);
-    chunks = [DESCULPA];
+    passo = null;
+    baloes = [DESCULPA];
   }
-
-  if (passo?.enviarWhatsapp) registro.whatsapp = enviarParaWhatsapp(c, passo, situacaoSalva, dataSalva);
 
   const metadata = {
     origem: erroCerebro ? "sistema" : "ia",
@@ -249,7 +245,6 @@ async function responderRodada(c: Conversa, tokenReserva: string, reserva: Reser
     fluxo_etapa: passo?.proximaEtapa ?? etapa,
     ...(erroCerebro ? { erro_cerebro: erroCerebro } : {}),
   };
-  const baloes = chunks.flatMap((chunk) => dividirPorBytes(chunk));
   let enviados = 0;
   let humanoAssumiu = false;
   let tokenMorto = false;
