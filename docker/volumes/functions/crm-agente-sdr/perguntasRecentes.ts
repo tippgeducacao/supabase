@@ -50,6 +50,16 @@ function falaDoLead(t: string): string {
     .trim();
 }
 
+/** O que o LEAD escreveu, em ordem, sem registros internos nem cabeçalho de citação. */
+export function falasDoLead(messages: readonly Msg[]): string[] {
+  return messages
+    .filter((m) => m.role === 'user')
+    .map((m) => textoDe(m))
+    .filter((t) => t && !ehInterno(t))
+    .map(falaDoLead)
+    .filter(Boolean);
+}
+
 type Pergunta = { pergunta: string; autor: 'voce' | 'atendente'; respostas: string[] };
 
 export function blocoPerguntasRecentes(messages: readonly Msg[], limite = MAX_PERGUNTAS): string {

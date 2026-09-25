@@ -38,14 +38,14 @@ import { proximoPassoDaColeta } from '../crm-agente-sdr/proximoPassoColeta.ts';
 import { instrucaoResultadoMaterial } from '../_shared/resultadoEnvioMaterial.ts';
 import { comNotaNoContexto, comNotaParaRouter, notaTrocaDeNumero, sinalInerte } from '../crm-agente-sdr/trocaDeNumero.ts';
 import {
-  aplicarColetaNaJornada, aplicarPerguntasNaJornada, avaliarFicha, bloqueioCronograma, contarObjecaoNaJornada, detectarPedidoDeCronograma,
+  aplicarColetaNaJornada, aplicarDeclaracaoNaJornada, aplicarPerguntasNaJornada, avaliarFicha, declaracaoDeConclusao, bloqueioCronograma, contarObjecaoNaJornada, detectarPedidoDeCronograma,
   INSTRUCAO_TEMPO_FICHA, montarBlocoFicha, perguntasFeitas, registrarBloqueioNaJornada, registrarEnvioNaJornada, type Jornada,
 } from '../crm-agente-sdr/fichaAtendimento.ts';
 import { comGanchoDoLote } from '../crm-agente-sdr/ganchoLote.ts';
 import { bloqueioProximaTurmaDeEstudante } from '../crm-agente-sdr/tools.ts';
 import { blocoConviteAgenda } from '../crm-agente-sdr/contexto.ts';
 import { resultadoConfirmacao } from '../crm-agente-sdr/confirmacaoAgendamento.ts';
-import { blocoPerguntasRecentes } from '../crm-agente-sdr/perguntasRecentes.ts';
+import { blocoPerguntasRecentes, falasDoLead } from '../crm-agente-sdr/perguntasRecentes.ts';
 import { diagnosticoDoProvedor, disponibilidadeSimulada, executarFollowupSimulado, executarSimulacao, extrairUso, MAX_CARACTERES_SIMULACAO, validarEntradaSimulacao, type AgenteRouter } from './simulacao.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
@@ -442,6 +442,10 @@ Deno.serve(async (req) => {
       },
       // Mesma composição da produção: ficha + perguntas já feitas, derivadas do histórico da volta.
       fichaDaVolta: (messages) => {
+        // Espelho da produção (index.ts): declaração explícita de conclusão no histórico vale como coleta.
+        if (fichaSim && !fichaSim.jornada.coleta?.graduacao_concluida && declaracaoDeConclusao(falasDoLead(messages))) {
+          fichaSim.jornada = aplicarDeclaracaoNaJornada(fichaSim.jornada);
+        }
         const base = blocoDaFicha();
         return base ? [base, blocoPerguntasRecentes(messages)].filter(Boolean).join('\n\n') : undefined;
       },

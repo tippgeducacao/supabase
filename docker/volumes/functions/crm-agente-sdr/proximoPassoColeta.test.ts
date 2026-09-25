@@ -45,4 +45,9 @@ describe('proximoPassoDaColeta', () => {
     expect(proximoPassoDaColeta({ nome: 'Ana' }, agora)).toBe('');
     expect(proximoPassoDaColeta({ area_atuacao: 'clínica' }, agora)).toBe('');
   });
+  it('fora do prazo sem pós escolhida: retorno direto com os meses contados, sem perguntar a área', () => {
+    const t = proximoPassoDaColeta({ tempo_formacao: 'cursando, conclui em janeiro de 2031', graduacao_concluida: 'cursando' }, agora);
+    expect(t).toContain('agendar_retorno com tipo="formatura" e meses=52');
+    expect(t).toContain('não pergunte a área');
+  });
 });

@@ -20,14 +20,16 @@ import { AGENTE_AULA, type AulaParaPrompt, montarVarsAula } from './prompts-aula
 import { comBlocoDaEscola, comLinkPedido, comPresenteNaDespedida, jaTemOPresente, LINK_ESCOLA_GRATUITA } from './escolaGratuita.ts';
 import { respostaDoEncerramento, toolConcluida, type Encerramento } from './encerramento.ts';
 import { confirmacaoDoResultado, falaEntregaConfirmacao, textoConfirmacaoAgendamento, type ConfirmacaoAgendamento } from './confirmacaoAgendamento.ts';
-import { blocoPerguntasRecentes } from './perguntasRecentes.ts';
+import { blocoPerguntasRecentes, falasDoLead } from './perguntasRecentes.ts';
 import { comContinuidadeWebchat } from './continuidadeWebchat.ts';
 import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoCurso, notaDoNome, renderPrompt } from './contexto.ts';
 import { atualizarAgenteComRatchet, atualizarLead, avaliarFimDoHistorico, buscarLead, carregarHistorico, comEntradaPendente, criarLead, excluirDadosLead, gravarMensagem, limparParaRouter, sanitizarHistorico } from './historico.ts';
 import { carregarTools, chamarAgentePrincipal, chamarRouter, provedorOpenai, type MetadadosRespostaRouter, type ProvedorIA } from './agente.ts';
 import { type CtxConversa, executarTool, montarToolResults } from './tools.ts';
 import { carregarStatusMateriais } from './envioMateriais.ts';
-import { carregarFicha, detectarPedidoDeCronograma, marcarPerguntasDaFicha, registrarNaJornada } from './fichaAtendimento.ts';
+import {
+  aplicarDeclaracaoNaJornada, carregarFicha, declaracaoDeConclusao, detectarPedidoDeCronograma, marcarPerguntasDaFicha, registrarNaJornada,
+} from './fichaAtendimento.ts';
 import { comGanchoDoLote } from './ganchoLote.ts';
 import { blocoConviteAgenda } from './contexto.ts';
 import { prepararMensagem } from './midia.ts';
@@ -781,12 +783,28 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
 
   // Loop agêntico: igual ao n8n, o histórico é relido do banco a cada volta.
   for (let rodada = 0; rodada < MAX_RODADAS_TOOLS; rodada++) {
-    const [historico, contextoEntregaMateriais, ficha] = await Promise.all([
+    const [historico, contextoEntregaMateriais, fichaLida] = await Promise.all([
       carregarHistorico(supabase, remotejid),
       carregarStatusMateriais(supabase, ctx),
       // Relida a cada volta: a tool da volta anterior pode ter preenchido a coleta.
       ctx.ficha ? carregarFicha(supabase, ctx) : Promise.resolve(null),
     ]);
+    let ficha = fichaLida;
+    // Canário (25/09/2026): "me formei", "sou pós-graduado"... numa fala do lead valem como coleta
+    // quando a ficha ainda não sabe da conclusão (conversa anterior à ficha). Sem isso a ficha
+    // mandava perguntar o que ele já tinha dito (fichaAtendimento.ts, declaracaoDeConclusao).
+    if (ctx.ficha && rodada === 0 && ficha && !ficha.entrada.jornada.coleta?.graduacao_concluida) {
+      const trecho = declaracaoDeConclusao(falasDoLead(historico));
+      if (trecho) {
+        try {
+          await registrarNaJornada(supabase, ctx.telefone, (j) => aplicarDeclaracaoNaJornada(j));
+          ficha = (await carregarFicha(supabase, ctx)) ?? ficha;
+          tel.registrar('ficha_conclusao_do_historico', { trecho });
+        } catch (e) {
+          console.error('[crm-agente-sdr] conclusão do histórico na ficha:', (e as Error)?.message ?? e);
+        }
+      }
+    }
     if (ctx.ficha && rodada === 0) {
       if (ficha) {
         tel.registrar('ficha_atendimento', {

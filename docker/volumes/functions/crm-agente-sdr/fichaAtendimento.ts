@@ -291,6 +291,43 @@ export function perguntouPos(textoEnviado: string): boolean {
 // ── Mutações puras da jornada (usadas pelo executor real e pelo mock do simulador) ──
 const FIXO = (v: unknown, aceitos: string[]) => (aceitos.includes(texto(v).toLowerCase()) ? texto(v).toLowerCase() : undefined);
 
+/*
+  Declaração EXPLÍCITA de graduação concluída numa fala do lead (25/09/2026, duelo Luna × Sonnet).
+  A ficha só sabia o que passou por atualizar_dados_lead; em conversa anterior ao canário (Sonnet,
+  atendente) ela vinha vazia e a Luna perguntava "vc já é formado em Direito?" a quem tinha escrito
+  "sou advogado pós graduado". Só frases que PROVAM conclusão: "me formei", "sou formada", "sou
+  pós-graduado", "tenho/fiz uma pós | mestrado | doutorado". Título profissional sozinho ("sou
+  nutricionista") NÃO entra — a regra de autodeclaração da tool continua sendo a que vale.
+*/
+const RE_DECLARA_CONCLUSAO = [
+  /\b(?:ja\s+)?me\s+formei\b/,
+  /\b(?:ja\s+)?sou\s+formad[oa]\b/,
+  /\bja\s+(?:conclui|terminei)\s+(?:a\s+|minha\s+)?(?:graduacao|faculdade)\b/,
+  /\bsou\s+(?:pos\s?-?\s?graduad[oa]|mestre|doutora?)\b/,
+  /\bpos\s?-?\s?graduad[oa]\b/,
+  /\b(?:tenho|fiz|possuo|conclui|terminei)\s+(?:uma\s+|um\s+|o\s+|a\s+)?(?:pos(?:\s?-?\s?graduacao)?|especializacao|mestrado|doutorado|residencia)\b/,
+];
+/** Negação ou intenção logo antes ("ainda não me formei", "quero ser pós-graduado") desfaz a declaração. */
+const RE_ANTES_NEGA = /\b(?:nao|nunca|quero|queria|vou|pretendo|gostaria|espero)\s+(?:\S+\s+){0,2}$/;
+
+/** Primeiro trecho de fala do lead que declara graduação concluída, ou null. */
+export function declaracaoDeConclusao(falas: readonly string[]): string | null {
+  for (const fala of falas) {
+    const t = fala.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+    for (const re of RE_DECLARA_CONCLUSAO) {
+      const m = re.exec(t);
+      if (m && !RE_ANTES_NEGA.test(t.slice(Math.max(0, m.index - 30), m.index))) return fala.slice(0, 160);
+    }
+  }
+  return null;
+}
+
+/** A declaração vale como coleta só se a ficha ainda não sabe nada da conclusão. */
+export function aplicarDeclaracaoNaJornada(j: Jornada, agora = new Date()): Jornada {
+  if (j.coleta?.graduacao_concluida) return j;
+  return { ...j, coleta: { ...(j.coleta ?? {}), graduacao_concluida: 'sim', atualizado_em: agora.toISOString() } };
+}
+
 export function aplicarColetaNaJornada(j: Jornada, input: Record<string, unknown>, agora = new Date()): Jornada {
   const coleta: ColetaJornada = { ...(j.coleta ?? {}) };
   if (texto(input.formacao)) coleta.graduacao = texto(input.formacao);

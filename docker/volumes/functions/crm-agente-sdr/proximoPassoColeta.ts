@@ -31,11 +31,17 @@ export function proximoPassoDaColeta(input: Record<string, unknown> | null | und
   if (estudante) {
     const bruta = tempo ? ` e conclusao_graduacao_bruta com a frase dele` : '';
     if (leitura?.veredito === 'fora_do_prazo' && dataLida) {
+      // Sem pós escolhida a checagem nem roda (curso_interesse é obrigatório e a avaliação exige um
+      // curso válido): o caminho é o retorno direto, como o Sonnet fez no caso "2031 em janeiro".
+      const meses = Math.max(1, (dataLida.getUTCFullYear() - agora.getUTCFullYear()) * 12
+        + dataLida.getUTCMonth() - agora.getUTCMonth());
       return `PRÓXIMO PASSO: a conclusão informada cai em ${mesAno(dataLida)}, DEPOIS da data-limite de elegibilidade `
-        + `(${limiteFormaturaFormatado(agora)}). Nesta mesma resposta, antes de escrever ao lead, chame (se ainda não chamou) `
-        + `verificar_compatibilidade_curso com contexto_qualificacao="estudante_fora_do_prazo", `
-        + `conclusao_graduacao="${mesAno(dataLida)}"${bruta}, e siga a instrução que ela devolver. `
-        + 'Não pergunte o mês nem mais nada sobre a data.';
+        + `(${limiteFormaturaFormatado(agora)}): ele ainda não pode se matricular. Nesta mesma resposta, antes de escrever ao lead: `
+        + `(a) se ele já tem uma pós de interesse, chame (se ainda não chamou) verificar_compatibilidade_curso com `
+        + `contexto_qualificacao="estudante_fora_do_prazo", conclusao_graduacao="${mesAno(dataLida)}"${bruta}, e siga a instrução `
+        + `que ela devolver; (b) se ainda não escolheu nenhuma pós, não pergunte a área: chame agendar_retorno com `
+        + `tipo="formatura" e meses=${meses}, e despeça-se dizendo que a pós é lato sensu e exige a graduação concluída e `
+        + 'que vc o procura quando ele estiver terminando o curso. Não pergunte o mês nem mais nada sobre a data.';
     }
     if (leitura?.veredito === 'apto' && dataLida) {
       return `PRÓXIMO PASSO: a conclusão informada cai em ${mesAno(dataLida)}, dentro do prazo. Nesta mesma resposta, `
