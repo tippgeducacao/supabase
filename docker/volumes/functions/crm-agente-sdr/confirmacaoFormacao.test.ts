@@ -46,8 +46,8 @@ describe('confirmação antes da matriz no piloto', () => {
   it('cadastro nomeado e atuação genérica devolvem pergunta direta, sem avaliar nem salvar aprovação', async () => {
     const b = banco(); const ctx = contexto();
     const r = await executar(b, pedido('confirmar'), ctx);
-    expect(r).toMatchObject({ output: 'CONFIRMAR_CONCLUSAO', pergunta: 'vc já é formado em Medicina Veterinária?', compativel: null });
-    expect(ctx.perguntaFormacaoPendente).toBe('vc já é formado em Medicina Veterinária?');
+    expect(r).toMatchObject({ output: 'CONFIRMAR_CONCLUSAO', pergunta: 'vc já se formou em Medicina Veterinária?', compativel: null });
+    expect(ctx.perguntaFormacaoPendente).toBe('vc já se formou em Medicina Veterinária?');
     expect(b.rpc).not.toHaveBeenCalled();
     expect(mocks.modelo).not.toHaveBeenCalled();
   });

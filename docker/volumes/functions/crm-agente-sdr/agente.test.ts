@@ -119,7 +119,7 @@ describe('instrução de memória no system enviado à Anthropic', () => {
     const system = pedido.system.map((bloco) => bloco.text);
     expect(system.includes(INSTRUCAO_VOZ)).toBe(comFicha);
     expect(system.includes(INSTRUCAO_FICHA)).toBe(comFicha);
-    expect(JSON.stringify(pedido.messages).includes('vc já é formado em Medicina Veterinária?')).toBe(comFicha);
+    expect(JSON.stringify(pedido.messages).includes('vc já se formou em Medicina Veterinária?')).toBe(comFicha);
     if (comFicha) {
       expect(system.join('\n')).toContain('Responda ao cumprimento recebido');
       expect(system.join('\n')).toContain('Não peça permissão para perguntar');

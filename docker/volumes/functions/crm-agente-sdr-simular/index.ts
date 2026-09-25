@@ -39,7 +39,7 @@ import { instrucaoResultadoMaterial } from '../_shared/resultadoEnvioMaterial.ts
 import { comNotaNoContexto, comNotaParaRouter, notaTrocaDeNumero, sinalInerte } from '../crm-agente-sdr/trocaDeNumero.ts';
 import {
   aplicarColetaNaJornada, aplicarDeclaracaoNaJornada, aplicarPerguntasNaJornada, avaliarFicha, declaracaoDeConclusao, bloqueioCronograma, contarObjecaoNaJornada, detectarPedidoDeCronograma,
-  INSTRUCAO_TEMPO_FICHA, montarBlocoFicha, perguntasFeitas, registrarBloqueioNaJornada, registrarEnvioNaJornada, type Jornada,
+  INSTRUCAO_TEMPO_FICHA, montarBlocoFicha, ORIENTACAO_NAO_E_FALA, perguntasFeitas, registrarBloqueioNaJornada, registrarEnvioNaJornada, type Jornada,
 } from '../crm-agente-sdr/fichaAtendimento.ts';
 import { comGanchoDoLote } from '../crm-agente-sdr/ganchoLote.ts';
 import { bloqueioProximaTurmaDeEstudante } from '../crm-agente-sdr/tools.ts';
@@ -118,6 +118,8 @@ async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimula
       const passo = proximoPassoDaColeta(input ?? {});
       return passo ? `${real} ${passo}` : real;
     }
+    // Mesmo acréscimo do executor real no canário: orientação da base não vira fala.
+    if (nome === 'consulta_objecoes' && ficha) return `${real} ${ORIENTACAO_NAO_E_FALA}`;
     return real;
   }
   switch (nome) {
@@ -233,7 +235,7 @@ async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimula
       if (ficha) ficha.jornada = contarObjecaoNaJornada(ficha.jornada, String(input?.tipo_objecao ?? ''));
       // Com a ficha, a quebra de TEMPO é a mesma instrução do executor real (com gatilho, sem material).
       if (ficha && input?.tipo_objecao === 'objecao_tempo') return `resposta_objecao: ${JSON.stringify(INSTRUCAO_TEMPO_FICHA)}`;
-      if (ficha) return 'resposta_objecao: "a conversa com o monitor é rápida, uns 10 minutos, e é onde vc vê a condição do primeiro lote promocional". Adapte ao contexto e reconduza pro agendamento.';
+      if (ficha) return 'resposta_objecao: "a conversa com o monitor é rápida, uns 10 minutos, e é onde vc vê a condição do primeiro lote promocional". Adapte ao contexto e reconduza pro agendamento. ' + ORIENTACAO_NAO_E_FALA;
       return 'resposta_objecao: "a conversa com o monitor é rápida, uns 15 minutos, e é onde vc vê a condição especial". Adapte ao contexto e reconduza pro agendamento.';
     }
     case 'pausa_ia':

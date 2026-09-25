@@ -3,7 +3,7 @@ import { aplicarDeclaracaoNaJornada, avaliarFicha, declaracaoDeConclusao } from 
 import { falasDoLead } from './perguntasRecentes';
 
 // Duelo cego Luna × Sonnet 5 (25/09/2026): a ficha vazia de conversa anterior ao canário fazia a
-// Luna perguntar "vc já é formado em Direito?" a quem tinha escrito "sou advogado pós graduado".
+// Luna perguntar "vc já se formou em Direito?" a quem tinha escrito "sou advogado pós graduado".
 describe('declaracaoDeConclusao', () => {
   it.each([
     'Sou advogado pós graduado',
@@ -42,9 +42,9 @@ describe('declaracaoDeConclusao', () => {
 });
 
 describe('aplicarDeclaracaoNaJornada', () => {
-  it('ficha que pediria "vc já é formado em Direito?" deixa de pedir', () => {
+  it('ficha que pediria "vc já se formou em Direito?" deixa de pedir', () => {
     const antes = avaliarFicha({ cadastro: 'Advogado (a)', jornada: {} });
-    expect(antes.perguntaConfirmacaoFormacao).toBe('vc já é formado em Direito?');
+    expect(antes.perguntaConfirmacaoFormacao).toBe('vc já se formou em Direito?');
     const jornada = aplicarDeclaracaoNaJornada({});
     const depois = avaliarFicha({ cadastro: 'Advogado (a)', jornada });
     expect(jornada.coleta?.graduacao_concluida).toBe('sim');

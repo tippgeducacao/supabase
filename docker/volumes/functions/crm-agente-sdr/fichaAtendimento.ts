@@ -115,7 +115,7 @@ export function avaliarFicha(e: EntradaFicha): AvaliacaoFicha {
   const graduacaoConcluida = !semGraduacao && disseFormado;
   const perguntaConfirmacaoFormacao = grupo === 'profissao' && !graduacaoConcluida
     && !semGraduacao && c.graduacao_concluida !== 'cursando'
-    ? `vc já é formado em ${profissao}?` : null;
+    ? `vc já se formou em ${profissao}?` : null;
   const falta: string[] = [];
   if (!semGraduacao) {
     if (grupo === 'vago' || grupo === 'desconhecido') {
@@ -124,7 +124,7 @@ export function avaliarFicha(e: EntradaFicha): AvaliacaoFicha {
     } else if (grupo === 'profissao') {
       if (c.graduacao_concluida === 'cursando') {
         if (!texto(c.tempo_formacao)) falta.push('quando ele conclui a graduação (mês e ano)');
-      } else if (!disseFormado) falta.push(`se ele já é formado em ${profissao} (graduação concluída)`);
+      } else if (!disseFormado) falta.push(`se ele já se formou em ${profissao} (graduação concluída)`);
     } else if (grupo === 'estudante') {
       if (!texto(c.tempo_formacao) && c.graduacao_concluida !== 'sim') falta.push('quando ele conclui a graduação (mês e ano)');
     }
@@ -242,6 +242,14 @@ Título de especialista, reconhecimento (MEC, CFMV, conselhos, associações), e
 
 ### Gatilho de ação
 Toda mensagem sua termina com UMA pergunta que leva o lead para a conversa com o monitor (encaixe, período do dia, confirmação). Exceções: (a) você acabou de enviar um material: pergunte se chegou e abriu (e, se for o caso, se ele já tem pós), e faça o convite quando ele confirmar; (b) você está fazendo a pergunta de coleta da ficha; (c) despedida depois de reunião confirmada, opt-out, pausa ou reprovação; (d) uma consulta falhou e não há ação executável: informe a indisponibilidade atual sem pergunta de enchimento nem promessa de retorno automático; (e) mero aceite/agradecimento depois dessa falha: encerre brevemente, sem reabrir a coleta ou disparar outra checagem. Fora dessas, nunca termine só informando nem com "disponha", "qualquer dúvida me chama" ou "fico à disposição".`;
+
+// Retorno de consulta_objecoes no canário (25/09/2026, duelo em amostra nova): a base devolve
+// ORIENTAÇÃO ("Não prometa que a condição cabe no orçamento") e a Luna a transformava em fala —
+// "sem eu prometer que vão caber no seu orçamento" (2ª vez; o replay de 24/09 já tinha "sem eu
+// prometer…"). Frase exata no ponto de uso, que é o que a Luna segue.
+export const ORIENTACAO_NAO_E_FALA = 'Tudo acima é orientação para VOCÊ, não texto para o lead: não diga ao lead o que você não vai '
+  + 'prometer, garantir ou fazer (nada de "sem prometer…", "sem garantir…", "não posso prometer…"). Diga só o que é '
+  + 'verdadeiro e útil e termine com a pergunta.';
 
 // Quebra de TEMPO do canário: substitui a referência revisada de tools.ts para quem tem a
 // ficha. Respeita os limites que o próprio retorno da tool impõe (sem "resolve horas", sem

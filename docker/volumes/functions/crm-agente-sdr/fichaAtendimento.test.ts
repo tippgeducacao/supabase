@@ -75,26 +75,26 @@ describe('o que falta coletar antes do cronograma', () => {
   it('profissão nomeada: só falta saber se já é formado', () => {
     const jornada: Jornada = { cronograma: { pedido_em: '2026-09-19T13:00:00.000Z', pedido_por: 'botao' } };
     const a = avaliarFicha({ cadastro: 'Médico Veterinário (a)', jornada });
-    expect(a.faltaParaCronograma).toEqual(['se ele já é formado em Medicina Veterinária (graduação concluída)']);
+    expect(a.faltaParaCronograma).toEqual(['se ele já se formou em Medicina Veterinária (graduação concluída)']);
     expect(a.graduacaoConcluida).toBe(false);
-    expect(a.proximoPasso).toContain('se ele já é formado em Medicina Veterinária');
+    expect(a.proximoPasso).toContain('se ele já se formou em Medicina Veterinária');
   });
   it('profissão no formulário e atuação genérica não confirmam graduação concluída', () => {
     const a = avaliarFicha({ cadastro: 'Zootecnista', jornada: { coleta: { atua_na_area: 'sim' } } });
-    expect(a.faltaParaCronograma).toEqual(['se ele já é formado em Zootecnia (graduação concluída)']);
+    expect(a.faltaParaCronograma).toEqual(['se ele já se formou em Zootecnia (graduação concluída)']);
     expect(a.liberaCronograma).toBe(false);
     expect(a.graduacaoConcluida).toBe(false);
-    expect(a.perguntaConfirmacaoFormacao).toBe('vc já é formado em Zootecnia?');
+    expect(a.perguntaConfirmacaoFormacao).toBe('vc já se formou em Zootecnia?');
   });
   it('caso Gustavo: mantém a área dita e pergunta a conclusão do curso conhecido', () => {
     const entrada = { cadastro: 'Médico Veterinário (a)', jornada: {
       coleta: { area_atuacao: 'formulação de dietas', atua_na_area: 'sim' as const },
     } };
     const a = avaliarFicha(entrada);
-    expect(a.perguntaConfirmacaoFormacao).toBe('vc já é formado em Medicina Veterinária?');
+    expect(a.perguntaConfirmacaoFormacao).toBe('vc já se formou em Medicina Veterinária?');
     const bloco = montarBlocoFicha(entrada, a);
     expect(bloco).toContain('formulação de dietas');
-    expect(bloco).toContain('"vc já é formado em Medicina Veterinária?"');
+    expect(bloco).toContain('"vc já se formou em Medicina Veterinária?"');
     expect(bloco).not.toContain('Nada falta:');
   });
   it('conclusão confirmada na conversa dispensa repetir a pergunta', () => {

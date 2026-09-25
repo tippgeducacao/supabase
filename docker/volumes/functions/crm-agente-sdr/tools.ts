@@ -34,7 +34,7 @@ import {
   recusaElegibilidade, VERSAO_REGRA_ELEGIBILIDADE,
 } from './elegibilidadeAgendamento.ts';
 import {
-  aplicarColetaNaJornada, bloqueioCronograma, carregarFicha, contarObjecaoNaJornada, INSTRUCAO_TEMPO_FICHA,
+  aplicarColetaNaJornada, bloqueioCronograma, carregarFicha, contarObjecaoNaJornada, INSTRUCAO_TEMPO_FICHA, ORIENTACAO_NAO_E_FALA,
   registrarBloqueioNaJornada, registrarEnvioNaJornada, registrarNaJornada,
 } from './fichaAtendimento.ts';
 
@@ -910,9 +910,10 @@ async function consultaObjecoes(supabase: any, input: any, toolUseId: string, ct
     };
     return { resposta_objecao: resposta ? (referenciasRevisadas[filtro.tipo_objecao] ?? resposta) : 'CONFIANCA_BAIXA', id: toolUseId,
       limites_da_resposta: 'O texto recuperado é uma referência de abordagem, não uma confirmação dos fatos de todos os cursos. Nunca generalize 2 a 3 horas por semana, 12 a 18 meses, número de módulos, modalidades ou encontros. Não afirme estatísticas de alunos, polos, processo seletivo, prazo de lote ou urgência sem confirmação específica. Não use "reservar 10 minutos é um bom sinal" nem julgue dedicação pela disponibilidade para a reunião. Acolha falta de tempo/dinheiro; não diga que a reunião resolve horas de conversa e não garanta que a condição caberá no orçamento. Se pedir prazo para analisar, siga o fluxo de combinar retorno, sem trocar isso por mais pressão para agendar.',
-      instrucao: resposta
+      instrucao: (resposta
         ? 'Use somente o argumento pertinente à objeção atual. Esta base genérica não confirma existência, modalidade ou conteúdo de uma pós; para esses fatos use catálogo/material do curso escolhido. Não invente valores ou condições. Nenhum horário foi consultado nesta ferramenta: não cite 16h, 16h30 ou qualquer horário concreto antes de consulta_disponibilidade retornar aquela opção. Convite para conversar não é agendamento confirmado.'
-        : 'Não há argumento confirmado para esta objeção. Acolha sem fabricar uma quebra nem usar resposta de outro assunto. Consulte catálogo/material se houver uma dúvida factual.' };
+        : 'Não há argumento confirmado para esta objeção. Acolha sem fabricar uma quebra nem usar resposta de outro assunto. Consulte catálogo/material se houver uma dúvida factual.')
+        + (ctx?.ficha ? ` ${ORIENTACAO_NAO_E_FALA}` : '') };
   } catch (e) {
     // Fallback próprio (NÃO deixar cair no catch genérico "conduza normalmente"):
     // sem a base, o modelo NÃO pode fabricar argumento de venda.

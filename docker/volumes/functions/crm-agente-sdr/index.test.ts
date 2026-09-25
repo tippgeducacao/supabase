@@ -337,12 +337,12 @@ describe('SDR: texto de ferramenta nunca vira despedida', () => {
       fronteiras.provedorOpenai.mockReturnValue({ nome: 'openai', formato: 'openai', modelo: 'modelo-sintetico' });
       fronteiras.tools.mockResolvedValue([{ name: 'verificar_compatibilidade_curso' }]);
       fronteiras.executar.mockImplementation(async (_banco, tool, ctx) => {
-        ctx[campo] = campo === 'compatibilidadeIndisponivel' ? true : 'vc já é formado em Medicina Veterinária?';
+        ctx[campo] = campo === 'compatibilidadeIndisponivel' ? true : 'vc já se formou em Medicina Veterinária?';
         return { id: tool.id, output: campo === 'compatibilidadeIndisponivel' ? 'FALHA_TECNICA' : 'CONFIRMAR_CONCLUSAO' };
       });
       fronteiras.chamarPrincipal.mockResolvedValueOnce({ stop_reason: 'tool_use', content: [
         { type: 'tool_use', id: 'matriz', name: 'verificar_compatibilidade_curso', input: {} },
-      ] }).mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'vc já é formado em Medicina Veterinária?' }] });
+      ] }).mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'vc já se formou em Medicina Veterinária?' }] });
       await chamar({ wa_account_id: 'conta-sintetica' });
       expect(fronteiras.executar).toHaveBeenCalledOnce();
       expect(fronteiras.chamarPrincipal).toHaveBeenCalledTimes(2);
