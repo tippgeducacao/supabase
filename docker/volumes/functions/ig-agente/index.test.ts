@@ -219,14 +219,14 @@ describe('ig-agente: o roteiro do direct', () => {
     expect(gravacaoDaEtapa()!.payload).toMatchObject({ fluxo_etapa: 'pergunta_interesse', data_formacao: '2027-07-31' });
   });
 
-  it('estudante que forma depois de jan/2027 passa o número → plano vai para "Forma depois de jan/2027"', async () => {
+  it('estudante que forma em julho/2027 passa o número → plano vai para "Forma em 2027/06"', async () => {
     vi.setSystemTime(new Date('2026-09-25T12:00:00Z'));
     Object.assign(mocks.estado.conversa!, { fluxo_etapa: 'pergunta_whatsapp', situacao: 'estudante', data_formacao: '2027-07-31' });
     mocks.estado.mensagens[0].conteudo = '46 9 9988-2268';
     mocks.classificar.mockResolvedValue({ classificacao: neutra, erro: null, modelo: 'gpt-5.6-luna' });
     await inbound();
     expect(liberacao().p_tools[0].whatsapp).toMatchObject({
-      simulado: true, situacao: 'estudante', data_formacao: '2027-07-31', etapa_crm: 'Forma depois de jan/2027',
+      simulado: true, situacao: 'estudante', data_formacao: '2027-07-31', etapa_crm: 'Forma em 2027/06',
     });
   });
 

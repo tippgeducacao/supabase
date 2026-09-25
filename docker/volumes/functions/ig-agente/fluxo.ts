@@ -149,21 +149,40 @@ export function lerDataFormacao(c: Classificacao, ctx: ContextoFluxo): string | 
   return r.leitura.tipo === "data" ? r.leitura.data.toISOString().slice(0, 10) : null;
 }
 
-export type EtapaCrmInstagram = "Formados" | "Na graduação" | "Forma depois de jan/2027";
+/** Última etapa semestral criada no funil; depois dela, "Forma depois de 2031/06". */
+export const ULTIMO_SEMESTRE_CRM = "2031/06";
 
 /**
- * Etapa do funil 1.5 INSTAGRAM. Estudante sem data vai para "Na graduação": o João do
- * WhatsApp confere o prazo de novo antes de marcar reunião.
+ * Semestre de formatura no formato das etapas do CRM (pedido do Gustavo, 25/09/2026):
+ * fevereiro a julho → "AAAA/06"; agosto a dezembro → "(AAAA+1)/01"; janeiro → "AAAA/01"
+ * (a colação do 2º semestre cai em janeiro).
+ */
+export function semestreDeFormatura(dataFormacao: string): string {
+  const [ano, mes] = dataFormacao.split("-").map(Number);
+  if (mes === 1) return `${ano}/01`;
+  if (mes <= 7) return `${ano}/06`;
+  return `${ano + 1}/01`;
+}
+
+/**
+ * Etapa do funil 1.5 INSTAGRAM:
+ *   formado → "Formados";
+ *   estudante que se forma até o limite da régua do João (hoje 31/01/2027) → "Na graduação"
+ *   (pode ir para reunião) — e também o estudante SEM data: o João re-confere o prazo;
+ *   depois do limite → "Forma em AAAA/06" | "Forma em AAAA/01", até 2031/06;
+ *   mais tarde que isso → "Forma depois de 2031/06".
  */
 export function etapaCrmInstagram(
   situacao: string | null | undefined,
   dataFormacao: string | null | undefined,
   agora: Date = new Date(),
-): EtapaCrmInstagram {
+): string {
   if (situacao !== "estudante") return "Formados";
   if (!dataFormacao) return "Na graduação";
   const fim = new Date(`${dataFormacao}T23:59:59Z`);
-  return fim <= limiteFormatura(agora) ? "Na graduação" : "Forma depois de jan/2027";
+  if (fim <= limiteFormatura(agora)) return "Na graduação";
+  const semestre = semestreDeFormatura(dataFormacao);
+  return semestre > ULTIMO_SEMESTRE_CRM ? `Forma depois de ${ULTIMO_SEMESTRE_CRM}` : `Forma em ${semestre}`;
 }
 
 // ── As passagens ─────────────────────────────────────────────────────────────

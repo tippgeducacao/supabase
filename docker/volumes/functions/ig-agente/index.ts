@@ -173,7 +173,7 @@ async function zerarConversa(c: Conversa) {
 // ── WhatsApp capturado: CRM + template do portfólio ───────────────────────────
 // ⚠️ SIMULADO nesta fase: o template com o PDF do portfólio ainda não existe na Meta.
 // Quando for aprovado, aqui entram: criar a oportunidade no funil 1.5 INSTAGRAM na etapa
-// de etapaCrmInstagram() (Formados | Na graduação | Forma depois de jan/2027), gravar o
+// de etapaCrmInstagram() (Formados | Na graduação | Forma em AAAA/06|01…), gravar o
 // campo "Data prevista de formação" do contato e mandar o template pelo número "João
 // PPGVET". Hoje só registra o que FARIA.
 function enviarParaWhatsapp(c: Conversa, passo: Passo, situacaoSalva: string | null, dataSalva: string | null) {

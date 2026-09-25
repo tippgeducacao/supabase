@@ -143,8 +143,16 @@ describe('etapaCrmInstagram: em qual etapa do 1.5 INSTAGRAM', () => {
     ['formado', null, 'Formados'],
     ['estudante', '2026-12-31', 'Na graduação'],
     ['estudante', '2027-01-31', 'Na graduação'],
-    ['estudante', '2027-02-28', 'Forma depois de jan/2027'],
-    ['estudante', '2028-12-31', 'Forma depois de jan/2027'],
+    ['estudante', '2027-02-28', 'Forma em 2027/06'],
+    ['estudante', '2027-07-31', 'Forma em 2027/06'],
+    ['estudante', '2027-08-31', 'Forma em 2028/01'],
+    ['estudante', '2027-12-31', 'Forma em 2028/01'],
+    ['estudante', '2028-01-31', 'Forma em 2028/01'],
+    ['estudante', '2028-06-30', 'Forma em 2028/06'],
+    ['estudante', '2028-12-31', 'Forma em 2029/01'],
+    ['estudante', '2031-06-30', 'Forma em 2031/06'],
+    ['estudante', '2031-12-31', 'Forma depois de 2031/06'],
+    ['estudante', '2033-06-30', 'Forma depois de 2031/06'],
     ['estudante', null, 'Na graduação'],
   ])('%s, %s → %s', (situacao, data, esperada) => {
     expect(etapaCrmInstagram(situacao, data, AGORA)).toBe(esperada);
