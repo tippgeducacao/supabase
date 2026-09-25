@@ -6,6 +6,9 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { extrairReferral } from "../_shared/waProviders.ts";
 import { carimboInbound } from "./carimbo.ts";
+import { prepararPortfolioInstagram } from "./portfolioInstagram.ts";
+
+declare const EdgeRuntime: { waitUntil?: (p: Promise<unknown>) => void } | undefined;
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -1209,6 +1212,38 @@ Deno.serve(async (req) => {
               if (permErr) console.error("[crm-whatsapp-webhook] espelho de permissão falhou:", permErr.message);
               else console.log(`[crm-whatsapp-webhook] permissão de ligação de ${from}: ${aceitou ? (permanente ? "PERMANENTE" : "7 dias") : "recusada"}`);
             }
+            // Instagram → WhatsApp (25/09/2026): 1ª resposta de quem pediu o portfólio no
+            // direct e recebeu o recibo neste número. Reivindica e grava a nota do agente
+            // AQUI (antes do relay, para a rodada da IA já enxergar), manda o PDF em
+            // segundo plano. Best-effort: nunca derruba o inbound. Ver portfolioInstagram.ts.
+            if (msgType !== "reaction" && interactiveReply?.tipo !== "call_permission_reply") {
+              try {
+                const envioPortfolio = await prepararPortfolioInstagram(admin, {
+                  accountId,
+                  telefone: phoneDigits,
+                  remotejid: `${canonicalBrDigits(phoneDigits)}@s.whatsapp.net`,
+                  timestampSeg: Number(msg?.timestamp) || Math.floor(Date.now() / 1000),
+                  leadId,
+                  oportunidadeId,
+                  enviar: async (corpo) => {
+                    const r = await fetch(`${SUPABASE_URL}/functions/v1/crm-whatsapp-send`, {
+                      method: "POST",
+                      headers: { Authorization: `Bearer ${SERVICE_ROLE}`, "Content-Type": "application/json" },
+                      body: JSON.stringify(corpo),
+                    });
+                    const j: any = await r.json().catch(() => ({}));
+                    return r.ok && !j?.error ? { ok: true } : { ok: false, erro: String(j?.error ?? `HTTP ${r.status}`) };
+                  },
+                });
+                if (envioPortfolio) {
+                  if (typeof EdgeRuntime !== "undefined" && EdgeRuntime?.waitUntil) EdgeRuntime.waitUntil(envioPortfolio);
+                  else await envioPortfolio;
+                }
+              } catch (e) {
+                console.error("[crm-whatsapp-webhook] portfólio do Instagram falhou:", e instanceof Error ? e.message : String(e));
+              }
+            }
+
             // Relay pro agente de IA — SÓ se este número está marcado com agente_ia_ativo.
             // (at-most-once garantido pelo índice único em wa_message_id no insert acima.)
             // Idade REAL da mensagem (relógio da Meta), não o created_at: numa

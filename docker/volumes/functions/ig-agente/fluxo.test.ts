@@ -35,7 +35,8 @@ describe('caminho feliz do diretor comercial (25/09/2026)', () => {
 
     const p4 = passo('pergunta_whatsapp', {}, { textoNovo: '46 9 9988-2268' });
     expect(p4).toMatchObject({
-      mensagens: ['Prontinho! Te mandei o portfólio lá no WhatsApp 😉'],
+      // 25/09: no WhatsApp sai o RECIBO; o PDF vai quando a pessoa responde lá.
+      mensagens: ['Prontinho! Acabei de te mandar uma mensagem no WhatsApp, do número (46) 9 9901-2001. É só responder qualquer coisa lá que eu te envio o portfólio em PDF 😉'],
       proximaEtapa: 'whatsapp_enviado', telefone: '5546999882268', enviarWhatsapp: true,
     });
   });

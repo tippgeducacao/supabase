@@ -9,8 +9,9 @@
 //   2b. pergunta_data_formacao mês e ano                   → pergunta se quer o portfólio
 //   3. pergunta_interesse      quer                        → pede o WhatsApp ("o PDF não vai pelo insta")
 //                              não quer                    → despedida (fim)
-//   4. pergunta_whatsapp       número válido               → CRM 1.5 INSTAGRAM + template com
-//                                                            o portfólio no WhatsApp (fim)
+//   4. pergunta_whatsapp       número válido               → CRM 1.5 INSTAGRAM + RECIBO no
+//                                                            WhatsApp; o PDF vai quando a pessoa
+//                                                            responde lá (fim) — _shared/igWhatsapp.ts
 //   fins: escola_enviada | whatsapp_enviado | encerrada
 //
 // A data de formação (aprovada pelo Gustavo em 25/09) decide a etapa do CRM: Formados |
@@ -21,6 +22,7 @@
 // AQUI: o texto é do comercial, não do modelo — o contrário do João do WhatsApp.
 // Módulo puro (sem banco, sem rede): cada passagem tem teste em fluxo.test.ts.
 import { avaliarConclusao, limiteFormatura } from "../crm-agente-sdr/elegibilidadeFormatura.ts";
+import { IG_WA_NUMERO_EXIBIDO } from "../_shared/igWhatsapp.ts";
 
 export const LINK_ESCOLA = "https://escoladeespecializacao.ppgvet.com.br";
 
@@ -72,7 +74,7 @@ export type Passo = {
   dataFormacao?: string;
   /** Canônico: 55 + DDD + número. */
   telefone?: string;
-  /** Capturou o WhatsApp: criar a oportunidade e mandar o template do portfólio. */
+  /** Capturou o WhatsApp: criar a oportunidade e mandar o recibo (o PDF vai na resposta). */
   enviarWhatsapp?: boolean;
 };
 
@@ -94,7 +96,14 @@ export const TEXTOS = {
     "Não consigo encaminhar o PDF pelo Insta. Me passa seu WhatsApp com DDD que te mando por lá?",
   telefoneInvalido: "Acho que faltou algum número 🤔 Me manda seu WhatsApp com DDD?",
   relembrarWhatsapp: "É só me mandar seu WhatsApp com DDD que eu te envio o portfólio por lá 😉",
-  confirmacaoWhatsapp: "Prontinho! Te mandei o portfólio lá no WhatsApp 😉",
+  // 25/09/2026 (aprovada pelo Gustavo): o que sai no WhatsApp é o RECIBO, não o PDF — o
+  // PDF vai quando a pessoa responde lá (ver _shared/igWhatsapp.ts). Esta frase é que
+  // explica isso; sem ela o recibo sozinho não diz nada do portfólio.
+  confirmacaoWhatsapp:
+    `Prontinho! Acabei de te mandar uma mensagem no WhatsApp, do número ${IG_WA_NUMERO_EXIBIDO}. É só responder qualquer coisa lá que eu te envio o portfólio em PDF 😉`,
+  // O recibo NÃO saiu (número sem WhatsApp, Meta recusou): a etapa volta para o pedido do
+  // número, para a pessoa conferir. Nunca dizer "te mandei" sem ter mandado.
+  whatsappNaoFoi: "Hmm, não consegui te chamar nesse número 🤔 Confere se é o seu WhatsApp com DDD e me manda de novo?",
   escola:
     `Te mando sim! 😉 Aqui está o acesso à nossa Escola de Especialização gratuita, com mais de 10 cursos, além de artigos, e-books e podcasts: ${LINK_ESCOLA}`,
   recusa: "Tranquilo! Se mudar de ideia, é só me chamar por aqui 😉",

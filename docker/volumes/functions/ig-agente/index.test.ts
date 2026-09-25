@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TEXTOS } from './fluxo';
+import { IG_WA_ACCOUNT_ID } from '../_shared/igWhatsapp';
 
 // Exercita o ig-agente de ponta a ponta com banco, rede e classificador simulados:
 // nenhuma DM sai de verdade, nenhuma linha é escrita.
@@ -132,10 +133,14 @@ beforeEach(() => {
   ];
   mocks.rpc.mockImplementation(async (nome: string) => (nome === 'ig_ia_reservar'
     ? { data: reservas.shift() ?? { status: 'sem_pendencia' }, error: null }
+    : nome === 'ig_whatsapp_capturar'
+    ? { data: { lead_id: 'lead-1', oportunidade_id: 'op-1', lead_novo: true, card_novo: true }, error: null }
     : { data: true, error: null }));
   mocks.classificar.mockResolvedValue({ classificacao: { ...neutra, intencao: 'aceita' }, erro: null, modelo: 'gpt-5.6-luna' });
   let n = 0;
-  mocks.fetch.mockImplementation(async () => new Response(JSON.stringify({ recipient_id: '999', message_id: `saida-${++n}` })));
+  mocks.fetch.mockImplementation(async (url: string) => (String(url).includes('crm-whatsapp-send')
+    ? new Response(JSON.stringify({ ok: true, wa_message_id: 'wamid.recibo' }))
+    : new Response(JSON.stringify({ recipient_id: '999', message_id: `saida-${++n}` }))));
 });
 
 // Sem EdgeRuntime o handler espera o trabalho terminar. As esperas (debounce, eco,
@@ -149,9 +154,15 @@ async function chamar(corpo: Record<string, unknown>, auth = SERVICE) {
   return p;
 }
 const inbound = (mid = 'm1') => chamar({ evento: 'inbound', conta_id: 'conta-1', igsid: '999', mid });
-const textosEnviados = () => mocks.fetch.mock.calls.map(([, init]) => JSON.parse(init.body).message.text);
+const chamadasInstagram = () => mocks.fetch.mock.calls.filter(([url]) => String(url).includes('graph.instagram.com'));
+const textosEnviados = () => chamadasInstagram().map(([, init]) => JSON.parse(init.body).message.text);
+const envioDoRecibo = () => mocks.fetch.mock.calls.find(([url]) => String(url).includes('crm-whatsapp-send'));
 const liberacao = () => mocks.rpc.mock.calls.find(([nome]) => nome === 'ig_ia_liberar')?.[1];
-const gravacaoDaEtapa = () => mocks.estado.escritas.find((w) => w.tabela === 'ig_conversa_ia' && w.op === 'update');
+const captura = () => mocks.rpc.mock.calls.find(([nome]) => nome === 'ig_whatsapp_capturar')?.[1];
+// A gravação da etapa é a de quem segura a trava (filtro por reserva_token); a marca do
+// recibo, feita antes, não conta.
+const gravacaoDaEtapa = () => mocks.estado.escritas.find((w) => w.tabela === 'ig_conversa_ia' && w.op === 'update' && 'eq:reserva_token' in w.filtros);
+const marcaDoRecibo = () => mocks.estado.escritas.find((w) => w.tabela === 'ig_conversa_ia' && w.op === 'update' && 'recibo_enviado_em' in (w.payload ?? {}));
 
 describe('ig-agente: o roteiro do direct', () => {
   it('resposta à boas-vindas → pergunta da formação com o nome, e a etapa anda', async () => {
@@ -184,15 +195,71 @@ describe('ig-agente: o roteiro do direct', () => {
       [{ role: 'user', text: 'oi' }, { role: 'assistant', text: 'Quer receber o acesso?' }], ['quero!']);
   });
 
-  it('passou o WhatsApp → confirma no direct, grava o número e registra o envio SIMULADO', async () => {
+  it('passou o WhatsApp → card no CRM + RECIBO no WhatsApp, e só então confirma no direct', async () => {
+    vi.setSystemTime(new Date('2026-09-25T15:00:00Z'));
     Object.assign(mocks.estado.conversa!, { fluxo_etapa: 'pergunta_whatsapp', situacao: 'formado' });
     mocks.estado.mensagens[0].conteudo = '46 9 9988-2268';
     mocks.classificar.mockResolvedValue({ classificacao: neutra, erro: null });
     await inbound();
+
+    expect(captura()).toMatchObject({
+      p_conta_id: 'conta-1', p_igsid: '999', p_telefone: '5546999882268', p_nome: 'Gustavo Sutil',
+      p_etapa_crm: 'Formados', p_data_formacao: null, p_wa_account_id: IG_WA_ACCOUNT_ID,
+    });
+    const [url, init] = envioDoRecibo()!;
+    expect(url).toBe('https://supabase.invalid/functions/v1/crm-whatsapp-send');
+    expect(init.headers.Authorization).toBe(`Bearer ${SERVICE}`);
+    expect(JSON.parse(init.body)).toEqual({
+      wa_account_id: IG_WA_ACCOUNT_ID, telefone: '5546999882268', tipo: 'template',
+      template_name: 'comprovante_cadastro_utility', template_lang: 'pt_BR',
+      template_components: [{ type: 'body', parameters: [
+        { type: 'text', text: 'Gustavo' }, { type: 'text', text: 'Veterinária e Agro' }, { type: 'text', text: '25/09/2026, pelo Instagram' },
+      ] }],
+      lead_id: 'lead-1', oportunidade_id: 'op-1',
+    });
+    // O recibo sai ANTES da frase do direct: a IA só diz "te mandei" depois de mandar.
+    const ordem = mocks.fetch.mock.calls.map(([u]) => (String(u).includes('crm-whatsapp-send') ? 'recibo' : 'direct'));
+    expect(ordem).toEqual(['recibo', 'direct']);
     expect(textosEnviados()).toEqual([TEXTOS.confirmacaoWhatsapp]);
+    expect(TEXTOS.confirmacaoWhatsapp).toContain('(46) 9 9901-2001');
+
+    // O PDF fica pendente até a pessoa responder no WhatsApp (o webhook procura pelo telefone).
+    expect(marcaDoRecibo()!.payload).toMatchObject({ telefone: '5546999882268', recibo_erro: null, portfolio_enviado_em: null });
+    expect(marcaDoRecibo()!.payload.recibo_enviado_em).toBeTruthy();
     expect(gravacaoDaEtapa()!.payload).toMatchObject({ fluxo_etapa: 'whatsapp_enviado', telefone: '5546999882268' });
-    expect(gravacaoDaEtapa()!.payload.whatsapp_enviado_em).toBeTruthy();
-    expect(liberacao().p_tools[0].whatsapp).toMatchObject({ simulado: true, situacao: 'formado', etapa_crm: 'Formados' });
+    expect(liberacao().p_tools[0].whatsapp).toMatchObject({ ok: true, situacao: 'formado', etapa_crm: 'Formados', lead_id: 'lead-1' });
+  });
+
+  it('o recibo NÃO saiu (Meta recusou) → não diz "te mandei"; pede o número de novo', async () => {
+    Object.assign(mocks.estado.conversa!, { fluxo_etapa: 'pergunta_whatsapp', situacao: 'formado' });
+    mocks.estado.mensagens[0].conteudo = '46 9 9988-2268';
+    mocks.classificar.mockResolvedValue({ classificacao: neutra, erro: null });
+    const direct = mocks.fetch.getMockImplementation()!;
+    mocks.fetch.mockImplementation(async (url: string, init: any) => (String(url).includes('crm-whatsapp-send')
+      ? new Response(JSON.stringify({ error: 'Recipient phone number not in allowed list', meta_code: 131030 }), { status: 422 })
+      : direct(url, init)));
+    await inbound();
+    expect(textosEnviados()).toEqual([TEXTOS.whatsappNaoFoi]);
+    expect(gravacaoDaEtapa()!.payload).toMatchObject({ fluxo_etapa: 'pergunta_whatsapp' });
+    expect(gravacaoDaEtapa()!.payload.telefone).toBeUndefined();
+    expect(marcaDoRecibo()).toBeUndefined();
+    const erro = mocks.estado.escritas.find((w) => w.tabela === 'ig_conversa_ia' && 'recibo_erro' in (w.payload ?? {}));
+    expect(erro!.payload.recibo_erro).toContain('131030');
+    expect(liberacao().p_tools[0]).toMatchObject({ proxima: 'pergunta_whatsapp', whatsapp: { ok: false } });
+  });
+
+  it('o CRM falhou → nem manda o recibo; pede o número de novo', async () => {
+    Object.assign(mocks.estado.conversa!, { fluxo_etapa: 'pergunta_whatsapp', situacao: 'formado' });
+    mocks.estado.mensagens[0].conteudo = '46 9 9988-2268';
+    mocks.classificar.mockResolvedValue({ classificacao: neutra, erro: null });
+    const padrao = mocks.rpc.getMockImplementation()!;
+    mocks.rpc.mockImplementation(async (nome: string, args: any) => (nome === 'ig_whatsapp_capturar'
+      ? { data: null, error: { message: 'telefone inválido' } }
+      : padrao(nome, args)));
+    await inbound();
+    expect(envioDoRecibo()).toBeUndefined();
+    expect(textosEnviados()).toEqual([TEXTOS.whatsappNaoFoi]);
+    expect(gravacaoDaEtapa()!.payload).toMatchObject({ fluxo_etapa: 'pergunta_whatsapp' });
   });
 
   it('formado → pergunta se quer o portfólio; "sim" → pede o WhatsApp (o PDF não vai pelo insta)', async () => {
@@ -219,14 +286,16 @@ describe('ig-agente: o roteiro do direct', () => {
     expect(gravacaoDaEtapa()!.payload).toMatchObject({ fluxo_etapa: 'pergunta_interesse', data_formacao: '2027-07-31' });
   });
 
-  it('estudante que forma em julho/2027 passa o número → plano vai para "Forma em 2027/06"', async () => {
+  it('estudante de vet que forma em julho/2027 passa o número → card em "Forma em 2027/06"', async () => {
     vi.setSystemTime(new Date('2026-09-25T12:00:00Z'));
-    Object.assign(mocks.estado.conversa!, { fluxo_etapa: 'pergunta_whatsapp', situacao: 'estudante', data_formacao: '2027-07-31' });
+    Object.assign(mocks.estado.conversa!, { fluxo_etapa: 'pergunta_whatsapp', situacao: 'estudante', area: 'veterinária', data_formacao: '2027-07-31' });
     mocks.estado.mensagens[0].conteudo = '46 9 9988-2268';
     mocks.classificar.mockResolvedValue({ classificacao: neutra, erro: null, modelo: 'gpt-5.6-luna' });
     await inbound();
+    expect(captura()).toMatchObject({ p_etapa_crm: 'Forma em 2027/06', p_data_formacao: '2027-07-31', p_area: 'veterinária' });
+    expect(JSON.parse(envioDoRecibo()![1].body).template_components[0].parameters[1]).toEqual({ type: 'text', text: 'Medicina Veterinária' });
     expect(liberacao().p_tools[0].whatsapp).toMatchObject({
-      simulado: true, situacao: 'estudante', data_formacao: '2027-07-31', etapa_crm: 'Forma em 2027/06',
+      ok: true, situacao: 'estudante', data_formacao: '2027-07-31', etapa_crm: 'Forma em 2027/06',
     });
   });
 

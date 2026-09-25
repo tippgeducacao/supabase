@@ -9,8 +9,8 @@
 // a resposta da pessoa (classificador.ts — Luna 5.6 pela API da OpenAI, Claude de
 // reserva) e as frases são fixas. Objetivo do roteiro:
 // saber se a pessoa é formada ou estudante e pegar o WhatsApp, o canal de vendas.
-// ⚠️ Nesta fase o efeito do WhatsApp é SIMULADO: nada entra no CRM e nenhum template sai
-// até o template do portfólio ser aprovado pela Meta (ver enviarParaWhatsapp()).
+// Capturou o WhatsApp (25/09/2026): card no funil 1.5 INSTAGRAM + RECIBO no WhatsApp; o
+// PDF do portfólio vai quando a pessoa responde lá (ver capturarWhatsapp()).
 //
 // Uma DM, do começo ao fim (o "canvas"):
 //   gate → token → "/reset"? → espera N s de silêncio → reserva a conversa (trava) →
@@ -24,7 +24,16 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { avaliarGateIg } from "../_shared/igAgenteGate.ts";
 import { ehTokenInvalido, enviarTextoIg, type ResultadoEnvioIg } from "../_shared/igMensageria.ts";
-import type { EtapaFluxo, Passo } from "./fluxo.ts";
+import {
+  areaDoRecibo,
+  componentesDoRecibo,
+  dataDoRecibo,
+  IG_RECIBO_IDIOMA,
+  IG_RECIBO_TEMPLATE,
+  IG_WA_ACCOUNT_ID,
+  nomeDoRecibo,
+} from "../_shared/igWhatsapp.ts";
+import { type EtapaFluxo, type Passo, primeiroNomeConfiavel, TEXTOS } from "./fluxo.ts";
 import { atrasoEntreBaloesMs, inicioDaJanela, type LinhaIg } from "./historico.ts";
 import { type EstadoRoteiro, pensarRodada, type PlanoWhatsapp, separarNovas } from "./rodada.ts";
 
@@ -61,6 +70,7 @@ type Conversa = {
   igUserId: string;
   token: string;
   nome: string;
+  username: string;
 };
 
 type Reserva = {
@@ -98,6 +108,7 @@ async function abrirConversa(
       igUserId: String(conta?.ig_user_id ?? ""),
       token,
       nome: String(perfil?.nome || perfil?.username || "").trim(),
+      username: String(perfil?.username ?? "").trim(),
     },
     debounceS: Number(cfg?.debounce_segundos ?? 5),
   };
@@ -170,15 +181,74 @@ async function zerarConversa(c: Conversa) {
   await registrarSaida(c, texto, envio, { origem: "sistema", comando: "reset" });
 }
 
-// ── WhatsApp capturado: CRM + template do portfólio ───────────────────────────
-// ⚠️ SIMULADO nesta fase: o template com o PDF do portfólio ainda não existe na Meta.
-// Quando for aprovado, aqui entram: criar a oportunidade no funil 1.5 INSTAGRAM na etapa
-// de etapaCrmInstagram() (Formados | Na graduação | Forma em AAAA/06|01…), gravar o
-// campo "Data prevista de formação" do contato e mandar o template pelo número "João
-// PPGVET". Hoje só registra o que FARIA (o plano sai de rodada.ts → planoWhatsapp()).
-function enviarParaWhatsapp(c: Conversa, passo: Passo, plano: PlanoWhatsapp) {
-  log("WhatsApp capturado (SIMULADO — sem CRM e sem template ainda):", JSON.stringify({ igsid: c.igsid, telefone: passo.telefone, ...plano }));
-  return plano;
+// ── WhatsApp capturado: CRM + RECIBO (25/09/2026) ─────────────────────────────
+// 1. lead + card no funil 1.5 INSTAGRAM na etapa de etapaCrmInstagram() e "Data prevista
+//    de formação" (RPC ig_whatsapp_capturar);
+// 2. o RECIBO comprovante_cadastro_utility pelo número PPGVET Educação - Pós-graduação.
+//    O template do portfólio vira MARKETING em qualquer BM; o recibo é UTILIDADE. O PDF
+//    vai quando a pessoa responder no WhatsApp: crm-whatsapp-webhook → portfolioInstagram.ts.
+// Roda ANTES da resposta no direct: a IA só diz "te mandei" se o recibo saiu mesmo.
+type Captura = PlanoWhatsapp & { ok: boolean; erro: string | null; lead_id?: string; oportunidade_id?: string };
+
+async function capturarWhatsapp(c: Conversa, telefone: string, depois: EstadoRoteiro, plano: PlanoWhatsapp): Promise<Captura> {
+  const falhou = (erro: string): Captura => {
+    log("WhatsApp capturado, mas o recibo NÃO saiu:", erro, c.igsid);
+    return { ...plano, ok: false, erro: erro.slice(0, 500) };
+  };
+  const { data: crm, error: erroCrm } = await supabase.rpc("ig_whatsapp_capturar", {
+    p_conta_id: c.contaId,
+    p_igsid: c.igsid,
+    p_telefone: telefone,
+    p_nome: c.nome || null,
+    p_area: depois.area,
+    p_data_formacao: plano.data_formacao,
+    p_etapa_crm: plano.etapa_crm,
+    p_wa_account_id: IG_WA_ACCOUNT_ID,
+  });
+  if (erroCrm) return falhou(`CRM: ${erroCrm.message}`);
+  const leadId = crm?.lead_id ? String(crm.lead_id) : undefined;
+  const oportunidadeId = crm?.oportunidade_id ? String(crm.oportunidade_id) : undefined;
+
+  try {
+    const r = await fetch(`${SUPABASE_URL}/functions/v1/crm-whatsapp-send`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SERVICE_ROLE}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        wa_account_id: IG_WA_ACCOUNT_ID,
+        telefone,
+        tipo: "template",
+        template_name: IG_RECIBO_TEMPLATE,
+        template_lang: IG_RECIBO_IDIOMA,
+        template_components: componentesDoRecibo(
+          nomeDoRecibo(primeiroNomeConfiavel(c.nome), c.username, c.nome),
+          areaDoRecibo(depois.area),
+          dataDoRecibo(),
+        ),
+        lead_id: leadId,
+        oportunidade_id: oportunidadeId,
+      }),
+    });
+    // deno-lint-ignore no-explicit-any
+    const resposta: any = await r.json().catch(() => ({}));
+    if (!r.ok || resposta?.error) {
+      const erro = `recibo: ${resposta?.error ?? `HTTP ${r.status}`}${resposta?.meta_code ? ` (Meta ${resposta.meta_code})` : ""}`;
+      await supabase.from("ig_conversa_ia").update({ recibo_erro: erro.slice(0, 500), updated_at: new Date().toISOString() })
+        .eq("conta_id", c.contaId).eq("igsid", c.igsid);
+      return { ...falhou(erro), lead_id: leadId, oportunidade_id: oportunidadeId };
+    }
+  } catch (e) {
+    return { ...falhou(`recibo: ${e instanceof Error ? e.message : String(e)}`), lead_id: leadId, oportunidade_id: oportunidadeId };
+  }
+
+  // O telefone vai JÁ aqui (e não só no fim da rodada): é por ele que o webhook do
+  // WhatsApp acha o PDF pendente quando a pessoa responder.
+  const agora = new Date().toISOString();
+  const { error: erroMarca } = await supabase.from("ig_conversa_ia")
+    .update({ telefone, recibo_enviado_em: agora, recibo_erro: null, portfolio_enviado_em: null, updated_at: agora })
+    .eq("conta_id", c.contaId).eq("igsid", c.igsid);
+  if (erroMarca) log("recibo saiu, mas não gravou o pendente do PDF:", erroMarca.message);
+  log("WhatsApp capturado: card no CRM e recibo enviado", JSON.stringify({ igsid: c.igsid, lead_id: leadId, oportunidade_id: oportunidadeId, etapa_crm: plano.etapa_crm }));
+  return { ...plano, ok: true, erro: null, lead_id: leadId, oportunidade_id: oportunidadeId };
 }
 
 // ── Uma rodada: histórico → classificador → roteiro → balões → libera a trava ──
@@ -231,7 +301,17 @@ async function responderRodada(c: Conversa, tokenReserva: string, reserva: Reser
       modelo: rodada.modelo,
       erro_classificador: rodada.erro,
     };
-    if (rodada.whatsapp) registro.whatsapp = enviarParaWhatsapp(c, passo, rodada.whatsapp);
+    if (rodada.whatsapp && passo.telefone) {
+      const captura = await capturarWhatsapp(c, passo.telefone, rodada.estadoDepois, rodada.whatsapp);
+      registro.whatsapp = captura;
+      if (!captura.ok) {
+        // Recibo não saiu: a pessoa confere o número e manda de novo — a etapa volta ao
+        // pedido do WhatsApp e o telefone não é gravado como capturado.
+        passo = { ...passo, mensagens: [TEXTOS.whatsappNaoFoi], proximaEtapa: "pergunta_whatsapp", telefone: undefined, enviarWhatsapp: false };
+        baloes = [TEXTOS.whatsappNaoFoi];
+        registro.proxima = passo.proximaEtapa;
+      }
+    }
   } catch (e) {
     erroCerebro = (e instanceof Error ? e.message : String(e)).slice(0, 500);
     log("a rodada falhou:", erroCerebro);
