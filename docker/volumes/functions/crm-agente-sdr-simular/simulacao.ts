@@ -213,15 +213,37 @@ export function disponibilidadeSimulada(entrada: unknown, mocksDoEnsaio: unknown
     return d;
   };
   const pool = mocks.disponibilidade === 'pool';
-  const agenda = ([
-    [1, '15:00', '15h', 'v1', 'Ana'],
-    [1, '16:30', '16h30', pool ? 'v2' : 'v1', pool ? 'Bruno' : 'Ana'],
-    [2, '10:00', '10h', pool ? 'v3' : 'v1', pool ? 'Carla' : 'Ana'],
-  ] as const).map(([dias, hora, rotulo, vid, nome]) => {
-    const d = proximoUtil(dias);
-    const semana = new Intl.DateTimeFormat('pt-BR', { timeZone: fuso, weekday: 'long' }).format(d).replace('-feira', '');
-    return { data: isoSP(d), hora, rotulo, vid, nome, semana };
-  });
+  const semanaDe = (d: Date) => new Intl.DateTimeFormat('pt-BR', { timeZone: fuso, weekday: 'long' }).format(d).replace('-feira', '');
+  // 'realista' (25/09/2026, duelo em amostra nova): a agenda enxuta abaixo não tem nada HOJE, no
+  // sábado nem à noite — o Sonnet procurou "hoje à tarde" até esgotar as voltas em 7 de 40 casos,
+  // contra 1 limite de voltas em 6.033 rodadas reais de 7 dias. Aqui: hoje (o que não passou) e os
+  // próximos 4 dias, manhã/tarde/noite, sábado só manhã, domingo nada. Sem data: os 4 primeiros.
+  const agenda = mocks.disponibilidade === 'realista'
+    ? (() => {
+      const agoraSP = new Intl.DateTimeFormat('en-GB', { timeZone: fuso, hour: '2-digit', minute: '2-digit', hour12: false })
+        .format(new Date(agora.getTime() + 30 * 60_000));
+      const slots: { data: string; hora: string; rotulo: string; vid: string; nome: string; semana: string }[] = [];
+      for (let dias = 0; dias <= 4; dias++) {
+        const d = new Date(agora.getTime() + dias * 86_400_000);
+        const dow = semanaCurta(d);
+        if (dow === 'Sun') continue;
+        for (const hora of ['09:00', '10:30', '11:30', '14:00', '15:30', '17:00', '19:00', '19:30', '20:30']) {
+          if (dow === 'Sat' && hora >= '12:00') continue;
+          if (dias === 0 && hora <= agoraSP) continue;
+          const [h, m] = hora.split(':');
+          slots.push({ data: isoSP(d), hora, rotulo: `${Number(h)}h${m === '00' ? '' : m}`, vid: 'v1', nome: 'Ana', semana: semanaDe(d) });
+        }
+      }
+      return slots;
+    })()
+    : ([
+      [1, '15:00', '15h', 'v1', 'Ana'],
+      [1, '16:30', '16h30', pool ? 'v2' : 'v1', pool ? 'Bruno' : 'Ana'],
+      [2, '10:00', '10h', pool ? 'v3' : 'v1', pool ? 'Carla' : 'Ana'],
+    ] as const).map(([dias, hora, rotulo, vid, nome]) => {
+      const d = proximoUtil(dias);
+      return { data: isoSP(d), hora, rotulo, vid, nome, semana: semanaDe(d) };
+    });
 
   const hoje = isoSP(agora);
   const dataPedida = String(input.data_desejada ?? '').trim();
@@ -229,7 +251,7 @@ export function disponibilidadeSimulada(entrada: unknown, mocksDoEnsaio: unknown
     return `⚠️ A data consultada (${dataPedida}) JÁ PASSOU. HOJE é ${hoje}. Refaça a consulta com a data de HOJE ou uma futura — `
       + 'e, se você afirmou outra data/dia da semana ao lead, corrija com naturalidade usando o HOJE informado aqui (nunca insista na data errada).';
   }
-  let janela = agenda;
+  let janela = mocks.disponibilidade === 'realista' && !dataPedida ? agenda.slice(0, 4) : agenda;
   if (dataPedida) {
     const inicio = String(input.horario_inicio_desejado ?? '').trim().slice(0, 5);
     const periodo = String(input.periodo_desejado ?? '').trim().toLowerCase();
