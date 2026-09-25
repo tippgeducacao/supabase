@@ -18,7 +18,7 @@ const mocks = vi.hoisted(() => ({
 // Os CHECKs das tabelas REAIS. Sem eles este teste passou gravando status_entrega =
 // 'enviado', que o banco recusa — e em produção a IA se pausou depois da 1ª resposta
 // (24/09/2026), porque o eco da própria mensagem ficou parecendo de um humano.
-const ETAPAS = ['boas_vindas', 'pergunta_formacao', 'pergunta_whatsapp', 'escola_enviada', 'whatsapp_enviado', 'encerrada'];
+const ETAPAS = ['boas_vindas', 'pergunta_formacao', 'pergunta_interesse', 'pergunta_whatsapp', 'escola_enviada', 'whatsapp_enviado', 'encerrada'];
 const CHECKS: Record<string, (p: Linha) => string | null> = {
   ig_mensagens: (p) => {
     if (!['sent', 'delivered', 'read', 'failed'].includes(p.status_entrega ?? 'sent')) return 'ig_mensagens_status_entrega_check';
@@ -154,10 +154,10 @@ const liberacao = () => mocks.rpc.mock.calls.find(([nome]) => nome === 'ig_ia_li
 const gravacaoDaEtapa = () => mocks.estado.escritas.find((w) => w.tabela === 'ig_conversa_ia' && w.op === 'update');
 
 describe('ig-agente: o roteiro do direct', () => {
-  it('"quero!" na boas-vindas → pergunta da formação com o nome, e a etapa anda', async () => {
+  it('resposta à boas-vindas → pergunta da formação com o nome, e a etapa anda', async () => {
     expect((await inbound()).status).toBe(200);
     expect(mocks.classificar).toHaveBeenCalledWith('boas_vindas', [], ['quero!']);
-    expect(textosEnviados()).toEqual([TEXTOS.perguntaFormacaoAceite('Gustavo')]);
+    expect(textosEnviados()).toEqual([TEXTOS.perguntaFormacao('Gustavo')]);
     expect(mocks.fetch.mock.calls[0][0]).toContain('graph.instagram.com');
     expect(mocks.fetch.mock.calls[0][1].headers.Authorization).toBe('Bearer IGAA-sintetico');
 
@@ -193,6 +193,21 @@ describe('ig-agente: o roteiro do direct', () => {
     expect(gravacaoDaEtapa()!.payload).toMatchObject({ fluxo_etapa: 'whatsapp_enviado', telefone: '5546999882268' });
     expect(gravacaoDaEtapa()!.payload.whatsapp_enviado_em).toBeTruthy();
     expect(liberacao().p_tools[0].whatsapp).toEqual({ simulado: true });
+  });
+
+  it('formado → pergunta se quer o portfólio; "sim" → pede o WhatsApp (o PDF não vai pelo insta)', async () => {
+    mocks.estado.conversa!.fluxo_etapa = 'pergunta_formacao';
+    mocks.classificar.mockResolvedValueOnce({ classificacao: { ...neutra, situacao: 'formado' }, erro: null, modelo: 'gpt-5.6-luna' });
+    await inbound();
+    expect(textosEnviados()).toEqual([TEXTOS.perguntaInteresse]);
+    expect(gravacaoDaEtapa()!.payload).toMatchObject({ fluxo_etapa: 'pergunta_interesse', situacao: 'formado' });
+  });
+
+  it('"sim" na pergunta do portfólio → pede o WhatsApp', async () => {
+    mocks.estado.conversa!.fluxo_etapa = 'pergunta_interesse';
+    await inbound();
+    expect(textosEnviados()).toEqual([TEXTOS.pedirWhatsapp]);
+    expect(gravacaoDaEtapa()!.payload).toMatchObject({ fluxo_etapa: 'pergunta_whatsapp' });
   });
 
   it('nem formado nem estudante → link da Escola e fim, sem WhatsApp', async () => {
@@ -264,7 +279,7 @@ describe('ig-agente: envio', () => {
       error: { message: 'Error validating access token', code: 190 },
     }), { status: 400 }));
     await inbound();
-    expect(textosEnviados()).toEqual([TEXTOS.perguntaFormacaoAceite('Gustavo')]);
+    expect(textosEnviados()).toEqual([TEXTOS.perguntaFormacao('Gustavo')]);
     const falha = mocks.estado.escritas.find((w) => w.tabela === 'ig_mensagens');
     expect(falha).toMatchObject({ op: 'insert', payload: { status_entrega: 'failed', mid: null } });
     expect(gravacaoDaEtapa()).toBeUndefined();

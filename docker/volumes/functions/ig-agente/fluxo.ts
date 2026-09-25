@@ -1,11 +1,14 @@
-// O ROTEIRO do direct do Instagram — fluxo desenhado pelo Gustavo em 24/09/2026.
+// O ROTEIRO do direct do Instagram — caminho feliz do DIRETOR COMERCIAL (25/09/2026),
+// "bem mais direto" que a 1ª versão do Gustavo (24/09, oferta da Escola na abertura):
 //
-//   ManyChat (novo seguidor): oferta da Escola gratuita → "Quer receber o acesso?"
-//   1. boas_vindas        a pessoa responde           → a IA pergunta a formação
-//   2. pergunta_formacao  formado ou estudante         → pede o WhatsApp
-//                         nem formado nem estudante    → link da Escola (fim, sem CRM)
-//   3. pergunta_whatsapp  número válido                → CRM 1.5 INSTAGRAM + template com
-//                                                        o portfólio no WhatsApp (fim)
+//   ManyChat (novo seguidor): "Oii, tudo bem?" — só puxa conversa
+//   1. boas_vindas         a pessoa responde            → pergunta a formação
+//   2. pergunta_formacao   formado ou estudante          → pergunta se quer o portfólio
+//                          nem formado nem estudante     → link da Escola (fim, sem CRM)
+//   3. pergunta_interesse  quer                          → pede o WhatsApp ("o PDF não vai pelo insta")
+//                          não quer                      → despedida (fim)
+//   4. pergunta_whatsapp   número válido                 → CRM 1.5 INSTAGRAM + template com
+//                                                          o portfólio no WhatsApp (fim)
 //   fins: escola_enviada | whatsapp_enviado | encerrada
 //
 // A IA (classificador.ts) só ENTENDE a resposta da pessoa. As frases são fixas e moram
@@ -17,6 +20,7 @@ export const LINK_ESCOLA = "https://escoladeespecializacao.ppgvet.com.br";
 export type EtapaFluxo =
   | "boas_vindas"
   | "pergunta_formacao"
+  | "pergunta_interesse"
   | "pergunta_whatsapp"
   | "escola_enviada"
   | "whatsapp_enviado"
@@ -57,20 +61,21 @@ export type Passo = {
 
 export const ETAPAS_FINAIS: ReadonlySet<EtapaFluxo> = new Set(["escola_enviada", "whatsapp_enviado", "encerrada"]);
 
-// ── As frases (do comercial) ───────────────────────────────────────────────────
+// ── As frases (do diretor comercial, 25/09/2026) ────────────────────────────────
 export const TEXTOS = {
-  perguntaFormacaoAceite: (nome: string | null) =>
-    `Te envio sim! Só me confirma${nome ? `, ${nome}` : ""}: você já se formou e tá trabalhando, ou ainda tá na graduação?`,
   perguntaFormacao: (nome: string | null) =>
-    `Oi${nome ? `, ${nome}` : ""}! Me conta rapidinho: você já se formou e tá trabalhando, ou ainda tá na graduação?`,
+    nome
+      ? `${nome}, você já se formou e tá trabalhando, ou ainda tá na graduação?`
+      : "Você já se formou e tá trabalhando, ou ainda tá na graduação?",
   reperguntarFormacao:
     "Só pra eu te mandar o material certo: você já tem graduação completa ou ainda tá cursando?",
+  perguntaInteresse:
+    "Você tem interesse em conhecer as nossas pós-graduações? Te encaminho o nosso portfólio pra você olhar com calma?",
   pedirWhatsapp:
-    "Perfeito! Me passa seu WhatsApp com DDD? Te mando por lá o link e o nosso portfólio em PDF, pra você olhar com calma.",
+    "Não consigo encaminhar o PDF pelo Insta. Me passa seu WhatsApp com DDD que te mando por lá?",
   telefoneInvalido: "Acho que faltou algum número 🤔 Me manda seu WhatsApp com DDD?",
-  relembrarWhatsapp: "É só me mandar seu WhatsApp com DDD que eu te envio o link e o portfólio por lá 😉",
-  confirmacaoWhatsapp:
-    'Prontinho! Te mandei lá no WhatsApp 😉 É só tocar em "Receber acesso" que o link chega na hora.',
+  relembrarWhatsapp: "É só me mandar seu WhatsApp com DDD que eu te envio o portfólio por lá 😉",
+  confirmacaoWhatsapp: "Prontinho! Te mandei o portfólio lá no WhatsApp 😉",
   escola:
     `Te mando sim! 😉 Aqui está o acesso à nossa Escola de Especialização gratuita, com mais de 10 cursos, além de artigos, e-books e podcasts: ${LINK_ESCOLA}`,
   recusa: "Tranquilo! Se mudar de ideia, é só me chamar por aqui 😉",
@@ -120,31 +125,19 @@ function comResposta(c: Classificacao, depois: string[]): string[] {
   return resposta ? [resposta, ...depois] : depois;
 }
 
-function pedirOuCapturarWhatsapp(
-  c: Classificacao,
-  ctx: ContextoFluxo,
-  situacao: "formado" | "estudante",
-): Passo {
-  const telefone = extrairTelefoneBR(ctx.textoNovo) ?? extrairTelefoneBR(c.telefone);
-  // Já mandou o número junto ("sou vet, meu zap é 46 9…"): não pergunta de novo.
-  if (telefone) {
-    return {
-      mensagens: [TEXTOS.confirmacaoWhatsapp],
-      proximaEtapa: "whatsapp_enviado",
-      tentativas: 0,
-      situacao,
-      area: c.area,
-      telefone,
-      enviarWhatsapp: true,
-    };
-  }
+function capturou(telefone: string, situacao?: "formado" | "estudante", area?: string | null): Passo {
   return {
-    mensagens: comResposta(c, [TEXTOS.pedirWhatsapp]),
-    proximaEtapa: "pergunta_whatsapp",
+    mensagens: [TEXTOS.confirmacaoWhatsapp],
+    proximaEtapa: "whatsapp_enviado",
     tentativas: 0,
-    situacao,
-    area: c.area,
+    telefone,
+    enviarWhatsapp: true,
+    ...(situacao ? { situacao, area } : {}),
   };
+}
+
+function telefoneDe(c: Classificacao, ctx: ContextoFluxo): string | null {
+  return extrairTelefoneBR(ctx.textoNovo) ?? extrairTelefoneBR(c.telefone);
 }
 
 export function decidirPasso(etapa: EtapaFluxo, c: Classificacao, ctx: ContextoFluxo): Passo {
@@ -156,16 +149,8 @@ export function decidirPasso(etapa: EtapaFluxo, c: Classificacao, ctx: ContextoF
   }
 
   if (etapa === "pergunta_whatsapp") {
-    const telefone = extrairTelefoneBR(ctx.textoNovo) ?? extrairTelefoneBR(c.telefone);
-    if (telefone) {
-      return {
-        mensagens: [TEXTOS.confirmacaoWhatsapp],
-        proximaEtapa: "whatsapp_enviado",
-        tentativas: 0,
-        telefone,
-        enviarWhatsapp: true,
-      };
-    }
+    const telefone = telefoneDe(c, ctx);
+    if (telefone) return capturou(telefone);
     if (pareceNumeroInvalido(ctx.textoNovo)) {
       return { mensagens: [TEXTOS.telefoneInvalido], proximaEtapa: "pergunta_whatsapp", tentativas: ctx.tentativas + 1 };
     }
@@ -183,8 +168,36 @@ export function decidirPasso(etapa: EtapaFluxo, c: Classificacao, ctx: ContextoF
     return { mensagens: [], proximaEtapa: "pergunta_whatsapp", tentativas: ctx.tentativas };
   }
 
+  if (etapa === "pergunta_interesse") {
+    // Já mandou o número junto do "quero": captura na hora.
+    const telefone = telefoneDe(c, ctx);
+    if (telefone && c.intencao !== "recusa") return capturou(telefone);
+    if (c.intencao === "aceita") {
+      return { mensagens: [TEXTOS.pedirWhatsapp], proximaEtapa: "pergunta_whatsapp", tentativas: 0 };
+    }
+    if (c.intencao === "recusa") {
+      return { mensagens: [TEXTOS.recusa], proximaEtapa: "encerrada", tentativas: 0 };
+    }
+    if (c.intencao === "pergunta" || ctx.tentativas < 1) {
+      return {
+        mensagens: comResposta(c, [TEXTOS.perguntaInteresse]),
+        proximaEtapa: "pergunta_interesse",
+        tentativas: ctx.tentativas + 1,
+      };
+    }
+    return { mensagens: [], proximaEtapa: "pergunta_interesse", tentativas: ctx.tentativas };
+  }
+
   // boas_vindas e pergunta_formacao: a pessoa pode já ter dito a situação.
-  if (c.situacao === "formado" || c.situacao === "estudante") return pedirOuCapturarWhatsapp(c, ctx, c.situacao);
+  if (c.situacao === "formado" || c.situacao === "estudante") {
+    return {
+      mensagens: comResposta(c, [TEXTOS.perguntaInteresse]),
+      proximaEtapa: "pergunta_interesse",
+      tentativas: 0,
+      situacao: c.situacao,
+      area: c.area,
+    };
+  }
   if (c.situacao === "nenhum") {
     return { mensagens: [TEXTOS.escola], proximaEtapa: "escola_enviada", tentativas: 0 };
   }
@@ -193,8 +206,7 @@ export function decidirPasso(etapa: EtapaFluxo, c: Classificacao, ctx: ContextoF
   }
 
   if (etapa === "boas_vindas") {
-    const pergunta = c.intencao === "aceita" ? TEXTOS.perguntaFormacaoAceite(nome) : TEXTOS.perguntaFormacao(nome);
-    return { mensagens: comResposta(c, [pergunta]), proximaEtapa: "pergunta_formacao", tentativas: 0 };
+    return { mensagens: comResposta(c, [TEXTOS.perguntaFormacao(nome)]), proximaEtapa: "pergunta_formacao", tentativas: 0 };
   }
 
   // pergunta_formacao sem resposta clara: repergunta UMA vez; na segunda, manda a Escola

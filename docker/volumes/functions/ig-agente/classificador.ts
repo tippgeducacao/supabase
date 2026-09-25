@@ -20,8 +20,10 @@ const PRAZO_CLAUDE_MS = 12_000;
 
 const O_QUE_A_IA_ACABOU_DE_PERGUNTAR: Record<EtapaFluxo, string> = {
   boas_vindas:
-    "A PPGVET mandou a boas-vindas a um novo seguidor oferecendo acesso à Escola de Especialização gratuita (\"quer receber o acesso?\") ou perguntando se a pessoa já se formou ou está na graduação.",
+    "A PPGVET mandou a boas-vindas a um novo seguidor (\"Oii, tudo bem?\"). Respostas como \"tudo sim, e você?\" são só cumprimento (intencao = outro).",
   pergunta_formacao: "A IA perguntou se a pessoa já se formou e trabalha, ou se ainda está na graduação.",
+  pergunta_interesse:
+    "A IA perguntou se a pessoa tem interesse em conhecer as pós-graduações e se pode encaminhar o portfólio (\"sim\", \"quero\", \"pode mandar\" = aceita).",
   pergunta_whatsapp: "A IA pediu o WhatsApp da pessoa (com DDD) para mandar o link e o portfólio em PDF.",
   escola_enviada: "A IA já mandou o link da Escola gratuita; o roteiro terminou.",
   whatsapp_enviado: "A IA já recebeu o WhatsApp e mandou o material por lá; o roteiro terminou.",
