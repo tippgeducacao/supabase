@@ -34,6 +34,7 @@ import { contextoEspecialidadeCannabis } from '../crm-agente-sdr/especialidadeCa
 import { comAberturaNumero, NOTA_ABERTURA_CONTROLADA } from '../crm-agente-sdr/aberturaTrocaNumero.ts';
 import { VERSAO_MEMORIA_HUMANA } from '../crm-agente-sdr/memoriaHumana.ts';
 import { montarRetornoInformacoes } from '../crm-agente-sdr/envioMateriais.ts';
+import { proximoPassoDaColeta } from '../crm-agente-sdr/proximoPassoColeta.ts';
 import { instrucaoResultadoMaterial } from '../_shared/resultadoEnvioMaterial.ts';
 import { comNotaNoContexto, comNotaParaRouter, notaTrocaDeNumero, sinalInerte } from '../crm-agente-sdr/trocaDeNumero.ts';
 import {
@@ -100,7 +101,12 @@ async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimula
   // recebe o mesmo fato; tool que a rodada real não chamou cai no mock sintético abaixo.
   const real = mocks?.respostas_reais?.[nome];
   if (typeof real === 'string' && real.trim()) {
-    if (nome === 'atualizar_dados_lead' && ficha) ficha.jornada = aplicarColetaNaJornada(ficha.jornada, input ?? {});
+    // Mesmo acréscimo do executor real no canário: o próximo passo da coleta (proximoPassoColeta.ts).
+    if (nome === 'atualizar_dados_lead' && ficha) {
+      ficha.jornada = aplicarColetaNaJornada(ficha.jornada, input ?? {});
+      const passo = proximoPassoDaColeta(input ?? {});
+      return passo ? `${real} ${passo}` : real;
+    }
     return real;
   }
   switch (nome) {
@@ -108,8 +114,9 @@ async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimula
       if (ficha) ficha.jornada = aplicarColetaNaJornada(ficha.jornada, input ?? {});
       const partes = ['nome', 'formacao', 'tempo_formacao', 'area_atuacao', 'atua_na_area', 'graduacao_concluida', 'possui_pos', 'qual_pos']
         .filter((k) => input?.[k]).map((k) => `${k}="${input[k]}"`);
+      const passo = ficha ? proximoPassoDaColeta(input ?? {}) : '';
       return partes.length
-        ? `Registrado no cadastro: ${partes.join(', ')}. NUNCA comente com o lead que registrou os dados.`
+        ? `Registrado no cadastro: ${partes.join(', ')}.${passo ? ` ${passo}` : ''} NUNCA comente com o lead que registrou os dados.`
         : 'Nada a atualizar.';
     }
     // ⚠️ Este mock NÃO pode confirmar qualquer curso: a 1ª versão devolvia
@@ -452,7 +459,7 @@ Deno.serve(async (req) => {
           return JSON.stringify(recusa);
         }
         const resposta = await mockTool(nome, dados, entrada.mocks, fichaSim);
-        if (nome === 'verificar_compatibilidade_curso') reprovadoPorPrazo = resposta.startsWith('REPROVADO_PRAZO');
+        if (nome === 'verificar_compatibilidade_curso') reprovadoPorPrazo = resposta.startsWith('REPROVADO_PRAZO') || resposta.includes('"output":"REPROVADO_PRAZO"');
         if (nome === 'atualizar_dados_lead') {
           if (typeof dados?.nome === 'string') estado.nome = dados.nome;
           if (typeof dados?.formacao === 'string') estado.formacao = dados.formacao;

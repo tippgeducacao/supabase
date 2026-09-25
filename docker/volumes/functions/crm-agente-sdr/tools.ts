@@ -28,6 +28,7 @@ import { temDorFinanceira } from './objecaoFinanceira.ts';
 import { montarRetornoInformacoes } from './envioMateriais.ts';
 import { consultarCatalogo } from './catalogoCursos.ts';
 import { resultadoConfirmacao } from './confirmacaoAgendamento.ts';
+import { proximoPassoDaColeta } from './proximoPassoColeta.ts';
 import {
   type ContextoElegibilidade, iniciarAvaliacao, finalizarAvaliacao, consultarAprovacao,
   recusaElegibilidade, VERSAO_REGRA_ELEGIBILIDADE,
@@ -1198,8 +1199,10 @@ async function atualizarDadosLead(supabase: any, input: any, ctx: CtxConversa, t
       console.error(`[crm-agente-sdr] jornada (coleta): ${(e as Error)?.message ?? e}`);
     }
   }
+  // Canário (25/09/2026): o próximo passo exato, com o prazo já lido pelo código (proximoPassoColeta.ts).
+  const proximoPasso = ctx.ficha ? proximoPassoDaColeta(input ?? {}) : '';
   if (!nome && !formacao && !tempoFormacao) {
-    return sair(`Registrado.${registroFicha} NUNCA comente com o lead que registrou ou salvou os dados dele.`);
+    return sair(`Registrado.${registroFicha} ${proximoPasso ? `${proximoPasso} ` : ''}NUNCA comente com o lead que registrou ou salvou os dados dele.`);
   }
 
   const { data, error } = await supabase.rpc('crm_agente_atualizar_dados_lead', {
@@ -1226,7 +1229,7 @@ async function atualizarDadosLead(supabase: any, input: any, ctx: CtxConversa, t
   return sair(
     `Registrado no cadastro: ${partes.join(' e ')}.${registroFicha} ` +
     (nome ? `Use "${nome.split(' ')[0]}" ao falar com o lead (minúsculo, no máximo duas vezes na conversa). ` : '') +
-    (formacao ? 'Isto NÃO checa elegibilidade: rode verificar_compatibilidade_curso para isso. ' : '') +
+    (proximoPasso ? `${proximoPasso} ` : formacao ? 'Isto NÃO checa elegibilidade: rode verificar_compatibilidade_curso para isso. ' : '') +
     'NUNCA comente com o lead que registrou ou salvou os dados dele.',
   );
 }

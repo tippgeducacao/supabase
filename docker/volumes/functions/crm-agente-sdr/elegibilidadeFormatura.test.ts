@@ -394,3 +394,37 @@ describe('mês é a PALAVRA inteira, não o começo de qualquer palavra (25/09/2
     }
   });
 });
+
+describe('ano/semestre corrente sem número (25/09/2026)', () => {
+  const agora = new Date('2026-09-25T13:00:00Z');
+  it.each([
+    ['me formo no fim do ano', 12, 2026],
+    ['Final do ano agora termino', 12, 2026],
+    ['termino esse ano', 12, 2026],
+    ['Esse ano', 12, 2026],
+    ['Termino agora neste semestre. Só falta o ESO.', 12, 2026],
+    ['último período, me formo no fim do ano', 12, 2026],
+  ])('%s ⇒ %i/%i', (texto, mes, ano) => {
+    const l = lerConclusao(texto, agora) as { tipo: string; data: Date };
+    expect(l.tipo).toBe('data');
+    expect(l.data.getUTCMonth() + 1).toBe(mes);
+    expect(l.data.getUTCFullYear()).toBe(ano);
+  });
+  it('no 1º semestre, "este semestre" é junho', () => {
+    const l = lerConclusao('termino este semestre', new Date('2026-03-10T13:00:00Z')) as { data: Date };
+    expect(l.data.getUTCMonth() + 1).toBe(6);
+  });
+  it('"ano que vem" e "próximo semestre" continuam sem data (falta o mês)', () => {
+    expect(lerConclusao('fim do ano que vem', agora).tipo).toBe('ilegivel');
+    expect(lerConclusao('Fim do ano q vem', agora).tipo).toBe('ilegivel');
+    expect(lerConclusao('no final do próximo semestre', agora).tipo).toBe('ilegivel');
+  });
+  it('posição no curso sem ano corrente continua posição', () => {
+    expect(lerConclusao('estou no 5 semestre', agora).tipo).toBe('posicao_no_curso');
+  });
+  it('com mês na frase, o mês manda (regressão de 30 dias, casos reais)', () => {
+    const colacao = lerConclusao('Termino no final do ano. Todavia, a colação só deve acontecer em fevereiro de 27', agora) as { data: Date };
+    expect(colacao.data.getUTCMonth() + 1).toBe(2);
+    expect(decidirPrazoEstudante({ contexto_qualificacao: 'estudante_fora_do_prazo', conclusao_graduacao: '12/2027', conclusao_graduacao_bruta: 'Fim do ano q vem' }, agora).acao).toBe('reprova');
+  });
+});

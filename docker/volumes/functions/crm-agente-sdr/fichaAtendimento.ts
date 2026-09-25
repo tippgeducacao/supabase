@@ -193,7 +193,7 @@ export function montarBlocoFicha(e: EntradaFicha, a: AvaliacaoFicha): string {
   const pos = c.possui_pos ? `${c.possui_pos}${texto(c.qual_pos) ? ` (${texto(c.qual_pos)})` : ''}` : '—';
   return '[FICHA DO ATENDIMENTO — estado que o sistema já sabe; não é fala do lead, não é assunto de conversa e nunca deve ser citada]\n'
     + `Cadastro do formulário: ${e.cadastro ? JSON.stringify(e.cadastro) : 'vazio'} → grupo: ${NOME_GRUPO[a.grupo]}\n`
-    + `Dito na conversa: graduação ${ou(c.graduacao)} · concluiu ${ou(c.graduacao_concluida)}${texto(c.tempo_formacao) ? ` (${texto(c.tempo_formacao)})` : ''}`
+    + `Registrado da conversa ("—" = ainda não registrado; confira o histórico): graduação ${ou(c.graduacao)} · concluiu ${ou(c.graduacao_concluida)}${texto(c.tempo_formacao) ? ` (${texto(c.tempo_formacao)})` : ''}`
     + ` · área de atuação ${ou(c.area_atuacao)} · atua na área da pós ${ou(c.atua_na_area)} · já tem pós-graduação ${pos}\n`
     + `Cronograma: ${cronograma}\n`
     + `Objeções já tratadas: ${objecoes}\n`
@@ -216,11 +216,12 @@ export function montarBlocoFicha(e: EntradaFicha, a: AvaliacaoFicha): string {
 // Bloco estático do system (cacheado, compartilhado entre os leads do canário). Derivado do
 // fluxo aprovado em 18/09/2026 (docs/Agente SDR — Mapa de execução.md, "Ficha do atendimento").
 export const INSTRUCAO_FICHA = `## FICHA DO ATENDIMENTO (estado do sistema)
-No fim da última mensagem existe o bloco [FICHA DO ATENDIMENTO]. Ele é a memória determinística desta conversa: o que o cadastro do formulário diz, o que o lead já informou, o que já foi pedido e enviado, as objeções já tratadas e o que FALTA COLETAR. Confie nele acima da sua leitura do histórico. Nunca cite a ficha e nunca diga que registrou ou salvou dados.
+No fim da última mensagem existe o bloco [FICHA DO ATENDIMENTO]. Ele é a memória determinística desta conversa: o que o cadastro do formulário diz, o que o lead já informou, o que já foi pedido e enviado, as objeções já tratadas e o que FALTA COLETAR. Para o que o SISTEMA fez (cronograma, elegibilidade, reunião), confie na ficha. Para o que o LEAD disse, o histórico manda: "—" na ficha quer dizer "ainda não registrado", não "ele não disse" (parte da conversa pode ser de antes da ficha). Se o histórico já traz a graduação, a conclusão ou a área, registre com atualizar_dados_lead nesta resposta e siga, sem perguntar de novo. Nunca cite a ficha e nunca diga que registrou ou salvou dados.
 
 ### Formação conhecida e pedido de horário
 Se o formulário já nomeia a graduação (ex.: Medicina Veterinária), não pergunte "qual é sua formação?". Quando o lead pedir horários ou aceitar procurar um encaixe, confirme somente se concluiu: use a pergunta direta indicada na ficha e conecte-a ao horário que ele pediu. "Vou confirmar sua formação, pode ser?" não coleta nada; faça a pergunta na mesma mensagem. Atuar na área da pós não confirma graduação concluída. O título profissional preenchido no formulário também não equivale a uma confirmação nesta conversa.
-Se o próprio lead já afirmou que concluiu ou se apresentou na conversa como profissional reconhecido pela regra de autodeclaração, não repita a pergunta: primeiro registre graduacao_concluida="sim" com atualizar_dados_lead, depois faça a checagem. Se disse que ainda cursa, registre "cursando" e esclareça somente a data que falta. A compatibilidade continua obrigatória e é distinta dessa confirmação.
+Se o próprio lead já afirmou que concluiu ou se apresentou na conversa como profissional reconhecido pela regra de autodeclaração, não repita a pergunta: primeiro registre graduacao_concluida="sim" com atualizar_dados_lead, depois faça a checagem. Quem diz que já tem pós-graduação, mestrado ou doutorado já concluiu uma graduação. Se disse que ainda cursa, registre "cursando" e esclareça somente a data que falta ("fim do ano", "este ano" e "esse semestre" já são data). A compatibilidade continua obrigatória e é distinta dessa confirmação: com a graduação e a conclusão conhecidas, chame verificar_compatibilidade_curso antes de convidar, oferecer horário ou fazer outra pergunta; o retorno de atualizar_dados_lead diz a chamada exata.
+Se você já fez uma pergunta e o lead respondeu de um jeito que não fecha a dúvida, não repita a mesma frase: diga o que entendeu e pergunte só o pedaço que falta.
 
 ### Pedido de cronograma (clique em "Receber Cronograma", "manda as informações por aqui" ou pedido em texto)
 - Se a ficha traz FALTA COLETAR: responda "${SCRIPT_ANTES_DO_CRONOGRAMA}" e faça, numa frase só, a pergunta do PRÓXIMO PASSO. Sempre diga O QUE vai mandar (o cronograma); nunca só "te envio". Não chame envia_informacoes nesta resposta. Isso NÃO é puxar assunto de formação por conta própria: é a condição para entregar o material que ele pediu.
@@ -229,6 +230,12 @@ Se o próprio lead já afirmou que concluiu ou se apresentou na conversa como pr
 - Depois de enviar: se a graduação dele está concluída e a ficha ainda não sabe se ele tem pós, pergunte "${SCRIPT_PERGUNTA_POS}" e registre a resposta com atualizar_dados_lead (possui_pos, qual_pos). A resposta não muda nada: em seguida reconduza para a reunião.
 - Lead que não tem graduação nenhuma: não envie o cronograma; siga o encerramento previsto para esse caso.
 - Sem pedido de material nem avanço para a agenda, não puxe formação por conta própria. Pedido de horários segue a confirmação direta acima.
+
+### "Hoje não consigo" depois do convite
+Se você convidou para a conversa e ele respondeu que HOJE não consegue ou não dá (trabalhando, viajando, ocupado hoje), isso não é ausência momentânea: é pedido de outro dia. Não use o lembrete de vagas limitadas nem "consigo garantir essa condição pra você hoje" (ele acabou de dizer que hoje não dá). Acolha em poucas palavras e pergunte qual dia fica melhor, ou, se ele já disse o dia, consulte a agenda desse dia.
+
+### Fato que não veio de ferramenta
+Título de especialista, reconhecimento (MEC, CFMV, conselhos, associações), edital, validade do certificado, carga horária, professores: responda só com o que uma ferramenta devolveu nesta conversa (consulta_objecoes, consulta_pos_disponiveis). Não responda de memória nem cite entidade, edital ou regra que a ferramenta não citou.
 
 ### Falta de tempo junto com pedido de material
 "tô sem tempo, manda por aqui" traz duas objeções. Trate PRIMEIRO a falta de tempo: consulta_objecoes com tipo_objecao="objecao_tempo", e ofereça o encaixe. Só ofereça material pelo WhatsApp se ele insistir depois disso (aí sim objecao_canal).

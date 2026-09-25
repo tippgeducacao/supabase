@@ -220,6 +220,21 @@ export function lerConclusao(bruto: unknown, agora: Date = new Date()): LeituraC
     return { tipo: 'data', data: fimDoMes(ano, mes), via: 'conclusao com mes' };
   }
 
+  // 2c. Ano/semestre CORRENTE sem número: "me formo no fim do ano", "termino esse ano", "neste
+  //     semestre" (25/09/2026, duelo Luna × Sonnet). Não é ambíguo como "2 semestre": aponta para
+  //     o calendário de agora. Antes era ilegível e o João perguntava o mês a quem já tinha dito.
+  //     "ano que vem"/"q vem"/"próximo" fica de fora (falta o mês) e vem antes da posição no curso:
+  //     "último período, me formo no fim do ano" é conclusão. Com MÊS na frase, o mês manda
+  //     ("termino no final do ano, mas a colação é em fevereiro" = fevereiro): a regra não se aplica.
+  if (!/\b(?:que|q)\s+vem\b|\bproxim[oa]\b/.test(t) && !new RegExp(`\\b(?:${RE_MES})\\b`).test(t)) {
+    const RE_CORRENTE = (unidade: string) =>
+      new RegExp(`\\b(?:fim|final|finalzinho)\\s+d[eo]\\s+${unidade}\\b|\\b[nd]?(?:est|ess)e\\s+${unidade}\\b`);
+    if (RE_CORRENTE('ano').test(t)) return { tipo: 'data', data: fimDoMes(anoAtual, 12), via: 'ano corrente' };
+    if (RE_CORRENTE('semestre').test(t)) {
+      return { tipo: 'data', data: fimDoMes(anoAtual, br.getUTCMonth() + 1 <= 6 ? 6 : 12), via: 'semestre corrente' };
+    }
+  }
+
   // 3. Posição no curso — o caso Edinara.
   if (new RegExp(`\\b(?:\\d{1,2}|${ORDINAL_PT})[a-z]*\\s*[ºoª°]?\\s*(?:semestre|periodo|ano|fase|etapa)s?\\b`).test(t)) {
     return { tipo: 'posicao_no_curso', via: 'numero de semestre/periodo' };
