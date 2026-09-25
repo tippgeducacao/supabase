@@ -257,6 +257,59 @@ export function disponibilidadeSimulada(entrada: unknown, mocksDoEnsaio: unknown
     : conteudo;
 }
 
+// Replay (25/09/2026): a agenda REAL daquele atendimento, levada ao dia que o modelo pediu. O
+// replay roda dias depois ("amanhã" já é outra data): devolver o dia antigo contradiz o pedido
+// (a Luna repetiu a consulta até esgotar as voltas) e a agenda sintética não tem noite (o Sonnet
+// procurou noite 6 vezes e ficou mudo — 8 silêncios que a produção não tem). Mantém HORÁRIOS e
+// vendedores reais, com a data e o dia da semana pedidos, recortados como a sdr-api (período ou
+// horário de início; sábado só manhã; hoje só o que ainda não passou). Domingo, data passada ou
+// nada no recorte ⇒ null (o chamador cai na agenda sintética).
+export function agendaRealNoDia(real: string, entrada: unknown, agora: Date = new Date()): string | null {
+  const input = (entrada ?? {}) as Record<string, unknown>;
+  const data = String(input.data_desejada ?? '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) return null;
+  const fuso = 'America/Sao_Paulo';
+  const hoje = new Intl.DateTimeFormat('en-CA', { timeZone: fuso, year: 'numeric', month: '2-digit', day: '2-digit' }).format(agora);
+  if (data < hoje) return null;
+  const dia = new Date(`${data}T12:00:00-03:00`);
+  const curta = new Intl.DateTimeFormat('en-US', { timeZone: fuso, weekday: 'short' }).format(dia);
+  if (curta === 'Sun') return null;
+  const semana = new Intl.DateTimeFormat('pt-BR', { timeZone: fuso, weekday: 'long' }).format(dia);
+
+  let texto = real;
+  try {
+    const j = JSON.parse(real);
+    if (typeof j?.resultado === 'string') texto = j.resultado;
+  } catch { /* resposta real em texto simples */ }
+
+  const inicio = String(input.horario_inicio_desejado ?? '').trim().slice(0, 5);
+  const periodo = String(input.periodo_desejado ?? '').trim().toLowerCase();
+  let [de, ate] = /^\d{2}:\d{2}$/.test(inicio) ? [inicio, '23:59']
+    : periodo === 'manhã' || periodo === 'manha' ? ['00:00', '12:00']
+    : periodo === 'tarde' ? ['12:00', '19:00']
+    : periodo === 'noite' ? ['19:00', '23:59']
+    : ['00:00', '23:59'];
+  if (curta === 'Sat' && ate > '12:00') ate = '12:00';
+  const jaPassou = data === hoje
+    ? new Intl.DateTimeFormat('en-GB', { timeZone: fuso, hour: '2-digit', minute: '2-digit', hour12: false }).format(agora)
+    : '';
+
+  const vistos = new Set<string>();
+  const linhas: string[] = [];
+  for (const linha of texto.split('\n')) {
+    const m = linha.match(/^- (\d{1,2})h(\d{2})? de [^,]+, dia \d{4}-\d{2}-\d{2}(.*)$/);
+    if (!m) continue;
+    const hora = `${m[1].padStart(2, '0')}:${m[2] ?? '00'}`;
+    if (hora < de || hora > ate || (jaPassou && hora <= jaPassou) || vistos.has(hora + m[3])) continue;
+    vistos.add(hora + m[3]);
+    linhas.push(`- ${m[1]}h${m[2] ?? ''} de ${semana}, dia ${data}${m[3]}`);
+  }
+  if (!linhas.length) return null;
+  return `Horários disponíveis para a conversa com o monitor (Brasília):\n${linhas.join('\n')}\n`
+    + '(O dia da semana informado acima é o correto — use-o exatamente, não recalcule.)\n'
+    + 'Ao apresentar as opções, diga que são para a conversa com o monitor. Não são horários de aula ou evento e não alteram a programação do convite. Só ofereça após aceite específico para essa conversa.';
+}
+
 // Somente contagens conhecidas saem no diagnóstico; nunca a resposta crua do provedor.
 export function extrairUso(usage: unknown): Record<string, number> {
   const resultado: Record<string, number> = {};

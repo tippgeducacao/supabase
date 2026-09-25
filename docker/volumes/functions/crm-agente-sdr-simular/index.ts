@@ -47,7 +47,7 @@ import { blocoConviteAgenda } from '../crm-agente-sdr/contexto.ts';
 import { resultadoConfirmacao } from '../crm-agente-sdr/confirmacaoAgendamento.ts';
 import { blocoPerguntasRecentes, falasDoLead } from '../crm-agente-sdr/perguntasRecentes.ts';
 import { alertaFatoSemFonte } from '../crm-agente-sdr/fatoSemFonte.ts';
-import { diagnosticoDoProvedor, disponibilidadeSimulada, executarFollowupSimulado, executarSimulacao, extrairUso, MAX_CARACTERES_SIMULACAO, validarEntradaSimulacao, type AgenteRouter } from './simulacao.ts';
+import { agendaRealNoDia, diagnosticoDoProvedor, disponibilidadeSimulada, executarFollowupSimulado, executarSimulacao, extrairUso, MAX_CARACTERES_SIMULACAO, validarEntradaSimulacao, type AgenteRouter } from './simulacao.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
@@ -106,6 +106,11 @@ async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimula
   // até esgotar as voltas (duelo de 25/09, silêncio). Dia diferente ⇒ agenda sintética abaixo.
   const agendaDeOutroDia = nome === 'consulta_disponibilidade' && typeof real === 'string'
     && Boolean(input?.data_desejada) && !real.includes(String(input.data_desejada));
+  if (agendaDeOutroDia) {
+    // Os horários REAIS daquele atendimento, no dia pedido (simulacao.ts, agendaRealNoDia).
+    const noDia = agendaRealNoDia(real as string, input);
+    if (noDia) return noDia;
+  }
   if (typeof real === 'string' && real.trim() && !agendaDeOutroDia) {
     // Mesmo acréscimo do executor real no canário: o próximo passo da coleta (proximoPassoColeta.ts).
     if (nome === 'atualizar_dados_lead' && ficha) {
