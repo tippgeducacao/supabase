@@ -362,3 +362,35 @@ describe('caso Paulo Renato (21/09/2026): o lead disse o ANO numa fala e o MÊS 
     expect(decidirPrazoEstudante({ contexto_qualificacao: 'estudante_apto', conclusao_graduacao_bruta: 'me formo em dezembro' }, agora).acao).toBe('segue');
   });
 });
+
+describe('mês é a PALAVRA inteira, não o começo de qualquer palavra (25/09/2026)', () => {
+  const agora = new Date('2026-09-25T10:10:35Z');
+  it('caso real: "agora em dezembro" + 12/2026 + apto ⇒ segue (antes: "ago" de "agora" = agosto/2027 ⇒ reprova)', () => {
+    expect(decidirPrazoEstudante({ contexto_qualificacao: 'estudante_apto', conclusao_graduacao: '12/2026', conclusao_graduacao_bruta: 'agora em dezembro' }, agora).acao).toBe('segue');
+  });
+  it.each([
+    ['agora em dezembro', 12, 2026],
+    ['termino agora em dezembro', 12, 2026],
+    ['me formo mais ou menos em janeiro', 1, 2027],
+    ['outro semestre não, termino em dezembro', 12, 2026],
+    ['me formo agora em dezembro de 2026', 12, 2026],
+  ])('%s ⇒ %i/%i', (texto, mes, ano) => {
+    const leitura = lerConclusao(texto, agora) as { tipo: string; data: Date };
+    expect(leitura.tipo).toBe('data');
+    expect(leitura.data.getUTCMonth() + 1).toBe(mes);
+    expect(leitura.data.getUTCFullYear()).toBe(ano);
+  });
+  it.each([['dez/2026', 12], ['dez', 12], ['março', 3], ['set de 2027', 9], ['dezenbro', 12], ['setembro', 9]])(
+    'nome, abreviação e erro de digitação continuam valendo: %s ⇒ %i',
+    (texto, mes) => {
+      const leitura = lerConclusao(texto, agora) as { tipo: string; data: Date };
+      expect(leitura.tipo).toBe('data');
+      expect(leitura.data.getUTCMonth() + 1).toBe(mes);
+    },
+  );
+  it('palavra que só COMEÇA como mês não vira data', () => {
+    for (const t of ['agora', 'mais pra frente', 'outro dia', 'é novo pra mim', 'junto com a turma', 'na janela']) {
+      expect(lerConclusao(t, agora).tipo).toBe('ilegivel');
+    }
+  });
+});

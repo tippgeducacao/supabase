@@ -83,6 +83,27 @@ const MESES_PT = [
   'janeiro', 'fevereiro', 'marco', 'abril', 'maio', 'junho',
   'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro',
 ];
+/*
+  Palavra que É um mês: a abreviação exata ("dez", "dez/2026"), o nome curto inteiro ("maio",
+  "março") ou as 5 primeiras letras do nome longo ("agost…", "outub…", tolerando erro depois;
+  nos "-mbro" vale "m" ou "n" antes do "b": "dezenbro" é erro comum).
+
+  ⚠️ 25/09/2026: o padrão era "3 letras + qualquer coisa" e casava o começo de QUALQUER palavra.
+  "agora em dezembro" virou AGOSTO ("ago" de "agora") de 2027 e a estudante que se forma em
+  dezembro/2026 saiu REPROVADO_PRAZO. Mesma armadilha: "mais" (maio), "outro" (outubro),
+  "novo"/"nove" (novembro), "janela" (janeiro), "sete" (setembro), "junto" (junho).
+*/
+const RE_MES = [
+  ...MESES_PT.map((m) => {
+    if (m.endsWith('mbro')) return `${m.slice(0, 4)}[mn]b[a-z]*`;
+    return m.length > 5 ? `${m.slice(0, 5)}[a-z]*` : m;
+  }),
+  ...MESES_PT.map((m) => m.slice(0, 3)),
+].join('|');
+/** Mês (1-12) da palavra que casou com RE_MES. */
+function mesDaPalavra(palavra: string): number {
+  return MESES_PT.findIndex((m) => m.startsWith(palavra.slice(0, 3))) + 1;
+}
 const NUMERO_PT: Record<string, number> = {
   um: 1, uma: 1, dois: 2, duas: 2, tres: 3, quatro: 4, cinco: 5,
   seis: 6, sete: 7, oito: 8, nove: 9, dez: 10, onze: 11, doze: 12,
@@ -152,11 +173,9 @@ export function lerConclusao(bruto: unknown, agora: Date = new Date()): LeituraC
       : [Number(numerico[2]), Number(numerico[1])];
     return { tipo: 'data', data: fimDoMes(ano, mes), via: 'mes/ano' };
   }
-  const nomeMesAno = t.match(
-    new RegExp(`\\b(${MESES_PT.map((m) => m.slice(0, 3)).join('|')})[a-z]*\\b[^0-9]{0,12}\\b(20\\d{2})\\b`),
-  );
+  const nomeMesAno = t.match(new RegExp(`\\b(${RE_MES})\\b[^0-9]{0,12}\\b(20\\d{2})\\b`));
   if (nomeMesAno) {
-    const mes = MESES_PT.findIndex((m) => m.startsWith(nomeMesAno[1])) + 1;
+    const mes = mesDaPalavra(nomeMesAno[1]);
     return { tipo: 'data', data: fimDoMes(Number(nomeMesAno[2]), mes), via: 'mes por extenso' };
   }
 
@@ -193,10 +212,10 @@ export function lerConclusao(bruto: unknown, agora: Date = new Date()): LeituraC
   */
   const conclusaoComMes = t.match(new RegExp(
     `\\b(?:finaliz|termin|conclu|form|colo|colar)[a-z]*\\b[^.;]{0,30}?`
-    + `\\b(${MESES_PT.map((m) => m.slice(0, 3)).join('|')})[a-z]*\\b`,
+    + `\\b(${RE_MES})\\b`,
   ));
   if (conclusaoComMes) {
-    const mes = MESES_PT.findIndex((m) => m.startsWith(conclusaoComMes[1])) + 1;
+    const mes = mesDaPalavra(conclusaoComMes[1]);
     const ano = mes < br.getUTCMonth() + 1 ? anoAtual + 1 : anoAtual;
     return { tipo: 'data', data: fimDoMes(ano, mes), via: 'conclusao com mes' };
   }
@@ -207,9 +226,9 @@ export function lerConclusao(bruto: unknown, agora: Date = new Date()): LeituraC
   }
 
   // 4. Mês solto: "dezembro", "em julho" — esse mês, neste ano ou no próximo se já passou.
-  const soMes = t.match(new RegExp(`\\b(${MESES_PT.map((m) => m.slice(0, 3)).join('|')})[a-z]*\\b`));
+  const soMes = t.match(new RegExp(`\\b(${RE_MES})\\b`));
   if (soMes) {
-    const mes = MESES_PT.findIndex((m) => m.startsWith(soMes[1])) + 1;
+    const mes = mesDaPalavra(soMes[1]);
     const ano = mes < br.getUTCMonth() + 1 ? anoAtual + 1 : anoAtual;
     return { tipo: 'data', data: fimDoMes(ano, mes), via: 'mes sem ano' };
   }
