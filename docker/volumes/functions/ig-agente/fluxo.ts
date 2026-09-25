@@ -105,7 +105,7 @@ export const TEXTOS = {
   // PDF vai quando a pessoa responde lá (ver _shared/igWhatsapp.ts). Esta frase é que
   // explica isso; sem ela o recibo sozinho não diz nada do portfólio.
   confirmacaoWhatsapp:
-    `Prontinho! Acabei de te mandar uma mensagem no WhatsApp, do número ${IG_WA_NUMERO_EXIBIDO}. É só responder qualquer coisa lá que eu te envio o portfólio em PDF 😉`,
+    `Prontinho! Acabei de te mandar uma mensagem no WhatsApp, do número ${IG_WA_NUMERO_EXIBIDO}. Manda um Oi por lá pra confirmar que é você que eu já te encaminho o portfólio 😉`,
   // O recibo NÃO saiu (número sem WhatsApp, Meta recusou): a etapa volta para o pedido do
   // número, para a pessoa conferir. Nunca dizer "te mandei" sem ter mandado.
   whatsappNaoFoi: "Hmm, não consegui te chamar nesse número 🤔 Confere se é o seu WhatsApp com DDD e me manda de novo?",
