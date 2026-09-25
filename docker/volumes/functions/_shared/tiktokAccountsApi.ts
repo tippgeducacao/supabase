@@ -1,8 +1,10 @@
 // Cliente da ACCOUNTS API do TikTok (business-api.tiktok.com) — publicação de vídeo no
-// perfil. Isolado de propósito: é a única parte do `tiktok-publish` cujo contrato eu NÃO
-// consegui confirmar contra a documentação (as páginas do portal são SPA e voltam vazias
-// no fetch; os proxies de leitura devolveram só o menu). Quando a aprovação sair e a
-// primeira chamada real acontecer, o conserto mora AQUI e o worker não muda.
+// perfil. Isolado de propósito: quando a primeira chamada real acontecer, o conserto mora
+// AQUI e o worker não muda.
+//
+// Os CAMINHOS foram conferidos em 25/09/2026 na lista de endpoints que o portal mostra no
+// escopo "TikTok accounts". O FORMATO do corpo e da resposta segue sem confirmação — a
+// documentação é SPA e volta vazia no fetch, e os proxies de leitura devolvem só o menu.
 //
 // ⚠️ NÃO confundir com as outras duas APIs de TikTok da casa:
 //   • Marketing API (mesmo domínio, header Access-Token por ADVERTISER) = gasto de campanha.
@@ -10,11 +12,21 @@
 
 const API = "https://business-api.tiktok.com/open_api/v1.3";
 
-/** ⚠️ Caminhos NÃO CONFIRMADOS — ver o cabeçalho. Trocar aqui quando a API responder de verdade. */
+/**
+ * Caminhos CONFERIDOS em 25/09/2026 contra a lista de endpoints que o próprio portal mostra
+ * no escopo "TikTok accounts" (tela de criação do app) — não são mais suposição.
+ * ⚠️ `statusPublicacao` era o meu palpite `/business/video/publish/status/` e está ERRADO:
+ * o caminho real é `/business/publish/status/`, sem o `video`. Publicação é assíncrona, então
+ * esse era justamente o endpoint que decidiria se um post virou "publicado" — errá-lo deixaria
+ * todo post preso em "processando" para sempre.
+ * O que a mesma lista revelou e ainda não usamos: `/business/photo/publish/` (dá para publicar
+ * FOTO, não só vídeo) e `/business/video/settings/`.
+ */
 export const ROTAS = {
   publicarVideo: "/business/video/publish/",
-  statusPublicacao: "/business/video/publish/status/",
+  statusPublicacao: "/business/publish/status/",
   infoConta: "/business/get/",
+  listaVideos: "/business/video/list/",
   token: "/tt_user/oauth2/token/",
 } as const;
 
