@@ -163,6 +163,16 @@ Deno.serve(async (req) => {
       if (!podeVer) return json({ error: "Aula não encontrada." }, 404);
     }
 
+    // ── Quiz de fim de aula pendente (26/09/2026): a IA responderia o próprio quiz. A tela
+    // já esconde a aba; aqui é a trava de verdade. Sem a função (antes da migration), segue.
+    const { data: quizPendente } = await db.rpc("academy_questionario_pendente", {
+      p_user: userId,
+      p_lesson: lessonId,
+    });
+    if (quizPendente === true) {
+      return json({ error: "Responda o quiz desta aula para voltar a usar o Pergunte à aula." }, 422);
+    }
+
     // ── Limite diário (todas as aulas) ──
     const desde = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
     const { count: usadas, error: erroConta } = await db
