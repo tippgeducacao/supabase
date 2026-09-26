@@ -21,7 +21,8 @@ const PRAZO_CLAUDE_MS = 12_000;
 const O_QUE_A_IA_ACABOU_DE_PERGUNTAR: Record<EtapaFluxo, string> = {
   boas_vindas:
     "A PPGVET mandou a boas-vindas a um novo seguidor (\"Oii, tudo bem?\"). Respostas como \"tudo sim, e você?\" são só cumprimento (intencao = outro).",
-  pergunta_formacao: "A IA perguntou se a pessoa já se formou e trabalha, ou se ainda está na graduação.",
+  pergunta_formacao:
+    "A IA perguntou se a pessoa já se formou e trabalha, ou se ainda está na graduação. Se a ÚLTIMA pergunta da IA foi \"Você não possui graduação?\", é uma confirmação: \"não tenho\", \"não possuo\", \"sim, não tenho\", \"só o ensino médio\" = nenhum; \"tenho sim\", \"sou formado em…\", \"faço…\" = formado/estudante; \"sim\" ou \"não\" sozinhos são ambíguos = nao_informou.",
   pergunta_curso:
     "A IA perguntou QUAL é o curso da graduação da pessoa (a formação dela, ou o curso que ela faz). Preencha `area` com o curso dito (ex.: \"medicina veterinária\", \"zootecnia\"); se ela não disse o curso, null.",
   pergunta_data_formacao:
@@ -41,6 +42,7 @@ const INSTRUCOES = [
   "- formado: já concluiu uma graduação (\"sou vet\", \"me formei em zootecnia\", \"sou médica veterinária\", \"sou formado em agronomia\").",
   "- estudante: está cursando uma graduação (\"tô no 7º período\", \"faço agronomia\", \"sou estudante de vet\").",
   "- nenhum: disse que não fez nem faz faculdade (ensino médio, só técnico, produtor sem graduação, só curiosidade).",
+  "  \"Sou produtor rural\" sozinho NÃO é nenhum (produtor pode ter graduação): nao_informou, e a IA confirma.",
   "- nao_informou: não deu para saber. Na dúvida, é nao_informou — nunca deduza pela profissão sem a pessoa dizer.",
   "  Cargo, função ou área de trabalho NÃO dizem se a pessoa tem graduação — nem os que exigem diploma",
   "  (\"sou responsável técnico\", \"trabalho como agrônomo\", \"atuo em bovinocultura de leite\", \"trabalho com",

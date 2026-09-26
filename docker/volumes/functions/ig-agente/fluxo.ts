@@ -98,6 +98,12 @@ export const TEXTOS = {
       : "Você já se formou e tá trabalhando, ou ainda tá na graduação?",
   reperguntarFormacao:
     "Só pra eu te mandar o material certo: você já tem graduação completa ou ainda tá cursando?",
+  // 2ª resposta ainda sem a formação (área de atuação de novo, "produtor rural"…): antes
+  // ia direto para a Escola e o lead saía do roteiro. Frase do Gustavo (26/09/2026).
+  confirmarSemGraduacao: (nome: string | null) =>
+    nome
+      ? `Você não possui graduação? Não consegui entender, ${nome} 😅`
+      : "Você não possui graduação? Não consegui entender 😅",
   // "A IA está assumindo qualquer coisa na graduação, tinha que perguntar qual é"
   // (Gustavo, 25/09/2026): sem o curso dito, a IA pergunta antes de seguir.
   perguntaCursoFormado: "Show! E qual é a sua formação?",
@@ -368,14 +374,19 @@ function decidirPassoSemApresentacao(etapa: EtapaFluxo, c: Classificacao, ctx: C
     return { mensagens: comResposta(c, [TEXTOS.perguntaFormacao(nome)]), proximaEtapa: "pergunta_formacao", tentativas: 0 };
   }
 
-  // pergunta_formacao sem resposta clara: repergunta UMA vez; na segunda, manda a Escola
-  // (é o que não custa nada errar: ninguém vai para o CRM sem saber a formação).
-  if (ctx.tentativas < 1 || c.intencao === "pergunta") {
-    return {
-      mensagens: comResposta(c, [TEXTOS.reperguntarFormacao]),
-      proximaEtapa: "pergunta_formacao",
-      tentativas: ctx.tentativas + 1,
-    };
+  // pergunta_formacao sem resposta clara (cargo e área de trabalho não contam — 26/09):
+  // 1ª vez repergunta; 2ª confirma se é sem graduação ("você não possui graduação? não
+  // consegui entender {nome}", Gustavo 26/09); só na 3ª manda a Escola — o que não custa
+  // nada errar: ninguém vai para o CRM sem saber a formação. Pergunta da pessoa não gasta
+  // a Escola: responde e repergunta.
+  if (ctx.tentativas < 1) {
+    return { mensagens: comResposta(c, [TEXTOS.reperguntarFormacao]), proximaEtapa: "pergunta_formacao", tentativas: 1 };
+  }
+  if (ctx.tentativas < 2) {
+    return { mensagens: comResposta(c, [TEXTOS.confirmarSemGraduacao(nome)]), proximaEtapa: "pergunta_formacao", tentativas: 2 };
+  }
+  if (c.intencao === "pergunta") {
+    return { mensagens: comResposta(c, [TEXTOS.reperguntarFormacao]), proximaEtapa: "pergunta_formacao", tentativas: ctx.tentativas + 1 };
   }
   return { mensagens: [TEXTOS.escola], proximaEtapa: "escola_enviada", tentativas: 0 };
 }

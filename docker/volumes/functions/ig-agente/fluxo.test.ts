@@ -93,13 +93,32 @@ describe('pergunta_formacao', () => {
     expect(p.enviarWhatsapp).toBeUndefined();
   });
 
-  it('resposta vaga → repergunta UMA vez; na segunda, manda a Escola', () => {
+  it('resposta vaga → repergunta; na 2ª confirma "você não possui graduação?"; só na 3ª a Escola (26/09)', () => {
     expect(passo('pergunta_formacao', {}, { tentativas: 0 })).toMatchObject({
       mensagens: [TEXTOS.reperguntarFormacao], proximaEtapa: 'pergunta_formacao', tentativas: 1,
     });
     expect(passo('pergunta_formacao', {}, { tentativas: 1 })).toMatchObject({
+      mensagens: ['Você não possui graduação? Não consegui entender, Gustavo 😅'], proximaEtapa: 'pergunta_formacao', tentativas: 2,
+    });
+    expect(passo('pergunta_formacao', {}, { tentativas: 2 })).toMatchObject({
       mensagens: [TEXTOS.escola], proximaEtapa: 'escola_enviada',
     });
+  });
+
+  it('confirmação sem nome confiável sai sem o nome', () => {
+    expect(passo('pergunta_formacao', {}, { tentativas: 1, nomePerfil: 'JS MIMOS' }).mensagens)
+      .toEqual(['Você não possui graduação? Não consegui entender 😅']);
+  });
+
+  it('depois da confirmação: "tenho sim, sou vet" segue o roteiro; "não tenho" vai para a Escola', () => {
+    expect(passo('pergunta_formacao', { situacao: 'formado', area: 'medicina veterinária' }, { tentativas: 2 }).proximaEtapa)
+      .toBe('pergunta_interesse');
+    expect(passo('pergunta_formacao', { situacao: 'nenhum' }, { tentativas: 2 }).proximaEtapa).toBe('escola_enviada');
+  });
+
+  it('pergunta da pessoa depois da confirmação: responde e repergunta, sem gastar a Escola', () => {
+    expect(passo('pergunta_formacao', { intencao: 'pergunta', resposta_pergunta: 'Temos MBA, sim!' }, { tentativas: 2 }))
+      .toMatchObject({ mensagens: ['Temos MBA, sim!', TEXTOS.reperguntarFormacao], proximaEtapa: 'pergunta_formacao', tentativas: 3 });
   });
 });
 
