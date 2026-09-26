@@ -8,6 +8,7 @@
 // pessoa abre a janela de 24 h e o PDF vai como mensagem comum, sem template.
 // ⚠️ O texto do recibo é FIXO (aprovado na Meta): só os três espaços mudam. Editar o
 // template o manda de volta para revisão, e ele pode voltar MARKETING.
+import { limiteFormatura } from "../crm-agente-sdr/elegibilidadeFormatura.ts";
 
 /** PPGVET Educação - Pós-graduação (46 9 9901-2001): GREEN, nome aprovado, recibo UTILIDADE. */
 export const IG_WA_ACCOUNT_ID = "0a17bea3-869d-4a95-bbc7-d0a5755e5b05";
@@ -62,7 +63,7 @@ export function componentesDoRecibo(nome: string, area: string, data: string) {
  * assistant). Documento mandado pelo sistema não entra sozinho na memória dele — sem a
  * nota, a IA não saberia que o PDF saiu nem de onde a pessoa veio.
  */
-export function notaParaOAgente(situacao: string | null, dataFormacao: string | null): string {
+export function notaParaOAgente(situacao: string | null, dataFormacao: string | null, agora: Date = new Date()): string {
   const quem = situacao === "formado"
     ? "Disse que já concluiu a graduação."
     : situacao === "estudante"
@@ -72,5 +73,35 @@ export function notaParaOAgente(situacao: string | null, dataFormacao: string | 
     "[INSTAGRAM] Esta pessoa veio do direct do Instagram da PPGVET: pediu o portfólio das pós-graduações e passou este WhatsApp.",
     quem,
     `O sistema está enviando agora o portfólio em PDF ("${IG_PORTFOLIO_ARQUIVO}"). Não reenvie o portfólio; siga a conversa a partir daqui.`,
+    instrucaoForaDoPrazo(situacao, dataFormacao, agora),
   ].filter(Boolean).join(" ");
+}
+
+/**
+ * Quem se forma DEPOIS da data-limite de matrícula (a régua do João, `limiteFormatura`)
+ * pediu o portfólio no Instagram, mas ainda não pode fazer a pós. Pedido do Gustavo
+ * (26/09/2026): "os leads que vão se formar além de janeiro, que não podem fazer a pós, a
+ * IA do WhatsApp deveria avisar e deixar por enquanto o link da Escola de Especialização".
+ * A data já veio do direct, então o João não chega a checar sozinho — a nota diz o que
+ * fazer. O mesmo caminho que ele segue quando descobre a data na conversa
+ * (REPROVADO_PRAZO em tools.ts): avisa, agenda o retorno da formatura e, na despedida, o
+ * presente da Escola — que o CÓDIGO anexa (`comPresenteNaDespedida`, ao chamar
+ * agendar_retorno).
+ * ⚠️ NÃO ponha o link da Escola nesta nota: a guarda do presente procura o link no
+ * histórico e, achando, conclui que ele já foi mandado — e não anexa (visto no simulador
+ * em 26/09: a despedida saiu sem o link).
+ */
+export function instrucaoForaDoPrazo(situacao: string | null, dataFormacao: string | null, agora: Date = new Date()): string {
+  if (situacao !== "estudante" || !/^\d{4}-\d{2}-\d{2}$/.test(String(dataFormacao ?? ""))) return "";
+  const conclusao = new Date(`${dataFormacao}T12:00:00Z`);
+  if (!(conclusao > limiteFormatura(agora))) return "";
+  const meses = Math.max(1, (conclusao.getUTCFullYear() - agora.getUTCFullYear()) * 12
+    + conclusao.getUTCMonth() - agora.getUTCMonth());
+  return "Ela ainda NÃO pode se matricular: a pós é lato sensu e exige a graduação concluída, e ela se forma"
+    + " depois do prazo da turma. Na sua PRÓXIMA resposta, com as suas palavras: (1) confirme que o portfólio"
+    + " é pra ela conhecer as pós com calma; (2) avise que a matrícula exige a graduação concluída, então por"
+    + " enquanto ainda não dá, e que vc a procura quando ela estiver terminando o curso — sem citar data-limite"
+    + ` nem prazo; (3) chame agendar_retorno com tipo="formatura" e meses=${meses}, e na despedida deixe o`
+    + " presente da Escola de Especialização gratuita pra ela ir aproveitando enquanto termina o curso."
+    + " Nenhuma reunião foi oferecida: NÃO fale de reunião, horário nem aula.";
 }

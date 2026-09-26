@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { areaDoRecibo, componentesDoRecibo, dataDoRecibo, nomeDoRecibo, notaParaOAgente } from './igWhatsapp';
+import { areaDoRecibo, componentesDoRecibo, dataDoRecibo, instrucaoForaDoPrazo, nomeDoRecibo, notaParaOAgente } from './igWhatsapp';
 
 describe('recibo do Instagram: os três espaços do comprovante_cadastro_utility', () => {
   it('{{1}}: primeiro nome; perfil de marca vira o @; nunca vazio', () => {
@@ -40,5 +40,27 @@ describe('nota para o agente do WhatsApp', () => {
     expect(notaParaOAgente('formado', null)).toMatch(/^\[INSTAGRAM\].*já concluiu a graduação\..*Não reenvie o portfólio/);
     expect(notaParaOAgente('estudante', '2027-07-31')).toContain('se forma em 07/2027');
     expect(notaParaOAgente(null, null)).not.toContain('Disse');
+  });
+
+  // Relógio fixo: a régua do João (limiteFormatura) em 26/09/2026 é 31/01/2027.
+  const AGORA = new Date('2026-09-26T12:00:00Z');
+
+  it('forma DEPOIS de janeiro (26/09): avisa, deixa a Escola e agenda o retorno da formatura', () => {
+    const nota = notaParaOAgente('estudante', '2027-07-31', AGORA);
+    expect(nota).toContain('se forma em 07/2027');
+    expect(nota).toContain('NÃO pode se matricular');
+    expect(nota).toContain('presente da Escola de Especialização gratuita');
+    // O LINK não pode estar na nota: a guarda do presente acharia e não anexaria.
+    expect(nota).not.toContain('escoladeespecializacao');
+    expect(nota).toContain('agendar_retorno com tipo="formatura" e meses=10');
+    expect(nota).toContain('NÃO fale de reunião');
+  });
+
+  it('forma até janeiro, formado ou sem data: nota de sempre, sem o aviso', () => {
+    expect(instrucaoForaDoPrazo('estudante', '2027-01-31', AGORA)).toBe('');
+    expect(instrucaoForaDoPrazo('formado', '2028-07-31', AGORA)).toBe('');
+    expect(instrucaoForaDoPrazo('estudante', null, AGORA)).toBe('');
+    expect(instrucaoForaDoPrazo('estudante', 'lixo', AGORA)).toBe('');
+    expect(notaParaOAgente('estudante', '2027-01-31', AGORA)).not.toContain('escoladeespecializacao');
   });
 });
