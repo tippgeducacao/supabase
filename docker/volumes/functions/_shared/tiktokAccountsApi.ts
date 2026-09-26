@@ -100,6 +100,40 @@ export async function renovarToken(
   return dados;
 }
 
+/**
+ * Troca o código da autorização do DONO DO PERFIL por token.
+ *
+ * ⚠️ É outro fluxo do de anúncios: lá o anunciante autoriza uma conta de ADS e o endpoint é
+ * `/oauth2/access_token/` (sem `grant_type`); aqui quem autoriza é o titular do PERFIL e o
+ * endpoint é `/tt_user/oauth2/token/`, que SEGUE o padrão OAuth com `grant_type`. Misturar
+ * os dois é o erro natural — os nomes são quase iguais e os contratos, não.
+ */
+export async function trocarCodigoPorToken(
+  appId: string,
+  secret: string,
+  authCode: string,
+  redirectUri: string,
+): Promise<Record<string, string | number | string[]>> {
+  const resp = await fetch(`${API}${ROTAS.token}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      client_id: appId,
+      client_secret: secret,
+      grant_type: "authorization_code",
+      auth_code: authCode,
+      code: authCode,          // os exemplos do TikTok divergem no nome; mandar os dois é inofensivo
+      redirect_uri: redirectUri,
+    }),
+  });
+  const json = await resp.json().catch(() => ({}));
+  const dados = json?.data ?? json;
+  if (json?.code !== 0 && !dados?.access_token) {
+    throw new Error(`O TikTok recusou a troca do código (code ${json?.code ?? "?"}): ${json?.message || "sem mensagem"}`);
+  }
+  return dados;
+}
+
 export interface PublicacaoIniciada {
   /** Protocolo do TikTok. Receber isto NÃO é "publicado" — a publicação é ASSÍNCRONA. */
   publish_id: string;

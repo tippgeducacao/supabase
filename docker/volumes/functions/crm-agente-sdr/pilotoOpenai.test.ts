@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 vi.mock('./agente.ts', () => ({ provedorOpenai: vi.fn(() => ({ nome: 'openai', formato: 'openai', modelo: 'gpt-5.6-luna', esforco: 'high' })) }));
-import { selecionarProvedorDoLead } from './pilotoOpenai';
+import { baldeDoLead, selecionarProvedorDoLead } from './pilotoOpenai';
 import { provedorOpenai } from './agente';
 
 const banco = (data: unknown, error: unknown = null) => ({ from: () => ({ select: () => ({ eq: () => ({ maybeSingle: async () => ({ data, error }) }) }) }) });
@@ -41,5 +41,33 @@ describe('provedor do piloto, comum ao atendimento e follow-up', () => {
     expect(await selecionarProvedorDoLead(banco({ luna_telefones: [] }), '5546988166051')).toBeNull();
     vi.mocked(provedorOpenai).mockReturnValueOnce(null);
     expect(await selecionarProvedorDoLead(banco({ luna_telefones: ['5546988166051'] }), '5546988166051')).toBeNull();
+  });
+
+  // Fatia da produção (26/09/2026): luna_percentual liga a Luna para ~N% dos leads, sempre os mesmos.
+  it('percentual 0 ou ausente não liga ninguém além da lista', async () => {
+    expect(await selecionarProvedorDoLead(banco({ luna_telefones: [], luna_percentual: 0 }), '5511912345678')).toBeNull();
+    expect(await selecionarProvedorDoLead(banco({ luna_telefones: [] }), '5511912345678')).toBeNull();
+  });
+  it('100% liga todo mundo e marca a origem', async () => {
+    expect(await selecionarProvedorDoLead(banco({ luna_telefones: [], luna_percentual: 100 }), '5511912345678'))
+      .toMatchObject({ nome: 'openai', origem: 'percentual' });
+    expect(await selecionarProvedorDoLead(banco({ luna_telefones: ['5546988166051'], luna_percentual: 100 }), '46988166051'))
+      .toMatchObject({ origem: 'lista' });
+  });
+  it('o mesmo lead cai no mesmo balde com ou sem 9º dígito e DDI', () => {
+    expect(baldeDoLead('5511912345678')).toBe(baldeDoLead('11912345678'));
+    expect(baldeDoLead('5511912345678')).toBe(baldeDoLead('551112345678'));
+  });
+  it('10% seleciona perto de 10% de 5.000 telefones, e só quem está abaixo do balde', async () => {
+    const telefones = Array.from({ length: 5000 }, (_, i) => `55119${String(10000000 + i * 7919).slice(-8)}`);
+    const escolhidos = telefones.filter((t) => baldeDoLead(t) < 10);
+    expect(escolhidos.length / telefones.length).toBeGreaterThan(0.08);
+    expect(escolhidos.length / telefones.length).toBeLessThan(0.12);
+    const config = banco({ luna_telefones: [], luna_percentual: 10 });
+    expect(await selecionarProvedorDoLead(config, escolhidos[0])).toMatchObject({ origem: 'percentual' });
+    expect(await selecionarProvedorDoLead(config, telefones.find((t) => baldeDoLead(t) >= 10)!)).toBeNull();
+  });
+  it.each([-5, 101, 12.5])('percentual inválido não liga ninguém: %s', async (percentual) => {
+    expect(await selecionarProvedorDoLead(banco({ luna_telefones: [], luna_percentual: percentual }), '5511912345678')).toBeNull();
   });
 });

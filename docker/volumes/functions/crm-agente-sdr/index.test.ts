@@ -482,8 +482,8 @@ describe('SDR: texto de ferramenta nunca vira despedida', () => {
     fronteiras.provedorOpenai.mockReturnValue(luna);
     fronteiras.chamarPrincipal.mockResolvedValueOnce({ stop_reason: 'end_turn', model: 'gpt-5.6-luna', content: [{ type: 'text', text: 'certo.' }] });
     await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
-    expect(fronteiras.chamarPrincipal.mock.calls[0][0].provedor).toEqual(luna);
-    expect(fronteiras.tools).toHaveBeenCalledWith(expect.anything(), 'agente_recontato', luna);
+    expect(fronteiras.chamarPrincipal.mock.calls[0][0].provedor).toEqual({ ...luna, origem: 'lista' });
+    expect(fronteiras.tools).toHaveBeenCalledWith(expect.anything(), 'agente_recontato', { ...luna, origem: 'lista' });
     expect(fronteiras.registrar).toHaveBeenCalledWith('provedor_ia', expect.objectContaining({ provedor: 'openai', modelo: 'gpt-5.6-luna' }));
     expect(fronteiras.registrar).toHaveBeenCalledWith('llm_chamada', expect.objectContaining({ provedor: 'openai' }), expect.any(Number));
     expect(fronteiras.enviar).toHaveBeenCalledOnce();
@@ -515,7 +515,7 @@ describe('SDR: texto de ferramenta nunca vira despedida', () => {
       .mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'certo.' }] });
     await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
     expect(fronteiras.chamarPrincipal).toHaveBeenCalledTimes(2);
-    expect(fronteiras.chamarPrincipal.mock.calls[0][0].provedor).toEqual(luna);
+    expect(fronteiras.chamarPrincipal.mock.calls[0][0].provedor).toEqual({ ...luna, origem: 'lista' });
     expect(fronteiras.chamarPrincipal.mock.calls[1][0].provedor).toBeNull();
     expect(fronteiras.registrar).toHaveBeenCalledWith('provedor_ia_fallback', expect.objectContaining({ de: 'openai', para: 'anthropic' }));
     expect(fronteiras.registrar.mock.calls.some(([tipo]) => tipo === 'erro')).toBe(false);

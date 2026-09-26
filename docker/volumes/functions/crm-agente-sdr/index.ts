@@ -23,6 +23,7 @@ import { confirmacaoDoResultado, falaEntregaConfirmacao, textoConfirmacaoAgendam
 import { blocoPerguntasRecentes, falasDoLead } from './perguntasRecentes.ts';
 import { AVISO_CONSULTA_REPETIDA, MemoriaDeConsultas } from './consultaRepetida.ts';
 import { alertaFatoSemFonte } from './fatoSemFonte.ts';
+import { alertaSaudacao, garantirSaudacao } from './saudacao.ts';
 import { comContinuidadeWebchat } from './continuidadeWebchat.ts';
 import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoCurso, notaDoNome, renderPrompt } from './contexto.ts';
 import { atualizarAgenteComRatchet, atualizarLead, avaliarFimDoHistorico, buscarLead, carregarHistorico, comEntradaPendente, criarLead, excluirDadosLead, gravarMensagem, limparParaRouter, sanitizarHistorico } from './historico.ts';
@@ -299,7 +300,12 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   // `let`: se o provedor alternativo falhar no meio da rodada, o resto dela volta para o Claude.
   let provedor = await provedorDoLead(telefone);
   let registrarFalaAposEnvio = Boolean(configurarVoz(telefone, (nome) => Deno.env.get(nome), provedor?.nome));
-  if (provedor) tel.registrar('provedor_ia', { provedor: provedor.nome, modelo: provedor.formato === 'openai' ? provedor.modelo : null, motivo: 'canario_luna_telefones' });
+  if (provedor) {
+    tel.registrar('provedor_ia', {
+      provedor: provedor.nome, modelo: provedor.formato === 'openai' ? provedor.modelo : null,
+      motivo: provedor.formato === 'openai' && provedor.origem === 'percentual' ? 'canario_luna_percentual' : 'canario_luna_telefones',
+    });
+  }
   const ctx: CtxConversa = {
     remotejid,
     telefone,
@@ -853,7 +859,8 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       // Sem o bloco (leitura falhou), a instrução também fica de fora: ela aponta para ele.
       // Perguntas já feitas + respostas vêm do histórico a cada volta (perguntasRecentes.ts).
       contextoFicha: baseFicha
-        ? [baseFicha, blocoPerguntasRecentes(messages), alertaFatoSemFonte(falasDoLead(messages).at(-1))].filter(Boolean).join('\n\n')
+        ? [baseFicha, blocoPerguntasRecentes(messages), alertaFatoSemFonte(falasDoLead(messages).at(-1)), alertaSaudacao(conteudo)]
+          .filter(Boolean).join('\n\n')
         : undefined,
       comFicha: Boolean(ficha) || aulaPiloto,
       ...(aulaPiloto ? { instrucaoFicha: INSTRUCAO_AULA_PILOTO } : {}),
@@ -1082,8 +1089,13 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
           comPresente.texto, conteudo, estaNaEscola || jaTemOPresente(conversaTexto(messages)),
         );
         if (comLink.anexou) tel.registrar('link_escola_reenviado', { pedido: resumir(conteudo, 200) });
+        // Canário (26/09/2026): o cumprimento do lead é retribuído, garantido em código (saudacao.ts).
+        const fala = ctx.ficha && !aberturaControlada
+          ? garantirSaudacao(humanizarTexto(comLink.texto), conteudo)
+          : { texto: humanizarTexto(comLink.texto), acrescentou: null };
+        if (fala.acrescentou) tel.registrar('saudacao_garantida', { prefixo: fala.acrescentou });
         const { envio, texto: textoEnviado } = await enviarComAberturaNumero({
-          banco: supabase, telefone, interacaoId: tel.rodadaId, texto: humanizarTexto(comLink.texto),
+          banco: supabase, telefone, interacaoId: tel.rodadaId, texto: fala.texto,
           sinal: aberturaControlada && aplicarTroca ? sinalTroca : null,
           registrar: (tipo, dados) => tel.registrar(tipo, dados),
           enviar: (fala, controle) => enviarResposta(ctx, fala, renovar, tel, pausouPorTool ? undefined : () => iaPausada(remotejid),

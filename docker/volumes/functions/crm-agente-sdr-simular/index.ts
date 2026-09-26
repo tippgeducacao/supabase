@@ -47,6 +47,7 @@ import { blocoConviteAgenda } from '../crm-agente-sdr/contexto.ts';
 import { resultadoConfirmacao } from '../crm-agente-sdr/confirmacaoAgendamento.ts';
 import { blocoPerguntasRecentes, falasDoLead } from '../crm-agente-sdr/perguntasRecentes.ts';
 import { alertaFatoSemFonte } from '../crm-agente-sdr/fatoSemFonte.ts';
+import { alertaSaudacao, garantirSaudacao } from '../crm-agente-sdr/saudacao.ts';
 import { agendaRealNoDia, diagnosticoDoProvedor, disponibilidadeSimulada, executarFollowupSimulado, executarSimulacao, extrairUso, MAX_CARACTERES_SIMULACAO, validarEntradaSimulacao, type AgenteRouter } from './simulacao.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
@@ -330,6 +331,9 @@ Deno.serve(async (req) => {
   const aulaPiloto = Boolean(fichaSim && entrada.persona === 'aula' && provedorAlternativo?.nome === 'openai');
   const aberturaControlada = provedorAlternativo?.nome === 'openai';
   let aberturaPendente = aberturaControlada && Boolean(entrada.troca_de_numero);
+  // Espelho do index.ts (canário): o cumprimento da fala do lead é retribuído, uma vez por turno.
+  let falaDoTurno: string | undefined;
+  let saudouNoTurno = false;
   const blocoDaFicha = () => {
     if (!fichaSim) return undefined;
     const entradaFicha = { cadastro: fichaSim.cadastro, jornada: fichaSim.jornada, inicioRodada: fichaSim.inicioRodada };
@@ -348,6 +352,8 @@ Deno.serve(async (req) => {
   try {
     const resultado = await executarSimulacao(entrada, {
       prepararRodada: async (messages, turno) => {
+        falaDoTurno = falasDoLead(messages).at(-1);
+        saudouNoTurno = false;
         // Cada fala do lead equivale a uma invocação de produção. Só as voltas de
         // ferramentas desse turno compartilham memória, inclusive a correção do canal.
         if (provedorAlternativo?.formato === 'openai' && provedorAlternativo.raciocinio === true) {
@@ -449,9 +455,13 @@ Deno.serve(async (req) => {
       chamarPrincipal: (opts: Parameters<typeof chamarAgentePrincipal>[0]) => chamarAgentePrincipal({ ...opts, provedor: provedorAlternativo }),
       humanizar: humanizarTexto,
       prepararFala: texto => {
-        if (!aberturaPendente) return texto;
-        aberturaPendente = false;
-        return comAberturaNumero(texto, 0);
+        if (aberturaPendente) {
+          aberturaPendente = false;
+          return comAberturaNumero(texto, 0);
+        }
+        if (!fichaSim || saudouNoTurno) return texto;
+        saudouNoTurno = true;
+        return garantirSaudacao(texto, falaDoTurno).texto;
       },
       // Mesma composição da produção: ficha + perguntas já feitas, derivadas do histórico da volta.
       fichaDaVolta: (messages) => {
@@ -461,7 +471,8 @@ Deno.serve(async (req) => {
         }
         const base = blocoDaFicha();
         return base
-          ? [base, blocoPerguntasRecentes(messages), alertaFatoSemFonte(falasDoLead(messages).at(-1))].filter(Boolean).join('\n\n')
+          ? [base, blocoPerguntasRecentes(messages), alertaFatoSemFonte(falasDoLead(messages).at(-1)), alertaSaudacao(falaDoTurno)]
+            .filter(Boolean).join('\n\n')
           : undefined;
       },
       aoResponder: (texto) => {
