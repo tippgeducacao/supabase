@@ -73,6 +73,8 @@ Deno.serve(async (req) => {
     const allActions = actionsRes.data || [];
 
     let processed = 0;
+    // Responsáveis da tarefa, carregados só se alguma condição "Responsável" precisar.
+    let taskAssigneeIds: Set<string> | null = null;
 
     for (const auto of automations) {
       const trigger = triggers.find(t => t.automation_id === auto.id);
@@ -101,10 +103,18 @@ Deno.serve(async (req) => {
             if (cond.operator === 'equals' && task.priority !== val) conditionsMet = false;
             if (cond.operator === 'not_equals' && task.priority === val) conditionsMet = false;
             break;
-          case 'assignee':
-            if (cond.operator === 'equals' && task.assignee_id !== val) conditionsMet = false;
-            if (cond.operator === 'not_equals' && task.assignee_id === val) conditionsMet = false;
+          case 'assignee': {
+            // Tarefa tem VÁRIOS responsáveis (gt_task_assignees) — assignee_id é só o
+            // principal. "é igual" = a pessoa está entre eles.
+            if (!taskAssigneeIds) {
+              const { data: rows } = await supabase.from('gt_task_assignees').select('user_id').eq('task_id', task_id);
+              taskAssigneeIds = new Set((rows || []).map((r: any) => r.user_id).filter(Boolean));
+              if (task.assignee_id) taskAssigneeIds.add(task.assignee_id);
+            }
+            if (cond.operator === 'equals' && !taskAssigneeIds.has(val)) conditionsMet = false;
+            if (cond.operator === 'not_equals' && taskAssigneeIds.has(val)) conditionsMet = false;
             break;
+          }
           case 'is_overdue':
             const overdue = task.due_date && new Date(task.due_date) < new Date() && !task.completed_at;
             if (cond.operator === 'equals' && !overdue) conditionsMet = false;
@@ -299,7 +309,8 @@ Deno.serve(async (req) => {
             case 'send_notification': {
               const recipients = await resolveRecipients(supabase, cfg, task);
               const title = replaceVariables(cfg.title || auto.name || 'Automação executada', task, { user_id, type: trigger_type });
-              const body = replaceVariables(cfg.message || '', task, { user_id, type: trigger_type });
+              // Sem mensagem, ao menos o nome da tarefa — notificação só com título não diz qual foi.
+              const body = replaceVariables(cfg.message || `Tarefa "{{task.title}}"`, task, { user_id, type: trigger_type });
               for (const rid of recipients) {
                 await supabase.from('gt_notifications').insert({
                   user_id: rid,
@@ -462,12 +473,12 @@ Deno.serve(async (req) => {
                 } else if (source === 'assignee') {
                   const targetUserId = task.assignee_id;
                   if (targetUserId) {
-                    const { data: prof } = await supabase.from('profiles').select('email').eq('user_id', targetUserId).maybeSingle();
+                    const { data: prof } = await supabase.from('profiles').select('email').eq('id', targetUserId).maybeSingle();
                     recipientEmail = prof?.email || null;
                   }
                 } else if (source === 'reporter') {
                   if (task.reporter_id) {
-                    const { data: prof } = await supabase.from('profiles').select('email').eq('user_id', task.reporter_id).maybeSingle();
+                    const { data: prof } = await supabase.from('profiles').select('email').eq('id', task.reporter_id).maybeSingle();
                     recipientEmail = prof?.email || null;
                   }
                 }
