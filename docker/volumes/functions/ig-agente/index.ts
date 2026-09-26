@@ -22,7 +22,7 @@
 // crm-agente-sdr. Deploy por git push (deploy-edges.yml). Mapa: docs/Instagram (IA + Chat).md
 // ----------------------------------------------------------------------------
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
-import { avaliarGateIg } from "../_shared/igAgenteGate.ts";
+import { avaliarGateIg, conversaComecadaPeloTime, JANELA_CONVERSA_DO_TIME_DIAS } from "../_shared/igAgenteGate.ts";
 import { ehTokenInvalido, enviarTextoIg, type ResultadoEnvioIg } from "../_shared/igMensageria.ts";
 import {
   areaDoRecibo,
@@ -408,6 +408,26 @@ async function responderPendentes(c: Conversa) {
   }
 }
 
+// ── Conversa do time (26/09/2026) ─────────────────────────────────────────────
+// Só para conversa em que a IA ainda NÃO entrou: dali em diante, humano que fala pausa a
+// IA pelo eco (tratarEco). Régua em _shared/igAgenteGate.ts. Sem conseguir ler as
+// mensagens = fica de fora (falar por cima do time é o erro caro; deixar de responder,
+// não). Sem conseguir ler o estado, confere as mensagens do mesmo jeito.
+async function ehConversaDoTime(c: Conversa): Promise<boolean> {
+  const { data: ja } = await supabase.from("ig_conversa_ia").select("igsid")
+    .eq("conta_id", c.contaId).eq("igsid", c.igsid).maybeSingle();
+  if (ja) return false;
+  const desde = new Date(Date.now() - JANELA_CONVERSA_DO_TIME_DIAS * 86_400_000).toISOString();
+  const { data, error } = await supabase.from("ig_mensagens").select("tipo, conteudo, metadata, direcao")
+    .eq("conta_id", c.contaId).eq("contato_igsid", c.igsid).eq("direcao", "outbound")
+    .gte("created_at", desde).limit(50);
+  if (error) return true;
+  // deno-lint-ignore no-explicit-any
+  const saidas = ((data ?? []) as any[]).filter((m) => m.direcao === "outbound")
+    .map((m) => ({ tipo: m.tipo, conteudo: m.conteudo, origem: m.metadata?.origem ?? null }));
+  return conversaComecadaPeloTime(saidas);
+}
+
 // ── Eventos ──────────────────────────────────────────────────────────────────
 async function tratarInbound(contaId: string, igsid: string, mid: string) {
   const aberta = await abrirConversa(contaId, igsid);
@@ -420,6 +440,11 @@ async function tratarInbound(contaId: string, igsid: string, mid: string) {
   const { data: gatilho } = await supabase.from("ig_mensagens").select("conteudo").eq("mid", mid).maybeSingle();
   if (String(gatilho?.conteudo ?? "").trim().toLowerCase() === COMANDO_RESET) {
     await zerarConversa(conversa);
+    return;
+  }
+
+  if (await ehConversaDoTime(conversa)) {
+    log("conversa do time — a IA fica de fora", igsid);
     return;
   }
 

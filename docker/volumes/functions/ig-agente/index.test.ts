@@ -332,6 +332,28 @@ describe('ig-agente: quando NÃO fala', () => {
     expect(mocks.rpc).not.toHaveBeenCalled();
   });
 
+  it('modo ligado, conversa que o TIME começou: a IA fica de fora (26/09/2026)', async () => {
+    mocks.estado.config = { modo: 'ligado', usernames_teste: [], debounce_segundos: 0 };
+    mocks.estado.perfil = { username: 'lead.qualquer', nome: 'Ana' };
+    mocks.estado.conversa = null;
+    mocks.estado.mensagens.unshift({ mid: 'm0', direcao: 'outbound', tipo: 'text', metadata: { origem: 'humano' },
+      conteudo: 'Sou a Flávia aqui da PPGVET! 💜 Vi seu perfil e notei que é da área da veterinária', created_at: '2026-09-24T11:00:00.000Z' });
+    await inbound();
+    expect(mocks.classificar).not.toHaveBeenCalled();
+    expect(mocks.fetch).not.toHaveBeenCalled();
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
+  it('modo ligado, conversa aberta pelo ManyChat ("Oii, tudo bem?"): a IA responde qualquer @', async () => {
+    mocks.estado.config = { modo: 'ligado', usernames_teste: [], debounce_segundos: 0 };
+    mocks.estado.perfil = { username: 'lead.qualquer', nome: 'Ana' };
+    mocks.estado.conversa = null;
+    mocks.estado.mensagens.unshift({ mid: 'm0', direcao: 'outbound', tipo: 'text', metadata: { origem: 'humano' },
+      conteudo: 'Oii, tudo bem?', created_at: '2026-09-24T11:00:00.000Z' });
+    await inbound();
+    expect(mocks.classificar).toHaveBeenCalledTimes(1);
+  });
+
   it('chegou mensagem mais nova: a execução dela responde, não esta', async () => {
     mocks.estado.mensagens.push({ mid: 'm2', direcao: 'inbound', tipo: 'text', conteudo: 'e o valor?', created_at: '2026-09-24T12:00:03.000Z' });
     await inbound('m1');
