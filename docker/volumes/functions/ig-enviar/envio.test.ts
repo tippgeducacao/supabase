@@ -81,6 +81,15 @@ describe('enviarDoSac', () => {
     expect(gravadas[0]).toMatchObject({ enviou: false, linha: { mid: null, status_entrega: 'failed', erro: { code: 190 } } });
   });
 
+  it('conversa presa a outro app (ManyChat, 2534037): diz para responder pelo app', async () => {
+    const { d } = deps({
+      enviar: vi.fn(async () => ({ ok: false as const, erro: { status: 400, code: 100, subcode: 2534037, message: 'not the thread owner' } })),
+    });
+    const r = await enviarDoSac(d, { conversaId: 'c1', texto: 'oi', autor: AUTOR });
+    expect(r).toMatchObject({ ok: false, codigo: 'conversa_de_outro_app', enviadas: 0 });
+    expect(!r.ok && r.erro).toContain('app do Instagram');
+  });
+
   it('outra recusa da Meta: para no balão que falhou', async () => {
     let n = 0;
     const { d, gravadas } = deps({

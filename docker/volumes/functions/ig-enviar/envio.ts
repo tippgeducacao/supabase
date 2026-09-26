@@ -23,6 +23,7 @@ export type CodigoErroEnvioIg =
   | "conversa_invalida"
   | "texto_vazio"
   | "falha_envio"
+  | "conversa_de_outro_app"
   | "nao_autorizado";
 
 export type RespostaEnvioIg =
@@ -97,6 +98,18 @@ export async function enviarDoSac(
       continue;
     }
     await deps.gravar({ ...base, conteudo: partes[i], mid: null, status_entrega: "failed", erro: r.erro, metadata }, false);
+    // 26/09/2026: (#100) subcode 2534037 = "não é o dono da conversa". Outro app (o
+    // ManyChat, que manda o "Oii, tudo bem?") está com o controle da conversa pelo
+    // roteamento de conversas da Meta; tentar de novo não adianta. O app do Instagram
+    // responde normalmente.
+    if (r.erro.subcode === 2534037) {
+      return {
+        ok: false,
+        codigo: "conversa_de_outro_app",
+        erro: "Esta conversa está sob controle do ManyChat no Instagram — por enquanto, responda pelo app do Instagram.",
+        enviadas: i,
+      };
+    }
     if (ehTokenInvalido(r.erro)) {
       return {
         ok: false,
