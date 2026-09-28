@@ -26,7 +26,7 @@ const O_QUE_A_IA_ACABOU_DE_PERGUNTAR: Record<EtapaFluxo, string> = {
   pergunta_curso:
     "A IA perguntou QUAL é o curso da graduação da pessoa (a formação dela, ou o curso que ela faz). Preencha `area` com o curso dito (ex.: \"medicina veterinária\", \"zootecnia\"); se ela não disse o curso, null.",
   pergunta_data_formacao:
-    "A IA perguntou quando a pessoa se forma (mês e ano). Preencha `conclusao` com o que ela disse, em MM/AAAA.",
+    "A IA perguntou quando a pessoa se forma (mês e ano). Preencha `conclusao` com o que ela disse, em MM/AAAA. Se a resposta é AMBÍGUA mas dá para arriscar uma leitura (\"fim de 28\", \"no meio do ano que vem\", \"28\"), deixe `conclusao` null e escreva em `confirmar_conclusao` UMA pergunta curta confirmando a sua leitura, como a Flávia (ex.: \"Seria no 2º semestre de 2028? 😊\", \"Em dezembro de 2028, então?\"). Se a ÚLTIMA fala da IA foi uma confirmação dessas e a pessoa confirmou (\"isso\", \"sim\", \"exato\"), `conclusao` = a data que a IA propôs, em MM/AAAA.",
   pergunta_interesse:
     "A IA perguntou se a pessoa tem interesse em conhecer as pós-graduações e se pode encaminhar o portfólio (\"sim\", \"quero\", \"pode mandar\" = aceita).",
   pergunta_whatsapp: "A IA pediu o WhatsApp da pessoa (com DDD) para mandar o link e o portfólio em PDF.",
@@ -82,8 +82,9 @@ export const TOOL_CLASSIFICAR = {
       telefone: { type: ["string", "null"] },
       conclusao: { type: ["string", "null"] },
       resposta_pergunta: { type: ["string", "null"] },
+      confirmar_conclusao: { type: ["string", "null"] },
     },
-    required: ["intencao", "situacao", "area", "telefone", "conclusao", "resposta_pergunta"],
+    required: ["intencao", "situacao", "area", "telefone", "conclusao", "resposta_pergunta", "confirmar_conclusao"],
   },
 } as const;
 
@@ -94,6 +95,7 @@ export const CLASSIFICACAO_NEUTRA: Classificacao = {
   telefone: null,
   conclusao: null,
   resposta_pergunta: null,
+  confirmar_conclusao: null,
 };
 
 const INTENCOES: readonly Intencao[] = ["aceita", "recusa", "pergunta", "outro"];
@@ -116,7 +118,21 @@ export function normalizarClassificacao(bruto: unknown): Classificacao {
     telefone: texto(b.telefone, 40),
     conclusao: texto(b.conclusao, 20),
     resposta_pergunta: intencao === "pergunta" ? texto(b.resposta_pergunta, 400) : null,
+    confirmar_conclusao: perguntaDeConfirmacao(b.confirmar_conclusao),
   };
+}
+
+/**
+ * A confirmação da data é o único texto do roteiro escrito pelo modelo: só passa se for UMA
+ * pergunta curta, sem link. Qualquer outra coisa → null, e o roteiro usa a frase fixa.
+ */
+export function perguntaDeConfirmacao(v: unknown): string | null {
+  const s = texto(v, 200);
+  if (!s || s.length > 120) return null;
+  if (/https?:|www\.|\n/i.test(s)) return null;
+  if (!/\?\s*(?:\p{Extended_Pictographic}|\uFE0F|\s)*$/u.test(s)) return null;
+  if ((s.match(/\?/g) ?? []).length > 1) return null;
+  return s;
 }
 
 function montarPedido(etapa: EtapaFluxo, historico: TurnoHistorico[], novas: string[]) {

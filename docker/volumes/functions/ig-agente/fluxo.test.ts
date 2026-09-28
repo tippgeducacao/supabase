@@ -8,7 +8,8 @@ import {
 const AGORA = new Date('2026-09-25T12:00:00Z');
 
 const cls = (p: Partial<Classificacao> = {}): Classificacao => ({
-  intencao: 'outro', situacao: 'nao_informou', area: null, telefone: null, conclusao: null, resposta_pergunta: null, ...p,
+  intencao: 'outro', situacao: 'nao_informou', area: null, telefone: null, conclusao: null, resposta_pergunta: null,
+  confirmar_conclusao: null, ...p,
 });
 const ctx = (p: {
   nomePerfil?: string | null; textoNovo?: string; tentativas?: number;
@@ -77,6 +78,31 @@ describe('boas_vindas: a pessoa respondeu o "Oii, tudo bem?"', () => {
 
   it('não quer papo → despedida e encerra, sem apresentação', () => {
     expect(passo('boas_vindas', { intencao: 'recusa' })).toMatchObject({ mensagens: [TEXTOS.recusa], proximaEtapa: 'encerrada' });
+  });
+});
+
+describe('pergunta_data_formacao: confirma a leitura em vez de soar robótico (28/09/2026)', () => {
+  it('data ambígua com leitura do modelo → a confirmação dele, UMA vez', () => {
+    expect(passo('pergunta_data_formacao', { situacao: 'estudante', confirmar_conclusao: 'Seria no 2º semestre de 2028? 😊' },
+      { textoNovo: 'fim de 28', tentativas: 0, situacaoSalva: 'estudante' })).toMatchObject({
+      mensagens: ['Seria no 2º semestre de 2028? 😊'], proximaEtapa: 'pergunta_data_formacao', tentativas: 1,
+    });
+  });
+
+  it('sem leitura do modelo → a frase fixa de sempre', () => {
+    expect(passo('pergunta_data_formacao', {}, { textoNovo: 'hmm', tentativas: 0 }).mensagens)
+      .toEqual([TEXTOS.reperguntarDataFormacao]);
+  });
+
+  it('"isso" depois da confirmação: vale a data que o modelo leu no histórico', () => {
+    const p = passo('pergunta_data_formacao', { situacao: 'estudante', conclusao: '12/2028' },
+      { textoNovo: 'isso', tentativas: 1, situacaoSalva: 'estudante' });
+    expect(p).toMatchObject({ proximaEtapa: 'pergunta_interesse', dataFormacao: '2028-12-31' });
+  });
+
+  it('"28.2" já é data, sem precisar confirmar', () => {
+    expect(passo('pergunta_data_formacao', { situacao: 'estudante' }, { textoNovo: '28.2', situacaoSalva: 'estudante' }))
+      .toMatchObject({ proximaEtapa: 'pergunta_interesse', dataFormacao: '2028-12-31' });
   });
 });
 

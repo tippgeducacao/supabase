@@ -54,6 +54,12 @@ export type Classificacao = {
   conclusao: string | null;
   /** Resposta curta, escrita pelo modelo, SÓ quando a pessoa fez uma pergunta. */
   resposta_pergunta: string | null;
+  /**
+   * Data de formatura AMBÍGUA: a pergunta de confirmação com a leitura do modelo ("Seria no
+   * 2º semestre de 2028? 😊"), no lugar da repergunta fixa — "pra não ficar robótico"
+   * (Gustavo, 28/09/2026). Validada em `normalizarClassificacao` (pergunta curta, sem link).
+   */
+  confirmar_conclusao?: string | null;
 };
 
 export type ContextoFluxo = {
@@ -334,11 +340,15 @@ function decidirPassoSemApresentacao(etapa: EtapaFluxo, c: Classificacao, ctx: C
   if (etapa === "pergunta_data_formacao") {
     const data = lerDataFormacao(c, ctx);
     if (data) return irParaInteresse(c, { dataFormacao: data });
-    // Pergunta ou resposta que não fecha data ("tô no 7º período", "ano que vem"):
-    // repergunta UMA vez. Depois segue sem a data — não trava a conversa por isso.
+    // Pergunta ou resposta que não fecha data ("tô no 7º período", "fim de 28"): repergunta
+    // UMA vez — confirmando a leitura do modelo quando ele tem uma ("Seria no 2º semestre de
+    // 2028?"), senão a frase fixa. Depois segue sem a data — não trava a conversa por isso.
     if (c.intencao === "pergunta" || (ctx.tentativas < 1 && c.intencao !== "recusa")) {
+      const repergunta = ctx.tentativas < 1
+        ? (c.confirmar_conclusao || TEXTOS.reperguntarDataFormacao)
+        : TEXTOS.perguntaDataFormacao;
       return {
-        mensagens: comResposta(c, [ctx.tentativas < 1 ? TEXTOS.reperguntarDataFormacao : TEXTOS.perguntaDataFormacao]),
+        mensagens: comResposta(c, [repergunta]),
         proximaEtapa: "pergunta_data_formacao",
         tentativas: ctx.tentativas + 1,
       };

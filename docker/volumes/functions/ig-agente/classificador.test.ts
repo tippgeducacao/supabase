@@ -25,7 +25,18 @@ describe('normalizarClassificacao: só passa o que o formulário permite', () =>
   it('valores válidos passam', () => {
     expect(mod.normalizarClassificacao({
       intencao: 'aceita', situacao: 'formado', area: ' medicina veterinária ', telefone: '46 99988-2268', conclusao: '07/2027', resposta_pergunta: null,
-    })).toEqual({ intencao: 'aceita', situacao: 'formado', area: 'medicina veterinária', telefone: '46 99988-2268', conclusao: '07/2027', resposta_pergunta: null });
+    })).toEqual({ intencao: 'aceita', situacao: 'formado', area: 'medicina veterinária', telefone: '46 99988-2268', conclusao: '07/2027', resposta_pergunta: null, confirmar_conclusao: null });
+  });
+
+  it('confirmação da data: só UMA pergunta curta, sem link (28/09/2026)', () => {
+    const conf = (v: unknown) => mod.normalizarClassificacao({ intencao: 'outro', confirmar_conclusao: v }).confirmar_conclusao;
+    expect(conf('Seria no 2º semestre de 2028? 😊')).toBe('Seria no 2º semestre de 2028? 😊');
+    expect(conf('Em dezembro de 2028, então?')).toBe('Em dezembro de 2028, então?');
+    expect(conf('Anotado: 2028.')).toBeNull();
+    expect(conf('Seria 2028? Ou 2029?')).toBeNull();
+    expect(conf('Seria 2028? veja https://x.com')).toBeNull();
+    expect(conf('x'.repeat(130) + '?')).toBeNull();
+    expect(conf(null)).toBeNull();
   });
 
   it('valor fora da lista vira o neutro', () => {
