@@ -59,6 +59,7 @@ function builder(tabela: string) {
     else if (tabela === 'ig_contas') dado = e.conta;
     else if (tabela === 'ig_perfis') dado = e.perfil;
     else if (tabela === 'ig_contas_secrets') dado = e.segredo;
+    else if (tabela === 'crm_agente_sdr_config') dado = { followup_secret: 'segredo-harness' };
     else if (tabela === 'ig_conversa_ia') {
       if (e.conversaComErro) return { data: null, error: { message: 'banco fora' } };
       dado = e.conversa;
@@ -370,6 +371,15 @@ describe('ig-agente: quando NÃO fala', () => {
     const r = await chamar({ evento: 'inbound', conta_id: 'conta-1', igsid: '999', mid: 'm1' }, 'anon');
     expect(r.status).toBe(401);
     expect(mocks.classificar).not.toHaveBeenCalled();
+  });
+
+  it('x-followup-key (a chave do harness) também chama; errada não (28/09/2026)', async () => {
+    const pedir = (chave: string) => handler(new Request('https://x.invalid/ig-agente', {
+      method: 'POST', headers: { 'x-followup-key': chave },
+      body: JSON.stringify({ evento: 'nada', conta_id: 'conta-1', igsid: '999', mid: 'm1' }),
+    }));
+    expect((await pedir('errada')).status).toBe(401);
+    expect((await pedir('segredo-harness')).status).toBe(400);  // passou da autorização; evento inválido
   });
 });
 

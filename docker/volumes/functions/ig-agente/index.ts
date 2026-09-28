@@ -492,10 +492,23 @@ async function tratarEco(contaId: string, igsid: string, mid: string) {
   if (data?.length) log("humano respondeu pelo app — IA pausada nesta conversa", igsid);
 }
 
+// Quem chama: o ig-webhook (service_role) e, desde 28/09/2026, a operação — reenvio a quem
+// ficou sem resposta (a chave do cofre do banco é a do projeto antigo e não vale aqui). Mesma
+// chave do harness do João e do ig-agente-simular: crm_agente_sdr_config.followup_secret,
+// no header x-followup-key.
+async function autorizado(req: Request): Promise<boolean> {
+  const auth = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
+  if (SERVICE_ROLE && auth === SERVICE_ROLE) return true;
+  const chave = req.headers.get("x-followup-key") ?? "";
+  if (!chave) return false;
+  const { data } = await supabase.from("crm_agente_sdr_config").select("followup_secret").eq("id", 1).maybeSingle();
+  const segredo = String(data?.followup_secret ?? "");
+  return Boolean(segredo) && chave === segredo;
+}
+
 Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "método não suportado" }, 405);
-  const auth = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
-  if (!SERVICE_ROLE || auth !== SERVICE_ROLE) return json({ error: "não autorizado" }, 401);
+  if (!(await autorizado(req))) return json({ error: "não autorizado" }, 401);
 
   // deno-lint-ignore no-explicit-any
   let body: any = null;
