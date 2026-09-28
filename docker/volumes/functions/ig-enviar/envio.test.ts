@@ -13,7 +13,7 @@ function deps(extra: Partial<DepsEnvioIg> = {}) {
     destino: vi.fn(async () => DESTINO),
     ultimoInbound: vi.fn(async () => new Date(AGORA - 60_000).toISOString()),
     token: vi.fn(async () => 'IGAA-token'),
-    enviar: vi.fn(async () => ({ ok: true as const, mid: `mid-${++n}` })),
+    enviar: vi.fn(async () => ({ ok: true as const, mid: `mid-${++n}`, via: 'instagram' as const })),
     gravar: vi.fn(async (linha, enviou) => { gravadas.push({ linha, enviou }); }),
     agora: () => AGORA,
     ...extra,
@@ -35,7 +35,7 @@ describe('enviarDoSac', () => {
     const { d, gravadas } = deps();
     const r = await enviarDoSac(d, { conversaId: 'c1', texto: '  Oi Fulana!  ', autor: AUTOR });
     expect(r).toEqual({ ok: true, enviadas: 1 });
-    expect(d.enviar).toHaveBeenCalledWith('IGAA-token', '999', 'Oi Fulana!');
+    expect(d.enviar).toHaveBeenCalledWith(DESTINO, 'IGAA-token', 'Oi Fulana!', AUTOR);
     expect(gravadas).toEqual([{
       enviou: true,
       linha: {
@@ -83,11 +83,27 @@ describe('enviarDoSac', () => {
 
   it('conversa presa a outro app (ManyChat, 2534037): diz para responder pelo app', async () => {
     const { d } = deps({
-      enviar: vi.fn(async () => ({ ok: false as const, erro: { status: 400, code: 100, subcode: 2534037, message: 'not the thread owner' } })),
+      enviar: vi.fn(async () => ({ ok: false as const, via: 'instagram' as const, erro: { status: 400, code: 100, subcode: 2534037, message: 'not the thread owner' } })),
     });
     const r = await enviarDoSac(d, { conversaId: 'c1', texto: 'oi', autor: AUTOR });
     expect(r).toMatchObject({ ok: false, codigo: 'conversa_de_outro_app', enviadas: 0 });
     expect(!r.ok && r.erro).toContain('app do Instagram');
+  });
+
+  it('conversa do ManyChat, enviado POR ELE (28/09): não grava — a linha nasce do eco', async () => {
+    const { d, gravadas } = deps({ enviar: vi.fn(async () => ({ ok: true as const, mid: '', via: 'manychat' as const })) });
+    const r = await enviarDoSac(d, { conversaId: 'c1', texto: 'oi', autor: AUTOR });
+    expect(r).toEqual({ ok: true, enviadas: 1 });
+    expect(gravadas).toEqual([]);
+  });
+
+  it('o ManyChat também falhou: a mensagem dele volta para o atendente', async () => {
+    const { d } = deps({
+      enviar: vi.fn(async () => ({ ok: false as const, via: 'manychat' as const, erro: { status: 401, message: 'ManyChat: Wrong token' } })),
+    });
+    const r = await enviarDoSac(d, { conversaId: 'c1', texto: 'oi', autor: AUTOR });
+    expect(r).toMatchObject({ ok: false, codigo: 'falha_envio' });
+    expect(!r.ok && r.erro).toContain('Não saiu pelo ManyChat');
   });
 
   it('outra recusa da Meta: para no balão que falhou', async () => {

@@ -10,7 +10,8 @@
 // Cada balão é gravado em ig_mensagens com origem 'humano' + autor ANTES do eco do
 // webhook, o que faz duas coisas: o espelho do SAC mostra o nome do atendente, e o
 // ig-agente, ao ver o eco, pausa a IA naquela conversa (humano assumiu).
-import { dividirPorBytes, ehTokenInvalido, type ResultadoEnvioIg } from "../_shared/igMensageria.ts";
+import { dividirPorBytes, ehTokenInvalido } from "../_shared/igMensageria.ts";
+import type { ResultadoEnvioDireto } from "../_shared/igManychat.ts";
 
 export const JANELA_IG_MS = 24 * 60 * 60 * 1000;
 /** Nenhum atendente precisa de mais que isso num envio; acima, é colagem por engano. */
@@ -30,7 +31,14 @@ export type RespostaEnvioIg =
   | { ok: true; enviadas: number }
   | { ok: false; codigo: CodigoErroEnvioIg; erro: string; enviadas?: number };
 
-export type DestinoIg = { contaId: string; igUserId: string | null; igsid: string };
+export type DestinoIg = {
+  contaId: string;
+  igUserId: string | null;
+  igsid: string;
+  /** Para achar a pessoa no ManyChat quando a conversa é dele. */
+  nome?: string | null;
+  username?: string | null;
+};
 export type AutorEnvio = { id: string; nome: string | null };
 
 export type DepsEnvioIg = {
@@ -39,7 +47,8 @@ export type DepsEnvioIg = {
   /** ISO da última DM DA PESSOA (sem reação), ou null. */
   ultimoInbound(d: DestinoIg): Promise<string | null>;
   token(contaId: string): Promise<string | null>;
-  enviar(token: string, igsid: string, texto: string): Promise<ResultadoEnvioIg>;
+  /** Instagram; se a conversa é do ManyChat, pelo ManyChat (`_shared/igManychat.ts`). */
+  enviar(destino: DestinoIg, token: string, texto: string, autor: AutorEnvio): Promise<ResultadoEnvioDireto>;
   /** Grava o balão em ig_mensagens (upsert por mid quando enviou). */
   gravar(linha: Record<string, unknown>, enviou: boolean): Promise<void>;
   agora(): number;
@@ -92,17 +101,21 @@ export async function enviarDoSac(
 
   const partes = dividirPorBytes(texto);
   for (let i = 0; i < partes.length; i++) {
-    const r = await deps.enviar(token, destino.igsid, partes[i]);
+    const r = await deps.enviar(destino, token, partes[i], entrada.autor);
     if (r.ok) {
-      await deps.gravar({ ...base, conteudo: partes[i], mid: r.mid, status_entrega: "sent", metadata }, true);
+      // Pelo ManyChat não há mid: a linha nasce do eco, com o autor (ig_envios_manychat).
+      if (r.via !== "manychat") {
+        await deps.gravar({ ...base, conteudo: partes[i], mid: r.mid, status_entrega: "sent", metadata }, true);
+      }
       continue;
     }
     await deps.gravar({ ...base, conteudo: partes[i], mid: null, status_entrega: "failed", erro: r.erro, metadata }, false);
     // 26/09/2026: (#100) subcode 2534037 = "não é o dono da conversa". Outro app (o
     // ManyChat, que manda o "Oii, tudo bem?") está com o controle da conversa pelo
-    // roteamento de conversas da Meta; tentar de novo não adianta. O app do Instagram
-    // responde normalmente.
-    if (r.erro.subcode === 2534037) {
+    // roteamento de conversas da Meta. Desde 28/09 o envio vai pelo ManyChat quando a
+    // conta tem a chave dele; este erro só volta se não tem (ou o ManyChat também falhou,
+    // e aí a mensagem dele vem em `falha_envio`).
+    if (r.via === "instagram" && r.erro.subcode === 2534037) {
       return {
         ok: false,
         codigo: "conversa_de_outro_app",
@@ -118,7 +131,12 @@ export async function enviarDoSac(
         enviadas: i,
       };
     }
-    return { ok: false, codigo: "falha_envio", erro: `O Instagram recusou: ${r.erro.message}`, enviadas: i };
+    return {
+      ok: false,
+      codigo: "falha_envio",
+      erro: r.via === "manychat" ? `Não saiu pelo ManyChat: ${r.erro.message}` : `O Instagram recusou: ${r.erro.message}`,
+      enviadas: i,
+    };
   }
   return { ok: true, enviadas: partes.length };
 }

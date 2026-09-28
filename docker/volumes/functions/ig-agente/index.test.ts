@@ -385,6 +385,31 @@ describe('ig-agente: envio', () => {
     expect(liberacao()).toMatchObject({ p_respondido_ate: INBOUND_EM });
   });
 
+  it('conversa do ManyChat (2534037, 28/09/2026): o balão sai PELO ManyChat, sem gravar a saída, e a etapa anda', async () => {
+    mocks.estado.segredo = { access_token: 'IGAA-sintetico', manychat_api_key: '1:chave-sintetica' };
+    const peloManychat: any[] = [];
+    mocks.fetch.mockImplementation(async (url: string, init?: any) => {
+      const u = String(url);
+      if (u.includes('graph.instagram.com')) {
+        return new Response(JSON.stringify({ error: { code: 100, error_subcode: 2534037, message: 'not the thread owner' } }), { status: 400 });
+      }
+      if (u.includes('findByName')) {
+        return new Response(JSON.stringify({ status: 'success', data: [{ id: 77, name: 'Gustavo Sutil', ig_id: 999, ig_username: 'sutil_gu' }] }));
+      }
+      peloManychat.push(JSON.parse(init.body));
+      return new Response(JSON.stringify({ status: 'success' }));
+    });
+    await inbound();
+    expect(peloManychat.map((b) => [b.subscriber_id, b.data.content.messages[0].text]))
+      .toEqual([[77, TEXTOS.apresentacao], [77, TEXTOS.perguntaFormacao('Gustavo')]]);
+    // A linha da saída nasce do ECO (o gatilho do banco marca como IA) — aqui não se grava nada.
+    expect(mocks.estado.escritas.filter((w) => w.tabela === 'ig_mensagens')).toEqual([]);
+    expect(mocks.estado.escritas.filter((w) => w.tabela === 'ig_envios_manychat').map((w) => w.payload.origem))
+      .toEqual(['ia', 'ia']);
+    expect(gravacaoDaEtapa()).toMatchObject({ payload: { fluxo_etapa: 'pergunta_formacao' } });
+    expect(liberacao()).toMatchObject({ p_respondido_ate: INBOUND_EM });
+  });
+
   it('token morto: grava a falha e NÃO dá a mensagem nem a etapa como resolvidas', async () => {
     mocks.fetch.mockImplementation(async () => new Response(JSON.stringify({
       error: { message: 'Error validating access token', code: 190 },

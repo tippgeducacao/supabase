@@ -13,7 +13,7 @@
 // ----------------------------------------------------------------------------
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { corsHeaders } from "../_shared/cors.ts";
-import { enviarTextoIg } from "../_shared/igMensageria.ts";
+import { enviarComDonoDaConversa } from "../_shared/igManychat.ts";
 import { type DepsEnvioIg, enviarDoSac, type RespostaEnvioIg } from "./envio.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
@@ -37,12 +37,16 @@ function depsReais(authorization: string): DepsEnvioIg {
         .select("id, canal, contato_id, ig_conta_id").eq("id", conversaId).maybeSingle();
       if (!conv || conv.canal !== "instagram" || !conv.ig_conta_id) return null;
       const { data: ct } = await admin.from("sac_contatos")
-        .select("ig_igsid, ig_conta_id").eq("id", conv.contato_id).maybeSingle();
+        .select("ig_igsid, ig_conta_id, ig_username, nome").eq("id", conv.contato_id).maybeSingle();
       if (!ct?.ig_igsid) return null;
       const { data: conta } = await admin.from("ig_contas")
         .select("ig_user_id").eq("id", conv.ig_conta_id).maybeSingle();
       if (!conta) return null;
-      return { contaId: conv.ig_conta_id, igUserId: conta.ig_user_id ?? null, igsid: ct.ig_igsid };
+      const { data: perfil } = await admin.from("ig_perfis").select("nome, username").eq("igsid", ct.ig_igsid).maybeSingle();
+      return {
+        contaId: conv.ig_conta_id, igUserId: conta.ig_user_id ?? null, igsid: ct.ig_igsid,
+        nome: perfil?.nome ?? ct.nome ?? null, username: perfil?.username ?? ct.ig_username ?? null,
+      };
     },
     async ultimoInbound(d) {
       const { data } = await admin.from("ig_mensagens").select("created_at")
@@ -55,7 +59,9 @@ function depsReais(authorization: string): DepsEnvioIg {
       const { data } = await admin.from("ig_contas_secrets").select("access_token").eq("conta_id", contaId).maybeSingle();
       return data?.access_token ? String(data.access_token) : null;
     },
-    enviar: (token, igsid, texto) => enviarTextoIg(token, igsid, texto),
+    enviar: (destino, token, texto, autor) => enviarComDonoDaConversa(admin, {
+      contaId: destino.contaId, igsid: destino.igsid, token, nome: destino.nome, username: destino.username,
+    }, texto, { origem: "humano", enviadoPorId: autor.id, enviadoPorNome: autor.nome }),
     async gravar(linha, enviou) {
       // upsert SEM ignoreDuplicates: se o eco chegou antes (gravado como humano sem autor),
       // esta escrita põe o autor — o espelho do SAC atualiza o balão.

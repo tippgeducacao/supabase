@@ -23,7 +23,8 @@
 // ----------------------------------------------------------------------------
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { avaliarGateIg, conversaComecadaPeloTime, JANELA_CONVERSA_DO_TIME_DIAS } from "../_shared/igAgenteGate.ts";
-import { ehTokenInvalido, enviarTextoIg, type ResultadoEnvioIg } from "../_shared/igMensageria.ts";
+import { ehTokenInvalido, type ResultadoEnvioIg } from "../_shared/igMensageria.ts";
+import { enviarComDonoDaConversa } from "../_shared/igManychat.ts";
 import {
   areaDoRecibo,
   componentesDoRecibo,
@@ -142,6 +143,13 @@ async function registrarSaida(c: Conversa, texto: string, envio: ResultadoEnvioI
   if (error) console.error("[ig-agente] NÃO GRAVOU A SAÍDA — o eco vai parecer humano e pausar a IA:", error.message);
 }
 
+// Instagram; se a conversa é do ManyChat (roteamento de conversas da Meta), pelo ManyChat.
+function enviarDireto(c: Conversa, texto: string, origem: "ia" | "sistema") {
+  return enviarComDonoDaConversa(supabase, {
+    contaId: c.contaId, igsid: c.igsid, token: c.token, nome: c.nome, username: c.username,
+  }, texto, { origem });
+}
+
 async function estaPausada(c: Conversa): Promise<boolean> {
   const { data } = await supabase.from("ig_conversa_ia").select("pausada")
     .eq("conta_id", c.contaId).eq("igsid", c.igsid).maybeSingle();
@@ -177,8 +185,10 @@ async function zerarConversa(c: Conversa) {
     return;
   }
   const texto = "🔄 conversa zerada (modo teste). pode começar de novo.";
-  const envio = await enviarTextoIg(c.token, c.igsid, texto);
-  await registrarSaida(c, texto, envio, { origem: "sistema", comando: "reset" });
+  const envio = await enviarDireto(c, texto, "sistema");
+  if (!(envio.ok && envio.via === "manychat")) {
+    await registrarSaida(c, texto, envio, { origem: "sistema", comando: "reset" });
+  }
 }
 
 // ── WhatsApp capturado: CRM + RECIBO (25/09/2026) ─────────────────────────────
@@ -336,8 +346,10 @@ async function responderRodada(c: Conversa, tokenReserva: string, reserva: Reser
       break;
     }
     if (enviados > 0) await dormir(atrasoEntreBaloesMs(balao));
-    const envio = await enviarTextoIg(c.token, c.igsid, balao);
-    await registrarSaida(c, balao, envio, metadata);
+    const envio = await enviarDireto(c, balao, "ia");
+    // Pelo ManyChat não há mid: a linha nasce do eco, marcada como da IA pelo gatilho
+    // trg_ig_mensagens_eco_manychat (ig_envios_manychat).
+    if (!(envio.ok && envio.via === "manychat")) await registrarSaida(c, balao, envio, metadata);
     if (!envio.ok) {
       log("envio falhou:", JSON.stringify(envio.erro));
       tokenMorto = ehTokenInvalido(envio.erro);
