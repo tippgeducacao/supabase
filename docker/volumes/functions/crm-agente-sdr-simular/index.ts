@@ -48,7 +48,7 @@ import { resultadoConfirmacao } from '../crm-agente-sdr/confirmacaoAgendamento.t
 import { blocoPerguntasRecentes, falasDoLead } from '../crm-agente-sdr/perguntasRecentes.ts';
 import { alertaFatoSemFonte } from '../crm-agente-sdr/fatoSemFonte.ts';
 import { alertaSaudacao, garantirSaudacao } from '../crm-agente-sdr/saudacao.ts';
-import { resultadoPortfolio } from '../crm-agente-sdr/portfolio.ts';
+import { passoAulaSemPos, pedidoDePortfolio, resultadoPortfolio } from '../crm-agente-sdr/portfolio.ts';
 import { agendaRealNoDia, diagnosticoDoProvedor, disponibilidadeSimulada, executarFollowupSimulado, executarSimulacao, extrairUso, MAX_CARACTERES_SIMULACAO, validarEntradaSimulacao, type AgenteRouter } from './simulacao.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
@@ -98,7 +98,7 @@ type FichaSimulada = { jornada: Jornada; cadastro: string | null; inicioRodada: 
 
 // Retornos plausíveis das tools — texto no MESMO espírito dos executores reais
 // (tools.ts), porque é o texto que guia a próxima decisão do modelo.
-async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimulada | null = null): Promise<string> {
+async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimulada | null = null, aulaSemPos = false): Promise<string> {
   // Replay de conversa real (24/09/2026): `mocks.respostas_reais[tool]` é o que a tool REAL
   // devolveu naquela rodada (agenda, matriz, cronograma…). Se o modelo chamar a mesma tool,
   // recebe o mesmo fato; tool que a rodada real não chamou cai no mock sintético abaixo.
@@ -115,9 +115,10 @@ async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimula
   }
   if (typeof real === 'string' && real.trim() && !agendaDeOutroDia) {
     // Mesmo acréscimo do executor real no canário: o próximo passo da coleta (proximoPassoColeta.ts).
-    if (nome === 'atualizar_dados_lead' && ficha) {
-      ficha.jornada = aplicarColetaNaJornada(ficha.jornada, input ?? {});
-      const passo = proximoPassoDaColeta(input ?? {});
+    // Aula MVP (sem pós): o executor real troca o passo pelo do portfólio, nos dois modelos.
+    if (nome === 'atualizar_dados_lead' && (ficha || aulaSemPos)) {
+      if (ficha) ficha.jornada = aplicarColetaNaJornada(ficha.jornada, input ?? {});
+      const passo = aulaSemPos ? passoAulaSemPos(input ?? {}) : proximoPassoDaColeta(input ?? {});
       return passo ? `${real} ${passo}` : real;
     }
     // Mesmo acréscimo do executor real no canário: orientação da base não vira fala.
@@ -129,7 +130,7 @@ async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimula
       if (ficha) ficha.jornada = aplicarColetaNaJornada(ficha.jornada, input ?? {});
       const partes = ['nome', 'formacao', 'tempo_formacao', 'area_atuacao', 'atua_na_area', 'graduacao_concluida', 'possui_pos', 'qual_pos']
         .filter((k) => input?.[k]).map((k) => `${k}="${input[k]}"`);
-      const passo = ficha ? proximoPassoDaColeta(input ?? {}) : '';
+      const passo = aulaSemPos ? passoAulaSemPos(input ?? {}) : ficha ? proximoPassoDaColeta(input ?? {}) : '';
       return partes.length
         ? `Registrado no cadastro: ${partes.join(', ')}.${passo ? ` ${passo}` : ''} NUNCA comente com o lead que registrou os dados.`
         : 'Nada a atualizar.';
@@ -161,15 +162,15 @@ async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimula
         const a = avaliarFicha({ cadastro: ficha.cadastro, jornada: ficha.jornada, inicioRodada: ficha.inicioRodada });
         if (!a.liberaCronograma) {
           if ((ficha.jornada.cronograma?.bloqueado_em ?? '') < ficha.inicioRodada) ficha.jornada = registrarBloqueioNaJornada(ficha.jornada);
-          const { id: _id, ...recusa } = bloqueioCronograma('', a, input?.conteudo === 'portfolio' ? 'portfolio' : 'cronograma');
+          const { id: _id, ...recusa } = bloqueioCronograma('', a, pedidoDePortfolio(input) ? 'portfolio' : 'cronograma');
           return JSON.stringify(recusa);
         }
         // Espelho do executor: o portfólio não conta como "cronograma enviado" na ficha.
-        if (input?.conteudo !== 'portfolio') ficha.jornada = registrarEnvioNaJornada(ficha.jornada);
+        if (!pedidoDePortfolio(input)) ficha.jornada = registrarEnvioNaJornada(ficha.jornada);
       }
       // Aula MVP (28/09/2026): o executor real envia o portfólio (portfolio.ts); o mock devolve
       // o MESMO retorno de envio aceito.
-      if (input?.conteudo === 'portfolio') {
+      if (pedidoDePortfolio(input)) {
         const { id: _id, ...retorno } = resultadoPortfolio('', { ok: true });
         return JSON.stringify(retorno);
       }
@@ -490,7 +491,7 @@ Deno.serve(async (req) => {
           const { id: _id, ...recusa } = bloqueioProximaTurmaDeEstudante('');
           return JSON.stringify(recusa);
         }
-        const resposta = await mockTool(nome, dados, entrada.mocks, fichaSim);
+        const resposta = await mockTool(nome, dados, entrada.mocks, fichaSim, entrada.persona === 'aula' && !entrada.aula?.curso_nome);
         if (nome === 'verificar_compatibilidade_curso') reprovadoPorPrazo = resposta.startsWith('REPROVADO_PRAZO') || resposta.includes('"output":"REPROVADO_PRAZO"');
         if (nome === 'atualizar_dados_lead') {
           if (typeof dados?.nome === 'string') estado.nome = dados.nome;

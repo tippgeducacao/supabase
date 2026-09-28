@@ -410,6 +410,9 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   }
   // Na aula, a pós do lead é a pós VINCULADA à aula (vazia quando a aula não tem pós).
   if (aulaDaCampanha) Object.assign(vars, montarVarsAula(aulaDaCampanha));
+  // Aula MVP (sem pós relacionada): o material é o portfólio, e o próximo passo depois da
+  // formação é o envio dele, não a checagem de compatibilidade (portfolio.ts).
+  ctx.aulaSemPos = Boolean(aulaDaCampanha && !aulaDaCampanha.curso_nome);
   // O nome volta AQUI, a cada turno, e não só no cabeçalho do prompt (ver notaDoNome).
   const contextoTemporal = montarContextoTemporal() + notaDoNome(vars.nome) + notaDoCurso(vars.curso_interesse_original)
     + (provedor?.nome === 'openai' ? contextoEspecialidadeCannabis(vars.curso_interesse_original) : '');

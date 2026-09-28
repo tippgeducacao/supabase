@@ -20,6 +20,25 @@ export const FALA_DEPOIS_DO_PORTFOLIO = 'te enviei o portfólio por aqui. qual �
 
 export type EnvioPortfolio = { ok: boolean; erro?: string };
 
+/** O modelo às vezes troca os campos (conteudo="cronograma", curso_escolhido="portfolio"). */
+export function pedidoDePortfolio(input: Record<string, unknown> | null | undefined): boolean {
+  const norm = (v: unknown) => String(v ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toLowerCase();
+  return norm(input?.conteudo) === 'portfolio' || norm(input?.curso_escolhido) === 'portfolio';
+}
+
+/**
+ * Retorno de atualizar_dados_lead numa aula SEM pós, com a formação registrada. No simulador
+ * (28/09) o Claude e a Luna registraram a graduação e NÃO mandaram o portfólio que o lead
+ * aceitou (um trocou os campos, a outra listou as pós em texto). Frase exata no ponto de uso.
+ */
+export function passoAulaSemPos(input: Record<string, unknown> | null | undefined): string {
+  const concluida = String(input?.graduacao_concluida ?? '').trim().toLowerCase();
+  if (concluida === 'nao' || (!String(input?.formacao ?? '').trim() && !concluida && !String(input?.tempo_formacao ?? '').trim())) return '';
+  return 'PRÓXIMO PASSO (aula sem pós relacionada): se ele aceitou receber o catálogo, chame AGORA envia_informacoes com '
+    + 'conteudo="portfolio" e curso_escolhido="portfolio", antes de qualquer outra pergunta, e não liste as pós em texto. '
+    + 'A compatibilidade é checada depois, quando ele escolher a pós.';
+}
+
 /** O retorno da tool — o mesmo texto no executor real e no simulador. */
 export function resultadoPortfolio(id: string, envio: EnvioPortfolio): Record<string, unknown> {
   if (envio.ok) {

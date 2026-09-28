@@ -29,7 +29,7 @@ import { montarRetornoInformacoes } from './envioMateriais.ts';
 import { consultarCatalogo } from './catalogoCursos.ts';
 import { resultadoConfirmacao } from './confirmacaoAgendamento.ts';
 import { proximoPassoDaColeta } from './proximoPassoColeta.ts';
-import { enviarPortfolio } from './portfolio.ts';
+import { enviarPortfolio, passoAulaSemPos, pedidoDePortfolio } from './portfolio.ts';
 import {
   type ContextoElegibilidade, iniciarAvaliacao, finalizarAvaliacao, consultarAprovacao,
   recusaElegibilidade, VERSAO_REGRA_ELEGIBILIDADE,
@@ -72,6 +72,8 @@ export type CtxConversa = ContextoElegibilidade & {
   compatibilidadeIndisponivel?: boolean;
   /** A tool pediu confirmação real do lead; esta rodada termina fazendo a pergunta. */
   perguntaFormacaoPendente?: string;
+  /** Persona aula com aula SEM pós relacionada (aula MVP): o material é o portfólio (portfolio.ts). */
+  aulaSemPos?: boolean;
 };
 
 function sdrApi(path: string, init: RequestInit = {}): Promise<Response> {
@@ -1202,7 +1204,8 @@ async function atualizarDadosLead(supabase: any, input: any, ctx: CtxConversa, t
     }
   }
   // Canário (25/09/2026): o próximo passo exato, com o prazo já lido pelo código (proximoPassoColeta.ts).
-  const proximoPasso = ctx.ficha ? proximoPassoDaColeta(input ?? {}) : '';
+  // Aula MVP (sem pós): depois da formação vem o portfólio, para os dois modelos (portfolio.ts).
+  const proximoPasso = ctx.aulaSemPos ? passoAulaSemPos(input ?? {}) : ctx.ficha ? proximoPassoDaColeta(input ?? {}) : '';
   if (!nome && !formacao && !tempoFormacao) {
     return sair(`Registrado.${registroFicha} ${proximoPasso ? `${proximoPasso} ` : ''}NUNCA comente com o lead que registrou ou salvou os dados dele.`);
   }
@@ -1270,7 +1273,7 @@ export async function executarTool(
       case 'envia_informacoes': {
         if (input?.conteudo === 'valor') return await enviaInformacoes(supabase, input, ctx, id);
         // Aula MVP (28/09/2026): o portf\u00f3lio sai pelo WhatsApp (portfolio.ts), n\u00e3o pela sdr-api.
-        const ehPortfolio = input?.conteudo === 'portfolio';
+        const ehPortfolio = pedidoDePortfolio(input);
         const chave = ehPortfolio ? 'portfolio'
           : String(input?.curso_escolhido ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
         ctx.enviosMateriais ??= new Map();

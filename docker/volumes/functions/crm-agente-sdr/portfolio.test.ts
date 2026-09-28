@@ -5,10 +5,12 @@ import { AGENTE_AULA } from './prompts-aula';
 // portfolio.ts lê Deno.env no import (mesmo padrão de saida.ts): importa depois do stub.
 let enviarPortfolio: typeof import('./portfolio').enviarPortfolio;
 let resultadoPortfolio: typeof import('./portfolio').resultadoPortfolio;
+let pedidoDePortfolio: typeof import('./portfolio').pedidoDePortfolio;
+let passoAulaSemPos: typeof import('./portfolio').passoAulaSemPos;
 let FALA_DEPOIS_DO_PORTFOLIO: string;
 beforeAll(async () => {
   vi.stubGlobal('Deno', { env: { get: () => undefined } });
-  ({ enviarPortfolio, resultadoPortfolio, FALA_DEPOIS_DO_PORTFOLIO } = await import('./portfolio'));
+  ({ enviarPortfolio, resultadoPortfolio, FALA_DEPOIS_DO_PORTFOLIO, pedidoDePortfolio, passoAulaSemPos } = await import('./portfolio'));
 });
 
 // Aula MVP (28/09/2026): o portfólio sai de verdade pelo WhatsApp e a formação vem antes.
@@ -59,5 +61,23 @@ describe('roteiro da aula MVP', () => {
     expect(AGENTE_AULA).toContain(SCRIPT_ANTES_DO_PORTFOLIO);
     expect(AGENTE_AULA).toContain(FALA_DEPOIS_DO_PORTFOLIO);
     expect(resultadoPortfolio('i', { ok: true }).resultado).toContain('consulta_pos_disponiveis');
+  });
+});
+
+// Simulador (28/09): Claude trocou os campos; Luna listou as pós em texto em vez de mandar o PDF.
+describe('aula MVP: portfólio no ponto de uso', () => {
+  it('curso_escolhido="portfolio" conta como pedido de portfólio, mesmo com conteudo="cronograma"', () => {
+    expect(pedidoDePortfolio({ conteudo: 'cronograma', curso_escolhido: 'portfolio' })).toBe(true);
+    expect(pedidoDePortfolio({ conteudo: 'portfolio', curso_escolhido: 'x' })).toBe(true);
+    expect(pedidoDePortfolio({ conteudo: 'cronograma', curso_escolhido: 'Nutrição e Gestão de Bovinos' })).toBe(false);
+  });
+  it('com a formação registrada, o retorno manda chamar o portfólio agora', () => {
+    const passo = passoAulaSemPos({ formacao: 'Agronomia', graduacao_concluida: 'sim' });
+    expect(passo).toContain('conteudo="portfolio"');
+    expect(passo).toContain('não liste as pós em texto');
+  });
+  it('sem graduação, ou só nome, não empurra portfólio', () => {
+    expect(passoAulaSemPos({ graduacao_concluida: 'nao' })).toBe('');
+    expect(passoAulaSemPos({ nome: 'Carla' })).toBe('');
   });
 });
