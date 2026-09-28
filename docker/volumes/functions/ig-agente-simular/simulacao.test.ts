@@ -78,7 +78,7 @@ describe('executarCenario: roteiro real, do "tudo bem" ao WhatsApp', () => {
       },
     }));
     expect(s.turnos.map((t) => t.ia)).toEqual([
-      [TEXTOS.apresentacao, TEXTOS.perguntaFormacao('Carla')], [TEXTOS.perguntaInteresse], [TEXTOS.pedirWhatsapp], [TEXTOS.confirmacaoWhatsapp],
+      [TEXTOS.apresentacao, TEXTOS.perguntaFormacao('Carla')], [TEXTOS.perguntaInteresse], [TEXTOS.pedirWhatsapp], [TEXTOS.confirmacaoWhatsapp()],
     ]);
     expect(s.final).toMatchObject({ etapa: 'whatsapp_enviado', situacao: 'formado', area: 'medicina veterinária', telefone: '5546999881234' });
     expect(s.whatsapp).toMatchObject({ simulado: true, situacao: 'formado', etapa_crm: 'Formados' });

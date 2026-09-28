@@ -32,6 +32,7 @@ import {
   IG_RECIBO_IDIOMA,
   IG_RECIBO_TEMPLATE,
   IG_WA_ACCOUNT_ID,
+  linkDoWhatsapp,
   nomeDoRecibo,
 } from "../_shared/igWhatsapp.ts";
 import { type EtapaFluxo, type Passo, primeiroNomeConfiavel, TEXTOS } from "./fluxo.ts";
@@ -141,6 +142,13 @@ async function registrarSaida(c: Conversa, texto: string, envio: ResultadoEnvioI
       { ...base, mid: null, status_entrega: "failed", erro: envio.erro, metadata: { is_echo: false, ...metadata } },
     );
   if (error) console.error("[ig-agente] NÃO GRAVOU A SAÍDA — o eco vai parecer humano e pausar a IA:", error.message);
+}
+
+// O link do fim do roteiro abre o número que manda o recibo — lido do cadastro da conta.
+async function linkDoRecibo(): Promise<string> {
+  const { data } = await supabase.from("crm_whatsapp_accounts").select("numero_display")
+    .eq("id", IG_WA_ACCOUNT_ID).maybeSingle();
+  return linkDoWhatsapp(data?.numero_display ?? null);
 }
 
 // Instagram; se a conversa é do ManyChat (roteamento de conversas da Meta), pelo ManyChat.
@@ -299,7 +307,7 @@ async function responderRodada(c: Conversa, tokenReserva: string, reserva: Reser
 
     // O que esta rodada responde = o que a pessoa mandou depois da última resposta.
     const { historico, novas } = separarNovas((linhas ?? []) as LinhaIg[], estado?.respondido_ate, estado?.historico_desde);
-    const rodada = await pensarRodada({ estado: antes, historico, novas, nomePerfil: c.nome });
+    const rodada = await pensarRodada({ estado: antes, historico, novas, nomePerfil: c.nome, linkWhatsapp: await linkDoRecibo() });
     if (rodada.erro) log("classificador:", rodada.erro);
     passo = rodada.passo;
     baloes = rodada.baloes;

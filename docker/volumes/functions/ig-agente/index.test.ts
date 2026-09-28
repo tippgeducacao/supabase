@@ -221,8 +221,9 @@ describe('ig-agente: o roteiro do direct', () => {
     // O recibo sai ANTES da frase do direct: a IA só diz "te mandei" depois de mandar.
     const ordem = mocks.fetch.mock.calls.map(([u]) => (String(u).includes('crm-whatsapp-send') ? 'recibo' : 'direct'));
     expect(ordem).toEqual(['recibo', 'direct']);
-    expect(textosEnviados()).toEqual([TEXTOS.confirmacaoWhatsapp]);
-    expect(TEXTOS.confirmacaoWhatsapp).toContain('(46) 9 9901-2001');
+    expect(textosEnviados()).toEqual([TEXTOS.confirmacaoWhatsapp()]);
+    // 28/09: o número virou link que abre a conversa com o Oi pronto.
+    expect(TEXTOS.confirmacaoWhatsapp()).toContain('https://wa.me/5546999012001?text=Oi');
 
     // O PDF fica pendente até a pessoa responder no WhatsApp (o webhook procura pelo telefone).
     expect(marcaDoRecibo()!.payload).toMatchObject({ telefone: '5546999882268', recibo_erro: null, portfolio_enviado_em: null });

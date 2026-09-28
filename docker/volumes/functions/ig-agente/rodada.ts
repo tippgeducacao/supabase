@@ -91,6 +91,8 @@ export async function pensarRodada(entrada: {
   historico: TurnoHistorico[];
   novas: string[];
   nomePerfil: string | null;
+  /** Link do WhatsApp do recibo; sem ele, o do número padrão. */
+  linkWhatsapp?: string;
 }): Promise<ResultadoRodada> {
   const { estado, historico, novas } = entrada;
   const resultado = await classificar(estado.etapa, historico, novas);
@@ -101,6 +103,7 @@ export async function pensarRodada(entrada: {
     situacaoSalva: estado.situacao,
     areaSalva: estado.area,
     dataSalva: estado.dataFormacao,
+    linkWhatsapp: entrada.linkWhatsapp,
   });
   return {
     ...resultado,

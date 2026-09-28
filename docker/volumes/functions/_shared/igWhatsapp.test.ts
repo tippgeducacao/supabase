@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { areaDoRecibo, componentesDoRecibo, dataDoRecibo, instrucaoForaDoPrazo, nomeDoRecibo, notaParaOAgente } from './igWhatsapp';
+import { areaDoRecibo, componentesDoRecibo, dataDoRecibo, instrucaoForaDoPrazo, linkDoWhatsapp, nomeDoRecibo, notaParaOAgente } from './igWhatsapp';
 
 describe('recibo do Instagram: os três espaços do comprovante_cadastro_utility', () => {
   it('{{1}}: primeiro nome; perfil de marca vira o @; nunca vazio', () => {
@@ -67,5 +67,17 @@ describe('nota para o agente do WhatsApp', () => {
     expect(instrucaoForaDoPrazo('estudante', null, AGORA)).toBe('');
     expect(instrucaoForaDoPrazo('estudante', 'lixo', AGORA)).toBe('');
     expect(notaParaOAgente('estudante', '2027-01-31', AGORA)).not.toContain('escoladeespecializacao');
+  });
+});
+
+describe('link do WhatsApp no fim do roteiro (28/09/2026)', () => {
+  it('do cadastro da conta, em qualquer formato, com o Oi pronto', () => {
+    expect(linkDoWhatsapp('+55 46 9 9901-2001')).toBe('https://wa.me/5546999012001?text=Oi');
+    expect(linkDoWhatsapp('46999012001')).toBe('https://wa.me/5546999012001?text=Oi');
+    expect(linkDoWhatsapp('(46) 9 9938-5100')).toBe('https://wa.me/5546999385100?text=Oi');
+  });
+  it('sem número utilizável, o do recibo de hoje', () => {
+    expect(linkDoWhatsapp(null)).toBe('https://wa.me/5546999012001?text=Oi');
+    expect(linkDoWhatsapp('abc')).toBe('https://wa.me/5546999012001?text=Oi');
   });
 });

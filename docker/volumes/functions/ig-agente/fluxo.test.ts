@@ -43,7 +43,7 @@ describe('caminho feliz do diretor comercial (25/09/2026)', () => {
     const p4 = passo('pergunta_whatsapp', {}, { textoNovo: '46 9 9988-2268' });
     expect(p4).toMatchObject({
       // 25/09: no WhatsApp sai o RECIBO; o PDF vai quando a pessoa responde lá.
-      mensagens: ['Prontinho! Acabei de te mandar uma mensagem no WhatsApp, do número (46) 9 9901-2001. Manda um Oi por lá pra confirmar que é você que eu já te encaminho o portfólio 😉'],
+      mensagens: ['Prontinho! Acabei de te mandar uma mensagem no WhatsApp. Toca aqui pra abrir a conversa e manda um Oi pra confirmar que é você que eu já te encaminho o portfólio 😉\nhttps://wa.me/5546999012001?text=Oi'],
       proximaEtapa: 'whatsapp_enviado', telefone: '5546999882268', enviarWhatsapp: true,
     });
   });
@@ -303,7 +303,7 @@ describe('pergunta_interesse (o portfólio)', () => {
 
   it('"quero, meu zap é …" → captura na hora, sem pedir de novo', () => {
     expect(passo('pergunta_interesse', { intencao: 'aceita' }, { textoNovo: 'quero, meu zap é (46) 99988-2268' })).toMatchObject({
-      mensagens: [TEXTOS.confirmacaoWhatsapp], proximaEtapa: 'whatsapp_enviado', telefone: '5546999882268', enviarWhatsapp: true,
+      mensagens: [TEXTOS.confirmacaoWhatsapp()], proximaEtapa: 'whatsapp_enviado', telefone: '5546999882268', enviarWhatsapp: true,
     });
   });
 

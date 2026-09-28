@@ -22,7 +22,7 @@
 // AQUI: o texto é do comercial, não do modelo — o contrário do João do WhatsApp.
 // Módulo puro (sem banco, sem rede): cada passagem tem teste em fluxo.test.ts.
 import { avaliarConclusao, limiteFormatura } from "../crm-agente-sdr/elegibilidadeFormatura.ts";
-import { IG_WA_NUMERO_EXIBIDO } from "../_shared/igWhatsapp.ts";
+import { IG_WA_NUMERO_EXIBIDO, linkDoWhatsapp } from "../_shared/igWhatsapp.ts";
 
 export const LINK_ESCOLA = "https://escoladeespecializacao.ppgvet.com.br";
 /** A IA do direct se apresenta com este nome (decisão do Gustavo, 25/09/2026). */
@@ -80,6 +80,8 @@ export type ContextoFluxo = {
   situacaoSalva?: string | null;
   areaSalva?: string | null;
   dataSalva?: string | null;
+  /** Link do WhatsApp do recibo (wa.me), montado do cadastro da conta. */
+  linkWhatsapp?: string;
 };
 
 export type Passo = {
@@ -136,8 +138,10 @@ export const TEXTOS = {
   // 25/09/2026 (aprovada pelo Gustavo): o que sai no WhatsApp é o RECIBO, não o PDF — o
   // PDF vai quando a pessoa responde lá (ver _shared/igWhatsapp.ts). Esta frase é que
   // explica isso; sem ela o recibo sozinho não diz nada do portfólio.
-  confirmacaoWhatsapp:
-    `Prontinho! Acabei de te mandar uma mensagem no WhatsApp, do número ${IG_WA_NUMERO_EXIBIDO}. Manda um Oi por lá pra confirmar que é você que eu já te encaminho o portfólio 😉`,
+  // 28/09/2026: o número escrito à mão virou LINK que abre a conversa com o "Oi" pronto
+  // (Gustavo). O link vem do cadastro da conta (crm_whatsapp_accounts.numero_display).
+  confirmacaoWhatsapp: (link: string = linkDoWhatsapp(IG_WA_NUMERO_EXIBIDO)) =>
+    `Prontinho! Acabei de te mandar uma mensagem no WhatsApp. Toca aqui pra abrir a conversa e manda um Oi pra confirmar que é você que eu já te encaminho o portfólio 😉\n${link}`,
   // O recibo NÃO saiu (número sem WhatsApp, Meta recusou): a etapa volta para o pedido do
   // número, para a pessoa conferir. Nunca dizer "te mandei" sem ter mandado.
   whatsappNaoFoi: "Hmm, não consegui te chamar nesse número 🤔 Confere se é o seu WhatsApp com DDD e me manda de novo?",
@@ -237,9 +241,9 @@ function comResposta(c: Classificacao, depois: string[]): string[] {
   return resposta ? [resposta, ...depois] : depois;
 }
 
-function capturou(telefone: string): Passo {
+function capturou(telefone: string, linkWhatsapp?: string): Passo {
   return {
-    mensagens: [TEXTOS.confirmacaoWhatsapp],
+    mensagens: [TEXTOS.confirmacaoWhatsapp(linkWhatsapp)],
     proximaEtapa: "whatsapp_enviado",
     tentativas: 0,
     telefone,
@@ -292,7 +296,7 @@ function decidirPassoSemApresentacao(etapa: EtapaFluxo, c: Classificacao, ctx: C
 
   if (etapa === "pergunta_whatsapp") {
     const telefone = telefoneDe(c, ctx);
-    if (telefone) return capturou(telefone);
+    if (telefone) return capturou(telefone, ctx.linkWhatsapp);
     if (pareceNumeroInvalido(ctx.textoNovo)) {
       return { mensagens: [TEXTOS.telefoneInvalido], proximaEtapa: "pergunta_whatsapp", tentativas: ctx.tentativas + 1 };
     }
@@ -313,7 +317,7 @@ function decidirPassoSemApresentacao(etapa: EtapaFluxo, c: Classificacao, ctx: C
   if (etapa === "pergunta_interesse") {
     // Já mandou o número junto do "quero": captura na hora.
     const telefone = telefoneDe(c, ctx);
-    if (telefone && c.intencao !== "recusa") return capturou(telefone);
+    if (telefone && c.intencao !== "recusa") return capturou(telefone, ctx.linkWhatsapp);
     if (c.intencao === "aceita") {
       return { mensagens: [TEXTOS.pedirWhatsapp], proximaEtapa: "pergunta_whatsapp", tentativas: 0 };
     }

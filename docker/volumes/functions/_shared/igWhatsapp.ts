@@ -15,6 +15,19 @@ import { LINK_ESCOLA_GRATUITA } from "../crm-agente-sdr/escolaGratuita.ts";
 export const IG_WA_ACCOUNT_ID = "0a17bea3-869d-4a95-bbc7-d0a5755e5b05";
 export const IG_WA_NUMERO_EXIBIDO = "(46) 9 9901-2001";
 
+/**
+ * Link que abre a conversa com o número do recibo já com o "Oi" digitado — no fim do
+ * roteiro, no lugar do número escrito à mão (28/09/2026, Gustavo: a pessoa só toca em
+ * enviar, e o número vem do cadastro da conta, não do texto). Aceita "+55 46 9 9901-2001",
+ * "46999012001"… Sem número utilizável, cai no do recibo de hoje.
+ */
+export function linkDoWhatsapp(numeroDisplay: string | null | undefined): string {
+  let d = String(numeroDisplay ?? "").replace(/\D/g, "");
+  if (d.length === 10 || d.length === 11) d = `55${d}`;
+  if (d.length < 12) d = IG_WA_NUMERO_EXIBIDO.replace(/\D/g, "").replace(/^/, "55");
+  return `https://wa.me/${d}?text=Oi`;
+}
+
 export const IG_RECIBO_TEMPLATE = "comprovante_cadastro_utility";
 export const IG_RECIBO_IDIOMA = "pt_BR";
 
