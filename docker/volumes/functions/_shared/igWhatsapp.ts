@@ -9,6 +9,7 @@
 // ⚠️ O texto do recibo é FIXO (aprovado na Meta): só os três espaços mudam. Editar o
 // template o manda de volta para revisão, e ele pode voltar MARKETING.
 import { limiteFormatura } from "../crm-agente-sdr/elegibilidadeFormatura.ts";
+import { LINK_ESCOLA_GRATUITA } from "../crm-agente-sdr/escolaGratuita.ts";
 
 /** PPGVET Educação - Pós-graduação (46 9 9901-2001): GREEN, nome aprovado, recibo UTILIDADE. */
 export const IG_WA_ACCOUNT_ID = "0a17bea3-869d-4a95-bbc7-d0a5755e5b05";
@@ -101,16 +102,35 @@ export function notaParaOAgente(
  * em 26/09: a despedida saiu sem o link).
  */
 export function instrucaoForaDoPrazo(situacao: string | null, dataFormacao: string | null, agora: Date = new Date()): string {
-  if (situacao !== "estudante" || !/^\d{4}-\d{2}-\d{2}$/.test(String(dataFormacao ?? ""))) return "";
-  const conclusao = new Date(`${dataFormacao}T12:00:00Z`);
-  if (!(conclusao > limiteFormatura(agora))) return "";
-  const meses = Math.max(1, (conclusao.getUTCFullYear() - agora.getUTCFullYear()) * 12
-    + conclusao.getUTCMonth() - agora.getUTCMonth());
-  return "Ela ainda NÃO pode se matricular: a pós é lato sensu e exige a graduação concluída, e ela se forma"
-    + " depois do prazo da turma. Na sua PRÓXIMA resposta, com as suas palavras: (1) confirme que o portfólio"
-    + " é pra ela conhecer as pós com calma; (2) avise que a matrícula exige a graduação concluída, então por"
-    + " enquanto ainda não dá, e que vc a procura quando ela estiver terminando o curso — sem citar data-limite"
-    + ` nem prazo; (3) chame agendar_retorno com tipo="formatura" e meses=${meses}, e na despedida deixe o`
-    + " presente da Escola de Especialização gratuita pra ela ir aproveitando enquanto termina o curso."
-    + " Nenhuma reunião foi oferecida: NÃO fale de reunião, horário nem aula.";
+  if (mesesAteFormatura(situacao, dataFormacao, agora) == null) return "";
+  // 28/09/2026: o João NEM entra nessa conversa ("quando a pessoa não pode ir para a
+  // reunião, a IA do WhatsApp nem deveria iniciar o agendamento, só enviar o portfólio e
+  // pausar" — Gustavo). A nota fica para quem abrir a conversa depois (time ou IA na volta).
+  return "Ela se forma DEPOIS do prazo da turma: não pode ir para a reunião agora. O sistema já mandou o"
+    + " portfólio e o aviso (a pós exige a graduação concluída) com a Escola de Especialização gratuita,"
+    + " agendou o retorno para perto da formatura e PAUSOU a IA nesta conversa. Não ofereça reunião, horário"
+    + " nem aula.";
 }
+
+/**
+ * Meses até a formatura de quem se forma DEPOIS da data-limite de matrícula (a régua do
+ * João); null = pode ir para a reunião (formado, forma até o limite ou sem data).
+ */
+export function mesesAteFormatura(situacao: string | null, dataFormacao: string | null, agora: Date = new Date()): number | null {
+  if (situacao !== "estudante" || !/^\d{4}-\d{2}-\d{2}$/.test(String(dataFormacao ?? ""))) return null;
+  const conclusao = new Date(`${dataFormacao}T12:00:00Z`);
+  if (!(conclusao > limiteFormatura(agora))) return null;
+  return Math.max(1, (conclusao.getUTCFullYear() - agora.getUTCFullYear()) * 12
+    + conclusao.getUTCMonth() - agora.getUTCMonth());
+}
+
+/**
+ * O que o sistema manda no WhatsApp, depois do PDF, para quem ainda não pode fazer a pós
+ * (26/09: "avisar e deixar por enquanto o link da Escola"; 28/09: sem o João, só o
+ * portfólio e a pausa). Texto fixo — nenhuma IA escreve.
+ */
+export const IG_AVISO_FORA_DO_PRAZO =
+  "Como você ainda está na graduação, a pós só pode começar depois da sua formatura (ela exige a graduação"
+  + " concluída). A gente te procura quando você estiver terminando o curso! 😉\n\nEnquanto isso, aproveita a"
+  + " nossa Escola de Especialização gratuita, com mais de 10 cursos, além de artigos, e-books e podcasts: "
+  + LINK_ESCOLA_GRATUITA;

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { IG_PORTFOLIO_URL, IG_WA_ACCOUNT_ID } from '../_shared/igWhatsapp';
+import { IG_AVISO_FORA_DO_PRAZO, IG_PORTFOLIO_URL, IG_WA_ACCOUNT_ID } from '../_shared/igWhatsapp';
 import { jidsDoLead, prepararPortfolioInstagram } from './portfolioInstagram';
 
 // Banco simulado: só o que o módulo toca (a RPC, a memória do agente e a devolução).
@@ -61,6 +61,43 @@ describe('cadastro do agente para quem veio do Instagram (caso Jucileia, 28/09/2
   it('as duas grafias do número', () => {
     expect(jidsDoLead('5594991964725@s.whatsapp.net')).toEqual(['5594991964725@s.whatsapp.net', '559491964725@s.whatsapp.net']);
     expect(jidsDoLead('559491964725@s.whatsapp.net')).toEqual(['5594991964725@s.whatsapp.net', '559491964725@s.whatsapp.net']);
+  });
+});
+
+describe('forma DEPOIS do prazo: portfólio, aviso e pausa — o João nem começa (28/09/2026)', () => {
+  const ESTUDANTE_LONGE = { ...PEND, situacao: 'estudante', data_formacao: '2030-06-30' };
+
+  it('pausa o agente ANTES do repasse, agenda o retorno e manda o PDF e depois o aviso com a Escola', async () => {
+    const { admin, escritas } = banco(ESTUDANTE_LONGE);
+    const envio = await prepararPortfolioInstagram(admin, entrada(enviar));
+    const cadastro = escritas.find((w) => w.tabela === 'cliente_ppg_leads_sdr');
+    expect(cadastro?.payload).toMatchObject({ fonte: 'Instagram', pausa_ia: true });
+    expect(Date.parse(cadastro!.payload.pausa_ia_ate)).toBeGreaterThan(Date.now() + 300 * 86_400_000);
+    expect(admin.rpc).toHaveBeenCalledWith('crm_agente_timer_retorno', expect.objectContaining({
+      p_telefone: '5546999882268', p_tipo: 'formatura', p_meses: 12,
+    }));
+    expect(escritas[0].payload.conversation_history.content).toContain('PAUSOU a IA');
+    await envio;
+    expect(enviar.mock.calls.map(([c]: any) => c.tipo)).toEqual(['document', 'text']);
+    expect(enviar.mock.calls[1][0].conteudo).toBe(IG_AVISO_FORA_DO_PRAZO);
+    expect(IG_AVISO_FORA_DO_PRAZO).toContain('https://escoladeespecializacao.ppgvet.com.br');
+  });
+
+  it('já tinha cadastro no SDR: só liga a pausa nele', async () => {
+    const { admin, escritas } = banco(ESTUDANTE_LONGE, null, true);
+    await prepararPortfolioInstagram(admin, entrada(enviar));
+    expect(escritas.find((w) => w.tabela === 'cliente_ppg_leads_sdr')).toMatchObject({
+      op: 'update', payload: { pausa_ia: true },
+    });
+  });
+
+  it('formado ou dentro do prazo: sem pausa, sem aviso — o João atende', async () => {
+    const { admin, escritas } = banco(PEND);
+    const envio = await prepararPortfolioInstagram(admin, entrada(enviar));
+    await envio;
+    expect(escritas.find((w) => w.tabela === 'cliente_ppg_leads_sdr')?.payload.pausa_ia).toBeUndefined();
+    expect(admin.rpc).not.toHaveBeenCalledWith('crm_agente_timer_retorno', expect.anything());
+    expect(enviar).toHaveBeenCalledTimes(1);
   });
 });
 

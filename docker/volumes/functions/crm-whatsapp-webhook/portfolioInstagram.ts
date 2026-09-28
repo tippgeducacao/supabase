@@ -16,10 +16,12 @@
 // Envio que falha devolve a pendência: a próxima mensagem da pessoa tenta de novo.
 // Mapa: docs/Instagram (IA + Chat).md
 import {
+  IG_AVISO_FORA_DO_PRAZO,
   IG_PORTFOLIO_ARQUIVO,
   IG_PORTFOLIO_LEGENDA,
   IG_PORTFOLIO_URL,
   IG_WA_ACCOUNT_ID,
+  mesesAteFormatura,
   notaParaOAgente,
 } from "../_shared/igWhatsapp.ts";
 
@@ -58,19 +60,34 @@ export function jidsDoLead(remotejid: string): string[] {
  * (`criarLead` do crm-agente-sdr: iniciar_atendimento e follow-up pelos defaults), com o
  * nome do lead e a fonte. Best-effort: nunca derruba o inbound.
  */
+export type PausaDoAgente = { ate: string; motivo: string };
+
 // deno-lint-ignore no-explicit-any
-export async function garantirLeadDoAgente(admin: any, remotejid: string, pend: Pendencia): Promise<void> {
+export async function garantirLeadDoAgente(
+  // deno-lint-ignore no-explicit-any
+  admin: any,
+  remotejid: string,
+  pend: Pendencia,
+  pausa: PausaDoAgente | null = null,
+): Promise<void> {
+  const camposDaPausa = pausa ? { pausa_ia: true, pausa_ia_ate: pausa.ate, motivo_pausa: pausa.motivo } : {};
   try {
     const { data: existe } = await admin.from("cliente_ppg_leads_sdr").select("id")
       .in("remotejid", jidsDoLead(remotejid)).limit(1);
-    if (Array.isArray(existe) && existe.length) return;
+    if (Array.isArray(existe) && existe.length) {
+      if (pausa) {
+        const { error } = await admin.from("cliente_ppg_leads_sdr").update(camposDaPausa).in("remotejid", jidsDoLead(remotejid));
+        if (error) console.error("[crm-whatsapp-webhook] portfólio do Instagram: pausa do agente falhou:", error.message);
+      }
+      return;
+    }
     let nome: string | null = null;
     if (pend.lead_id) {
       const { data: lead } = await admin.from("leads").select("nome").eq("id", pend.lead_id).maybeSingle();
       nome = String(lead?.nome ?? "").trim() || null;
     }
     const { error } = await admin.from("cliente_ppg_leads_sdr").upsert(
-      { remotejid, timestamp: new Date().toISOString(), nome, fonte: "Instagram" },
+      { remotejid, timestamp: new Date().toISOString(), nome, fonte: "Instagram", ...camposDaPausa },
       { onConflict: "remotejid", ignoreDuplicates: true },
     );
     if (error) console.error("[crm-whatsapp-webhook] portfólio do Instagram: cadastro do agente falhou:", error.message);
@@ -107,7 +124,27 @@ export async function prepararPortfolioInstagram(admin: any, e: Entrada): Promis
     timestamp: antes,
   });
   if (erroNota) console.error("[crm-whatsapp-webhook] portfólio do Instagram: nota do agente falhou:", erroNota.message);
-  await garantirLeadDoAgente(admin, e.remotejid, pend);
+
+  // Quem se forma DEPOIS do prazo não pode ir para a reunião: "a IA do WhatsApp nem deveria
+  // iniciar o agendamento, só enviar o portfólio e pausar" (Gustavo, 28/09/2026). A pausa
+  // vai ANTES do repasse (o João lê e sai calado), até perto da formatura, junto com o
+  // retorno que o próprio João agendaria (crm_agente_timer_retorno, teto de 12 meses).
+  const meses = mesesAteFormatura(pend.situacao, pend.data_formacao);
+  const foraDoPrazo = meses != null;
+  const mesesDaPausa = foraDoPrazo ? Math.min(meses, 12) : 0;
+  await garantirLeadDoAgente(admin, e.remotejid, pend, foraDoPrazo
+    ? {
+      ate: new Date(Date.now() + mesesDaPausa * 30 * 86_400_000).toISOString(),
+      motivo: "Instagram: forma depois do prazo — portfólio e aviso enviados, IA pausada até perto da formatura",
+    }
+    : null);
+  if (foraDoPrazo) {
+    const { error: erroRetorno } = await admin.rpc("crm_agente_timer_retorno", {
+      p_telefone: e.telefone, p_dias: null, p_tipo: "formatura", p_meses: mesesDaPausa,
+      p_motivo: "pediu o portfólio no Instagram; ainda na graduação",
+    });
+    if (erroRetorno) console.error("[crm-whatsapp-webhook] portfólio do Instagram: retorno da formatura falhou:", erroRetorno.message);
+  }
 
   return (async () => {
     let resultado: ResultadoEnvio;
@@ -128,6 +165,17 @@ export async function prepararPortfolioInstagram(admin: any, e: Entrada): Promis
     }
     if (resultado.ok) {
       console.log(`[crm-whatsapp-webhook] portfólio do Instagram enviado para ${e.telefone} (igsid ${pend.igsid})`);
+      if (foraDoPrazo) {
+        const aviso = await e.enviar({
+          wa_account_id: e.accountId,
+          telefone: e.telefone,
+          tipo: "text",
+          conteudo: IG_AVISO_FORA_DO_PRAZO,
+          lead_id: pend.lead_id ?? e.leadId ?? undefined,
+          oportunidade_id: pend.oportunidade_id ?? e.oportunidadeId ?? undefined,
+        }).catch((err) => ({ ok: false, erro: err instanceof Error ? err.message : String(err) }));
+        if (!aviso.ok) console.error(`[crm-whatsapp-webhook] aviso de fora do prazo NÃO saiu para ${e.telefone}: ${aviso.erro ?? "?"}`);
+      }
       return;
     }
     console.error(`[crm-whatsapp-webhook] portfólio do Instagram NÃO saiu para ${e.telefone}: ${resultado.erro ?? "?"} — pendência devolvida`);
