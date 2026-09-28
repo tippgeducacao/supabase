@@ -7,6 +7,10 @@
 //   2. grava a nota [INSTAGRAM] na memória do agente, datada 1 s antes da mensagem da
 //      pessoa (a nota fica entre o recibo e a resposta; se ficasse depois, o histórico
 //      terminaria num turno do assistente);
+//   2b. garante o cadastro do agente (cliente_ppg_leads_sdr): sem ele, o número (persona
+//      qualificador) sai calado com skip 'sem_iniciar_atendimento' — o lead recebia o PDF e
+//      mais nada (caso Jucileia, 27/09/2026: "Como funciona isso", "Olá", "Boa noite" sem
+//      resposta). O lead do Instagram nasce no CRM (ig_whatsapp_capturar), não no SDR;
 //   3. devolve o ENVIO do PDF para o chamador rodar em segundo plano — o webhook não pode
 //      segurar a Meta, e o 1º upload do PDF (26 MB) leva alguns segundos.
 // Envio que falha devolve a pendência: a próxima mensagem da pessoa tenta de novo.
@@ -41,6 +45,40 @@ type Entrada = {
   enviar: (corpo: Record<string, unknown>) => Promise<ResultadoEnvio>;
 };
 
+/** "5594991964725@s.whatsapp.net" → com e sem o 9º dígito (o cadastro pode estar em qualquer um). */
+export function jidsDoLead(remotejid: string): string[] {
+  const dig = String(remotejid ?? "").split("@")[0].replace(/\D/g, "");
+  const m = dig.match(/^(55\d{2})(9?)(\d{8})$/);
+  if (!m) return [`${dig}@s.whatsapp.net`];
+  return [...new Set([`${m[1]}9${m[3]}`, `${m[1]}${m[3]}`])].map((n) => `${n}@s.whatsapp.net`);
+}
+
+/**
+ * Cadastro do agente para quem veio do Instagram (28/09/2026). Nasce como o do anúncio
+ * (`criarLead` do crm-agente-sdr: iniciar_atendimento e follow-up pelos defaults), com o
+ * nome do lead e a fonte. Best-effort: nunca derruba o inbound.
+ */
+// deno-lint-ignore no-explicit-any
+export async function garantirLeadDoAgente(admin: any, remotejid: string, pend: Pendencia): Promise<void> {
+  try {
+    const { data: existe } = await admin.from("cliente_ppg_leads_sdr").select("id")
+      .in("remotejid", jidsDoLead(remotejid)).limit(1);
+    if (Array.isArray(existe) && existe.length) return;
+    let nome: string | null = null;
+    if (pend.lead_id) {
+      const { data: lead } = await admin.from("leads").select("nome").eq("id", pend.lead_id).maybeSingle();
+      nome = String(lead?.nome ?? "").trim() || null;
+    }
+    const { error } = await admin.from("cliente_ppg_leads_sdr").upsert(
+      { remotejid, timestamp: new Date().toISOString(), nome, fonte: "Instagram" },
+      { onConflict: "remotejid", ignoreDuplicates: true },
+    );
+    if (error) console.error("[crm-whatsapp-webhook] portfólio do Instagram: cadastro do agente falhou:", error.message);
+  } catch (err) {
+    console.error("[crm-whatsapp-webhook] portfólio do Instagram: cadastro do agente falhou:", err instanceof Error ? err.message : String(err));
+  }
+}
+
 // deno-lint-ignore no-explicit-any
 export async function prepararPortfolioInstagram(admin: any, e: Entrada): Promise<Promise<void> | null> {
   if (e.accountId !== IG_WA_ACCOUNT_ID) return null;
@@ -63,6 +101,7 @@ export async function prepararPortfolioInstagram(admin: any, e: Entrada): Promis
     timestamp: antes,
   });
   if (erroNota) console.error("[crm-whatsapp-webhook] portfólio do Instagram: nota do agente falhou:", erroNota.message);
+  await garantirLeadDoAgente(admin, e.remotejid, pend);
 
   return (async () => {
     let resultado: ResultadoEnvio;

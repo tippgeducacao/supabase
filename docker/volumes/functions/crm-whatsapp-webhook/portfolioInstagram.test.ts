@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { IG_PORTFOLIO_URL, IG_WA_ACCOUNT_ID } from '../_shared/igWhatsapp';
-import { prepararPortfolioInstagram } from './portfolioInstagram';
+import { jidsDoLead, prepararPortfolioInstagram } from './portfolioInstagram';
 
 // Banco simulado: só o que o módulo toca (a RPC, a memória do agente e a devolução).
-function banco(pendencia: Record<string, unknown> | null, erroRpc: string | null = null) {
+function banco(pendencia: Record<string, unknown> | null, erroRpc: string | null = null, jaNoAgente = false) {
   const escritas: { tabela: string; op: string; payload: any; filtros: Record<string, unknown> }[] = [];
   const admin = {
     rpc: vi.fn(async () => ({ data: pendencia ? [pendencia] : [], error: erroRpc ? { message: erroRpc } : null })),
@@ -12,7 +12,16 @@ function banco(pendencia: Record<string, unknown> | null, erroRpc: string | null
       q.insert = async (payload: any) => { escritas.push({ tabela, op: 'insert', payload, filtros: {} }); return { error: null }; };
       q.update = (payload: any) => { q.op = 'update'; q.payload = payload; return q; };
       q.eq = (k: string, v: unknown) => { q.filtros[k] = v; return q; };
-      q.then = (ok: any) => { escritas.push({ tabela, op: q.op, payload: q.payload, filtros: q.filtros }); return Promise.resolve({ error: null }).then(ok); };
+      q.in = (k: string, v: unknown) => { q.filtros[k] = v; return q; };
+      q.select = () => { q.op = 'select'; return q; };
+      q.limit = () => q;
+      q.maybeSingle = async () => ({ data: tabela === 'leads' ? { nome: 'Jucileia Sousa' } : null, error: null });
+      q.upsert = async (payload: any, opcoes: any) => { escritas.push({ tabela, op: 'upsert', payload, filtros: opcoes }); return { error: null }; };
+      q.then = (ok: any) => {
+        if (q.op === 'select') return Promise.resolve({ data: jaNoAgente ? [{ id: 'sdr-1' }] : [], error: null }).then(ok);
+        escritas.push({ tabela, op: q.op, payload: q.payload, filtros: q.filtros });
+        return Promise.resolve({ error: null }).then(ok);
+      };
       return q;
     },
   };
@@ -27,6 +36,30 @@ const entrada = (enviar: any, extra = {}) => ({
 
 let enviar: ReturnType<typeof vi.fn>;
 beforeEach(() => { enviar = vi.fn(async () => ({ ok: true })); });
+
+describe('cadastro do agente para quem veio do Instagram (caso Jucileia, 28/09/2026)', () => {
+  it('sem cadastro: cria, com o nome do lead e a fonte — senão o João sai calado', async () => {
+    const { admin, escritas } = banco(PEND);
+    await prepararPortfolioInstagram(admin, entrada(enviar));
+    const cadastro = escritas.find((w) => w.tabela === 'cliente_ppg_leads_sdr');
+    expect(cadastro).toMatchObject({
+      op: 'upsert',
+      payload: { remotejid: '5546999882268@s.whatsapp.net', nome: 'Jucileia Sousa', fonte: 'Instagram' },
+      filtros: { onConflict: 'remotejid', ignoreDuplicates: true },
+    });
+  });
+
+  it('já tem cadastro (com ou sem o 9): não mexe', async () => {
+    const { admin, escritas } = banco(PEND, null, true);
+    await prepararPortfolioInstagram(admin, entrada(enviar));
+    expect(escritas.filter((w) => w.tabela === 'cliente_ppg_leads_sdr')).toEqual([]);
+  });
+
+  it('as duas grafias do número', () => {
+    expect(jidsDoLead('5594991964725@s.whatsapp.net')).toEqual(['5594991964725@s.whatsapp.net', '559491964725@s.whatsapp.net']);
+    expect(jidsDoLead('559491964725@s.whatsapp.net')).toEqual(['5594991964725@s.whatsapp.net', '559491964725@s.whatsapp.net']);
+  });
+});
 
 describe('portfólio do Instagram: a 1ª resposta no WhatsApp leva o PDF', () => {
   it('outro número da empresa: nem consulta o banco', async () => {
