@@ -577,7 +577,12 @@ async function cMidia(input: any, ctx: Ctx) {
       "'gasto', 'gasto_hoje' e 'gasto_ontem' SOMAM Meta + Google + TikTok em QUALQUER mês consultado — o valor é recalculado das três plataformas, inclusive para meses anteriores; 'por_plataforma' traz a quebra do mês. Só respostas antigas deste chat, dadas antes de 28/09/2026, traziam apenas o Meta. " +
       "Cada linha de 'por_conta' tem 'plataforma': no META a 'conta' é o BM (o nome carrega o rótulo); no GOOGLE e no TIKTOK é a conta de anúncio da plataforma, não um BM. " +
       "Gasto é líquido (sem imposto). 'Hoje' é parcial; 'ontem' é o dia fechado. " +
-      "O orçado é comparado com o TOTAL das três plataformas. " +
+      "O orçado é comparado com o TOTAL das três plataformas. 'orcado' = 'orcado_pos' + 'orcado_escola'. Desde 28/09/2026 'orcado_pos' é a soma, por pós, " +
+      "das verbas projetadas de Meta + Google + TikTok lançadas em Metas por Pós, com a quebra em 'orcado_pos_meta', 'orcado_pos_google' e 'orcado_pos_tiktok' " +
+      "(inclui os buckets institucionais Branding PPG/Corporativo). A Escola é só Meta. Orçado POR PLATAFORMA (o número que o card mostra): " +
+      "Meta = 'orcado_pos_meta' + 'orcado_escola'; Google = 'orcado_pos_google'; TikTok = 'orcado_pos_tiktok'. O gasto do META em 'por_plataforma' já inclui " +
+      "as campanhas da Escola — nunca o compare só com 'orcado_pos_meta'. Se a verba de uma plataforma vier 0 num mês, NÃO havia verba projetada dela " +
+      "— não diga que o orçado dela foi zero nem que ela estourou. " +
       "⚠️ 'orcado' é o teto da COMPETÊNCIA pedida (herda a última competência <= o mês). A primeira competência cadastrada é agosto/2026: " +
       "para julho/2026 e antes ele vem 0 porque NÃO HÁ ORÇADO DEFINIDO naquele mês — nunca diga 'o orçado foi R$ 0,00' nem trate como teto zero; " +
       "diga que não há orçado cadastrado para esse mês e compare só o gasto.",
