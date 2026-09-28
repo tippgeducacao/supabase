@@ -45,6 +45,7 @@ export type AulaParaPrompt = {
 export type EstadoAula = "data" | "amanha" | "hoje" | "agora" | "encerrada";
 
 const FUSO = "America/Sao_Paulo";
+// ⚠️ A tela usa a mesma régua (src/components/crm-comercial/aulas/modeloAula.ts): mudou aqui, mude lá.
 const DURACAO_AULA_MS = 2 * 60 * 60_000;
 
 function dataLocal(d: Date): string {
