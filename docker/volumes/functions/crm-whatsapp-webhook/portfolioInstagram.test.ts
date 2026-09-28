@@ -15,7 +15,10 @@ function banco(pendencia: Record<string, unknown> | null, erroRpc: string | null
       q.in = (k: string, v: unknown) => { q.filtros[k] = v; return q; };
       q.select = () => { q.op = 'select'; return q; };
       q.limit = () => q;
-      q.maybeSingle = async () => ({ data: tabela === 'leads' ? { nome: 'Jucileia Sousa' } : null, error: null });
+      q.maybeSingle = async () => ({
+        data: tabela === 'leads' ? { nome: 'Jucileia Sousa' } : tabela === 'ig_conversa_ia' ? { area: 'agronomia' } : null,
+        error: null,
+      });
       q.upsert = async (payload: any, opcoes: any) => { escritas.push({ tabela, op: 'upsert', payload, filtros: opcoes }); return { error: null }; };
       q.then = (ok: any) => {
         if (q.op === 'select') return Promise.resolve({ data: jaNoAgente ? [{ id: 'sdr-1' }] : [], error: null }).then(ok);
@@ -84,7 +87,9 @@ describe('portfólio do Instagram: a 1ª resposta no WhatsApp leva o PDF', () =>
       payload: { remotejid: '5546999882268@s.whatsapp.net', timestamp: new Date((1790370000 - 1) * 1000).toISOString() },
     });
     expect(escritas[0].payload.conversation_history).toMatchObject({ role: 'assistant' });
-    expect(escritas[0].payload.conversation_history.content).toMatch(/^\[INSTAGRAM\].*concluiu a graduação/);
+    expect(escritas[0].payload.conversation_history.content).toMatch(/^\[INSTAGRAM\].*concluiu a graduação em agronomia\./);
+    // O "Veterinária e Agro" do recibo não é curso escolhido (caso Jucileia, 28/09/2026).
+    expect(escritas[0].payload.conversation_history.content).toContain('não procure curso por ele');
     await envio;
     expect(enviar).toHaveBeenCalledWith(expect.objectContaining({
       wa_account_id: IG_WA_ACCOUNT_ID, telefone: '5546999882268', tipo: 'document',

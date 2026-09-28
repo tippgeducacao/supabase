@@ -95,9 +95,15 @@ export async function prepararPortfolioInstagram(admin: any, e: Entrada): Promis
   if (!pend?.igsid) return null;
 
   const antes = new Date((e.timestampSeg - 1) * 1000).toISOString();
+  // A graduação que a pessoa disse no direct vai na nota (o João não precisa perguntar de novo).
+  const { data: conversaIg } = await admin.from("ig_conversa_ia").select("area")
+    .eq("conta_id", pend.conta_id).eq("igsid", pend.igsid).maybeSingle();
   const { error: erroNota } = await admin.from("cliente_ppg_mensagens_sdr").insert({
     remotejid: e.remotejid,
-    conversation_history: { role: "assistant", content: notaParaOAgente(pend.situacao, pend.data_formacao) },
+    conversation_history: {
+      role: "assistant",
+      content: notaParaOAgente(pend.situacao, pend.data_formacao, new Date(), conversaIg?.area ?? null),
+    },
     timestamp: antes,
   });
   if (erroNota) console.error("[crm-whatsapp-webhook] portfólio do Instagram: nota do agente falhou:", erroNota.message);

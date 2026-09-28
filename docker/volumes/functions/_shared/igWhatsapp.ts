@@ -63,15 +63,24 @@ export function componentesDoRecibo(nome: string, area: string, data: string) {
  * assistant). Documento mandado pelo sistema não entra sozinho na memória dele — sem a
  * nota, a IA não saberia que o PDF saiu nem de onde a pessoa veio.
  */
-export function notaParaOAgente(situacao: string | null, dataFormacao: string | null, agora: Date = new Date()): string {
+export function notaParaOAgente(
+  situacao: string | null,
+  dataFormacao: string | null,
+  agora: Date = new Date(),
+  area: string | null = null,
+): string {
+  const em = area ? ` em ${area}` : "";
   const quem = situacao === "formado"
-    ? "Disse que já concluiu a graduação."
+    ? `Disse que já concluiu a graduação${em}.`
     : situacao === "estudante"
-    ? `Disse que ainda está na graduação${dataFormacao ? ` e se forma em ${dataFormacao.slice(5, 7)}/${dataFormacao.slice(0, 4)}` : ""}.`
+    ? `Disse que ainda está na graduação${em}${dataFormacao ? ` e se forma em ${dataFormacao.slice(5, 7)}/${dataFormacao.slice(0, 4)}` : ""}.`
     : "";
   return [
     "[INSTAGRAM] Esta pessoa veio do direct do Instagram da PPGVET: pediu o portfólio das pós-graduações e passou este WhatsApp.",
     quem,
+    // Caso Jucileia (28/09/2026): o João procurou um curso chamado "Veterinária e Agro" (o
+    // texto do recibo), não achou e abriu com "a gente não tem uma pós chamada assim".
+    "O \"pós-graduação em …\" do recibo é texto padrão: ela NÃO escolheu um curso com esse nome — não procure curso por ele; descubra a área de interesse.",
     `O sistema está enviando agora o portfólio em PDF ("${IG_PORTFOLIO_ARQUIVO}"). Não reenvie o portfólio; siga a conversa a partir daqui.`,
     instrucaoForaDoPrazo(situacao, dataFormacao, agora),
   ].filter(Boolean).join(" ");

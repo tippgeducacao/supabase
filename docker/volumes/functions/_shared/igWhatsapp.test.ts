@@ -42,6 +42,12 @@ describe('nota para o agente do WhatsApp', () => {
     expect(notaParaOAgente(null, null)).not.toContain('Disse');
   });
 
+  it('a graduação dita no direct entra na nota; o texto do recibo não é curso (28/09)', () => {
+    expect(notaParaOAgente('formado', null, new Date(), 'agronomia')).toContain('concluiu a graduação em agronomia.');
+    expect(notaParaOAgente('estudante', '2027-07-31', new Date(), 'zootecnia')).toContain('na graduação em zootecnia e se forma em 07/2027');
+    expect(notaParaOAgente('formado', null)).toContain('não procure curso por ele');
+  });
+
   // Relógio fixo: a régua do João (limiteFormatura) em 26/09/2026 é 31/01/2027.
   const AGORA = new Date('2026-09-26T12:00:00Z');
 
