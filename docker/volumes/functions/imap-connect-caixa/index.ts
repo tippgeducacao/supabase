@@ -6,6 +6,11 @@
 // `created_by`, e a visibilidade segue a regra de caixa compartilhada/privada.
 //
 // `dry_run: true` só testa e devolve o diagnóstico — é o "Testar conexão" da tela.
+//
+// `caixa_id` = EDITAR a conexão de uma caixa que já existe (28/09/2026, depois da migração
+// de cPanel que deixou as caixas lendo o servidor antigo). Só quem GERE a caixa
+// (`email_caixa_can_manage`) edita; senha em branco reaproveita a guardada; nome,
+// privacidade e setor não mudam por aqui.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { cifrar, chaveDoAmbiente } from '../_shared/imap/cripto.ts';
 import { abrirImap } from '../_shared/imap/conexao.ts';
@@ -16,7 +21,8 @@ import {
   PASTAS_LIXEIRA,
   PASTAS_SPAM,
 } from '../_shared/imap/client.ts';
-import { abrirSmtp, classificarErro } from '../_shared/imap/caixa.ts';
+import { abrirSmtp, carregarConfig, classificarErro, senhaDaConfig } from '../_shared/imap/caixa.ts';
+import { resolvedorDaPlataforma, verificarServidorDoDominio } from '../_shared/imap/servidorDoDominio.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -47,12 +53,52 @@ Deno.serve(async (req) => {
     const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
 
     const body = await req.json();
-    const email_caixa = String(body.email_caixa || '').trim().toLowerCase();
+
+    // ── Edição: a caixa manda, não o corpo do pedido ─────────────────────────
+    const caixaIdEdicao = body.caixa_id ? String(body.caixa_id) : null;
+    let caixaEdicao: { id: string; email_caixa: string; created_by: string | null } | null = null;
+    let configEdicao: Awaited<ReturnType<typeof carregarConfig>> | null = null;
+    if (caixaIdEdicao) {
+      const { data: c } = await admin
+        .from('email_caixas_conectadas')
+        .select('id, email_caixa, provider, created_by')
+        .eq('id', caixaIdEdicao)
+        .maybeSingle();
+      if (!c || c.provider !== 'imap') throw new Error('Caixa IMAP não encontrada.');
+      // Mesma régua da RLS: em caixa privada só o dono; nas compartilhadas, dono,
+      // admin/diretor e chefe do setor. A tela esconde o botão, mas quem decide é aqui.
+      const { data: pode, error: erroPode } = await admin.rpc('email_caixa_can_manage', {
+        _caixa_id: c.id, _user_id: user.id,
+      });
+      if (erroPode || pode !== true) throw new Error('Você não pode editar a conexão desta caixa.');
+      caixaEdicao = c;
+      configEdicao = await carregarConfig(admin, c.id);
+    }
+
+    const email_caixa = caixaEdicao
+      ? String(caixaEdicao.email_caixa).trim().toLowerCase()
+      : String(body.email_caixa || '').trim().toLowerCase();
     const nome_exibicao = String(body.nome_exibicao || '').trim();
-    const senha = String(body.senha || '');
     const usuario = String(body.usuario || email_caixa).trim();
     const imap_host = String(body.imap_host || '').trim();
     const smtp_host = String(body.smtp_host || '').trim();
+    // Senha em branco na edição = a que já está guardada (quem só troca o servidor não
+    // precisa redigitar — e muitas vezes nem sabe de cabeça).
+    // ⚠️ SÓ para o DONO, ou sem trocar de servidor. A senha guardada é enviada ao host
+    // informado aqui: se admin/chefe de setor (que gerem caixas compartilhadas alheias)
+    // pudesse apontar o host para uma máquina própria com a senha em branco, o sistema
+    // entregaria a senha de outra pessoa. O dono já sabe a própria senha.
+    const mesmosServidores = !!configEdicao
+      && configEdicao.imap_host.trim().toLowerCase() === imap_host.toLowerCase()
+      && configEdicao.smtp_host.trim().toLowerCase() === smtp_host.toLowerCase();
+    const podeReusarSenha = !!configEdicao && (caixaEdicao?.created_by === user.id || mesmosServidores);
+    let senha = String(body.senha || '');
+    if (!senha && configEdicao) {
+      if (!podeReusarSenha) {
+        throw new Error('Para trocar o servidor de uma caixa que não é sua, digite a senha da caixa.');
+      }
+      senha = await senhaDaConfig(configEdicao);
+    }
     const imap_port = Number(body.imap_port || 993);
     const smtp_port = Number(body.smtp_port || 465);
     const imap_tls = body.imap_tls === 'starttls' ? 'starttls' : 'ssl';
@@ -62,7 +108,7 @@ Deno.serve(async (req) => {
     if (!email_caixa || !imap_host || !smtp_host || !senha) {
       throw new Error('Campos obrigatórios: email_caixa, imap_host, smtp_host, senha.');
     }
-    if (!dryRun && !nome_exibicao) throw new Error('Informe o nome de exibição da caixa.');
+    if (!dryRun && !caixaEdicao && !nome_exibicao) throw new Error('Informe o nome de exibição da caixa.');
 
     // Caixa já existe? Repetir o UNIQUE em erro de banco daria uma mensagem feia.
     const { data: existente } = await admin
@@ -70,7 +116,7 @@ Deno.serve(async (req) => {
       .select('id, ativo, provider')
       .eq('email_caixa', email_caixa)
       .maybeSingle();
-    if (existente && existente.ativo && !dryRun) {
+    if (existente && existente.ativo && !dryRun && !caixaEdicao) {
       throw new Error('Esta caixa já está conectada.');
     }
 
@@ -101,6 +147,22 @@ Deno.serve(async (req) => {
     const smtp = await abrirSmtp({ smtp_host, smtp_port, smtp_tls, usuario }, senha);
     await smtp.fechar();
 
+    // Numeração guardada × a do servidor que respondeu agora. Só informa a tela: quem
+    // AGE sobre isso é o sync (ver o bloco de gravação abaixo).
+    const { data: configAnterior } = existente
+      ? await admin
+        .from('email_caixa_imap_config')
+        .select('uid_validity')
+        .eq('caixa_id', existente.id)
+        .maybeSingle()
+      : { data: null };
+    const servidorRenumerou = !!configAnterior?.uid_validity
+      && Number(configAnterior.uid_validity) !== Number(estado.uidValidity);
+
+    // O domínio entrega e-mail no servidor que está sendo cadastrado? Foi o que
+    // faltou perceber na migração de cPanel de 28/09/2026.
+    const alertaServidor = await verificarServidorDoDominio(email_caixa, imap_host, resolvedorDaPlataforma());
+
     const diagnostico = {
       ok: true,
       pastas: pastas.map((p) => p.nome),
@@ -113,6 +175,8 @@ Deno.serve(async (req) => {
       aviso: pastaEnviados
         ? null
         : 'Não achei a pasta de Enviados nesse servidor. O envio vai funcionar, mas não ficará registrado nos Enviados do webmail.',
+      servidor_renumerou: servidorRenumerou,
+      alerta_servidor: alertaServidor,
     };
 
     if (dryRun) return responder(diagnostico);
@@ -121,7 +185,21 @@ Deno.serve(async (req) => {
     const senhaCifrada = await cifrar(senha, await chaveDoAmbiente());
 
     let caixaId: string;
-    if (existente) {
+    if (caixaEdicao) {
+      // Editar a conexão não mexe em nome, privacidade nem setor — só zera o estado de
+      // saúde para o próximo sync reavaliar do zero.
+      const { error } = await admin
+        .from('email_caixas_conectadas')
+        .update({
+          last_sync_error: null,
+          alerta_conexao: alertaServidor,
+          alerta_verificado_em: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', caixaEdicao.id);
+      if (error) throw new Error(error.message);
+      caixaId = caixaEdicao.id;
+    } else if (existente) {
       // Reconecta a que estava desativada em vez de duplicar — mesmo espírito do Gmail.
       const { error } = await admin
         .from('email_caixas_conectadas')
@@ -136,6 +214,8 @@ Deno.serve(async (req) => {
           departamento_id: body.departamento_id ?? null,
           privado: body.privado === true,
           last_sync_error: null,
+          alerta_conexao: alertaServidor,
+          alerta_verificado_em: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         })
         .eq('id', existente.id);
@@ -152,6 +232,8 @@ Deno.serve(async (req) => {
           departamento_id: body.departamento_id ?? null,
           privado: body.privado === true,
           created_by: user.id,
+          alerta_conexao: alertaServidor,
+          alerta_verificado_em: new Date().toISOString(),
         })
         .select('id')
         .single();
@@ -159,21 +241,15 @@ Deno.serve(async (req) => {
       caixaId = data.id;
     }
 
-    // Reconectando uma caixa que já tinha config: se o servidor renumerou a INBOX,
-    // o ponteiro guardado passou a apontar para OUTRAS mensagens. Gravar o
-    // UIDVALIDITY novo por cima e manter o `ultimo_uid` velho desarmaria justamente
-    // a trava que o sync usa para perceber isso — e o sync nunca mais compararia,
-    // porque os dois números já chegariam iguais.
-    const { data: configAnterior } = await admin
-      .from('email_caixa_imap_config')
-      .select('uid_validity, pasta_enviados')
-      .eq('caixa_id', caixaId)
-      .maybeSingle();
-
-    const renumerou = !!configAnterior
-      && Number(configAnterior.uid_validity ?? 0) !== Number(estado.uidValidity);
-    const mudouEnviados = !!configAnterior && (configAnterior.pasta_enviados ?? null) !== (pastaEnviados ?? null);
-
+    // ⚠️ Caixa que JÁ tinha config (reconectar ou editar): a numeração guardada
+    // (`uid_validity`, `uid_validity_enviados`) NÃO é sobrescrita aqui. É ela que o sync
+    // compara com a do servidor na próxima rodada: se mudou, ele aposenta as chaves da
+    // numeração antiga (`email_imap_aposentar_chaves`) e ressincroniza do topo. Gravar o
+    // número novo aqui desarmaria essa trava — e o sync passaria a pular todo e-mail novo
+    // cujo UID coincidisse com o de uma mensagem antiga (a chave `imap:<caixa>:<pasta>:<uid>`
+    // já existiria). Foi o que a troca de servidor da migração de cPanel teria causado.
+    // Pasta de Enviados que mudou de nome cai na mesma régua: a numeração da pasta nova
+    // não bate com a guardada.
     const { error: erroConfig } = await admin
       .from('email_caixa_imap_config')
       .upsert({
@@ -186,9 +262,7 @@ Deno.serve(async (req) => {
         pasta_arquivo: pastaArquivo,
         pasta_lixeira: pastaLixeira,
         pasta_spam: pastaSpam,
-        uid_validity: estado.uidValidity,
-        ...(renumerou ? { ultimo_uid: 0 } : {}),
-        ...(renumerou || mudouEnviados ? { ultimo_uid_enviados: 0, uid_validity_enviados: null } : {}),
+        ...(configAnterior ? {} : { uid_validity: estado.uidValidity }),
         updated_at: new Date().toISOString(),
       }, { onConflict: 'caixa_id' });
     if (erroConfig) throw new Error(erroConfig.message);

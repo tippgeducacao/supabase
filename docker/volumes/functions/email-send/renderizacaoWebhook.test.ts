@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { emailEhMarketing, renderizarEmailWebhook } from "./renderizacaoWebhook.ts";
+import { contextoDeAutomacao, emailEhMarketing, renderizarEmailWebhook } from "./renderizacaoWebhook.ts";
 
 const modelo = {
   assunto: "Olá, {{nome}}", corpoHtml: '<p>Olá, {{nome}}</p><a href="{{link}}">Curso</a>',
@@ -71,5 +71,15 @@ describe("renderização de e-mail do webhook", () => {
     expect(emailEhMarketing("campanha", null)).toBe(true);
     expect(emailEhMarketing("teste", "marketing")).toBe(false);
     expect(emailEhMarketing(undefined, "marketing")).toBe(false);
+  });
+
+  it("fluxo de automação recebe o mesmo tratamento do webhook (28/09/2026)", () => {
+    expect(contextoDeAutomacao("fluxo")).toBe(true);
+    expect(contextoDeAutomacao("webhook")).toBe(true);
+    expect(contextoDeAutomacao("campanha")).toBe(false);
+    expect(contextoDeAutomacao("tarefa")).toBe(false);
+    expect(contextoDeAutomacao(undefined)).toBe(false);
+    expect(emailEhMarketing("fluxo", "marketing")).toBe(true);
+    expect(emailEhMarketing("fluxo", "transacional")).toBe(false);
   });
 });

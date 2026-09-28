@@ -17,7 +17,7 @@ import { urlPublicaEmail } from "../_shared/urlPublicaEmail.ts";
 import { ErroEnvio, obterProvedor, provedorEfetivo } from "../_shared/emailProviders/index.ts";
 import { buscarSupressao, supressaoSeAplica } from "../_shared/supressao.ts";
 import { conferirConsultaIdempotente, permiteNovaChaveIdempotente, respostaEnvioExistente } from "./idempotencia.ts";
-import { emailEhMarketing, renderizarEmailWebhook } from "./renderizacaoWebhook.ts";
+import { contextoDeAutomacao, emailEhMarketing, renderizarEmailWebhook } from "./renderizacaoWebhook.ts";
 import { resolverModeloCampanhaAB } from "./campanhaAB.ts";
 import { expandirVariaveis, renderizarTags } from "../_shared/emailBuilder/mergeTags.ts";
 import { respostaOpcoesCampanhas } from "../_shared/emailCampanhasCapacidades.ts";
@@ -233,7 +233,7 @@ Deno.serve(async (req) => {
       corpoTexto = tpl.corpo_texto;
       remetenteId = remetenteId ?? tpl.remetente_id;
       usoModelo = tpl.uso ?? null;
-      if (payload.contexto_tipo === "webhook" && !tpl.ativo) {
+      if (contextoDeAutomacao(payload.contexto_tipo) && !tpl.ativo) {
         return new Response(JSON.stringify({ error: "Modelo de e-mail inativo." }), {
           status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
@@ -241,9 +241,9 @@ Deno.serve(async (req) => {
     }
 
     const vars = payload.variaveis ?? {};
-    if (payload.contexto_tipo === "webhook") {
+    if (contextoDeAutomacao(payload.contexto_tipo)) {
       try {
-        if (!templateId) throw new Error("Modelo de e-mail obrigatório para webhook.");
+        if (!templateId) throw new Error("Modelo de e-mail obrigatório no envio automático.");
         ({ assunto, corpoHtml, corpoTexto } = renderizarEmailWebhook({ assunto, corpoHtml, corpoTexto, variaveis: vars }));
       } catch {
         return new Response(JSON.stringify({ error: "Confira o conteúdo e as variáveis do modelo de e-mail.", codigo: "modelo_webhook_invalido" }), {
@@ -281,7 +281,7 @@ Deno.serve(async (req) => {
     const fromName = rem.nome_remetente;
     const replyTo = rem.reply_to_email;
     const ehCampanha = emailEhMarketing(payload.contexto_tipo, usoModelo);
-    if (payload.contexto_tipo === "webhook" && (!rem.ativo || provider === "gmail" || !rem.dominio_verificado)) {
+    if (contextoDeAutomacao(payload.contexto_tipo) && (!rem.ativo || provider === "gmail" || !rem.dominio_verificado)) {
       return new Response(JSON.stringify({ error: "Selecione um remetente de disparo ativo e verificado." }), {
         status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -445,7 +445,7 @@ Deno.serve(async (req) => {
     // webhook — a mesma régua do descadastro logo abaixo. Notificação pessoal
     // (tarefa, menção, lead) continua com o link cru: ali o número não é métrica
     // de campanha, e link redirecionado em aviso interno só atrapalha.
-    if (ehCampanha || payload.contexto_tipo === "webhook") {
+    if (ehCampanha || contextoDeAutomacao(payload.contexto_tipo)) {
       try {
         corpoHtml = await envolverCliquesNoHtml(
           corpoHtml,
@@ -472,7 +472,7 @@ Deno.serve(async (req) => {
     const urlDescadastro = provider !== "gmail"
       ? await linkDescadastro(basePublicaEmail, payload.destinatario_email)
       : null;
-    if (urlDescadastro && (ehCampanha || payload.contexto_tipo === "webhook")) {
+    if (urlDescadastro && (ehCampanha || contextoDeAutomacao(payload.contexto_tipo))) {
       // O link só existe depois de resolvido o remetente, então a variável
       // {{descadastro_url}} é substituída aqui, num segundo passe.
       const usaVariavel = /\{\{\s*descadastro_url\s*\}\}/.test(corpoHtml);

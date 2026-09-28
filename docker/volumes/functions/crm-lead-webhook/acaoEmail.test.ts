@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { executarAcaoEmail, normalizarDestinatarioEmail, type DependenciasAcaoEmail, type LeadEmail, type RemetenteEmail, type ReservaEmail, type TemplateEmail } from "./acaoEmail.ts";
+import { createHash } from "node:crypto";
+import { executarAcaoEmail, executarEnvioModeloEmail, normalizarDestinatarioEmail, type DependenciasAcaoEmail, type LeadEmail, type RemetenteEmail, type ReservaEmail, type TemplateEmail } from "./acaoEmail.ts";
 
 const INTEGRACAO = "11111111-1111-4111-8111-111111111111";
 const LEAD = "22222222-2222-4222-8222-222222222222";
@@ -180,5 +181,43 @@ describe("destinatário de e-mail", () => {
   });
   it("preserva alias + e normaliza espaços/maiúsculas", () => {
     expect(normalizarDestinatarioEmail(" Pessoa+Teste@Example.COM ")).toBe("pessoa+teste@example.com");
+  });
+});
+
+describe("núcleo compartilhado com os Fluxos (28/09/2026)", () => {
+  it("a chave do webhook é a MESMA de antes da generalização (senão quem já recebeu receberia de novo)", async () => {
+    await executarAcaoEmail(entrada(), deps);
+    const esperado = createHash("sha256")
+      .update(JSON.stringify(["crm-webhook-email/v1", INTEGRACAO, "acao-email-1", "maria@example.com"])).digest("hex");
+    expect(deps.reservar).toHaveBeenCalledWith(expect.objectContaining({ chave: esperado, integration_id: INTEGRACAO, acao_id: "acao-email-1" }));
+    expect(deps.enviar).toHaveBeenCalledWith(expect.objectContaining({ idempotencia_key: `crm-webhook-email/v1/${esperado}` }));
+  });
+
+  it("origem fluxo: contexto, chave e reserva do fluxo, com as mesmas validações", async () => {
+    const FLUXO = "66666666-6666-4666-8666-666666666666";
+    const EXEC = "77777777-7777-4777-8777-777777777777";
+    const reservar = vi.fn(async () => true);
+    const r = await executarEnvioModeloEmail({
+      contexto: { tipo: "fluxo", id: FLUXO, namespace: "crm-fluxo-email/v1", partesChave: [FLUXO, EXEC, "0"] },
+      acao: { id: "no-acao-1", params: { template_id: TEMPLATE, remetente_id: REMETENTE, variaveis: {} } },
+      leadId: LEAD, dados: null,
+    }, { ...deps, reservar });
+    expect(r).toEqual({ acao_id: "no-acao-1", status: "enviado", log_id: LOG });
+    const esperado = createHash("sha256")
+      .update(JSON.stringify(["crm-fluxo-email/v1", FLUXO, EXEC, "0", "no-acao-1", "maria@example.com"])).digest("hex");
+    expect(reservar).toHaveBeenCalledWith(expect.objectContaining({ chave: esperado, contexto_id: FLUXO, acao_id: "no-acao-1", lead_id: LEAD }));
+    expect(deps.enviar).toHaveBeenCalledWith(expect.objectContaining({
+      contexto_tipo: "fluxo", contexto_id: FLUXO, idempotencia_key: `crm-fluxo-email/v1/${esperado}`,
+    }));
+  });
+
+  it("origem fluxo: token de webhook não existe ali e barra o envio", async () => {
+    const r = await executarEnvioModeloEmail({
+      contexto: { tipo: "fluxo", id: "66666666-6666-4666-8666-666666666666", namespace: "crm-fluxo-email/v1", partesChave: ["x"] },
+      acao: { id: "no-acao-1", params: { template_id: TEMPLATE, remetente_id: REMETENTE, variaveis: { nome: "{webhook=nome}" } } },
+      leadId: LEAD, dados: null,
+    }, { ...deps, resolverVariavel: (modelo) => modelo, reservar: vi.fn(async () => true) });
+    expect(r.status).toBe("ignorado");
+    expect(deps.enviar).not.toHaveBeenCalled();
   });
 });

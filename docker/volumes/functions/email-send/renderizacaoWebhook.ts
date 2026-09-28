@@ -71,7 +71,17 @@ export function renderizarEmailWebhook(modelo: ModeloWebhook) {
   return { assunto, corpoHtml, corpoTexto };
 }
 
-/** O webhook mantém seu contexto no histórico, e usa a finalidade do modelo. */
+/**
+ * Envio AUTOMÁTICO de modelo ao contato — webhook (11/09/2026) e fluxo de automação
+ * (28/09/2026). Os dois recebem o mesmo tratamento: modelo ativo obrigatório, variáveis
+ * escapadas, só remetente de disparo verificado, clique rastreado e descadastro visível.
+ * Origem nova que mande modelo sozinha deve entrar AQUI, não num `=== "webhook"` a mais.
+ */
+export function contextoDeAutomacao(contexto: string | undefined): boolean {
+  return contexto === "webhook" || contexto === "fluxo";
+}
+
+/** A automação mantém seu contexto no histórico, e usa a finalidade do modelo. */
 export function emailEhMarketing(contexto: string | undefined, usoModelo: string | null) {
-  return contexto === "campanha" || (contexto === "webhook" && usoModelo === "marketing");
+  return contexto === "campanha" || (contextoDeAutomacao(contexto) && usoModelo === "marketing");
 }

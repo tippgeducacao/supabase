@@ -17,6 +17,8 @@ import { abrirSessao, carregarConfig, limparErro, marcarErro, classificarErro } 
 import { pontoDePartida } from '../_shared/imap/ponteiros.ts';
 import type { SessaoImap } from '../_shared/imap/conexao.ts';
 import { diferencaPorLinha, emLotes, LOTE_FILTRO_IN } from '../_shared/emailReconciliacao.ts';
+import { resolvedorDaPlataforma, verificarServidorDoDominio } from '../_shared/imap/servidorDoDominio.ts';
+import { regraReligar } from '../_shared/imap/religar.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -34,6 +36,8 @@ const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 const ORCAMENTO_MS = 42_000;
 const LOTE_FETCH = 15;
 const MAX_POR_PASTA_POR_RODADA = 60;
+// De quanto em quanto tempo o DNS do domínio é reconferido (ver `conferirServidorDoDominio`).
+const INTERVALO_ALERTA_MS = 30 * 60_000;
 
 interface Resultado {
   caixa_id: string;
@@ -166,6 +170,37 @@ async function sincronizarPasta(
         .eq('gmail_thread_id', chaveThread)
         .maybeSingle();
 
+      // ── mensagem que já temos com outra chave ───────────────────────────
+      // Duas origens: (1) o imap-send já gravou localmente o que NÓS enviamos e o
+      // colocou nos Enviados via APPEND; (2) o servidor renumerou (troca de servidor,
+      // 28/09/2026) e a chave antiga foi aposentada. Nos dois casos a mensagem é
+      // reconhecida pelo Message-ID dentro da própria thread e só ganha a chave/UID reais.
+      // ⚠️ Isto vem ANTES do patch da thread: reler o histórico inteiro de um servidor
+      // novo passaria por milhares de mensagens antigas, e cada uma regravaria
+      // `ultima_mensagem_em`, resumo e "não lida" da conversa com os dados de uma
+      // mensagem VELHA — a Inbox inteira sairia de ordem.
+      // ⚠️ Só se religa o que é DESTA pasta: a chave provisória do envio (lida de volta
+      // dos Enviados) ou uma chave aposentada desta mesma pasta. E-mail para si mesmo tem
+      // o MESMO Message-ID na INBOX e nos Enviados — religar "qualquer uma" roubaria a
+      // chave da outra pasta, e UID é por pasta.
+      if (threadExistente && msg.messageId) {
+        const { data: mesmas } = await admin
+          .from('email_mensagens')
+          .select('id, gmail_message_id')
+          .eq('thread_id', threadExistente.id)
+          .eq('message_id', msg.messageId);
+        const daPasta = regraReligar(caixa.id, opcoes.apelido, (mesmas || []) as { id: string; gmail_message_id: string | null }[]);
+        if (daPasta.religar) {
+          await admin.from('email_mensagens')
+            .update({ gmail_message_id: chave, imap_uid: bruta.uid })
+            .eq('id', daPasta.religar);
+          avancar(bruta.uid);
+          continue;
+        }
+        // Cópia repetida da mesma mensagem na mesma pasta (outro UID): não duplica.
+        if (daPasta.jaLigada) { avancar(bruta.uid); continue; }
+      }
+
       let threadId: string;
       if (threadExistente) {
         threadId = threadExistente.id;
@@ -204,26 +239,8 @@ async function sincronizarPasta(
       }
 
       // ── mensagem ────────────────────────────────────────────────────────
-      // Guarda contra duplicar o que NÓS enviamos: o imap-send já gravou a
-      // mensagem localmente e a colocou nos Enviados do servidor via APPEND.
-      // Quando o sync lê essa mesma mensagem de volta, ela é reconhecida pelo
-      // Message-ID dentro da própria thread e só ganha o UID real.
-      if (msg.messageId) {
-        const { data: nossa } = await admin
-          .from('email_mensagens')
-          .select('id')
-          .eq('thread_id', threadId)
-          .eq('message_id', msg.messageId)
-          .maybeSingle();
-        if (nossa) {
-          await admin.from('email_mensagens')
-            .update({ gmail_message_id: chave, imap_uid: bruta.uid })
-            .eq('id', nossa.id);
-          avancar(bruta.uid);
-          continue;
-        }
-      }
-
+      // (a checagem de "já temos com outra chave" roda antes do patch da thread, acima;
+      // thread recém-criada não tem mensagem nenhuma para reconhecer.)
       const { data: inserida, error: erroMsg } = await admin
         .from('email_mensagens')
         .insert({
@@ -332,6 +349,31 @@ async function reconciliarNaoLidosImap(admin: any, caixa: any, sessao: SessaoIma
 
 let INICIO = agora();
 
+/**
+ * "O domínio entrega e-mail num servidor e esta caixa lê outro" — a falha que a
+ * migração de cPanel de 28/09/2026 produziu em silêncio: o servidor antigo continuou
+ * aceitando login, o sync rodava sem erro e nada novo chegava. Grava o alerta em
+ * `alerta_conexao` (que a tela mostra) e não interrompe o sync — pode haver MX legítimo
+ * em outro lugar (antispam). No máximo a cada 30 min: são três consultas de DNS.
+ *
+ * Roda ANTES de abrir a sessão de propósito: se o servidor antigo for desligado, o sync
+ * passa a falhar, e é justamente aí que a tela precisa dizer para onde o domínio foi.
+ */
+async function conferirServidorDoDominio(admin: any, caixa: any, config: { imap_host: string }) {
+  const ultima = caixa.alerta_verificado_em ? new Date(caixa.alerta_verificado_em).getTime() : 0;
+  if (agora() - ultima < INTERVALO_ALERTA_MS) return;
+  try {
+    const alerta = await verificarServidorDoDominio(caixa.email_caixa, config.imap_host, resolvedorDaPlataforma());
+    await admin
+      .from('email_caixas_conectadas')
+      .update({ alerta_conexao: alerta, alerta_verificado_em: new Date().toISOString() })
+      .eq('id', caixa.id);
+    if (alerta) console.warn('servidor do domínio diferente', caixa.email_caixa, JSON.stringify(alerta));
+  } catch (e) {
+    console.warn('falha ao conferir o servidor do domínio', e);
+  }
+}
+
 async function sincronizarCaixa(admin: any, caixaId: string): Promise<Resultado> {
   const { data: caixa } = await admin
     .from('email_caixas_conectadas')
@@ -348,6 +390,7 @@ async function sincronizarCaixa(admin: any, caixaId: string): Promise<Resultado>
   }
 
   const config = await carregarConfig(admin, caixaId);
+  await conferirServidorDoDominio(admin, caixa, config);
   const sessao = await abrirSessao(config);
   try {
     const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
@@ -447,6 +490,19 @@ async function varrerPasta(
   // em silêncio, que é a pior falha possível aqui.
   if (o.uidValidityGuardado && o.uidValidityGuardado !== estado.uidValidity) {
     console.warn(`uidvalidity mudou em ${o.pasta} (${o.uidValidityGuardado} -> ${estado.uidValidity}); ressincronizando`);
+    // ⚠️ Zerar o ponteiro NÃO basta. As mensagens já gravadas têm a chave
+    // imap:<caixa>:<pasta>:<uid> da numeração ANTIGA, e o sync pula todo UID cuja chave
+    // já existe — então o UID 500 do servidor novo (outra mensagem) seria tomado por
+    // "já baixado" e sumiria. As chaves antigas ganham um rótulo e deixam de colidir; ao
+    // reler o histórico, cada mensagem é religada à chave nova pelo Message-ID (ver o
+    // bloco "nossa" em sincronizarPasta), sem duplicar. Falhou? Aborta a caixa: seguir
+    // com colisão é perder e-mail em silêncio.
+    const rotulo = `${o.uidValidityGuardado}-${Math.floor(Date.now() / 1000)}`;
+    const { data: aposentadas, error } = await admin.rpc('email_imap_aposentar_chaves', {
+      p_caixa_id: caixa.id, p_apelido: o.apelido, p_rotulo: rotulo,
+    });
+    if (error) throw new Error(`aposentar_chaves_falhou: ${error.message}`);
+    console.warn(`chaves da numeração antiga aposentadas em ${o.pasta}: ${aposentadas} (rótulo ${rotulo})`);
     teto = 0;
     backfill = null;
   }

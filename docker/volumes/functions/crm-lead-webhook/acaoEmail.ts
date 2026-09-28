@@ -2,6 +2,12 @@
  * E-mail opt-in do webhook. A reserva persiste antes de chamar o motor de envio:
  * uma resposta incerta não autoriza repetir uma mensagem na próxima captação.
  * Não guarda o payload nem a chave do provedor; o destino vem do contato salvo.
+ *
+ * Desde 28/09/2026 o núcleo (`executarEnvioModeloEmail`) também serve os FLUXOS de
+ * automação (edge `crm-fluxo-email`): a mesma validação de modelo, remetente e variáveis,
+ * a mesma interpretação da resposta do `email-send`. O que muda por origem é só o
+ * `contexto` — tipo, id e o que compõe a chave única. `executarAcaoEmail` continua sendo a
+ * porta do webhook e gera exatamente a mesma chave de antes.
  */
 import { renderizarEmailWebhook } from "../email-send/renderizacaoWebhook.ts";
 export interface LeadEmail {
@@ -45,9 +51,34 @@ export interface PayloadEmailWebhook {
   destinatario_email: string;
   destinatario_nome: string;
   variaveis: Record<string, string>;
-  contexto_tipo: "webhook";
+  contexto_tipo: "webhook" | "fluxo";
   contexto_id: string;
   idempotencia_key: string;
+}
+
+/** De onde vem o envio e o que o torna único (além do endereço). */
+export interface ContextoEnvioModelo {
+  tipo: "webhook" | "fluxo";
+  /** Integração (webhook) ou fluxo. Vai para `emails_enviados.contexto_id`. */
+  id: string;
+  /** Prefixo versionado do hash — mudar invalida as reservas existentes. */
+  namespace: string;
+  /** Partes da chave ANTES do id da ação e do e-mail. */
+  partesChave: string[];
+}
+
+export interface ReservaEnvioModelo {
+  chave: string;
+  contexto_id: string;
+  acao_id: string;
+  lead_id: string;
+  template_id: string;
+  remetente_id: string;
+}
+
+export interface DependenciasEnvioModelo extends Omit<DependenciasAcaoEmail, "reservar"> {
+  /** true exclusivamente para quem inseriu/assumiu a reserva; conflitos retornam false. */
+  reservar(reserva: ReservaEnvioModelo): Promise<boolean>;
 }
 export interface DependenciasAcaoEmail {
   carregarLead(id: string): Promise<LeadEmail | null>;
@@ -97,8 +128,8 @@ function validarModelo(modelo: string, variaveis: Record<string, string>, permit
   return valido && !/\{\{|\}\}|\{webhook=/i.test(restante);
 }
 
-async function chaveReserva(integrationId: string, acaoId: string, email: string): Promise<string> {
-  const bytes = new TextEncoder().encode(JSON.stringify(["crm-webhook-email/v1", integrationId, acaoId, email]));
+async function chaveReserva(namespace: string, partes: string[], email: string): Promise<string> {
+  const bytes = new TextEncoder().encode(JSON.stringify([namespace, ...partes, email]));
   const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
   return Array.from(hash, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -110,12 +141,35 @@ export async function executarAcaoEmail(entrada: {
   leadId: string | null;
   dados: unknown;
 }, deps: DependenciasAcaoEmail): Promise<ResultadoAcaoEmail> {
+  return await executarEnvioModeloEmail({
+    contexto: { tipo: "webhook", id: entrada.integrationId, namespace: "crm-webhook-email/v1", partesChave: [entrada.integrationId] },
+    acao: entrada.acao, leadId: entrada.leadId, dados: entrada.dados,
+  }, {
+    ...deps,
+    reservar: (r) => deps.reservar({
+      chave: r.chave, integration_id: r.contexto_id, acao_id: r.acao_id, lead_id: r.lead_id,
+      template_id: r.template_id, remetente_id: r.remetente_id,
+    }),
+  });
+}
+
+/**
+ * O envio de um modelo ao e-mail salvo do contato — núcleo comum a webhook e fluxo.
+ * Valida tudo ANTES de reservar; reserva ANTES de enviar; nunca repete o incerto.
+ */
+export async function executarEnvioModeloEmail(entrada: {
+  contexto: ContextoEnvioModelo;
+  acao: { id?: unknown; params?: unknown };
+  leadId: string | null;
+  dados: unknown;
+}, deps: DependenciasEnvioModelo): Promise<ResultadoAcaoEmail> {
+  const { contexto } = entrada;
   const acaoId = typeof entrada.acao.id === "string" ? entrada.acao.id.trim() : "";
   const resultado = (status: ResultadoAcaoEmail["status"], motivo?: string): ResultadoAcaoEmail => ({
     acao_id: acaoId || null, status, ...(motivo ? { motivo } : {}),
   });
   if (!acaoId || acaoId.length > 200 || temControles(acaoId)) return resultado("ignorado", "acao_invalida");
-  if (!UUID.test(entrada.integrationId) || !entrada.leadId || !UUID.test(entrada.leadId)) return resultado("ignorado", "contato_indisponivel");
+  if (!UUID.test(contexto.id) || !entrada.leadId || !UUID.test(entrada.leadId)) return resultado("ignorado", "contato_indisponivel");
   const params = entrada.acao.params;
   if (!objeto(params) || typeof params.template_id !== "string" || !UUID.test(params.template_id)
     || typeof params.remetente_id !== "string" || !UUID.test(params.remetente_id)) return resultado("ignorado", "configuracao_incompleta");
@@ -172,15 +226,15 @@ export async function executarAcaoEmail(entrada: {
       return resultado("ignorado", "template_invalido");
     }
 
-    chave = await chaveReserva(entrada.integrationId, acaoId, email);
+    chave = await chaveReserva(contexto.namespace, [...contexto.partesChave, acaoId], email);
     payload = {
       template_id: params.template_id, remetente_id: params.remetente_id,
       destinatario_email: email, destinatario_nome: nome, variaveis,
-      contexto_tipo: "webhook", contexto_id: entrada.integrationId,
-      idempotencia_key: `crm-webhook-email/v1/${chave}`,
+      contexto_tipo: contexto.tipo, contexto_id: contexto.id,
+      idempotencia_key: `${contexto.namespace}/${chave}`,
     };
     const inseriu = await deps.reservar({
-      chave, integration_id: entrada.integrationId, acao_id: acaoId, lead_id: lead.id,
+      chave, contexto_id: contexto.id, acao_id: acaoId, lead_id: lead.id,
       template_id: params.template_id, remetente_id: params.remetente_id,
     });
     if (!inseriu) return resultado("duplicado", "acao_ja_reservada");
