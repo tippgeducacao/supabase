@@ -23,7 +23,7 @@ const FICHAS: FichaPos[] = [
       'TOM OBRIGATÓRIO: cannabis é TERAPIA ADJUVANTE. Nunca prometa cura nem resultado clínico. A prescrição veterinária foi regulamentada pela RDC 936, de outubro de 2024: pode citar como respaldo, sem dar parecer jurídico.',
       'O QUE A PÓS ENTREGA (só isto; não invente módulo): base de fisiologia e farmacologia do sistema endocanabinoide (receptores CB1 e CB2, vias de administração); como prescrever e titular a dose ("start low, go slow"), toxicologia (o cão é mais sensível ao THC que o humano) e interações em paciente polimedicado; aplicações em neurologia e comportamento, dor crônica e osteoartrite, oncologia (cuidados paliativos) e dermatologia; regulamentação e respaldo jurídico (tem advogada no curso); registro e acompanhamento de casos; professora que é prescritora e traz os casos que conduziu.',
       'GANCHOS DE CONEXÃO PELA ÁREA QUE O LEAD DISSER (use UM, o que casar com a fala dele):',
-      '- Clínica de pequenos, ainda não prescreve: os tutores já perguntam sobre cannabis; hoje ele responde com segurança ou acaba encaminhando pra outro profissional?',
+      '- Clínica de pequenos, ainda não prescreve: reação (afirmação) "clínica de pequenos é onde mais aparece tutor perguntando de cannabis"; para aprofundar depois, numa mensagem própria: hoje ele responde com segurança ou acaba encaminhando pra outro profissional?',
       '- Atende dor crônica ou osteoartrite, paciente idoso: caso que não melhora só com anti-inflamatório, e o uso crônico preocupa pelo risco renal ou intestinal.',
       '- Neurologia: epilepsia que segue com crises mesmo com fenobarbital na dose máxima.',
       '- Comportamento: ansiedade de separação ou comportamento destrutivo em que o tutor já cogita abandonar o animal.',

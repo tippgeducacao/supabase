@@ -122,3 +122,13 @@ describe("pergunta de conexão da aula (26/09/2026)", () => {
     expect(AGENTE_AULA).toContain("Já conhece a PPGVET");
   });
 });
+
+describe("reação da pergunta de conexão (28/09/2026)", () => {
+  it("a reação é afirmação e a única pergunta da mensagem é a de conexão", () => {
+    expect(AGENTE_AULA).toContain("afirmação que não pode ser lida como pergunta");
+    expect(AGENTE_AULA).toContain("bacana, clínica de pequenos é onde mais aparece tutor perguntando de cannabis.");
+  });
+  it("o gancho da ficha de cannabis não traz mais a frase que parece pergunta", () => {
+    expect(fichaDaPos("PÓS | CANNABIS MEDICINAL VETERINÁRIA")).not.toContain("os tutores já perguntam sobre cannabis;");
+  });
+});
