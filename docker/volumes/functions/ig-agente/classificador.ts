@@ -56,7 +56,7 @@ const INSTRUCOES = [
   "",
   "telefone: copie o número de telefone/WhatsApp que a pessoa escreveu, se houver; senão null.",
   "area: o CURSO da graduação que a pessoa citou (ex.: \"medicina veterinária\"). \"Tô na graduação\" ou \"sou formado\" sem dizer o curso = null — nunca deduza o curso.",
-  "conclusao: quando a pessoa disse quando SE FORMA, o mês e o ano em MM/AAAA (ex.: \"julho do ano que vem\" em 2026 → \"07/2027\"). Posição no curso (\"tô no 7º período\") NÃO é data: null. Sem data: null.",
+  "conclusao: quando a pessoa disse quando SE FORMA, o mês e o ano em MM/AAAA (ex.: \"julho do ano que vem\" em 2026 → \"07/2027\"; ano.semestre — \"2028.2\" ou \"28.2\" → \"12/2028\", \"27.1\" → \"06/2027\"). Posição no curso (\"tô no 7º período\") NÃO é data: null. Sem data: null.",
   "",
   "resposta_pergunta: só quando intencao = pergunta. UMA resposta curta (1 a 2 frases), no tom do",
   "direct, sem markdown, usando APENAS estes fatos:",

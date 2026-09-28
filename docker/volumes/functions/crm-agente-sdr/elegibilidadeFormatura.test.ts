@@ -130,6 +130,12 @@ describe('lerConclusao', () => {
     }
   });
 
+  it('"28.2" só vale com ponto e ano 25–39: "28/2", decimais e notas não viram formatura', () => {
+    for (const resposta of ['28/2', '8.2', '2.2', '128.2', '28.25', 'nota 9.5']) {
+      expect(lerConclusao(resposta, AGO).tipo, resposta).not.toBe('data');
+    }
+  });
+
   it('com ANO explícito volta a ser data, mesmo falando de semestre', () => {
     const casos: [string, string][] = [
       ['termino em 2027.1', '2027-06-30'],
@@ -140,6 +146,10 @@ describe('lerConclusao', () => {
       ['dez/2026', '2026-12-31'],
       ['dezembro de 2026', '2026-12-31'],
       ['só me formo em 2028', '2028-12-31'],
+      // Ano em dois dígitos com o semestre (28/09/2026, lead do Instagram).
+      ['28.2', '2028-12-31'],
+      ['me formo 27.1', '2027-06-30'],
+      ['acho que 30.2', '2030-12-31'],
     ];
     for (const [resposta, iso] of casos) {
       const l = lerConclusao(resposta, AGO);

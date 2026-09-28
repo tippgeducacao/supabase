@@ -163,6 +163,14 @@ export function lerConclusao(bruto: unknown, agora: Date = new Date()): LeituraC
       : [Number(letivo[2]), Number(letivo[1])];
     return { tipo: 'data', data: fimDoMes(ano, sem === 1 ? 6 : 12), via: 'semestre letivo' };
   }
+  // 1a'. O mesmo com o ano em DOIS dígitos: "28.2" = 2º semestre de 2028 (28/09/2026, lead do
+  //      Instagram: a IA reperguntou "em que mês e ano?" depois de "28.2"). Só com PONTO — "28/2"
+  //      é 28 de fevereiro — e só anos 25–39, para não ler nota ou decimal como formatura.
+  const letivoCurto = t.match(/(?:^|[^\d.])(2[5-9]|3\d)\s*\.\s*([12])(?![\d.])/);
+  if (letivoCurto) {
+    const ano = 2000 + Number(letivoCurto[1]);
+    return { tipo: 'data', data: fimDoMes(ano, Number(letivoCurto[2]) === 1 ? 6 : 12), via: 'semestre letivo' };
+  }
 
   // 1b. Mês + ano: "12/2026", "2026-12", "dez/2026", "dezembro de 2026".
   const numerico = t.match(/\b(0?[1-9]|1[0-2])\s*[/-]\s*(20\d{2})\b/)
