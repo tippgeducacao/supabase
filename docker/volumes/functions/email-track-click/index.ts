@@ -16,6 +16,7 @@
 //   email_cliques                                        → QUAL link foi clicado
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { conferirCliqueEmail } from "../_shared/envioComum.ts";
+import { candidatosDeDestino } from "./destino.ts";
 
 const HTML_ERRO = `<!doctype html><html lang="pt-BR"><meta charset="utf-8">`
   + `<title>Link inválido</title><body style="font-family:Arial,Helvetica,sans-serif;padding:32px;color:#1f2937">`
@@ -42,9 +43,14 @@ Deno.serve(async (req) => {
   const token = url.searchParams.get("t") ?? "";
   const destinoBruto = url.searchParams.get("u") ?? "";
 
-  const destino = destinoValido(destinoBruto);
-  if (!envioId || !token || !destino) return erro(400);
-  if (!await conferirCliqueEmail(envioId, destino, token)) return erro(400);
+  if (!envioId || !token) return erro(400);
+  // Links enviados de 22 a 28/09/2026 chegam com lixo depois do destino (ver destino.ts).
+  let destino: string | null = null;
+  for (const candidato of candidatosDeDestino(destinoBruto)) {
+    const valido = destinoValido(candidato);
+    if (valido && await conferirCliqueEmail(envioId, valido, token)) { destino = valido; break; }
+  }
+  if (!destino) return erro(400);
 
   // Redireciona ANTES de qualquer escrita falhar: quem clicou não pode ficar numa
   // tela de erro porque o banco piscou. O registro é o efeito colateral, não o fim.

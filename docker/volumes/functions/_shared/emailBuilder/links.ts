@@ -151,6 +151,10 @@ export async function envolverCliquesNoHtml(
   for (const destino of encontrados) mapa.set(destino, await rastrear(destino));
   return html.replace(padrao, (inteiro, antes: string, aspas: string, href: string) => {
     const novo = mapa.get(decodificarHref(href));
-    return novo ? `${antes}${aspas}${escaparHref(novo)}` : inteiro;
+    // A aspa de FECHAMENTO também foi consumida pelo padrão — tem que voltar. De 22/09 a
+    // 28/09/2026 ela faltava: o href engolia o atributo seguinte (`…u=…%2F target=`), a
+    // assinatura não conferia e TODO link rastreado caía em "Link inválido" (0 cliques em
+    // 1.539 e-mails). O email-track-click resgata os que já saíram assim.
+    return novo ? `${antes}${aspas}${escaparHref(novo)}${aspas}` : inteiro;
   });
 }

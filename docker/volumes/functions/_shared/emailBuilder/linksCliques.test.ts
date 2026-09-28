@@ -14,6 +14,19 @@ describe("embrulhar cliques no HTML pronto", () => {
     expect(saida).toContain(">Inscrever</a>");
   });
 
+  it("fecha a aspa do href — o atributo seguinte não pode virar parte do link (28/09/2026)", async () => {
+    // O `toContain('target="_blank"')` acima passava mesmo com a aspa faltando: o texto
+    // continuava lá, só que DENTRO do href. Aqui o href é lido como o navegador lê.
+    const html = `<a href="https://www.youtube.com/watch?v=_QFeoNefTzM" target="_blank">Assistir</a><a href="https://ppgvet.com.br/">site</a>`;
+    const saida = await envolverCliquesNoHtml(html, rastrear);
+    const hrefs = [...saida.matchAll(/<a\b[^>]*?\bhref="([^"]*)"/g)].map((m) => m[1].replace(/&amp;/g, "&"));
+    expect(hrefs).toEqual([
+      await rastrear("https://www.youtube.com/watch?v=_QFeoNefTzM"),
+      await rastrear("https://ppgvet.com.br/"),
+    ]);
+    expect(saida).toMatch(/" target="_blank">Assistir<\/a>/);
+  });
+
   it("não toca em mailto, tel, âncora nem merge tag por resolver", async () => {
     const html = [
       `<a href="mailto:contato@ppgvet.com.br">e-mail</a>`,
