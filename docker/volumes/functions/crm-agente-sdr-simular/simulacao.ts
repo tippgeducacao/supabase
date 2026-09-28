@@ -4,6 +4,7 @@
 import { sanitizarHistorico, type Msg } from '../crm-agente-sdr/historico.ts';
 import type { Telemetria } from '../crm-agente-sdr/eventos.ts';
 import type { ProvedorIA } from '../crm-agente-sdr/agente.ts';
+import { type ConfigRouterJev, LIMIAR_PADRAO } from '../crm-agente-sdr/routerJev.ts';
 import { modeloOpenaiPermitido } from '../crm-agente-sdr/modelosOpenai.ts';
 import { contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from '../crm-agente-sdr/contextoAulaPiloto.ts';
 import { avaliarEvidenciaSemGraduacao, bloqueioSemEvidenciaGraduacao } from '../crm-agente-sdr/evidenciaFormacao.ts';
@@ -60,6 +61,8 @@ export type EntradaSimulacao = {
   raciocinio_encadeado: boolean;
   /** Liga a ficha do atendimento (canário): bloco + instrução + trava do cronograma no mock. */
   ficha: boolean;
+  /** Router pelo Jev (routerJev.ts) neste ensaio; exige usar_router. null = o router de sempre. */
+  router_jev: ConfigRouterJev | null;
 };
 
 export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
@@ -135,6 +138,16 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
     throw new Error('agente_atual inválido');
   }
   if (body.mocks != null && (typeof body.mocks !== 'object' || Array.isArray(body.mocks))) throw new Error('mocks deve ser objeto');
+  let routerJev: ConfigRouterJev | null = null;
+  if (body.router_jev != null) {
+    const r = body.router_jev as Record<string, unknown>;
+    if (typeof r !== 'object' || Array.isArray(r)) throw new Error('router_jev deve ser objeto');
+    if (body.usar_router !== true) throw new Error('router_jev exige usar_router');
+    if (r.modo !== 'sombra' && r.modo !== 'ativo') throw new Error('router_jev.modo deve ser sombra ou ativo');
+    const limiar = r.limiar ?? LIMIAR_PADRAO;
+    if (typeof limiar !== 'number' || !(limiar >= 0.5 && limiar < 1)) throw new Error('router_jev.limiar deve ser número entre 0,5 e 1');
+    routerJev = { modo: r.modo, limiar };
+  }
   let trocaDeNumero: TrocaDeNumeroSimulada | null = null;
   if (body.troca_de_numero != null) {
     const t = body.troca_de_numero;
@@ -176,6 +189,7 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
     modelo_openai: modeloOpenai as string | null,
     raciocinio_encadeado: body.raciocinio_encadeado === true,
     ficha: body.ficha === true,
+    router_jev: routerJev,
   };
 }
 

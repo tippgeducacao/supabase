@@ -20,6 +20,7 @@ import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO } from '../crm-agente-sdr/prompts
 import { AGENTE_CAMPANHA_DIRETA } from '../crm-agente-sdr/prompts-campanha-direta.ts';
 import { AGENTE_AULA, montarVarsAula } from '../crm-agente-sdr/prompts-aula.ts';
 import { carregarTools, chamarAgentePrincipal, chamarRouter, MODELO_AGENTE, provedorDeepseek, provedorOpenai } from '../crm-agente-sdr/agente.ts';
+import { type LeituraJev, rotearComJev } from '../crm-agente-sdr/routerJev.ts';
 import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoCurso, notaDoNome, renderPrompt } from '../crm-agente-sdr/contexto.ts';
 import { comBlocoDaEscola, comPresenteEscola } from '../crm-agente-sdr/escolaGratuita.ts';
 import {
@@ -402,12 +403,15 @@ Deno.serve(async (req) => {
           let fallback = false;
           let usoRouter: Record<string, number> = {};
           let modeloRouter = MODELO_AGENTE;
+          const jev: { leitura?: LeituraJev } = {};
           if (consultar) {
             try {
-              decidiu = await chamarRouter(limparParaRouter(comNotaParaRouter(messages, notaTroca)), (resposta) => {
+              // Mesmo caminho da produção (routerJev.ts); sem `router_jev` é o chamarRouter puro.
+              const historicoRouter = limparParaRouter(comNotaParaRouter(messages, notaTroca));
+              decidiu = await rotearComJev(historicoRouter, entrada.router_jev, () => chamarRouter(historicoRouter, (resposta) => {
                 usoRouter = extrairUso(resposta.usage);
                 modeloRouter = resposta.model ?? MODELO_AGENTE;
-              }, provedorAlternativo);
+              }, provedorAlternativo), { nota: notaTroca, aoLerJev: (l) => { jev.leitura = l; } });
             } catch {
               fallback = true;
             }
@@ -417,7 +421,8 @@ Deno.serve(async (req) => {
             : entrada.persona === 'aula' && agenteAtual === 'agente_validacao' ? 'agente_aula' : agenteAtual;
           routers.push({ turno, anterior, decidiu, efetivo: agenteAtual, consultado: consultar, fallback,
             ...(notaTroca ? { troca_numero: true, ratchet_ignorado: ratchetIgnorado } : {}),
-            ...(consultar ? { modelo: modeloRouter, usage: usoRouter } : {}) });
+            ...(consultar ? { modelo: jev.leitura?.decidiu_sozinho ? 'jev' : modeloRouter, usage: usoRouter } : {}),
+            ...(jev.leitura ? { jev: jev.leitura } : {}) });
         }
         const promptBase = agente === 'agente_campanha_direta' ? AGENTE_CAMPANHA_DIRETA
           : agente === 'agente_aula' ? AGENTE_AULA

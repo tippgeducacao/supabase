@@ -42,6 +42,14 @@ describe('contrato textual de simulação com histórico', () => {
     expect(() => validarEntradaSimulacao({ mensagens: ['Olá'], raciocinio_encadeado: true })).toThrow('raciocinio_encadeado');
     expect(() => validarEntradaSimulacao({ mensagens: ['Olá'], provedor: 'openai', raciocinio_encadeado: 'sim' })).toThrow('raciocinio_encadeado');
   });
+  it('router pelo Jev: só com usar_router, modo sombra/ativo e limiar entre 0,5 e 1', () => {
+    expect(validarEntradaSimulacao({ mensagens: ['Olá'] }).router_jev).toBeNull();
+    expect(validarEntradaSimulacao({ mensagens: ['Olá'], usar_router: true, router_jev: { modo: 'ativo' } }).router_jev).toEqual({ modo: 'ativo', limiar: 0.9 });
+    expect(validarEntradaSimulacao({ mensagens: ['Olá'], usar_router: true, router_jev: { modo: 'sombra', limiar: 0.95 } }).router_jev).toEqual({ modo: 'sombra', limiar: 0.95 });
+    expect(() => validarEntradaSimulacao({ mensagens: ['Olá'], router_jev: { modo: 'ativo' } })).toThrow('usar_router');
+    expect(() => validarEntradaSimulacao({ mensagens: ['Olá'], usar_router: true, router_jev: { modo: 'off' } })).toThrow('router_jev.modo');
+    expect(() => validarEntradaSimulacao({ mensagens: ['Olá'], usar_router: true, router_jev: { modo: 'ativo', limiar: 1 } })).toThrow('router_jev.limiar');
+  });
   it('recusa do provedor vira diagnóstico estruturado, sem o texto do erro', () => {
     const corpo = JSON.stringify({ error: { message: 'DETALHE COM DADO DO LEAD', type: 'invalid_request_error', param: 'input[3]', code: null } });
     expect(diagnosticoDoProvedor(new Error(`OpenAI: HTTP 400: ${corpo}`))).toEqual({

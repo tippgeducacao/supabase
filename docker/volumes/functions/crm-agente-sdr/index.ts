@@ -48,6 +48,7 @@ import { rodarEsteiraFollowup } from './followup.ts';
 import { contextoEspecialidadeCannabis } from './especialidadeCannabis.ts';
 import { rodarEsteiraFollowupTemplate } from './followup-template.ts';
 import { criarTelemetria, resumir, type Telemetria } from './eventos.ts';
+import { type AgenteRouter, carregarConfigRouterJev, type LeituraJev, rotearComJev } from './routerJev.ts';
 import { carregarModoTrocaNumero, carregarSinalTrocaDeNumero, comNotaNoContexto, comNotaParaRouter, notaTrocaDeNumero, resumoDoSinal, sinalInerte, type SinalTrocaDeNumero } from './trocaDeNumero.ts';
 import { enviarComAberturaNumero, NOTA_ABERTURA_CONTROLADA } from './aberturaTrocaNumero.ts';
 
@@ -477,6 +478,18 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     cache_lido: m.usage?.cache_read_input_tokens ?? null,
     cache_escrito: m.usage?.cache_creation_input_tokens ?? null,
   });
+  // Router pelo Jev (28/09/2026, routerJev.ts): só para os TELEFONES da lista do canário da Luna
+  // (não para a fatia `luna_percentual`) e só com `router_jev_modo` ligado. Abrir para a fatia =
+  // mandar conversa de lead real para a TypeSafe: decisão do Gustavo (DPA/LGPD), não do código.
+  // A leitura do Jev vai junto do router_decisao; o Jev não entra no llm_chamada (a soma do
+  // "Uso de IA" cobraria os tokens dele a preço de Sonnet).
+  const configJev = provedor?.formato === 'openai' && provedor.origem === 'lista' ? await carregarConfigRouterJev(supabase) : null;
+  const jev: { leitura?: LeituraJev } = {};
+  const rotear = async (): Promise<AgenteRouter> => {
+    const historicoRouter = limparParaRouter(comNotaParaRouter(await carregarHistorico(supabase, remotejid), notaTroca));
+    return rotearComJev(historicoRouter, configJev, () => chamarRouter(historicoRouter, registrarUsoRouter, provedor),
+      { nota: notaTroca, aoLerJev: (l) => { jev.leitura = l; } });
+  };
   let promptAgente: string;
   let tools: any[];
   // A nota vai no bloco de contexto temporal: relido a cada volta, fora do prefixo cacheado.
@@ -521,7 +534,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     const inicioRouter = Date.now();
     if (consultarRouter) {
       try {
-        decidiu = await chamarRouter(limparParaRouter(comNotaParaRouter(await carregarHistorico(supabase, remotejid), notaTroca)), registrarUsoRouter, provedor);
+        decidiu = await rotear();
         if (decidiu === 'agente_qualificador') agenteAtual = 'agente_qualificador';
       } catch (e) {
         console.error('[crm-agente-sdr] router (campanha direta) falhou, mantendo a abertura:', e);
@@ -538,6 +551,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       router_consultado: consultarRouter,
       troca_numero: sinalTroca.trocou,
       ratchet_ignorado: agenteAnterior !== (lead?.agente_atual ?? null),
+      ...(jev.leitura ? { jev: jev.leitura } : {}),
     }, Date.now() - inicioRouter);
     promptAgente = renderPrompt(
       agenteAtual === 'agente_qualificador' ? AGENTE_QUALIFICADOR : AGENTE_CAMPANHA_DIRETA,
@@ -550,7 +564,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     const inicioRouter = Date.now();
     let routerFallback = false;
     try {
-      proximo = await chamarRouter(limparParaRouter(comNotaParaRouter(await carregarHistorico(supabase, remotejid), notaTroca)), registrarUsoRouter, provedor);
+      proximo = await rotear();
     } catch (e) {
       console.error('[crm-agente-sdr] router falhou, mantendo agente atual:', e);
       routerFallback = true;
@@ -566,6 +580,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       troca_numero: sinalTroca.trocou,
       ratchet_ignorado: agenteAnterior !== (lead?.agente_atual ?? null),
       persona,
+      ...(jev.leitura ? { jev: jev.leitura } : {}),
     }, Date.now() - inicioRouter);
     // (campanha_direta não cai aqui — tem branch próprio, sem router na abertura)
     // Persona aula: a abertura é o prompt da aula com as tools de `agente_aula` (as mesmas
