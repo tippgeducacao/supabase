@@ -48,6 +48,7 @@ import { resultadoConfirmacao } from '../crm-agente-sdr/confirmacaoAgendamento.t
 import { blocoPerguntasRecentes, falasDoLead } from '../crm-agente-sdr/perguntasRecentes.ts';
 import { alertaFatoSemFonte } from '../crm-agente-sdr/fatoSemFonte.ts';
 import { alertaSaudacao, garantirSaudacao } from '../crm-agente-sdr/saudacao.ts';
+import { resultadoPortfolio } from '../crm-agente-sdr/portfolio.ts';
 import { agendaRealNoDia, diagnosticoDoProvedor, disponibilidadeSimulada, executarFollowupSimulado, executarSimulacao, extrairUso, MAX_CARACTERES_SIMULACAO, validarEntradaSimulacao, type AgenteRouter } from './simulacao.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
@@ -160,16 +161,17 @@ async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimula
         const a = avaliarFicha({ cadastro: ficha.cadastro, jornada: ficha.jornada, inicioRodada: ficha.inicioRodada });
         if (!a.liberaCronograma) {
           if ((ficha.jornada.cronograma?.bloqueado_em ?? '') < ficha.inicioRodada) ficha.jornada = registrarBloqueioNaJornada(ficha.jornada);
-          const { id: _id, ...recusa } = bloqueioCronograma('', a);
+          const { id: _id, ...recusa } = bloqueioCronograma('', a, input?.conteudo === 'portfolio' ? 'portfolio' : 'cronograma');
           return JSON.stringify(recusa);
         }
-        ficha.jornada = registrarEnvioNaJornada(ficha.jornada);
+        // Espelho do executor: o portfólio não conta como "cronograma enviado" na ficha.
+        if (input?.conteudo !== 'portfolio') ficha.jornada = registrarEnvioNaJornada(ficha.jornada);
       }
-      // 16/09/2026, persona aula: aula sem pós manda o PORTFÓLIO da PPGVET (PRD —
-      // Persona por disparo). O executor real ainda não tem esse conteúdo; o mock
-      // devolve o contrato esperado para o ensaio não confundir portfólio com cronograma.
+      // Aula MVP (28/09/2026): o executor real envia o portfólio (portfolio.ts); o mock devolve
+      // o MESMO retorno de envio aceito.
       if (input?.conteudo === 'portfolio') {
-        return 'Portfólio da PPGVET (PDF com todas as pós) enviado ao lead no WhatsApp. Pergunte qual área chamou a atenção dele.';
+        const { id: _id, ...retorno } = resultadoPortfolio('', { ok: true });
+        return JSON.stringify(retorno);
       }
       // Mesma instrução do executor real depois do aceite ("te enviei o cronograma por aqui"…):
       // sem ela o modelo escrevia "solicitei o envio" só no harness.

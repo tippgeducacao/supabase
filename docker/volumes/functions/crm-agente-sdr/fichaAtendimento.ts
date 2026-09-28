@@ -394,7 +394,12 @@ export function aplicarPerguntasNaJornada(j: Jornada, marcas: ('coleta' | 'pos')
 }
 
 /** tool_result da recusa: mesmo contrato de bloqueio das outras guardas (status 'bloqueado' ⇒ não concluiu). */
-export function bloqueioCronograma(id: string, a: AvaliacaoFicha) {
+/** Aula MVP (28/09/2026): antes do portfólio, a mesma troca pela formação, com a frase aprovada. */
+export const SCRIPT_ANTES_DO_PORTFOLIO = 'claro, já te mando. mas antes só me confirma: sua graduação está completa? e qual o curso?';
+
+export function bloqueioCronograma(id: string, a: AvaliacaoFicha, material: 'cronograma' | 'portfolio' = 'cronograma') {
+  // Sem o nome certo, a Luna dizia "te mando o cronograma" a quem pediu o portfólio.
+  const nome = material === 'portfolio' ? 'o portfólio' : 'o cronograma';
   return {
     id,
     status: 'bloqueado',
@@ -402,12 +407,15 @@ export function bloqueioCronograma(id: string, a: AvaliacaoFicha) {
     cronograma_enviado: false,
     falta: a.faltaParaCronograma,
     resultado: a.semGraduacao
-      ? 'RECUSADO: o lead informou que não tem graduação, e a pós exige graduação concluída. O cronograma não foi enviado.'
-      : `RECUSADO: o cronograma NÃO foi enviado porque ainda falta coletar: ${a.faltaParaCronograma.join(' e ')}.`,
+      ? `RECUSADO: o lead informou que não tem graduação, e a pós exige graduação concluída. ${nome[0].toUpperCase()}${nome.slice(1)} não foi enviado.`
+      : `RECUSADO: ${nome} NÃO foi enviado porque ainda falta coletar: ${a.faltaParaCronograma.join(' e ')}.`,
     instrucao: a.semGraduacao
       ? 'Não diga que enviou. Siga o encerramento previsto para quem não tem graduação.'
-      : `Não diga que enviou. Responda "${SCRIPT_ANTES_DO_CRONOGRAMA}" e faça, numa frase só, a pergunta do que falta. `
-        + 'Quando ele responder, registre com atualizar_dados_lead e chame envia_informacoes de novo.',
+      : material === 'portfolio'
+        ? `Não diga que enviou. Responda "${SCRIPT_ANTES_DO_PORTFOLIO}". `
+          + 'Quando ele responder, registre com atualizar_dados_lead e chame envia_informacoes com conteudo="portfolio" de novo.'
+        : `Não diga que enviou. Responda "${SCRIPT_ANTES_DO_CRONOGRAMA}" e faça, numa frase só, a pergunta do que falta. `
+          + 'Quando ele responder, registre com atualizar_dados_lead e chame envia_informacoes de novo.',
   };
 }
 

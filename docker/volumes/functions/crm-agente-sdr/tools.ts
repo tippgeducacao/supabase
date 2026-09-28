@@ -29,6 +29,7 @@ import { montarRetornoInformacoes } from './envioMateriais.ts';
 import { consultarCatalogo } from './catalogoCursos.ts';
 import { resultadoConfirmacao } from './confirmacaoAgendamento.ts';
 import { proximoPassoDaColeta } from './proximoPassoColeta.ts';
+import { enviarPortfolio } from './portfolio.ts';
 import {
   type ContextoElegibilidade, iniciarAvaliacao, finalizarAvaliacao, consultarAprovacao,
   recusaElegibilidade, VERSAO_REGRA_ELEGIBILIDADE,
@@ -1268,7 +1269,10 @@ export async function executarTool(
       case 'consulta_objecoes': return await consultaObjecoes(supabase, input, id, ctx);
       case 'envia_informacoes': {
         if (input?.conteudo === 'valor') return await enviaInformacoes(supabase, input, ctx, id);
-        const chave = String(input?.curso_escolhido ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+        // Aula MVP (28/09/2026): o portf\u00f3lio sai pelo WhatsApp (portfolio.ts), n\u00e3o pela sdr-api.
+        const ehPortfolio = input?.conteudo === 'portfolio';
+        const chave = ehPortfolio ? 'portfolio'
+          : String(input?.curso_escolhido ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
         ctx.enviosMateriais ??= new Map();
         const anterior = ctx.enviosMateriais.get(chave);
         if (anterior) return {
@@ -1286,19 +1290,24 @@ export async function executarTool(
               try { await registrarNaJornada(supabase, ctx.telefone, (j) => registrarBloqueioNaJornada(j)); }
               catch (e) { console.error('[crm-agente-sdr] jornada (bloqueio):', (e as Error)?.message ?? e); }
             }
-            return bloqueioCronograma(id, ficha.avaliacao);
+            return bloqueioCronograma(id, ficha.avaliacao, ehPortfolio ? 'portfolio' : 'cronograma');
           }
         }
         let retorno: Record<string, unknown>;
-        try { retorno = await enviaInformacoes(supabase, input ?? {}, ctx, id); }
-        catch {
-          retorno = montarRetornoInformacoes(true, { data: {
-            cronograma_status: 'desconhecido', cronograma_enviado: false,
-            cronograma_erro: 'Sem resposta da integração de envio.', cronograma_codigo: 'envio_sem_confirmacao',
-          } }, input?.conteudo ?? 'cronograma', id);
+        if (ehPortfolio) retorno = await enviarPortfolio(ctx, id);
+        else {
+          try { retorno = await enviaInformacoes(supabase, input ?? {}, ctx, id); }
+          catch {
+            retorno = montarRetornoInformacoes(true, { data: {
+              cronograma_status: 'desconhecido', cronograma_enviado: false,
+              cronograma_erro: 'Sem resposta da integração de envio.', cronograma_codigo: 'envio_sem_confirmacao',
+            } }, input?.conteudo ?? 'cronograma', id);
+          }
         }
         ctx.enviosMateriais.set(chave, retorno);
-        if (ctx.ficha && retorno?.cronograma_enviado === true) {
+        // O portfólio não conta como "cronograma enviado" na ficha: a próxima pergunta dele é a da
+        // área (FALA_DEPOIS_DO_PORTFOLIO), não a da pós-graduação que vem depois do cronograma.
+        if (ctx.ficha && !ehPortfolio && retorno?.cronograma_enviado === true) {
           try { await registrarNaJornada(supabase, ctx.telefone, (j) => registrarEnvioNaJornada(j)); }
           catch (e) { console.error('[crm-agente-sdr] jornada (envio):', (e as Error)?.message ?? e); }
         }
