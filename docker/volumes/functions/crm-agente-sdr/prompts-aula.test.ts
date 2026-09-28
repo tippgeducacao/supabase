@@ -110,3 +110,15 @@ describe("AGENTE_AULA composto a partir do João de vendas", () => {
     expect(AGENTE_AULA).not.toContain("aula_gravacao");
   });
 });
+
+describe("pergunta de conexão da aula (26/09/2026)", () => {
+  const PERGUNTA = "o que te chamou a atenção nessa aula e você já conhece a PPGVET?";
+  it("o roteiro da aula usa a pergunta nova, e a antiga saiu", () => {
+    expect(AGENTE_AULA).toContain(PERGUNTA);
+    expect(AGENTE_AULA).not.toContain("fez se inscrever");
+  });
+  it("quem não conhece a PPGVET ouve só o que a base devolver", () => {
+    expect(AGENTE_AULA).toContain("pergunta_instituicao");
+    expect(AGENTE_AULA).toContain("Já conhece a PPGVET");
+  });
+});

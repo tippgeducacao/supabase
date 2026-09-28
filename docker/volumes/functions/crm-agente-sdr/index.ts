@@ -484,7 +484,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   if (ctx.ficha && !aulaPiloto) contextoEfetivo = `${contextoEfetivo}\n\n${blocoConviteAgenda()}`;
   if (aulaPiloto) contextoEfetivo += contextoAulaPiloto(aulaDaCampanha);
   if (persona === 'aula' && campanha?.origem === 'convite_base') {
-    contextoEfetivo += '\n\nORIGEM DA CAMPANHA: convite enviado à base. Receber esse convite não comprova inscrição. Não diga que ele se inscreveu nem pergunte por que se cadastrou sem ele confirmar. Pergunte o que chamou a atenção no tema ou sua relação com a área.';
+    contextoEfetivo += '\n\nORIGEM DA CAMPANHA: convite enviado à base. Receber esse convite não comprova inscrição. Não diga que ele se inscreveu nem pergunte por que se cadastrou sem ele confirmar. A pergunta de conexão é: "o que te chamou a atenção nessa aula e você já conhece a PPGVET?"';
   }
   let agenteEfetivo: string;
 
