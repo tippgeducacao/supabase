@@ -38,7 +38,12 @@ export type EtapaFluxo =
   | "escola_enviada"
   | "whatsapp_enviado"
   | "encerrada";
-export type Situacao = "formado" | "estudante" | "nenhum" | "nao_informou";
+/**
+ * `incompleto` (28/09/2026): "superior incompleto" — pode estar cursando OU ter trancado.
+ * Nunca é gravado (o CHECK de ig_conversa_ia.situacao só aceita formado/estudante): o
+ * roteiro pergunta e a resposta decide.
+ */
+export type Situacao = "formado" | "estudante" | "nenhum" | "nao_informou" | "incompleto";
 export type Intencao = "aceita" | "recusa" | "pergunta" | "outro";
 
 /** O que o classificador entendeu das mensagens novas da pessoa. */
@@ -113,6 +118,11 @@ export const TEXTOS = {
   // "A IA está assumindo qualquer coisa na graduação, tinha que perguntar qual é"
   // (Gustavo, 25/09/2026): sem o curso dito, a IA pergunta antes de seguir.
   perguntaCursoFormado: "Show! E qual é a sua formação?",
+  // "Grau superior incompleto" virava "Legal! E qual curso você faz?" — mas incompleto pode
+  // ser quem trancou: "tinha que perguntar está cursando ainda? e qual é o curso" (Gustavo,
+  // 28/09/2026).
+  perguntaIncompleto: "Entendi! Você ainda tá cursando? E qual é o curso?",
+  perguntaIncompletoComCurso: "Entendi! E você ainda tá cursando?",
   perguntaCursoEstudante: "Legal! E qual curso você faz?",
   reperguntarCurso: "Me conta qual é o curso da sua graduação? Por exemplo: medicina veterinária, zootecnia, agronomia…",
   perguntaDataFormacao: "E você se forma quando? Me fala o mês e o ano 😊",
@@ -354,6 +364,18 @@ function decidirPassoSemApresentacao(etapa: EtapaFluxo, c: Classificacao, ctx: C
       };
     }
     return irParaInteresse(c);
+  }
+
+  // "Superior incompleto": não chuta estudante — pergunta se ainda cursa (e o curso). A
+  // resposta volta para esta mesma etapa: "sim, zootecnia" segue como estudante; "tranquei"
+  // é sem graduação (Escola). Repetiu "incompleto" duas vezes → cai na régua do vago abaixo.
+  if (c.situacao === "incompleto" && ctx.tentativas < 2) {
+    return {
+      mensagens: comResposta(c, [c.area ? TEXTOS.perguntaIncompletoComCurso : TEXTOS.perguntaIncompleto]),
+      proximaEtapa: "pergunta_formacao",
+      tentativas: ctx.tentativas + 1,
+      ...(c.area ? { area: c.area } : {}),
+    };
   }
 
   // boas_vindas e pergunta_formacao: a pessoa pode já ter dito a situação (e o curso).

@@ -106,6 +106,31 @@ describe('pergunta_data_formacao: confirma a leitura em vez de soar robótico (2
   });
 });
 
+describe('"superior incompleto": pergunta se ainda cursa (28/09/2026)', () => {
+  it('sem o curso → "Você ainda tá cursando? E qual é o curso?", fica na etapa da formação', () => {
+    expect(passo('pergunta_formacao', { situacao: 'incompleto' }, { textoNovo: 'Grau superior incompleto...' })).toMatchObject({
+      mensagens: ['Entendi! Você ainda tá cursando? E qual é o curso?'], proximaEtapa: 'pergunta_formacao', tentativas: 1,
+    });
+  });
+
+  it('com o curso → só pergunta se ainda cursa, e guarda o curso', () => {
+    expect(passo('pergunta_formacao', { situacao: 'incompleto', area: 'zootecnia' })).toMatchObject({
+      mensagens: ['Entendi! E você ainda tá cursando?'], proximaEtapa: 'pergunta_formacao', area: 'zootecnia',
+    });
+  });
+
+  it('a resposta decide: cursando com o curso → data; trancou → Escola', () => {
+    expect(passo('pergunta_formacao', { situacao: 'estudante', area: 'zootecnia' }, { tentativas: 1 }).proximaEtapa)
+      .toBe('pergunta_data_formacao');
+    expect(passo('pergunta_formacao', { situacao: 'nenhum' }, { tentativas: 1 }).proximaEtapa).toBe('escola_enviada');
+  });
+
+  it('também na 1ª resposta (boas-vindas)', () => {
+    expect(passo('boas_vindas', { situacao: 'incompleto' }).mensagens)
+      .toEqual([TEXTOS.apresentacao, 'Entendi! Você ainda tá cursando? E qual é o curso?']);
+  });
+});
+
 describe('pergunta_formacao', () => {
   it('formado de área fora do catálogo também segue (tem MBA e extensão)', () => {
     expect(passo('pergunta_formacao', { situacao: 'formado', area: 'direito' }).proximaEtapa).toBe('pergunta_interesse');

@@ -22,7 +22,7 @@ const O_QUE_A_IA_ACABOU_DE_PERGUNTAR: Record<EtapaFluxo, string> = {
   boas_vindas:
     "A PPGVET mandou a boas-vindas a um novo seguidor (\"Oii, tudo bem?\"). Respostas como \"tudo sim, e você?\" são só cumprimento (intencao = outro).",
   pergunta_formacao:
-    "A IA perguntou se a pessoa já se formou e trabalha, ou se ainda está na graduação. Se a ÚLTIMA pergunta da IA foi \"Você não possui graduação?\", é uma confirmação: \"não tenho\", \"não possuo\", \"sim, não tenho\", \"só o ensino médio\" = nenhum; \"tenho sim\", \"sou formado em…\", \"faço…\" = formado/estudante; \"sim\" ou \"não\" sozinhos são ambíguos = nao_informou.",
+    "A IA perguntou se a pessoa já se formou e trabalha, ou se ainda está na graduação. Se a ÚLTIMA pergunta da IA foi \"Você não possui graduação?\", é uma confirmação: \"não tenho\", \"não possuo\", \"sim, não tenho\", \"só o ensino médio\" = nenhum; \"tenho sim\", \"sou formado em…\", \"faço…\" = formado/estudante; \"sim\" ou \"não\" sozinhos são ambíguos = nao_informou. Se a ÚLTIMA pergunta da IA foi \"Você ainda tá cursando?\": \"sim\", \"tô sim, faço zootecnia\" = estudante (com a area, se disse); \"não\", \"tranquei\", \"parei\" = nenhum.",
   pergunta_curso:
     "A IA perguntou QUAL é o curso da graduação da pessoa (a formação dela, ou o curso que ela faz). Preencha `area` com o curso dito (ex.: \"medicina veterinária\", \"zootecnia\"); se ela não disse o curso, null.",
   pergunta_data_formacao:
@@ -41,7 +41,10 @@ const INSTRUCOES = [
   "situacao (sobre a GRADUAÇÃO, ensino superior, em QUALQUER área):",
   "- formado: já concluiu uma graduação (\"sou vet\", \"me formei em zootecnia\", \"sou médica veterinária\", \"sou formado em agronomia\").",
   "- estudante: está cursando uma graduação (\"tô no 7º período\", \"faço agronomia\", \"sou estudante de vet\").",
-  "- nenhum: disse que não fez nem faz faculdade (ensino médio, só técnico, produtor sem graduação, só curiosidade).",
+  "- nenhum: disse que não fez nem faz faculdade (ensino médio, só técnico, produtor sem graduação, só curiosidade),",
+  "  ou que parou/trancou e não está cursando (\"tranquei no 5º período\", \"parei a faculdade\").",
+  "- incompleto: disse que a graduação está INCOMPLETA sem dizer se ainda cursa (\"grau superior incompleto\",",
+  "  \"faculdade incompleta\", \"não terminei a faculdade\") — pode ter trancado. NÃO chute estudante: a IA pergunta.",
   "  \"Sou produtor rural\" sozinho NÃO é nenhum (produtor pode ter graduação): nao_informou, e a IA confirma.",
   "- nao_informou: não deu para saber. Na dúvida, é nao_informou — nunca deduza pela profissão sem a pessoa dizer.",
   "  Cargo, função ou área de trabalho NÃO dizem se a pessoa tem graduação — nem os que exigem diploma",
@@ -77,7 +80,7 @@ export const TOOL_CLASSIFICAR = {
     type: "object",
     properties: {
       intencao: { type: "string", enum: ["aceita", "recusa", "pergunta", "outro"] },
-      situacao: { type: "string", enum: ["formado", "estudante", "nenhum", "nao_informou"] },
+      situacao: { type: "string", enum: ["formado", "estudante", "nenhum", "nao_informou", "incompleto"] },
       area: { type: ["string", "null"] },
       telefone: { type: ["string", "null"] },
       conclusao: { type: ["string", "null"] },
@@ -99,7 +102,7 @@ export const CLASSIFICACAO_NEUTRA: Classificacao = {
 };
 
 const INTENCOES: readonly Intencao[] = ["aceita", "recusa", "pergunta", "outro"];
-const SITUACOES: readonly Situacao[] = ["formado", "estudante", "nenhum", "nao_informou"];
+const SITUACOES: readonly Situacao[] = ["formado", "estudante", "nenhum", "nao_informou", "incompleto"];
 
 function texto(v: unknown, max: number): string | null {
   const s = typeof v === "string" ? v.trim() : "";
