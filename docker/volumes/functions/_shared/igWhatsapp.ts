@@ -96,8 +96,27 @@ export function notaParaOAgente(
     // texto do recibo), não achou e abriu com "a gente não tem uma pós chamada assim".
     "O \"pós-graduação em …\" do recibo é texto padrão: ela NÃO escolheu um curso com esse nome — não procure curso por ele; descubra a área de interesse.",
     `O sistema está enviando agora o portfólio em PDF ("${IG_PORTFOLIO_ARQUIVO}"). Não reenvie o portfólio; siga a conversa a partir daqui.`,
-    instrucaoForaDoPrazo(situacao, dataFormacao, agora),
+    instrucaoForaDoPrazo(situacao, dataFormacao, agora) || aberturaComContexto(situacao, dataFormacao, area),
   ].filter(Boolean).join(" ");
+}
+
+/**
+ * A 1ª resposta do João no WhatsApp retoma o que a pessoa disse no Instagram — "tinha que
+ * usar o contexto: vc me falou no Instagram que é formado em Y, né? {pergunta sobre o
+ * interesse na pós}" (Gustavo, 28/09/2026). Sem isso ele abria com "vi que vc pegou o
+ * portfólio, qual área te chamou atenção?", como se não soubesse nada dela.
+ */
+export function aberturaComContexto(situacao: string | null, dataFormacao: string | null, area: string | null): string {
+  const MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"];
+  const mes = dataFormacao ? MESES[Number(dataFormacao.slice(5, 7)) - 1] : null;
+  const quando = dataFormacao && mes ? ` e se forma em ${mes} de ${dataFormacao.slice(0, 4)}` : "";
+  const fala = situacao === "formado"
+    ? `"vc me falou lá no Instagram que é formado(a)${area ? ` em ${area}` : ""}, né?"`
+    : situacao === "estudante"
+    ? `"vc me falou lá no Instagram que tá cursando ${area ?? "a graduação"}${quando}, né?"`
+    : "";
+  if (!fala) return "";
+  return `Na sua PRIMEIRA resposta aqui, retome esse contexto com as suas palavras (flexione pelo nome) — algo como ${fala} — e emende UMA pergunta sobre o interesse na pós (qual área ou pós chamou mais a atenção). Não pergunte de novo a formação nem a data.`;
 }
 
 /**

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { areaDoRecibo, componentesDoRecibo, dataDoRecibo, instrucaoForaDoPrazo, linkDoWhatsapp, nomeDoRecibo, notaParaOAgente } from './igWhatsapp';
+import { aberturaComContexto, areaDoRecibo, componentesDoRecibo, dataDoRecibo, instrucaoForaDoPrazo, linkDoWhatsapp, nomeDoRecibo, notaParaOAgente } from './igWhatsapp';
 
 describe('recibo do Instagram: os três espaços do comprovante_cadastro_utility', () => {
   it('{{1}}: primeiro nome; perfil de marca vira o @; nunca vazio', () => {
@@ -67,6 +67,23 @@ describe('nota para o agente do WhatsApp', () => {
     expect(instrucaoForaDoPrazo('estudante', null, AGORA)).toBe('');
     expect(instrucaoForaDoPrazo('estudante', 'lixo', AGORA)).toBe('');
     expect(notaParaOAgente('estudante', '2027-01-31', AGORA)).not.toContain('escoladeespecializacao');
+  });
+});
+
+describe('a 1ª resposta do João retoma o que a pessoa disse no Instagram (28/09/2026)', () => {
+  it('formado com a área, estudante com área e data; sem situação, nada', () => {
+    expect(aberturaComContexto('formado', null, 'agronomia')).toContain('"vc me falou lá no Instagram que é formado(a) em agronomia, né?"');
+    expect(aberturaComContexto('estudante', '2026-12-31', 'zootecnia'))
+      .toContain('"vc me falou lá no Instagram que tá cursando zootecnia e se forma em dezembro de 2026, né?"');
+    expect(aberturaComContexto(null, null, null)).toBe('');
+  });
+
+  it('vai na nota de quem pode ir para a reunião; quem se forma depois do prazo fica com a pausa', () => {
+    const AGORA = new Date('2026-09-28T12:00:00Z');
+    expect(notaParaOAgente('formado', null, AGORA, 'agronomia')).toContain('Na sua PRIMEIRA resposta aqui');
+    const fora = notaParaOAgente('estudante', '2028-12-31', AGORA, 'zootecnia');
+    expect(fora).toContain('PAUSOU a IA');
+    expect(fora).not.toContain('Na sua PRIMEIRA resposta aqui');
   });
 });
 
