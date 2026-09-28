@@ -356,6 +356,14 @@ describe('ig-agente: quando NÃO fala', () => {
     expect(mocks.classificar).toHaveBeenCalledTimes(1);
   });
 
+  it('menção em story: a IA não atua (28/09/2026)', async () => {
+    mocks.estado.mensagens = [{ mid: 'm1', direcao: 'inbound', tipo: 'story_mention', conteudo: null, created_at: INBOUND_EM }];
+    await inbound();
+    expect(mocks.classificar).not.toHaveBeenCalled();
+    expect(mocks.fetch).not.toHaveBeenCalled();
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
   it('chegou mensagem mais nova: a execução dela responde, não esta', async () => {
     mocks.estado.mensagens.push({ mid: 'm2', direcao: 'inbound', tipo: 'text', conteudo: 'e o valor?', created_at: '2026-09-24T12:00:03.000Z' });
     await inbound('m1');

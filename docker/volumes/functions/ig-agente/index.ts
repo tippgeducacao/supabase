@@ -457,9 +457,16 @@ async function tratarInbound(contaId: string, igsid: string, mid: string) {
   }
   const { conversa, debounceS } = aberta;
 
-  const { data: gatilho } = await supabase.from("ig_mensagens").select("conteudo").eq("mid", mid).maybeSingle();
+  const { data: gatilho } = await supabase.from("ig_mensagens").select("conteudo, tipo").eq("mid", mid).maybeSingle();
   if (String(gatilho?.conteudo ?? "").trim().toLowerCase() === COMANDO_RESET) {
     await zerarConversa(conversa);
+    return;
+  }
+  // Menção em story não é conversa: "menção ao story não vamos atuar" (Gustavo, 28/09/2026).
+  // A IA abria com "Tudo ótimo por aqui!" como se a pessoa tivesse perguntado algo. Se ela
+  // escrever de verdade depois, a rodada daquela mensagem atende normalmente.
+  if (gatilho?.tipo === "story_mention" && !String(gatilho?.conteudo ?? "").trim()) {
+    log("menção em story — a IA não atua", igsid);
     return;
   }
 
