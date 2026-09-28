@@ -329,7 +329,30 @@ export function humanizarTexto(texto: string): string {
   t = t.replace(/,\s*$/gm, '.');             // vírgula pendurada no fim da linha
   t = t.replace(/[ \t]+([,.;:?])/g, '$1');   // espaço antes de pontuação ("aí ," → "aí,")
   t = t.replace(/[ \t]{2,}/g, ' ');
+  t = comInterrogacao(t);
   return corrigirNomeDeCurso(t).trim();
+}
+
+// 28/09/2026 (pedido do Gustavo): pergunta termina com "?". O Sonnet imitava exemplos do roteiro
+// escritos sem "?" ("quer que eu te mande pra vc dar uma olhada", "e qual o curso"). A regra está
+// nos prompts; aqui é a garantia, CONSERVADORA: só mexe no fim de linha SEM nenhuma pontuação cuja
+// última frase começa com palavra inequívoca de pergunta. "vc pode ficar tranquila" e "como a pós
+// é lato sensu, …" não entram ("como" e "vc pode" também abrem afirmações).
+const RE_INICIO_DE_PERGUNTA = new RegExp('^(?:e\\s+)?(?:' + [
+  'qual', 'quais', 'quando', 'onde', 'quem', 'quanto', 'quantos', 'quantas', 'por que', 'pq', 'o que',
+  'quer que', 'prefere', 'consegue', 'topa', 'fica bom', 'fica melhor', 'faz sentido', 'posso',
+  'alguma dessas', 'algum desses', 'alguma delas', 'algum deles', 'chegou', 'abriu', 'tem interesse',
+  '(?:vc|voce)\\s+(?:prefere|consegue|quer|topa|tem interesse|ja conhece|conhece|ja tem)',
+].join('|') + ')\\b');
+
+export function comInterrogacao(texto: string): string {
+  return texto.split('\n').map((linha) => {
+    const t = linha.trimEnd();
+    if (!t || /[.?!:;…)"'»\]]$/.test(t) || /\p{Extended_Pictographic}$/u.test(t) || /https?:\/\/\S+$/.test(t)) return linha;
+    const ultima = t.split(/[.?!:;]\s+/).pop() ?? t;
+    const norm = ultima.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+    return RE_INICIO_DE_PERGUNTA.test(norm) ? `${t}?` : linha;
+  }).join('\n');
 }
 
 // 21/09/2026 (pedido do usuário) — o que o lead LÊ sobre o nome do curso, corrigido na saída:
