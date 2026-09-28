@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AGENTE_AULA, comporAgenteAula, estadoDaAula, montarVarsAula, quandoOcorre, type AulaParaPrompt } from "./prompts-aula.ts";
+import { AGENTE_AULA, certificadoLiberado, comporAgenteAula, estadoDaAula, montarVarsAula, quandoOcorre, semCertificadoAntesDoFim, type AulaParaPrompt } from "./prompts-aula.ts";
 import { AGENTE_VALIDACAO } from "./prompts.ts";
 import { fichaDaPos } from "./fichasPos.ts";
 
@@ -130,5 +130,42 @@ describe("reação da pergunta de conexão (28/09/2026)", () => {
   });
   it("o gancho da ficha de cannabis não traz mais a frase que parece pergunta", () => {
     expect(fichaDaPos("PÓS | CANNABIS MEDICINAL VETERINÁRIA")).not.toContain("os tutores já perguntam sobre cannabis;");
+  });
+});
+
+describe("certificado só depois do fim da aula (28/09/2026)", () => {
+  const aula: AulaParaPrompt = {
+    titulo: "Medicina Endocanabinoide Veterinária", inicio_em: "2026-09-28T22:00:00.000Z", link: "https://www.youtube.com/watch?v=abc",
+    certificado_link: "https://certificado.example.com/cannabis", certificado_instrucoes: "assistir até o fim", curso_nome: "PÓS | CANNABIS MEDICINAL VETERINÁRIA",
+  };
+  const antes = new Date("2026-09-28T15:00:00.000Z"); // 12h em Brasília, dia da aula
+  const durante = new Date("2026-09-28T23:00:00.000Z"); // 20h, aula acontecendo
+  const depois = new Date("2026-09-29T00:05:00.000Z"); // 21h05, aula encerrada (19h + 2h)
+
+  it("antes e durante a aula, o link e as orientações nem entram no prompt", () => {
+    for (const agora of [antes, durante]) {
+      const v = montarVarsAula(aula, agora);
+      expect(certificadoLiberado(aula, agora)).toBe(false);
+      expect(v.aula_certificado).not.toContain("certificado.example.com");
+      expect(v.aula_certificado).not.toContain("assistir até o fim");
+      expect(v.aula_certificado).toContain("só é liberado depois que a aula termina");
+    }
+    expect(montarVarsAula(aula, antes).aula_certificado).toContain("hoje, a partir das 21h00");
+  });
+
+  it("depois do fim, o link e as orientações vão para o prompt", () => {
+    const v = montarVarsAula(aula, depois);
+    expect(certificadoLiberado(aula, depois)).toBe(true);
+    expect(v.aula_certificado).toContain("Certificado gratuito: https://certificado.example.com/cannabis");
+    expect(v.aula_certificado).toContain("assistir até o fim");
+  });
+
+  it("no envio, o link sai do texto antes do fim e passa depois", () => {
+    const fala = "segue o certificado: https://certificado.example.com/cannabis";
+    const cedo = semCertificadoAntesDoFim(fala, aula, durante);
+    expect(cedo.removido).toBe(true);
+    expect(cedo.texto).not.toContain("certificado.example.com");
+    expect(semCertificadoAntesDoFim(fala, aula, depois)).toEqual({ texto: fala, removido: false });
+    expect(semCertificadoAntesDoFim(fala, null, durante)).toEqual({ texto: fala, removido: false });
   });
 });

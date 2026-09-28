@@ -34,6 +34,7 @@ import { FOLLOWUP_PILOTO_SYSTEM } from './followupPiloto.ts';
 import { contextoFollowupCarreira, corrigirPremissaDeCarreira, planejarFollowupCarreira, validarFollowupCarreira } from './followupCarreira.ts';
 import { registrarNaJornada } from './fichaAtendimento.ts';
 import { carregarAulaParaFollowup, contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from './contextoAulaPiloto.ts';
+import { type AulaParaPrompt, semCertificadoAntesDoFim } from './prompts-aula.ts';
 import { carregarModoTrocaNumero, carregarSinalTrocaDeNumero, notaTrocaDeNumero, resumoDoSinal, type SinalTrocaDeNumero } from './trocaDeNumero.ts';
 import { enviarComAberturaNumero, NOTA_ABERTURA_CONTROLADA } from './aberturaTrocaNumero.ts';
 import { PRAZO_MODELO_PILOTO_MS } from './prazoModelo.ts';
@@ -475,6 +476,7 @@ export async function processarFollowupLead(supabase: any, leadSel: any, stageSe
     let contextoPiloto = '';
     let sinalAbertura: SinalTrocaDeNumero | null = null;
     let leadGeracao = lead;
+    let aulaDoLead: AulaParaPrompt | null = null;
     if (provedor) {
       // A conta escolhida continua sendo a do inbound; não abrir janela nem trocar
       // número para conseguir enviar um follow-up. Ausência da conta cancela o piloto.
@@ -483,6 +485,7 @@ export async function processarFollowupLead(supabase: any, leadSel: any, stageSe
       if (lead.contexto_campanha?.persona === 'aula') {
         const aula = await carregarAulaParaFollowup(supabase, lead);
         if (!aula) { tel.registrar('followup_pulado', { motivo: 'aula_sem_contexto' }); return false; }
+        aulaDoLead = aula;
         leadGeracao = { ...lead, curso_interesse_original: aula.curso_nome ?? '' };
         contextoPiloto += '\n\n' + INSTRUCAO_AULA_PILOTO + contextoAulaPiloto(aula);
       }
@@ -539,9 +542,12 @@ export async function processarFollowupLead(supabase: any, leadSel: any, stageSe
     await atualizarLead(supabase, remotejid, { follow_up: followUpDoStage(stage) });
     // Marcador no histórico (conta a tentativa; o agente principal ignora).
     await gravarMensagem(supabase, remotejid, { role: 'user', content: MARCADOR_FOLLOWUP });
+    // Certificado só depois da aula (28/09/2026): o link não sai antes do fim (prompts-aula.ts).
+    const semCertificado = semCertificadoAntesDoFim(message, aulaDoLead);
+    if (semCertificado.removido) tel.registrar('certificado_retido', { motivo: 'aula_nao_terminou', origem: 'followup' });
     // Envia pelo MESMO pipeline (fraciona + delay + crm-whatsapp-send).
     const { envio, texto: textoEnviado } = await enviarComAberturaNumero({
-      banco: supabase, telefone, interacaoId: tel.rodadaId, texto: message, sinal: sinalAbertura,
+      banco: supabase, telefone, interacaoId: tel.rodadaId, texto: semCertificado.texto, sinal: sinalAbertura,
       registrar: (tipo, dados) => tel.registrar(tipo, dados),
       enviar: (fala, controle) => enviarResposta(ctx, fala, lockRenovar(supabase, remotejid), tel, interrompido, {
       supabase, origem: 'followup', historico: history, etapaFollowup: stage, iniciadaEm: inicioRodada, interrompido,

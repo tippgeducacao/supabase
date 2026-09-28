@@ -16,7 +16,7 @@ import { pausaVigente } from './pausa.ts';
 import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO } from './prompts.ts';
 import { AGENTE_RECONTATO, montarDossieRecontato } from './prompts-recontato.ts';
 import { AGENTE_CAMPANHA_DIRETA } from './prompts-campanha-direta.ts';
-import { AGENTE_AULA, type AulaParaPrompt, montarVarsAula } from './prompts-aula.ts';
+import { AGENTE_AULA, type AulaParaPrompt, montarVarsAula, semCertificadoAntesDoFim } from './prompts-aula.ts';
 import { comBlocoDaEscola, comLinkPedido, comPresenteNaDespedida, jaTemOPresente, LINK_ESCOLA_GRATUITA } from './escolaGratuita.ts';
 import { respostaDoEncerramento, toolConcluida, type Encerramento } from './encerramento.ts';
 import { confirmacaoDoResultado, falaEntregaConfirmacao, textoConfirmacaoAgendamento, type ConfirmacaoAgendamento } from './confirmacaoAgendamento.ts';
@@ -1089,10 +1089,14 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
           comPresente.texto, conteudo, estaNaEscola || jaTemOPresente(conversaTexto(messages)),
         );
         if (comLink.anexou) tel.registrar('link_escola_reenviado', { pedido: resumir(conteudo, 200) });
+        // Certificado só depois da aula (28/09/2026): 2ª camada — o link não sai antes do fim,
+        // mesmo que o modelo o tenha tirado do histórico (prompts-aula.ts, semCertificadoAntesDoFim).
+        const semCertificado = semCertificadoAntesDoFim(comLink.texto, aulaDaCampanha);
+        if (semCertificado.removido) tel.registrar('certificado_retido', { motivo: 'aula_nao_terminou' });
         // Canário (26/09/2026): o cumprimento do lead é retribuído, garantido em código (saudacao.ts).
         const fala = ctx.ficha && !aberturaControlada
-          ? garantirSaudacao(humanizarTexto(comLink.texto), conteudo)
-          : { texto: humanizarTexto(comLink.texto), acrescentou: null };
+          ? garantirSaudacao(humanizarTexto(semCertificado.texto), conteudo)
+          : { texto: humanizarTexto(semCertificado.texto), acrescentou: null };
         if (fala.acrescentou) tel.registrar('saudacao_garantida', { prefixo: fala.acrescentou });
         const { envio, texto: textoEnviado } = await enviarComAberturaNumero({
           banco: supabase, telefone, interacaoId: tel.rodadaId, texto: fala.texto,

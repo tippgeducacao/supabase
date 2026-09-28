@@ -83,6 +83,37 @@ export function quandoOcorre(aula: AulaParaPrompt, agora: Date = new Date()): st
 
 const SEM_FICHA = "(esta pós ainda não tem ficha: conecte pelo que o lead contar, sem inventar conteúdo, módulo ou resultado da pós)";
 
+// ── CERTIFICADO SÓ DEPOIS DA AULA (28/09/2026, regra do Gustavo) ─────────────────────────
+// O certificado é de quem assistiu: só pode ser enviado depois que a aula termina. Regra em
+// código, em duas camadas: (1) antes do fim, o link e as orientações NEM ENTRAM no prompt
+// (montarVarsAula) — o modelo não tem o que mandar; (2) se o link ainda assim aparecer numa
+// fala antes do fim (vindo de histórico, por exemplo), `semCertificadoAntesDoFim` tira do
+// texto antes do envio. "Fim" = início + DURACAO_AULA_MS, a mesma régua de "acontecendo agora".
+
+/** A aula já terminou, e o certificado pode ser enviado? */
+export function certificadoLiberado(aula: AulaParaPrompt, agora: Date = new Date()): boolean {
+  return estadoDaAula(aula, agora) === "encerrada";
+}
+
+function textoCertificado(aula: AulaParaPrompt, agora: Date): string {
+  if (!certificadoLiberado(aula, agora)) {
+    const fim = new Date(new Date(aula.inicio_em).getTime() + DURACAO_AULA_MS);
+    const quando = dataLocal(fim) === dataLocal(agora) ? `hoje, a partir das ${horaLocal(fim)}` : `${diaMesLocal(fim)}, a partir das ${horaLocal(fim)}`;
+    return `O certificado gratuito só é liberado depois que a aula termina (${quando}, horário de brasília). `
+      + "Se o lead perguntar, diga isso e que você manda o certificado quando a aula acabar. Antes disso, não envie link nem requisitos de certificado.";
+  }
+  return [aula.certificado_link ? `Certificado gratuito: ${aula.certificado_link}` : "", aula.certificado_instrucoes ?? ""].filter(Boolean).join("\n")
+    || "Informações do certificado ainda não cadastradas. Não afirme que não existe certificado nem invente link ou requisitos.";
+}
+
+/** Tira o link do certificado de uma fala enviada ANTES do fim da aula (2ª camada, no envio). */
+export function semCertificadoAntesDoFim(texto: string, aula: AulaParaPrompt | null, agora: Date = new Date()): { texto: string; removido: boolean } {
+  const link = aula?.certificado_link?.trim();
+  if (!aula || !link || certificadoLiberado(aula, agora) || !texto.includes(link)) return { texto, removido: false };
+  const limpo = texto.split(link).join("(o certificado é liberado quando a aula terminar)");
+  return { texto: limpo, removido: true };
+}
+
 /** As vars da persona, prontas para o renderPrompt. Texto vazio = dado não cadastrado. */
 export function montarVarsAula(aula: AulaParaPrompt, agora: Date = new Date()): Record<string, string> {
   return {
@@ -90,8 +121,8 @@ export function montarVarsAula(aula: AulaParaPrompt, agora: Date = new Date()): 
     aula_tema: aula.tema ?? "",
     aula_quando: quandoOcorre(aula, agora),
     aula_link: aula.link ?? "",
-    aula_certificado: [aula.certificado_link ? `Certificado gratuito: ${aula.certificado_link}` : '', aula.certificado_instrucoes ?? ''].filter(Boolean).join('\n')
-      || 'Informações do certificado ainda não cadastradas. Não afirme que não existe certificado nem invente link ou requisitos.',
+    // Antes do fim da aula, o link e as orientações não entram (ver CERTIFICADO SÓ DEPOIS DA AULA).
+    aula_certificado: textoCertificado(aula, agora),
     aula_monitor: aula.monitor_nome ?? "",
     curso_interesse_original: aula.curso_nome ?? "",
     aula_ficha_pos: fichaDaPos(aula.curso_nome) || SEM_FICHA,
