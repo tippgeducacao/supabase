@@ -148,7 +148,7 @@ export const FERRAMENTAS_CONSULTA = [
   {
     name: "consultar_midia",
     description:
-      "Investimento de mídia (Meta): quanto investimos HOJE, ONTEM e no MÊS, a quebra por conta/BM, o orçado e o ritmo (disponível por dia). Use para 'quanto investimos hoje/este mês em cada conta'.",
+      "Investimento de mídia (Meta + Google + TikTok): quanto investimos HOJE, ONTEM e no MÊS, a quebra por plataforma e por conta/BM, o orçado e o ritmo (disponível por dia). Use para 'quanto investimos hoje/este mês', 'quanto foi no Google/TikTok' ou 'em cada conta'.",
     input_schema: { type: "object", properties: { mes: { type: "string", description: "'YYYY-MM' (opcional; padrão mês atual)" } } },
   },
   {
@@ -574,7 +574,10 @@ async function cMidia(input: any, ctx: Ctx) {
   return {
     ...data,
     _nota:
-      "A 'conta' já é o BM (o nome carrega o rótulo). Gasto é líquido (sem imposto). 'Hoje' é parcial; 'ontem' é o dia fechado. " +
+      "'gasto', 'gasto_hoje' e 'gasto_ontem' SOMAM Meta + Google + TikTok em QUALQUER mês consultado — o valor é recalculado das três plataformas, inclusive para meses anteriores; 'por_plataforma' traz a quebra do mês. Só respostas antigas deste chat, dadas antes de 28/09/2026, traziam apenas o Meta. " +
+      "Cada linha de 'por_conta' tem 'plataforma': no META a 'conta' é o BM (o nome carrega o rótulo); no GOOGLE e no TIKTOK é a conta de anúncio da plataforma, não um BM. " +
+      "Gasto é líquido (sem imposto). 'Hoje' é parcial; 'ontem' é o dia fechado. " +
+      "O orçado é comparado com o TOTAL das três plataformas. " +
       "⚠️ 'orcado' é o teto da COMPETÊNCIA pedida (herda a última competência <= o mês). A primeira competência cadastrada é agosto/2026: " +
       "para julho/2026 e antes ele vem 0 porque NÃO HÁ ORÇADO DEFINIDO naquele mês — nunca diga 'o orçado foi R$ 0,00' nem trate como teto zero; " +
       "diga que não há orçado cadastrado para esse mês e compare só o gasto.",
