@@ -152,7 +152,21 @@ function montarContexto(d: any): string {
     `Google Ads | ${brl(vg)} | ${brl(Number(v.google_anterior ?? 0))} | ${soma(leadsGoogle, "leads")} | ` +
     `${custo(vg, soma(leadsGoogle, "leads"))} | ${soma(leadsGoogle, "agendaram")} | ${custo(vg, soma(leadsGoogle, "agendaram"))} | ${matGoogle} | ${custo(vg, matGoogle)}`,
   );
-  linhas.push(`TikTok Ads | verba NÃO ingerida no sistema | — | ${soma(atual.filter((l) => l.sub === "tiktok_ads"), "leads")} | — | — | — | ${matDe((s) => s === "tiktok_ads")} | —`);
+  const leadsTiktok = atual.filter((l) => l.sub === "tiktok_ads");
+  const matTiktok = matDe((s) => s === "tiktok_ads");
+  const vt = v.tiktok == null ? null : Number(v.tiktok);
+  if (vt == null) {
+    // RPC sem a emenda de 29/09 (verba.tiktok = NULL): declarar, não inventar R$ 0,00.
+    linhas.push(`TikTok Ads | verba NÃO ingerida no sistema | — | ${soma(leadsTiktok, "leads")} | — | — | — | ${matTiktok} | —`);
+  } else {
+    // spend na moeda da conta, registrado desde 18/08/2026. Verba zero no período ⇒ "—" nos
+    // custos: R$ 0,00 de CPL leria "custou nada", o erro que o bloco Formato × verba proíbe.
+    const custoTk = (n: number) => (vt > 0 ? custo(vt, n) : "—");
+    linhas.push(
+      `TikTok Ads | ${brl(vt)} | ${brl(Number(v.tiktok_anterior ?? 0))} | ${soma(leadsTiktok, "leads")} | ` +
+      `${custoTk(soma(leadsTiktok, "leads"))} | ${soma(leadsTiktok, "agendaram")} | ${custoTk(soma(leadsTiktok, "agendaram"))} | ${matTiktok} | ${custoTk(matTiktok)}`,
+    );
+  }
 
   // 4) tipo de cadastro
   linhas.push("\n## 4. Tipo de cadastro dentro dos 'leads' (heurística pelo nome do webhook/página)");
