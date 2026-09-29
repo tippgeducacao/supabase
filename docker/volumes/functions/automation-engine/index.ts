@@ -249,6 +249,16 @@ Deno.serve(async (req) => {
               await supabase.from('gt_tasks').update({ priority: cfg.priority }).eq('id', task_id);
               executedActions.push({ type: 'change_priority', status: 'success' });
               break;
+            case 'mark_completed':
+              // Só marca a caixinha (completed_at) — não mexe na etapa/status,
+              // que é quem a automação já está seguindo pelo gatilho.
+              await supabase.from('gt_tasks').update({ completed_at: new Date().toISOString() }).eq('id', task_id);
+              executedActions.push({ type: 'mark_completed', status: 'success' });
+              break;
+            case 'mark_incomplete':
+              await supabase.from('gt_tasks').update({ completed_at: null }).eq('id', task_id);
+              executedActions.push({ type: 'mark_incomplete', status: 'success' });
+              break;
             case 'change_due_date': {
               const triggerTs = new Date().toISOString();
               const offset = parseInt(cfg.offset_days) || 0;
@@ -836,6 +846,8 @@ function actionLabelPt(t: string): string {
     change_assignee: 'responsável alterado',
     change_priority: 'prioridade alterada',
     change_due_date: 'data alterada',
+    mark_completed: 'marcada como concluída',
+    mark_incomplete: 'reaberta',
     add_tag: 'tag adicionada',
     remove_tag: 'tag removida',
     add_comment: 'comentário adicionado',
