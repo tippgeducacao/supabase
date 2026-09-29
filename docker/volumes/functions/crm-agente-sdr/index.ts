@@ -58,6 +58,7 @@ import {
 import { comGanchoDoLote, cursoDaConversa } from './ganchoLote.ts';
 import { ehComandoLimpar, ehTelefoneDeTeste, limparConversaDeTeste, limpoEm } from './limparTeste.ts';
 import { carregarDesvioN8n, vaiParaN8n } from '../_shared/desvioN8n.ts';
+import { autorizarN8n, ehAcaoN8n, segredoDoPedido, tratarMidiaN8n } from './rotasN8n.ts';
 import { blocoConviteAgenda } from './contexto.ts';
 import { prepararMensagem } from './midia.ts';
 import { persistirEntradasDoLote, registrarEntrada } from './historicoEntradaPausa.ts';
@@ -1527,6 +1528,23 @@ Deno.serve(async (req) => {
     if (typeof EdgeRuntime !== 'undefined' && EdgeRuntime?.waitUntil) EdgeRuntime.waitUntil(trabalho);
     else await trabalho;
     return json({ ok: true, esteira: 'followup-template', modo: 'background' });
+  }
+
+  // ▸ Rotas do agente no n8n (rotasN8n.ts): segredo do desvio + só telefone de teste.
+  // ?mode=n8n&acao=midia → mídia do gateway vira texto (Gemini), antes de o n8n pôr no buffer.
+  if (url.searchParams.get('mode') === 'n8n') {
+    const acao = url.searchParams.get('acao');
+    if (!ehAcaoN8n(acao)) return json({ error: 'acao_desconhecida' }, 400);
+    let corpo: any;
+    try { corpo = await req.json(); } catch { return json({ error: 'payload inválido' }, 400); }
+    const auth = autorizarN8n(await carregarDesvioN8n(supabase), segredoDoPedido(req), corpo?.remotejid ?? corpo?.telefone);
+    if (!auth.ok) return json({ error: auth.erro }, auth.status);
+    try {
+      return json({ ok: true, ...(await tratarMidiaN8n(corpo, criarTelemetria(supabase, String(corpo.remotejid ?? '')))) });
+    } catch (e) {
+      console.error('[crm-agente-sdr] n8n/midia falhou:', (e as Error)?.message ?? e);
+      return json({ ok: false, error: 'falha_ao_tratar_midia' }, 502);
+    }
   }
 
   if (TOKEN && url.searchParams.get('token') !== TOKEN) return json({ error: 'unauthorized' }, 401);
