@@ -1547,7 +1547,8 @@ Deno.serve(async (req) => {
   // (limparTeste.ts). Número fora da lista segue o fluxo normal, como qualquer mensagem.
   if (ehComandoLimpar(payload.conteudo) && await ehTelefoneDeTeste(supabase, String(payload.telefone))) {
     try {
-      return json({ ok: true, limpo: true, ...(await limparConversaDeTeste(supabase, payload.remotejid, String(payload.telefone))) });
+      return json({ ok: true, limpo: true,
+        ...(await limparConversaDeTeste(supabase, payload.remotejid, String(payload.telefone), payload.wa_account_id ?? null)) });
     } catch (e) {
       console.error('[crm-agente-sdr] /limpar falhou:', (e as Error)?.message ?? e);
       return json({ ok: false, limpo: false, erro: (e as Error)?.message ?? String(e) }, 500);

@@ -5,8 +5,10 @@
 //
 // Zera: a memória do agente (cliente_ppg_mensagens_sdr), o estado do agente no lead (etapa, ficha,
 // pausa, agendado, dados comerciais coletados), a elegibilidade registrada e buffer/lock.
-// Mantém: nome, curso, e-mail e formação do cadastro. O chat do SAC continua visível; o agente
-// passa a ignorar o que veio antes (jornada.limpo_em filtra status de materiais e troca de número).
+// Mantém: nome, curso, e-mail e formação do cadastro, e o ÚLTIMO TEMPLATE que o mesmo número
+// enviou (regravado na memória: a conversa recomeça como se ele tivesse acabado de chegar). O chat
+// do SAC continua visível; o agente passa a ignorar o que veio antes (jornada.limpo_em filtra
+// status de materiais e troca de número).
 // Zerar `agendado` dispara o trigger que move o card do lead no funil (é o lead de teste).
 import { jidsDoTelefone } from './historico.ts';
 import { phoneVariants } from './conta.ts';
@@ -45,11 +47,36 @@ export async function ehTelefoneDeTeste(supabase: any, telefone: string): Promis
   } catch { return false; }
 }
 
-export async function limparConversaDeTeste(supabase: any, remotejid: string, telefone: string): Promise<{ limpo_em: string }> {
+/**
+ * O último template que este número mandou ao lead, como o crm-whatsapp-send o semeia na memória
+ * (texto real, ou "[template] nome"). null = nenhum (ou falha de leitura: limpa sem regravar).
+ */
+export async function ultimoTemplateDoNumero(supabase: any, telefone: string, waAccountId: string | null | undefined): Promise<string | null> {
+  if (!waAccountId) return null;
+  try {
+    const { data, error } = await supabase.from('crm_whatsapp_messages')
+      .select('conteudo, template_name')
+      .in('telefone', phoneVariants(telefone)).eq('wa_account_id', waAccountId)
+      .eq('direcao', 'outbound').eq('tipo', 'template').neq('status_entrega', 'failed')
+      .order('created_at', { ascending: false }).limit(1).maybeSingle();
+    if (error || !data) return null;
+    const texto = String(data.conteudo ?? '').trim();
+    return texto || (data.template_name ? `[template] ${data.template_name}` : null);
+  } catch { return null; }
+}
+
+export async function limparConversaDeTeste(
+  supabase: any, remotejid: string, telefone: string, waAccountId?: string | null,
+): Promise<{ limpo_em: string; template_mantido: boolean }> {
   const agora = new Date().toISOString();
   const jids = jidsDoTelefone(remotejid);
+  const template = await ultimoTemplateDoNumero(supabase, telefone, waAccountId);
   const passos: [string, PromiseLike<{ error: { message: string } | null }>][] = [
     ['mensagens', supabase.from('cliente_ppg_mensagens_sdr').delete().in('remotejid', jids)],
+    // A abertura do teste: o template volta como 1ª fala (a memória é lida pelo remotejid da conversa).
+    ...(template ? [['template', supabase.from('cliente_ppg_mensagens_sdr').insert({
+      remotejid, conversation_history: { role: 'assistant', content: template }, timestamp: agora,
+    })] as [string, PromiseLike<{ error: { message: string } | null }>]] : []),
     ['lead', supabase.from('cliente_ppg_leads_sdr').update(estadoZerado(agora)).in('remotejid', jids)],
     ['elegibilidade', supabase.from('crm_agente_elegibilidade').delete().in('telefone_canonico', phoneVariants(telefone))],
     ['buffer', supabase.from('crm_agente_sdr_buffer').delete().in('remotejid', jids)],
@@ -66,5 +93,5 @@ export async function limparConversaDeTeste(supabase: any, remotejid: string, te
     const { error } = await passo;
     if (error) throw new Error(`/limpar (${onde}): ${error.message}`);
   }
-  return { limpo_em: agora };
+  return { limpo_em: agora, template_mantido: Boolean(template) };
 }
