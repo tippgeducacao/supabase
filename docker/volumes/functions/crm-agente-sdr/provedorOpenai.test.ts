@@ -4,6 +4,7 @@ import {
   paraPedidoOpenai, paraRespostaAnthropic, semRaciocinioOpenai,
   type MemoriaRaciocinio,
 } from './provedorOpenai';
+import { FERRAMENTAS, FERRAMENTAS_POR_AGENTE } from './tools-luna';
 
 const cfg = { modelo: 'gpt-5.6-luna', esforco: 'high' };
 const pedidoAnthropic = () => ({
@@ -448,26 +449,33 @@ describe('carregarTools: cada provedor lê a SUA tabela', () => {
   const luna = { nome: 'openai', formato: 'openai' as const, base: 'https://api.openai.com', chave: 'k', modelo: 'gpt-5.6-luna', esforco: 'high' };
   const linhaOpenai = { type: 'function', name: 'pausa_ia', description: 'TEXTO DA TABELA DA OPENAI', parameters: { type: 'object', properties: { tipo: { type: 'string' } } }, strict: false };
 
-  it('openai: lê lista_tools_openai, converte para o contrato interno e NÃO aplica o acréscimo do código', async () => {
+  // 29/09/2026: a Luna lê as ferramentas de tools-luna.ts (não mais da tabela lista_tools_openai).
+  it('openai: lê tools-luna.ts, sem banco, e NÃO aplica o acréscimo do código', async () => {
     const { client, lidas } = banco({ lista_tools_openai: [linhaOpenai] });
     const tools = await agente.carregarTools(client, 'agente_recontato', luna);
-    expect(lidas).toEqual(['lista_tools_openai']);
-    // o modelo recebe exatamente a linha: sem o prefixo que descreverToolsSdr põe em pausa_ia
-    expect(tools).toEqual([{ name: 'pausa_ia', description: 'TEXTO DA TABELA DA OPENAI', input_schema: linhaOpenai.parameters }]);
+    expect(lidas).toEqual([]);
+    expect(tools.map((t) => t.name)).toEqual(FERRAMENTAS_POR_AGENTE.agente_recontato.map((a) => FERRAMENTAS[a].name));
+    // o modelo recebe exatamente o texto do arquivo: sem o prefixo que descreverToolsSdr põe em pausa_ia
+    expect(tools.find((t) => t.name === 'pausa_ia')?.description).toBe(FERRAMENTAS.pausa_ia.description);
   });
 
-  it('openai: strict da linha atravessa; ida e volta pelo tradutor devolve a mesma function tool', async () => {
-    const estrita = { ...linhaOpenai, strict: true };
-    const { client } = banco({ lista_tools_openai: [estrita] });
-    const tools = await agente.carregarTools(client, 'agente_recontato', luna);
-    expect(tools[0].strict).toBe(true);
+  it('openai: ida e volta pelo tradutor devolve as mesmas function tools do arquivo', async () => {
+    const tools = await agente.carregarTools(banco({}).client, 'agente_validacao', luna);
     const pedido = paraPedidoOpenai({ messages: [], tools }, { modelo: 'gpt-5.6-luna', esforco: 'high' }) as { tools: unknown[] };
-    expect(pedido.tools).toEqual([estrita]);
+    expect(pedido.tools).toEqual(FERRAMENTAS_POR_AGENTE.agente_validacao.map((a) => FERRAMENTAS[a]));
   });
 
-  it('openai: persona sem linha na tabela é erro, nunca um agente sem ferramentas em silêncio', async () => {
-    await expect(agente.carregarTools(banco({}).client, 'agente_aula', luna)).rejects.toThrow(/nenhuma tool para agente_aula/);
-    await expect(agente.carregarTools(banco({}, 'permission denied').client, 'agente_aula', luna)).rejects.toThrow(/permission denied/);
+  it('openai: quem chama pode mexer no que recebeu sem sujar a fonte', async () => {
+    const tools = await agente.carregarTools(banco({}).client, 'agente_validacao', luna);
+    tools[0].input_schema.properties = {};
+    tools[0].description = 'MEXIDO';
+    const deNovo = await agente.carregarTools(banco({}).client, 'agente_validacao', luna);
+    expect(deNovo[0].description).not.toBe('MEXIDO');
+    expect(Object.keys(deNovo[0].input_schema.properties ?? {}).length).toBeGreaterThan(0);
+  });
+
+  it('openai: persona sem ferramentas no arquivo é erro, nunca um agente sem ferramentas em silêncio', async () => {
+    await expect(agente.carregarTools(banco({}).client, 'agente_inexistente', luna)).rejects.toThrow(/nenhuma tool para agente_inexistente/);
   });
 
   it('sem provedor (Claude): segue lendo lista_tools_claude com o acréscimo do código', async () => {

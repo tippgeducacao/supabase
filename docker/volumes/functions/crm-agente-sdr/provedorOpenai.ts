@@ -15,7 +15,7 @@
 //   hidrata uma cópia do pedido com `raciocinio_openai`; o function_call leva o `id`
 //   dele — os dois juntos ou nenhum. O histórico persistido continua sem esses campos.
 // - `strict` vem da PRÓPRIA tool e é sempre explícito (a referência não documenta o padrão):
-//   as linhas de `lista_tools_openai` nascem com false (têm campo opcional, e o modo estrito
+//   as ferramentas de `tools-luna.ts` (antes, lista_tools_openai) nascem com false (têm campo opcional, e o modo estrito
 //   exige todos em required); `responder_ao_cliente` é true e cumpre as exigências — é o que
 //   garante que a fala ao lead chega como {mensagem: string}.
 // - `store: false`: a conversa do lead não fica guardada no provedor.

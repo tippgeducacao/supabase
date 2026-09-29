@@ -150,7 +150,7 @@ describe('contrato do mock de consulta de valor', () => {
     expect(JSON.stringify(pedido)).toContain('Condução do piloto de aulas');
     expect(JSON.stringify(pedido)).toContain('MISSÃO DA CAMPANHA');
     expect(JSON.stringify(pedido)).toContain('Nutrição na prática');
-    expect(mocks.from.mock.calls.map(([tabela]) => tabela)).toEqual(['crm_agente_sdr_config', 'lista_tools_openai']);
+    expect(mocks.from.mock.calls.map(([tabela]) => tabela)).toEqual(['crm_agente_sdr_config']); // 29/09/2026: as tools da Luna vêm de tools-luna.ts
   });
   it('informa preço ao modelo sem simular envio de cronograma ou de mensagem ao cliente', async () => {
     const respostas = [

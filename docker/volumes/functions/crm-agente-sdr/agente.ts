@@ -13,6 +13,7 @@ import { INSTRUCAO_FALHA_COMPATIBILIDADE, respostaAoAceiteAposFalha, ultimaCompa
 import { comPrazoModelo, PRAZO_MODELO_PILOTO_MS } from './prazoModelo.ts';
 import { INSTRUCAO_FATOS_DO_LEAD } from './fatosLead.ts';
 import { blocosDoPrompt, type ConjuntoPrompt } from './conjuntoPrompt.ts';
+import { FERRAMENTAS, FERRAMENTAS_POR_AGENTE } from './tools-luna.ts';
 import { contemMeta, contemRaciocinioVazado } from './saida.ts';
 import {
   avaliarCanalResposta, NOME_TOOL_RESPOSTA,
@@ -335,22 +336,17 @@ export async function chamarAgentePrincipal(opts: {
 
 // ── Tools do agente: mesma fonte do n8n (tabela lista_tools_claude) ─────────
 export async function carregarTools(supabase: any, agente: string, provedor: ProvedorIA | null = null): Promise<any[]> {
-  // OpenAI tem a SUA tabela (lista_tools_openai), no formato nativo da Responses API. O modelo
-  // recebe exatamente a linha: `descreverToolsSdr` NÃO roda aqui, de propósito — o que está
-  // na tabela é o que ele lê. Por dentro o agente fala um contrato só (name/description/
-  // input_schema), então a linha é convertida na entrada e o tradutor a devolve na saída.
+  // Luna (OpenAI): as ferramentas vêm de tools-luna.ts (29/09/2026), no formato nativo da Responses
+  // API. Até 29/09 vinham da tabela lista_tools_openai, que a Luna deixou de ler: agora têm histórico
+  // no git, teste antes de valer e edição pelo Markdown, como o prompts-luna.ts. O modelo recebe
+  // exatamente o texto do arquivo (`descreverToolsSdr` NÃO roda aqui, de propósito). Por dentro o
+  // agente fala um contrato só (name/description/input_schema): convertido aqui, desfeito no tradutor.
   if (provedor?.formato === 'openai') {
-    const { data, error } = await supabase
-      .from('lista_tools_openai')
-      .select('tool')
-      .eq('type', 'ppg')
-      .eq('agente', agente)
-      .order('id');
-    if (error) throw new Error(`carregarTools (openai): ${error.message}`);
-    const tools = (data ?? []).map((r: any) => r.tool).filter(Boolean);
-    // Tabela vazia para a persona NÃO vira "agente sem ferramentas" em silêncio.
-    if (!tools.length) throw new Error(`carregarTools (openai): nenhuma tool para ${agente} em lista_tools_openai`);
-    return tools.map((t: any) => ({
+    const apelidos = FERRAMENTAS_POR_AGENTE[agente] ?? [];
+    // Persona sem ferramentas NÃO vira "agente sem ferramentas" em silêncio.
+    if (!apelidos.length) throw new Error(`carregarTools (openai): nenhuma tool para ${agente} em tools-luna.ts`);
+    // Cópia: quem chama pode mexer no objeto (cache_control etc.) sem sujar a fonte compartilhada.
+    return apelidos.map((apelido) => structuredClone(FERRAMENTAS[apelido])).map((t: any) => ({
       name: t.name, description: t.description ?? '', input_schema: t.parameters, ...(t.strict === true ? { strict: true } : {}),
     }));
   }

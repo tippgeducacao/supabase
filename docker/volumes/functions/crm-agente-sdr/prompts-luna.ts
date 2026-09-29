@@ -11,7 +11,7 @@
 // que o CÓDIGO procura dentro deste texto) e npx vite-node scripts/sdr/orcamento-prompt.ts (tamanho).
 //
 // Não entram aqui (continuam nos arquivos de sempre): o router, a matriz, o follow-up, a persona de
-// aula/campanha/recontato, as descrições das ferramentas (tabela lista_tools_openai) e os avisos que o
+// aula/campanha/recontato, as ferramentas (tools-luna.ts, também editáveis pelo Markdown) e os avisos que o
 // index.ts cola no fim da última mensagem. Crase dentro do texto aparece como \` e ${ como \${.
 
 // ── PEÇA 1 · Persona de ABERTURA (antes de o lead escolher horário) — era AGENTE_VALIDACAO em prompts.ts ──
