@@ -57,6 +57,7 @@ import {
 } from './fichaAtendimento.ts';
 import { comGanchoDoLote, cursoDaConversa } from './ganchoLote.ts';
 import { ehComandoLimpar, ehTelefoneDeTeste, limparConversaDeTeste, limpoEm } from './limparTeste.ts';
+import { carregarDesvioN8n, vaiParaN8n } from '../_shared/desvioN8n.ts';
 import { blocoConviteAgenda } from './contexto.ts';
 import { prepararMensagem } from './midia.ts';
 import { persistirEntradasDoLote, registrarEntrada } from './historicoEntradaPausa.ts';
@@ -1543,6 +1544,11 @@ Deno.serve(async (req) => {
     await excluirDadosLead(supabase, payload.remotejid);
     await supabase.from('crm_agente_sdr_buffer').delete().eq('remotejid', payload.remotejid);
     return json({ ok: true, reset: true });
+  }
+  // Telefone de teste atendido pelo agente no n8n (29/09/2026, _shared/desvioN8n.ts): o gateway já
+  // manda para lá; aqui só chega pela reconciliação de órfãos, e responder daria duas IAs.
+  if (vaiParaN8n(await carregarDesvioN8n(supabase), payload.remotejid)) {
+    return json({ ok: true, skip: 'atendido_pelo_n8n' });
   }
   // /limpar (29/09/2026): recomeça o TESTE do zero mantendo o cadastro, só para telefones de teste
   // (limparTeste.ts). Número fora da lista segue o fluxo normal, como qualquer mensagem.

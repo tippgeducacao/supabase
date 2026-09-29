@@ -7,6 +7,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { extrairReferral } from "../_shared/waProviders.ts";
 import { carimboInbound } from "./carimbo.ts";
 import { prepararPortfolioInstagram } from "./portfolioInstagram.ts";
+import { CABECALHO_SEGREDO_N8N, carregarDesvioN8n, vaiParaN8n } from "../_shared/desvioN8n.ts";
 
 declare const EdgeRuntime: { waitUntil?: (p: Promise<unknown>) => void } | undefined;
 
@@ -550,15 +551,19 @@ async function relayToN8n(payload: Record<string, unknown>): Promise<void> {
   // ⚠️ Persona 'aluno' NUNCA cai no João: o SDR trata persona que não conhece como
   // 'qualificador' e venderia pós para quem já é aluno. Sem a URL do assistente, não repassa.
   const ehAluno = !ehRh && payload?.agente_ia_persona === "aluno";
-  const destino = ehRh ? AGENTE_RH_URL : ehAluno ? AGENTE_ALUNO_URL : N8N_INBOUND_URL;
+  // Telefones de TESTE do agente no n8n (29/09/2026, _shared/desvioN8n.ts): vão para o webhook do
+  // n8n com o segredo no cabeçalho, no lugar do João. Lista vazia/desligada = nada muda.
+  const desvio = !ehRh && !ehAluno ? await carregarDesvioN8n(rhLookup) : null;
+  const paraN8n = vaiParaN8n(desvio, payload?.remotejid ?? payload?.telefone);
+  const destino = ehRh ? AGENTE_RH_URL : ehAluno ? AGENTE_ALUNO_URL : paraN8n ? desvio!.url : N8N_INBOUND_URL;
   if (!destino) return;
-  const rotulo = ehRh ? "RH" : ehAluno ? "aluno" : "n8n";
+  const rotulo = ehRh ? "RH" : ehAluno ? "aluno" : paraN8n ? "n8n-luna" : "n8n";
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 10000);
   try {
     const res = await fetch(destino, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...(paraN8n ? { [CABECALHO_SEGREDO_N8N]: desvio!.segredo } : {}) },
       body: JSON.stringify(payload),
       signal: ctrl.signal,
     });
