@@ -311,7 +311,13 @@ async function toolsDaVez(agenteEfetivo: string, ehCampanha: boolean, provedor: 
 // `tel.registrar(...)` (NÓ 11) aparece em todo o caminho: é o que vira a tela de Debug.
 // ── uma rodada do agente sobre um lote de mensagens drenadas ────────────────
 
-async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): Promise<void> {
+// ═══ PREPARO DA RODADA (29/09/2026) ══════════════════════════════════════════
+// Tudo o que acontece UMA vez por lote, antes do loop da IA: grava o lote, escolhe a IA, monta o ctx,
+// o contexto, a persona, roda o router e fecha o prompt e as ferramentas. Extraído de rodadaAgente SEM
+// mudar uma linha, para o agente no n8n usar o MESMO preparo (endpoint de início da rodada).
+// null = o lote não tinha entrada ativa (tudo chegou em pausa).
+async function prepararRodada(remotejid: string, itensDoLote: any[], tel: Telemetria) {
+  let itens = itensDoLote;
   const inicioRodada = Date.now();
   // 08/09/2026: a pausa pode ter capturado parte do lote antes da drenagem.
   // Essas falas já são contexto; despausar não autoriza respondê-las por replay.
@@ -319,7 +325,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   itens = await persistirEntradasDoLote(supabase, remotejid, itens);
   if (!itens.length) {
     tel.registrar('envio_abortado_pausa', { onde: 'historico_entrada', motivo: 'lote sem entrada ativa' });
-    return;
+    return null;
   }
   const conteudo = itens.map((item: any) => item.mensagem).filter(Boolean).join('\n');
   tel.registrar('rodada_inicio', {
@@ -703,6 +709,14 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     promptAgente = gancho.prompt;
     tel.registrar('gancho_lote', gancho.trocas);
   }
+  return { itens, inicioRodada, conteudo, doUltimoCom, telefone, provedor, registrarFalaAposEnvio, conjuntoPrompt, textosDoPrompt, ctx, lead, pedidoPorPalavraChave, modoTroca, aberturaControlada, contasNoLote, desdeLimpeza, sinalTroca, formacaoNormalizada, vars, campanha, aulaPiloto, aulaDaCampanha, contextoTemporal, personaDoNumero, persona, ehCampanha, aplicarTroca, agenteAnterior, notaTroca, registrarUsoRouter, naListaDoCanario, configJev, configLeitura, leituraPromessa, jev, rotear, promptAgente, tools, contextoEfetivo, agenteEfetivo, estaNaEscola };
+}
+
+async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetria): Promise<void> {
+  const preparo = await prepararRodada(remotejid, itensDoLote, tel);
+  if (!preparo) return;
+  // `let`: o loop reatribui parte delas (provedor no fallback, lead, contexto…), como antes.
+  let { itens, inicioRodada, conteudo, doUltimoCom, telefone, provedor, registrarFalaAposEnvio, conjuntoPrompt, textosDoPrompt, ctx, lead, pedidoPorPalavraChave, modoTroca, aberturaControlada, contasNoLote, desdeLimpeza, sinalTroca, formacaoNormalizada, vars, campanha, aulaPiloto, aulaDaCampanha, contextoTemporal, personaDoNumero, persona, ehCampanha, aplicarTroca, agenteAnterior, notaTroca, registrarUsoRouter, naListaDoCanario, configJev, configLeitura, leituraPromessa, jev, rotear, promptAgente, tools, contextoEfetivo, agenteEfetivo, estaNaEscola } = preparo;
   const renovar = lockRenovar(remotejid);
   // 22/09/2026: candidato local, só no canário OpenAI já selecionado pelo telefone.
   // Consulta o provedor na HORA da saída: fallback para Claude conserva o legado.
