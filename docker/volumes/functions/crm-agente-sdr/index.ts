@@ -10,6 +10,28 @@
 // Responde 200 imediatamente (o relay do gateway tem timeout de 10s) e processa
 // em background via EdgeRuntime.waitUntil.
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 🧭 MAPA DE LEITURA (29/09/2026) — para quem vem do n8n
+// O arquivo está na ordem "ferramentas primeiro, fluxo depois". Para seguir o caminho de
+// UMA mensagem do lead, leia de BAIXO para CIMA — procure os cabeçalhos "═══ NÓ".
+//
+//   NÓ 1  TRIGGER ......... Deno.serve (fim do arquivo)            n8n: Webhook
+//   NÓ 3  GATES ........... Deno.serve, "Guards de entrada"        n8n: IFs antes de tudo
+//   NÓ 2  BUFFER / ESPERA . processarInbound                       n8n: Wait + Redis
+//   NÓ 4  CONTEXTO ........ rodadaAgente, começo                   n8n: Set / Postgres
+//   NÓ 6  ROUTER .......... rodadaAgente, "persona"                n8n: Switch (validação × qualificador)
+//   NÓ 7  PERSONA ......... rodadaAgente, renderPrompt             n8n: qual AI Agent
+//   NÓ 8  LOOP DA IA ...... rodadaAgente, "for (let rodada"        n8n: AI Agent
+//   NÓ 4b FICHA ........... dentro do loop, 1ª volta               estado do que o lead já disse
+//   NÓ 5  HISTÓRICO ....... carregarHistorico (historico.ts)       n8n: memória do agente
+//   NÓ 9  TOOLS ........... executarTool (tools.ts)                n8n: sub-workflows
+//   NÓ 10 SAÍDA ........... enviarResposta (saida.ts)              n8n: humanizar + enviar
+//   NÓ 11 TELEMETRIA ...... tel.registrar(...) em todo lugar       n8n: aba Executions
+//
+// Os números são os mesmos de docs/Agente SDR — Mapa de execução.md (a ordem de execução é a
+// da tabela acima). Símbolos de TypeScript (await, ?., ??, =>, `${}`) estão explicados em
+// docs/aprender-typescript-com-o-agente.md.
+// ─────────────────────────────────────────────────────────────────────────────
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3';
 import { pausaVigente } from './pausa.ts';
@@ -70,6 +92,11 @@ const supabase = createClient(SUPABASE_URL, SERVICE_ROLE);
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } });
 
+// ═══ FERRAMENTAS DO NÓ 2 — buffer, trava e espera ════════════════════════════
+// As funções daqui até rodadaAgente são peças usadas pelo processarInbound (lá embaixo).
+// Buffer = fila de mensagens do lead que ainda não foram respondidas (tabela crm_agente_sdr_buffer).
+// Trava (lock) = garante que só UMA execução responde o mesmo lead por vez.
+// No n8n isso era o Redis; aqui é o Postgres.
 // ── buffer/lock (Postgres no lugar do Redis) ────────────────────────────────
 
 async function bufferInserir(remotejid: string, item: Record<string, unknown>): Promise<void> {
@@ -270,12 +297,22 @@ async function toolsDaVez(agenteEfetivo: string, ehCampanha: boolean, provedor: 
   return [...base, ...extras];
 }
 
+// ═══ NÓS 4 → 11 — UMA RODADA DO JOÃO ═════════════════════════════════════════
+// Recebe o lote de mensagens do lead (já agrupadas pela espera do nó 2) e faz, em ordem:
+//   1. grava as mensagens no histórico e escolhe qual IA responde (Luna no canário, senão Claude);
+//   2. NÓ 4  carrega o lead e monta as variáveis do prompt (nome, curso, relógio);
+//   3. NÓ 7  escolhe a persona (recontato, campanha, aula ou a padrão);
+//   4. NÓ 6  o router decide validação (abertura) × qualificador (fechamento);
+//   5. NÓ 8  loop da IA: ela lê tudo, pede ferramentas (NÓ 9) ou escreve a resposta;
+//   6. NÓ 10 checa a resposta e envia no WhatsApp.
+// `tel.registrar(...)` (NÓ 11) aparece em todo o caminho: é o que vira a tela de Debug.
 // ── uma rodada do agente sobre um lote de mensagens drenadas ────────────────
 
 async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): Promise<void> {
   const inicioRodada = Date.now();
   // 08/09/2026: a pausa pode ter capturado parte do lote antes da drenagem.
   // Essas falas já são contexto; despausar não autoriza respondê-las por replay.
+  // ▸ Passo 1 — grava no histórico as mensagens deste lote (as que chegaram em pausa não contam).
   itens = await persistirEntradasDoLote(supabase, remotejid, itens);
   if (!itens.length) {
     tel.registrar('envio_abortado_pausa', { onde: 'historico_entrada', motivo: 'lote sem entrada ativa' });
@@ -300,6 +337,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   // No piloto de voz a preparação pode ser cancelada por uma entrada nova.
   // A fala final só passa a ser memória depois de pelo menos um envio aceito.
   // `let`: se o provedor alternativo falhar no meio da rodada, o resto dela volta para o Claude.
+  // ▸ Qual IA responde este lead: a Luna (OpenAI) se o telefone está no canário; senão, `null` = Claude.
   let provedor = await provedorDoLead(telefone);
   let registrarFalaAposEnvio = Boolean(configurarVoz(telefone, (nome) => Deno.env.get(nome), provedor?.nome));
   if (provedor) {
@@ -308,6 +346,8 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       motivo: provedor.formato === 'openai' && provedor.origem === 'percentual' ? 'canario_luna_percentual' : 'canario_luna_telefones',
     });
   }
+  // ▸ ctx = a "maleta" da conversa: telefone, conta do WhatsApp, lead, oportunidade.
+  //   Ela é passada para as ferramentas (tools.ts), que precisam saber de quem se trata.
   const ctx: CtxConversa = {
     remotejid,
     telefone,
@@ -320,6 +360,9 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     ...(provedor ? { ficha: { inicioRodada: new Date(inicioRodada).toISOString() } } : {}),
   };
 
+  // ═══ NÓ 4 · CONTEXTO — o que a IA recebe além da conversa ═══════════════════
+  // Busca o cadastro do lead (cliente_ppg_leads_sdr) e prepara tudo o que vai junto no pedido:
+  // nome, curso de interesse, relógio (data/hora de agora), campanha, troca de número.
   let lead = await buscarLead(supabase, remotejid);
   // O nome vai no ctx pra servir de último recurso no agendamento (ver o payload em
   // tools.ts): sem lead ativo e sem nome, o sdr-api devolve 422 e a reunião não nasce.
@@ -330,6 +373,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   }
   // Ficha (canário): o clique em "Receber Cronograma" (936 em 30 dias) ou o pedido em texto fica
   // anotado na jornada ANTES de o modelo falar — é o que a ficha usa para cobrar a coleta.
+  // ▸ Ficha (só canário): se o lead clicou "Receber Cronograma" ou pediu em texto, anota o pedido.
   let pedidoPorPalavraChave: 'botao' | 'texto' | null = null;
   if (ctx.ficha) {
     const pedido = pedidoPorPalavraChave = detectarPedidoDeCronograma(itens);
@@ -344,6 +388,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       }
     }
   }
+  // ▸ O lead respondeu: zera a contagem do follow-up (se ele esfriar de novo, a régua recomeça).
   // Reabriu a conversa: atualiza o relógio âncora e ZERA o estágio de follow-up
   // (se o lead esfriar de novo, a cadência recomeça do 1º toque — igual ao n8n,
   // onde o reset do timestamp_mensagem + dedup por estágio reiniciava a régua).
@@ -357,6 +402,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     template_followup_em: null,
   });
 
+  // ▸ Troca de número: o lead escreveu por um número da PPGVET diferente do da conversa anterior?
   // 14/09/2026 — TROCA DE NÚMERO: o lead pode estar escrevendo por OUTRO número da PPGVET
   // (respondeu a um template de disparo/cadência de um número que nunca conversou com ele)
   // enquanto a memória, que é uma só por telefone, traz a conversa do número anterior — e o
@@ -372,6 +418,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     : await carregarSinalTrocaDeNumero(supabase, { telefone, contaAtual: ctx.waAccountId, itens, contasNoLote,
       somenteSaidas: aberturaControlada });
 
+  // ▸ Variáveis do prompt (n8n: nó Set): viram os {{nome}}, {{curso}}… dentro do texto do prompt.
   // Contexto do lead + temporal (mesma montagem do node "normalizador").
   const formacaoNormalizada = encontrarFormacao(lead?.formacao_academica ?? '');
   const vars: Record<string, string> = {
@@ -434,6 +481,9 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   // 'aula' (16/09/2026) = lead com contexto_campanha de aula e aula carregada acima: mesma
   // dupla validação×qualificador da validação, só que a abertura usa o prompt da aula.
   // O no-show (recontato) continua vencendo: é um processo em andamento, com dossiê.
+  // ═══ NÓ 7 · PERSONA — qual "agente" atende ══════════════════════════════════
+  // Ordem de prioridade: no-show (recontato) > aula (campanha de aula) > número de anúncio
+  // (campanha direta) > padrão (qualificador). Cada persona tem o SEU prompt em prompts-*.ts.
   const personaDoNumero = doUltimoCom('agente_ia_persona');
   const persona = lead?.modo_recontato === true || personaDoNumero === 'recontato'
     ? 'recontato'
@@ -465,6 +515,10 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       persona,
     });
   }
+  // ═══ NÓ 6 · ROUTER — validação (abertura) × qualificador (fechamento) ═══════
+  // Pergunta única: o lead já escolheu um horário concreto? Sim → qualificador; não → validação.
+  // "Ratchet": quem virou qualificador nunca volta. No canário, o Jev pode responder no lugar
+  // (routerJev.ts) e também lê a mensagem para a ficha (leituraJev.ts).
   // O router é uma chamada paga como as outras (1 por rodada, histórico inteiro): sem
   // este registro o painel "Uso de IA" ficava ~US$ 40 abaixo da fatura num dia de pico
   // (15/09/2026). `volta: 0` + `agente: 'router'` separam do loop principal.
@@ -516,6 +570,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   }
   let agenteEfetivo: string;
 
+  // ▸ Caminho A — recontato (no-show): missão fixa, NÃO passa pelo router.
   if (persona === 'recontato') {
     agenteEfetivo = 'agente_recontato';
     promptAgente = renderPrompt(AGENTE_RECONTATO, vars);
@@ -529,6 +584,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       persona: 'recontato',
       dossie: dossie ? true : false,
     }, 0);
+    // ▸ Caminho B — número de anúncio: a abertura coleta nome → curso → formação; o router só promove depois.
   } else if (ehCampanha) {
     // ⚠️ NA CAMPANHA DIRETA O ROUTER NÃO DECIDE A ABERTURA (decisão do usuário
     // 2026-07-25). O lead de anúncio SEMPRE entra na COLETA (nome → curso → formação):
@@ -571,6 +627,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     );
     tools = await toolsDaVez(agenteAtual, true, provedor);
   } else {
+    // ▸ Caminho C — padrão (e aula): o router decide e o ratchet grava em agente_atual.
     // Router (em erro, mantém o agente atual — não derruba a conversa).
     let proximo: 'agente_validacao' | 'agente_qualificador';
     const inicioRouter = Date.now();
@@ -604,6 +661,8 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     );
     tools = await carregarTools(supabase, abrirComAula ? 'agente_aula' : agenteAtual, provedor);
   }
+  // ▸ Acabamentos do prompt (valem para todas as personas): presente da Escola gratuita, aviso de
+  //   que a conversa veio do chat do site e, no canário, o gancho do "primeiro lote".
   // PRESENTE DA ESCOLA (2026-08-05): conversa que acaba sem reunião leva o convite da
   // biblioteca gratuita junto da despedida. Apensado AQUI, no ponto único onde o prompt
   // já foi renderizado, para valer nas QUATRO personas sem editar o prompts.ts (gerado
@@ -644,6 +703,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   // essas tools precisa sair MESMO com o flag de pausa já setado: o recheck de
   // pausa existe pra honrar pausa de ATENDENTE durante a geração, não pra
   // engolir a própria despedida do agente.
+  // ▸ Regras de encerramento: quais ferramentas terminam o atendimento e qual despedida sai em cada caso.
   const TOOLS_QUE_PAUSAM = new Set(['pausa_ia', 'temporizador_proxima_turma']);
   // ⚠️ ENCERRAR ≠ PAUSAR. `agendar_retorno` também termina o atendimento (o lead volta
   // perto da formatura / no prazo que pediu) e a despedida vem NA MESMA volta da tool —
@@ -710,6 +770,8 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     + 'mandado o convite nesta conversa.\n'
     + 'Nunca mencione a data-limite, "prazo" ou "elegibilidade". Se a mensagem já foi enviada, '
     + 'responda com texto vazio.';
+  // ▸ Casos especiais preparados antes do loop: lead que só reagiu com emoji, IA que ficou calada,
+  //   oferta de "te chamo na próxima turma" (desliga o follow-up). Cada um com o incidente que o criou.
   // ── LEVA SÓ DE REAÇÃO (2026-08-06, caso Peterson) ─────────────────────────
   // O lead reage com 👍 e não escreve nada. O agente acorda, não tem o que dizer
   // e RELATA ao sistema ("nenhuma resposta necessária, o lead apenas reagiu com
@@ -822,6 +884,11 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   const consultasDaRodada = ctx.ficha ? new MemoriaDeConsultas() : null;
   // Avisos da leitura do Jev: valem para todas as voltas desta rodada (a Luna pode chamar tools antes de falar).
   let avisosDaLeitura: string[] = [];
+  // ═══ NÓ 8 · LOOP DA IA (n8n: AI Agent) ═══════════════════════════════════════
+  // Cada volta: relê histórico + ficha → monta o pedido → chama a IA. A IA devolve UMA de duas coisas:
+  //   • pedido de ferramenta (tool_use) → NÓ 9 executa, grava o resultado no histórico e dá outra volta;
+  //   • texto → checagens (horário inventado, vazio, pausa) → NÓ 10 envia e a rodada termina.
+  // No máximo MAX_RODADAS_TOOLS (8) voltas; passou disso, é erro.
   // Loop agêntico: igual ao n8n, o histórico é relido do banco a cada volta.
   for (let rodada = 0; rodada < MAX_RODADAS_TOOLS; rodada++) {
     const [historico, contextoEntregaMateriais, fichaLida] = await Promise.all([
@@ -831,6 +898,9 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       ctx.ficha ? carregarFicha(supabase, ctx) : Promise.resolve(null),
     ]);
     let ficha = fichaLida;
+    // ═══ NÓ 4b · FICHA DO ATENDIMENTO (só canário) ══════════════════════════════
+    // Na 1ª volta, a ficha (o que já se sabe do lead) é completada com o que ele disse:
+    // primeiro por palavra-chave, depois pela leitura do Jev. Ela vai no fim do pedido para a IA.
     // Canário (25/09/2026): "me formei", "sou pós-graduado"... numa fala do lead valem como coleta
     // quando a ficha ainda não sabe da conclusão (conversa anterior à ficha). Sem isso a ficha
     // mandava perguntar o que ele já tinha dito (fichaAtendimento.ts, declaracaoDeConclusao).
@@ -902,6 +972,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
         tel.registrar('ficha_atendimento', { disponivel: false, motivo: 'leitura falhou; a volta seguiu sem a ficha' });
       }
     }
+    // ▸ NÓ 5 · HISTÓRICO — limpa a memória para a API (tira pensamento antigo, junta falas seguidas).
     let messages = sanitizarHistorico(historico);
     // Só na 1ª volta: depois de uma tool o último turno é sempre o tool_result (user).
     if (rodada === 0) {
@@ -923,6 +994,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     const instrucaoEncerramento = retornoPorFormatura ? INSTRUCAO_POS_RETORNO : INSTRUCAO_POS_PAUSA;
     const inicioLlm = Date.now();
     tel.registrar('llm_inicio', { volta: rodada + 1, provedor: provedor?.nome ?? 'anthropic' });
+    // ▸ Monta o PEDIDO para a IA: prompt da persona + contexto (relógio, ficha, avisos) + histórico + ferramentas.
     const baseFicha = aulaPiloto ? `DADOS COLETADOS (não são um roteiro): ${JSON.stringify(ficha?.entrada ?? {})}` : ficha?.texto;
     const pedidoPrincipal = {
       promptAgente,
@@ -948,6 +1020,8 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       // só redige a pergunta/resposta; não repete cinco consultas sem saldo.
       tools: encerrouPorTool || (ctx.ficha && (ctx.compatibilidadeIndisponivel || ctx.perguntaFormacaoPendente)) ? [] : tools,
     };
+    // ▸ Chama a IA (agente.ts). Se a Luna falhar, a MESMA volta é refeita no Claude; se os dois
+    //   falharem, sai uma frase operacional ("não consegui concluir agora…").
     let resp: any;
     try {
       resp = await chamarAgentePrincipal({ ...pedidoPrincipal, provedor });
@@ -976,6 +1050,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
           origem: 'indisponibilidade_modelo', usage: { input_tokens: 0, output_tokens: 0 } };
       }
     }
+    // ▸ NÓ 11 · registra o que a IA respondeu nesta volta (é a linha "IA" na tela de Debug).
     // OUTPUT da IA (não o prompt): o que o modelo gerou nesta volta — raciocínio
     // (thinking), resposta crua (text) e as tools que ELA decidiu chamar.
     const blocosResp = (resp.content ?? []) as any[];
@@ -1011,6 +1086,10 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       await gravarMensagem(supabase, remotejid, { role: 'assistant', content: semRaciocinioNoTexto(resp.content) });
     }
 
+    // ═══ NÓ 9 · TOOLS — a IA pediu ferramentas ══════════════════════════════════
+    // Executa uma por vez (tools.ts → executarTool), grava os resultados no histórico e volta ao
+    // início do loop para a IA ler o que as ferramentas devolveram. Se a ferramenta ENCERRA o
+    // atendimento (pausa, retorno), a despedida sai aqui mesmo, em código.
     const toolUses = (resp.content ?? []).filter((b: any) => b.type === 'tool_use');
     if (toolUses.length) {
       await renovar();
@@ -1073,6 +1152,9 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       continue;
     }
 
+    // ═══ A IA ESCREVEU TEXTO — checagens antes de enviar ════════════════════════
+    // Horário que não veio da agenda → devolve para a IA corrigir (1x) ou descarta.
+    // Texto vazio ou só bastidor → pede de novo (1x). Agendamento feito sem fala → confirmação em código.
     const texto = (resp.content ?? [])
       .filter((b: any) => b.type === 'text')
       .map((b: any) => b.text)
@@ -1140,6 +1222,9 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
         });
         continue;
       }
+      // ═══ NÓ 10 · SAÍDA — acabamentos e envio no WhatsApp ════════════════════════
+      // Se um atendente pausou durante a geração, não envia. Senão: presente da Escola, link pedido,
+      // certificado só depois da aula, cumprimento, humanizar e mandar em balões (saida.ts).
       // Última checagem antes de falar: a geração do LLM (com tools) pode ter levado
       // dezenas de segundos; se o atendente pausou nesse meio, NÃO envia. O recheck
       // entre chunks (passado a enviarResposta) cobre a pausa durante o dribble.
@@ -1210,11 +1295,19 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     tel.registrar('rodada_fim', { voltas_llm: rodada + 1, respondeu: Boolean(texto) }, Date.now() - inicioRodada);
     return;
   }
+  // ▸ Chegou aqui = a IA ficou 8 voltas pedindo ferramentas sem responder. Vira erro na telemetria.
   await enviarConfirmacaoEmCodigo('limite_de_voltas');
   tel.registrar('erro', { onde: 'loop' }, Date.now() - inicioRodada, `limite de ${MAX_RODADAS_TOOLS} rodadas de tools atingido`);
   console.error(`[crm-agente-sdr] ${remotejid}: limite de ${MAX_RODADAS_TOOLS} rodadas de tools atingido.`);
 }
 
+// ═══ NÓ 2 · BUFFER, TRAVA E ESPERA (n8n: Wait + Redis) ═══════════════════════
+// Roda em segundo plano, depois que o Deno.serve já respondeu 200. Passo a passo:
+//   1. áudio/imagem viram texto (midia.ts) e a mensagem entra no buffer;
+//   2. tenta pegar a trava do lead — se outra execução já está com ela, sai (ela vai responder);
+//   3. espera o lead parar de digitar (45 s em produção, 5 s no canário, 0 no telefone de teste);
+//   4. pega TODAS as mensagens acumuladas (o "lote") e chama rodadaAgente;
+//   5. repete enquanto chegar mensagem nova; no fim, solta a trava.
 // ── processamento completo de um inbound (roda em background) ───────────────
 
 async function processarInbound(payload: any): Promise<void> {
@@ -1226,6 +1319,7 @@ async function processarInbound(payload: any): Promise<void> {
   const telPrep = criarTelemetria(supabase, remotejid);
   try {
     // Mídia é tratada ANTES do buffer (transcrição/análise), como no n8n.
+    // ▸ 1. mídia → texto (transcrição do áudio pelo Gemini, descrição de imagem/documento).
     const tratada = await prepararMensagem(payload, telPrep);
     await bufferInserir(remotejid, {
       ...tratada,
@@ -1237,6 +1331,7 @@ async function processarInbound(payload: any): Promise<void> {
       oportunidade_id: payload.oportunidade_id ?? null,
     });
 
+    // ▸ 2. trava: só uma execução por lead.
     if (!(await lockClaim(remotejid))) return; // quem segura o lock drena o buffer
 
     try {
@@ -1248,6 +1343,7 @@ async function processarInbound(payload: any): Promise<void> {
       const renovar = lockRenovar(remotejid);
       // Drena até esvaziar: cada lote espera o silêncio do debounce antes de
       // processar; mensagens que chegarem durante a rodada entram na próxima.
+      // ▸ 3–5. espera o silêncio, confere áudio pendente e pausa, drena o lote e roda a IA.
       while (true) {
         const esperouMs = await aguardarSilencio(remotejid, delaySegundos, renovar);
         const audio = await aguardarAudiosDoHistorico({
@@ -1303,6 +1399,10 @@ async function processarInbound(payload: any): Promise<void> {
   }
 }
 
+// ═══ NÓ 1 · TRIGGER — a porta de entrada (n8n: nó Webhook) ══════════════════
+// Toda mensagem do lead chega aqui por HTTP, vinda do crm-whatsapp-webhook. Os crons também
+// batem aqui para rodar as esteiras de follow-up (mode=followup / followup-template).
+// Responde 200 NA HORA (o webhook desiste em 10 s) e o trabalho segue em segundo plano.
 // ── entrada ─────────────────────────────────────────────────────────────────
 
 Deno.serve(async (req) => {
@@ -1319,6 +1419,7 @@ Deno.serve(async (req) => {
   // autenticar por service_role; o segredo do banco resolve (e o front não lê, RLS
   // bloqueia). Vem ANTES da checagem do token de inbound. ?wait=1 roda síncrono
   // (teste manual vê estatísticas); sem isso, background + 200 na hora.
+  // ▸ Não é mensagem de lead: é o cron do follow-up de janela aberta (followup.ts).
   if (url.searchParams.get('mode') === 'followup') {
     const { data: cfg } = await supabase
       .from('crm_agente_sdr_config')
@@ -1343,6 +1444,7 @@ Deno.serve(async (req) => {
   // em vários horários do dia; o módulo espalha o envio por lead e respeita a trava
   // de 24h. ?wait=1 roda síncrono (vê estatísticas); ?hora=<0-23> força a hora do
   // tick (teste); ?limite=<n> limita os leads do tick.
+  // ▸ Cron da esteira de template, para janela de 24 h fechada (followup-template.ts).
   if (url.searchParams.get('mode') === 'followup-template') {
     const { data: cfg } = await supabase
       .from('crm_agente_sdr_config')
@@ -1381,6 +1483,10 @@ Deno.serve(async (req) => {
   let payload: any;
   try { payload = await req.json(); } catch { return json({ error: 'payload inválido' }, 400); }
 
+  // ═══ NÓ 3 · GATES — a IA pode falar com este lead? ═══════════════════════════
+  // Cada `return json({ ok: true, skip: … })` abaixo é uma saída "não responder" (n8n: IF → false).
+  // Ordem: é mensagem recebida? é de outro agente (aluno/RH)? pedido de reset de teste? o lead
+  // existe e pode ser atendido? está pausado? é aluno matriculado? Passou em tudo → processarInbound.
   // Guards de entrada (mesma ordem do n8n).
   if (payload?.direcao !== 'inbound' || payload?.from_me === true) return json({ ok: true, skip: 'nao_inbound' });
   // Persona do assistente pedagógico (Suporte ao Aluno): quem atende é o crm-agente-aluno.
@@ -1468,6 +1574,7 @@ Deno.serve(async (req) => {
     return json({ ok: true, skip: 'aluno_matriculado' });
   }
 
+  // ▸ Passou nos gates: dispara o nó 2 em segundo plano e responde 200 para o webhook.
   const trabalho = processarInbound(payload);
   if (typeof EdgeRuntime !== 'undefined' && EdgeRuntime?.waitUntil) {
     EdgeRuntime.waitUntil(trabalho);
