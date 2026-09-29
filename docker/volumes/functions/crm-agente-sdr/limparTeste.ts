@@ -26,6 +26,9 @@ export function estadoZerado(agora: string): Record<string, unknown> {
     pausa_ia: false, motivo_pausa: null, pausa_ia_ate: null, atendimento_finalizado: false,
     agendado: false, link_meet: null,
     situacao_trabalho_atual: null, objetivos_profissionais: null, experiencia_area: null,
+    // Campanha é estado, não cadastro. 1º teste real (29/09/2026): um disparo de AULA de Cannabis do
+    // dia 28 ficou no lead e a Luna abriu como persona aula, sobre outra pós, em cima do template de Bovinos.
+    contexto_campanha: null, modo_recontato: false, contexto_recontato: null,
   };
 }
 

@@ -44,7 +44,8 @@ describe('/limpar', () => {
 
   it('zera o estado do agente e mantém o cadastro', () => {
     const e = estadoZerado('2026-09-29T20:00:00.000Z');
-    expect(e).toMatchObject({ agente_atual: null, agendado: false, pausa_ia: false, jornada: { limpo_em: '2026-09-29T20:00:00.000Z' } });
+    expect(e).toMatchObject({ agente_atual: null, agendado: false, pausa_ia: false, jornada: { limpo_em: '2026-09-29T20:00:00.000Z' },
+      contexto_campanha: null, modo_recontato: false });
     for (const cadastro of ['nome', 'curso_interesse_original', 'email', 'formacao_academica', 'remotejid']) {
       expect(e, `${cadastro} é cadastro e fica`).not.toHaveProperty(cadastro);
     }

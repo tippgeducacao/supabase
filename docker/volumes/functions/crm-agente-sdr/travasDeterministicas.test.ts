@@ -97,6 +97,16 @@ describe('na fala: horário oferecido', () => {
     const h: Msg[] = [...historico, { role: 'user', content: 'e às 20h, tem?' }];
     expect(horariosNaoOfertados('às 20h não tenho, mas consigo 18h, pode ser?', h)).toEqual([]);
   });
+  it('lead escreve a hora sem "h" ("quero as 18") — 1º teste real, 29/09', () => {
+    const h: Msg[] = [{ role: 'assistant', content: 'podemos agendar amanhã ás 11:00h ou 18:00h?' }, { role: 'user', content: 'oi quero as 18' }];
+    expect(horariosNaoOfertados('vc já se formou? aí confiro a disponibilidade para amanhã, perto das 18h.', h)).toEqual([]);
+    expect(horariosNaoOfertados('vc já se formou? aí confiro amanhã às 11h ou 18h?', h)).toEqual(['11:00']);
+    for (const fala of ['pode ser às 9', 'lá pelas 20 horas', 'depois das 19']) {
+      expect(horariosNaoOfertados('consigo esse horário, pode ser?'.replace('esse horário', fala.match(/\d+/)![0] + 'h'), [{ role: 'user', content: fala }])).toEqual([]);
+    }
+    // quantidade não é hora
+    expect(horariosNaoOfertados('consigo 2h, pode ser?', [{ role: 'user', content: 'tenho as 2 opções' }])).toEqual(['02:00']);
+  });
   it('a correção interna (que cita o texto barrado) não vira "fala do lead" na segunda tentativa', () => {
     const h: Msg[] = [...historico, { role: 'user', content: '[CORRECAO_INTERNA_AUTO_IGNORE] Sua última mensagem NÃO foi enviada: """consigo 17h, pode ser?"""' }];
     expect(horariosNaoOfertados('consigo 17h, pode ser?', h)).toEqual(['17:00']);

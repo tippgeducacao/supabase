@@ -1212,7 +1212,8 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
           role: 'user',
           content: '[CORRECAO_INTERNA_AUTO_IGNORE] Sua última mensagem NÃO foi enviada ao lead: ela oferece horário(s) ' +
             `(${inventados.join(', ')}) que não vieram de consulta_disponibilidade nesta conversa — é proibido inventar ` +
-            'horário (Regra de ouro nº 2). O texto barrado foi:\n' +
+            // A Luna (ctx.ficha) não tem mais "regras de ouro" no prompt: citar a nº 2 apontaria para o nada.
+            (ctx.ficha ? 'horário.' : 'horário (Regra de ouro nº 2).') + ' O texto barrado foi:\n' +
             `"""\n${resumir(texto, 600)}\n"""\n` +
             'Refaça agora PRESERVANDO todo o conteúdo dele que não é horário — em especial a quebra de objeção, o ' +
             'acolhimento e o argumento que você já tinha construído. A ÚNICA coisa que muda são os horários: rode ' +

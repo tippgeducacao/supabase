@@ -122,6 +122,20 @@ function horarios(texto: string): Set<string> {
   return out;
 }
 
+// O lead escreve hora sem "h" ("quero as 18", "pode ser às 9", "18 horas"). Primeiro teste real
+// (29/09/2026): o template ofereceu 18:00, o lead respondeu "oi quero as 18", a Luna repetiu "18h"
+// e a trava barrou como inventado. Só vale para a fala do LEAD — a oferta da IA segue exigindo o "h".
+// Sem \b: ele não enxerga "à" como letra e "às 9" não casava. As bordas usam \p{L} (flag u).
+const RE_HORA_DO_LEAD = /(?<![\p{L}\d])(?:às|as|pras|pra|para as|das|umas|depois das|antes das|lá pelas|la pelas)\s+(\d{1,2})(?:\s*(?:horas|hrs|hs))?(?![\p{L}\d])(?!\s*(?:min|dias|semanas|meses|anos|vezes|op[cç]))|(?<![\p{L}\d])(\d{1,2})\s*(?:horas|hrs|hs)(?![\p{L}\d])/giu;
+function horariosDoLead(texto: string): Set<string> {
+  const out = horarios(texto);
+  for (const m of texto.matchAll(RE_HORA_DO_LEAD)) {
+    const h = parseInt(m[1] ?? m[2], 10);
+    if (h <= 23) out.add(`${String(h).padStart(2, '0')}:00`);
+  }
+  return out;
+}
+
 /**
  * Texto das falas do LEAD. Não conta resultado de ferramenta nem turno interno: a correção que volta
  * para a IA ([CORRECAO_INTERNA_AUTO_IGNORE]) é gravada como `user` e CITA o texto barrado — contada
@@ -147,7 +161,7 @@ export function horariosNaoOfertados(resposta: string, historico: readonly Msg[]
   if (!oferecidos.size) return [];
   const permitidos = new Set<string>();
   for (const o of opcoesDeAgenda(historico) ?? []) permitidos.add(o.horario);
-  for (const h of horarios(falasDoLeadTexto(historico))) permitidos.add(h);
+  for (const h of horariosDoLead(falasDoLeadTexto(historico))) permitidos.add(h);
   for (const r of resultadosDeFerramenta(historico)) {
     if (r.agendamento_id || r.confirmacao) for (const h of horarios(JSON.stringify(r))) permitidos.add(h);
   }
