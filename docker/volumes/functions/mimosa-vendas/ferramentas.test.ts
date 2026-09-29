@@ -71,8 +71,11 @@ describe("fontesDoResultado", () => {
 
   it("status legível para cada ferramenta declarada", () => {
     for (const t of FERRAMENTAS) {
-      expect(statusDaFerramenta(t.name, {})).not.toBe("Consultando o sistema");
+      expect(statusDaFerramenta(t.name, {})).not.toBe("Dando uma olhada no sistema");
     }
-    expect(statusDaFerramenta("buscar_na_base", { consulta: "SISBI" })).toBe("Buscando “SISBI” em toda a base");
+    expect(statusDaFerramenta("buscar_na_base", { consulta: "SISBI" })).toBe("Procurando “SISBI” nos materiais");
+    expect(statusDaFerramenta("calcular_orcamento", {})).toBe("Fazendo as contas do orçamento");
+    // Em primeira pessoa e sem cara de log: nada de "Consultando…" / "Buscando… em toda a base".
+    for (const t of FERRAMENTAS) expect(statusDaFerramenta(t.name, { produto: "X", consulta: "Y", termo: "Z" })).not.toMatch(/^Consultando|em toda a base|no cadastro/);
   });
 });

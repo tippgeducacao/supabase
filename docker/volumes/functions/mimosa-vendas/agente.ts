@@ -88,7 +88,50 @@ function houveFallback(msg: Anthropic.Beta.BetaMessage): boolean {
   return iteracoes.some((i) => i?.type === "fallback_message");
 }
 
-export async function rodarAgente(entrada: EntradaAgente, deps: DependenciasAgente): Promise<ResumoAgente> {
+/**
+ * Erro da API que merece a reserva em vez de erro na tela. 404 = modelo indisponível nesta
+ * conta; 529 / `overloaded_error` = IA sobrecarregada. A sobrecarga também chega como evento
+ * de erro NO MEIO do stream (depois do 200), sem `status` e com o JSON no `message` — ali o
+ * SDK não refaz sozinho. Foi o único erro das primeiras 24 perguntas (29/09/2026, 09:30), e a
+ * reserva só cobria o 404.
+ */
+export function motivoDaReserva(e: unknown): "modelo_indisponivel" | "sobrecarga" | null {
+  if (!e || typeof e !== "object") return null;
+  const x = e as { status?: unknown; type?: unknown; error?: { type?: unknown; error?: { type?: unknown } }; message?: unknown };
+  if (x.status === 404) return "modelo_indisponivel";
+  const tipo = x.type ?? x.error?.error?.type ?? x.error?.type;
+  if (x.status === 529 || tipo === "overloaded_error" || /overloaded/i.test(String(x.message ?? ""))) return "sobrecarga";
+  return null;
+}
+
+/**
+ * O que a pessoa já está VENDO. O texto de um passo que virou consulta (`passo_consulta`)
+ * é recolhido pelo front; o de um passo refeito some. Enquanto nenhum texto de resposta
+ * estiver na tela, dá para recomeçar com a reserva sem apagar nada — continuando a
+ * numeração (`proximoPasso`), porque um passo já marcado como consulta recolheria a
+ * resposta nova se ela viesse com o mesmo número.
+ */
+export function criarRastreioDaTela() {
+  const comTexto = new Set<number>();
+  const consulta = new Set<number>();
+  let proximo = 0;
+  return {
+    registrar(ev: EventoMimosa) {
+      if (ev.tipo === "texto") comTexto.add(ev.passo);
+      else if (ev.tipo === "passo_consulta") consulta.add(ev.passo);
+      else if (ev.tipo === "refazer_passo") comTexto.delete(ev.passo);
+      if ("passo" in ev) proximo = Math.max(proximo, ev.passo + 1);
+    },
+    respostaVisivel: () => [...comTexto].some((p) => !consulta.has(p)),
+    proximoPasso: () => proximo,
+  };
+}
+
+export async function rodarAgente(
+  entrada: EntradaAgente,
+  deps: DependenciasAgente,
+  opcoes: { passoInicial?: number } = {},
+): Promise<ResumoAgente> {
   const mensagens = entrada.messages.slice();
   const resumo: ResumoAgente = {
     passos: 0,
@@ -99,13 +142,15 @@ export async function rodarAgente(entrada: EntradaAgente, deps: DependenciasAgen
     terminou: "limite",
   };
   const rotulosVistos = new Set<string>();
+  const inicio = opcoes.passoInicial ?? 0;
 
-  for (let passo = 0; passo < MAX_PASSOS; passo++) {
+  for (let rodada = 0; rodada < MAX_PASSOS; rodada++) {
     if (deps.cancelado?.()) {
       resumo.terminou = "cancelado";
       break;
     }
-    const ultimoPasso = passo === MAX_PASSOS - 1;
+    const passo = inicio + rodada;
+    const ultimoPasso = rodada === MAX_PASSOS - 1;
     let msg: Anthropic.Beta.BetaMessage | null = null;
 
     for (let tentativa = 0; ; tentativa++) {
@@ -127,7 +172,7 @@ export async function rodarAgente(entrada: EntradaAgente, deps: DependenciasAgen
       }
     }
 
-    resumo.passos = passo + 1;
+    resumo.passos = rodada + 1;
     resumo.uso.entrada += msg.usage?.input_tokens ?? 0;
     resumo.uso.saida += msg.usage?.output_tokens ?? 0;
     resumo.uso.cacheLeitura += msg.usage?.cache_read_input_tokens ?? 0;
@@ -136,7 +181,7 @@ export async function rodarAgente(entrada: EntradaAgente, deps: DependenciasAgen
 
     // Recusa: nunca roda ferramenta desse turno (o tool_use pode ter sido cortado).
     if (msg.stop_reason === "refusal") {
-      deps.emitir({ tipo: "erro", mensagem: "A Mimosa não conseguiu responder a essa pergunta. Tente reformular." });
+      deps.emitir({ tipo: "erro", mensagem: "Essa eu não consegui responder. Tenta perguntar de outro jeito?" });
       resumo.terminou = "recusa";
       break;
     }
@@ -144,14 +189,14 @@ export async function rodarAgente(entrada: EntradaAgente, deps: DependenciasAgen
     const usos = msg.content.filter((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === "tool_use");
     if (!usos.length) {
       if (msg.stop_reason === "max_tokens") {
-        deps.emitir({ tipo: "aviso", texto: "A resposta ficou longa demais e foi cortada. Peça a continuação ou uma versão mais curta." });
+        deps.emitir({ tipo: "aviso", texto: "Minha resposta ficou longa demais e cortou no fim. Quer que eu continue ou faça uma versão mais curta?" });
       }
       resumo.terminou = "resposta";
       break;
     }
     if (msg.stop_reason === "max_tokens") {
       // tool_use cortado no meio pode até parecer válido — não executa.
-      deps.emitir({ tipo: "erro", mensagem: "A consulta ficou grande demais. Tente perguntar por partes." });
+      deps.emitir({ tipo: "erro", mensagem: "Essa ficou grande demais pra mim de uma vez. Pergunta por partes?" });
       resumo.terminou = "erro";
       break;
     }

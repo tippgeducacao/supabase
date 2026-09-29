@@ -19,7 +19,7 @@ import Anthropic from "npm:@anthropic-ai/sdk@0.128.0";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { executarFerramenta, FERRAMENTAS } from "./ferramentas.ts";
 import { blocoBase, blocoConversa, hojeEmBrasilia, PROMPT_BASE } from "./prompt.ts";
-import { rodarAgente, type EventoMimosa, type ResumoAgente } from "./agente.ts";
+import { criarRastreioDaTela, motivoDaReserva, rodarAgente, type EventoMimosa, type ResumoAgente } from "./agente.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -78,12 +78,14 @@ function paramsDoModelo(modelo: string): Record<string, unknown> {
 }
 
 function mensagemDeErro(e: unknown): string {
-  if (e instanceof Anthropic.RateLimitError) return "A IA está com muita demanda agora. Tente de novo em 1 minuto.";
-  if (e instanceof Anthropic.AuthenticationError || e instanceof Anthropic.PermissionDeniedError) {
-    return "A chave da IA foi recusada — avise o TI.";
+  if (e instanceof Anthropic.RateLimitError || (e instanceof Anthropic.APIError && motivoDaReserva(e) === "sobrecarga")) {
+    return "Estou com muita gente me chamando agora. Tenta de novo em um minutinho?";
   }
-  if (e instanceof Anthropic.APIConnectionError) return "Não consegui falar com a IA agora. Tente de novo.";
-  return "Não consegui responder agora. Tente de novo em instantes.";
+  if (e instanceof Anthropic.AuthenticationError || e instanceof Anthropic.PermissionDeniedError) {
+    return "Minha chave de acesso à IA foi recusada. Avisa o TI, por favor?";
+  }
+  if (e instanceof Anthropic.APIConnectionError) return "Não consegui me conectar agora. Tenta de novo?";
+  return "Não consegui responder agora. Tenta de novo em instantes?";
 }
 
 Deno.serve(async (req) => {
@@ -99,7 +101,7 @@ Deno.serve(async (req) => {
   });
   const { data: userData } = await sbUsuario.auth.getUser();
   const user = userData?.user;
-  if (!user) return json({ erro: "sessão inválida — entre de novo no sistema" }, 401);
+  if (!user) return json({ erro: "Sua sessão expirou. Entra de novo no sistema e me pergunta outra vez?" }, 401);
 
   // ── O que ela recebeu ────────────────────────────────────────────────────
   const body = await req.json().catch(() => ({}));
@@ -121,13 +123,13 @@ Deno.serve(async (req) => {
   });
   if (erroCota) {
     console.error("[mimosa-vendas] cota", erroCota.message);
-    return json({ erro: "Não consegui registrar a pergunta agora. Tente de novo." }, 422);
+    return json({ erro: "Não consegui registrar sua pergunta agora. Tenta de novo?" }, 422);
   }
   if (!cota?.ok) {
     return json({
       erro: cota?.motivo === "dia"
-        ? "Você chegou ao limite de perguntas de hoje. Amanhã a Mimosa volta."
-        : `Muitas perguntas em sequência. Tente de novo em ${cota?.retry_after ?? 60} segundos.`,
+        ? "Por hoje você chegou no limite de perguntas. Amanhã a gente continua!"
+        : `Muitas perguntas seguidas. Me dá ${cota?.retry_after ?? 60} segundos e tenta de novo?`,
       retry_after: cota?.retry_after ?? null,
     }, 429);
   }
@@ -166,11 +168,11 @@ Deno.serve(async (req) => {
   if (catalogoR.error || !catalogoR.data) {
     console.error("[mimosa-vendas] catálogo", catalogoR.error?.message);
     await finalizarUso(null, MODELO, "catalogo_indisponivel");
-    return json({ erro: "Não consegui ler o catálogo do sistema agora. Tente de novo." }, 422);
+    return json({ erro: "Não consegui abrir o catálogo do sistema agora. Tenta de novo?" }, 422);
   }
   if (!chave) {
     await finalizarUso(null, MODELO, "sem_chave");
-    return json({ erro: "A IA está sem chave configurada — avise o TI." }, 422);
+    return json({ erro: "Estou sem chave de acesso à IA configurada. Avisa o TI, por favor?" }, 422);
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -211,13 +213,13 @@ Deno.serve(async (req) => {
       };
 
       let modelo = MODELO;
-      let emitiuTexto = false;
+      const tela = criarRastreioDaTela();
       const deps = {
         abrirStream: (params: Record<string, unknown>) =>
           cliente.beta.messages.stream({ ...params, ...paramsDoModelo(modelo) } as never, { signal: abortar.signal }),
         executar: (nomeFerramenta: string, entrada: unknown) => executarFerramenta(sbUsuario, nomeFerramenta, entrada),
         emitir: (ev: EventoMimosa) => {
-          if (ev.tipo === "texto") emitiuTexto = true;
+          tela.registrar(ev);
           enviar(ev);
         },
         ehErroDaApi: (e: unknown) => e instanceof Anthropic.APIError,
@@ -230,11 +232,15 @@ Deno.serve(async (req) => {
         try {
           resumo = await rodarAgente(entrada, deps);
         } catch (e) {
-          // Modelo indisponível nesta conta (404) antes de qualquer texto: tenta a reserva.
-          if (e instanceof Anthropic.NotFoundError && !emitiuTexto && modelo !== MODELO_RESERVA) {
-            console.warn("[mimosa-vendas] modelo indisponível, usando reserva", modelo);
+          // Reserva em vez de erro na tela: modelo indisponível (404) ou IA sobrecarregada
+          // (529/overloaded_error). Só enquanto nenhuma resposta apareceu; o que já foi
+          // recolhido como consulta fica, e a reserva continua a numeração dos passos.
+          const motivo = e instanceof Anthropic.APIError ? motivoDaReserva(e) : null;
+          if (motivo && modelo !== MODELO_RESERVA && !tela.respostaVisivel() && !abortar.signal.aborted) {
+            console.warn("[mimosa-vendas] usando reserva", motivo, modelo);
             modelo = MODELO_RESERVA;
-            resumo = await rodarAgente(entrada, deps);
+            resumo = await rodarAgente(entrada, deps, { passoInicial: tela.proximoPasso() });
+            resumo.fallback = true;
           } else {
             throw e;
           }

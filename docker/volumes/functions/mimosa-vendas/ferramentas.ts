@@ -202,23 +202,25 @@ function inteiro(v: unknown, campo: string): number | null {
 /** Status que o front mostra enquanto a ferramenta roda ("Consultando…"). */
 export function statusDaFerramenta(nome: string, entrada: Record<string, unknown>): string {
   const aspas = (v: unknown) => (typeof v === "string" && v.trim() ? `“${v.trim().slice(0, 60)}”` : "");
+  // Em primeira pessoa e com cara de gente (29/09/2026): "Consultando X no cadastro" e
+  // "Buscando X em toda a base" soavam como log de sistema na tela do vendedor.
   switch (nome) {
     case "detalhar_produto":
-      return `Consultando ${aspas(entrada.produto) || "o produto"} no cadastro`;
+      return `Abrindo a ficha de ${aspas(entrada.produto) || "produto"}`;
     case "buscar_na_base":
-      return `Buscando ${aspas(entrada.consulta)} em toda a base`;
+      return `Procurando ${aspas(entrada.consulta) || "isso"} nos materiais`;
     case "modulos_praticos":
-      return `Consultando módulos práticos${entrada.produto ? ` de ${aspas(entrada.produto)}` : ""}${entrada.cidade ? ` em ${aspas(entrada.cidade)}` : ""}`;
+      return `Olhando os módulos práticos${entrada.produto ? ` de ${aspas(entrada.produto)}` : ""}${entrada.cidade ? ` em ${aspas(entrada.cidade)}` : ""}`;
     case "turmas":
-      return `Consultando turmas${entrada.produto ? ` de ${aspas(entrada.produto)}` : ""}`;
+      return `Olhando as turmas${entrada.produto ? ` de ${aspas(entrada.produto)}` : ""}`;
     case "buscar_professor":
-      return `Procurando professor ${aspas(entrada.termo)}`;
+      return `Procurando ${aspas(entrada.termo) || "o professor"} entre os professores`;
     case "ler_documento":
       return "Lendo o documento";
     case "calcular_orcamento":
-      return "Calculando o orçamento";
+      return "Fazendo as contas do orçamento";
     default:
-      return "Consultando o sistema";
+      return "Dando uma olhada no sistema";
   }
 }
 
