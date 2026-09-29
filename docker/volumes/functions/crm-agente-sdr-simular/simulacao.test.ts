@@ -537,3 +537,18 @@ describe('troca de número no harness (14/09/2026)', () => {
     expect(validarEntradaSimulacao(confirmada).troca_de_numero?.agendado).toBe(true);
   });
 });
+
+describe('ferramentas_reais (29/09/2026)', () => {
+  it('é opcional, booleano e nasce desligado', () => {
+    expect(validarEntradaSimulacao({ mensagens: ['oi'] }).ferramentas_reais).toBe(false);
+    expect(validarEntradaSimulacao({ mensagens: ['oi'], ferramentas_reais: true }).ferramentas_reais).toBe(true);
+    expect(() => validarEntradaSimulacao({ mensagens: ['oi'], ferramentas_reais: 'sim' })).toThrow('ferramentas_reais');
+  });
+  it('só ferramenta de CONSULTA vai ao executor real: nada que agenda, envia, pausa ou grava', async () => {
+    const { TOOLS_REAIS_NO_TESTE } = await import('../crm-webchat/modoTeste');
+    for (const gravam of ['confirmar_agendamento', 'remarcar_agendamento', 'envia_informacoes', 'pausa_ia',
+      'agendar_retorno', 'temporizador_proxima_turma', 'atualizar_dados_lead']) {
+      expect(TOOLS_REAIS_NO_TESTE.has(gravam), `${gravam} tem efeito real e precisa seguir simulada`).toBe(false);
+    }
+  });
+});

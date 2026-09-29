@@ -66,6 +66,11 @@ export type EntradaSimulacao = {
   prompt: ConjuntoPrompt;
   /** Router pelo Jev (routerJev.ts) neste ensaio; exige usar_router. null = o router de sempre. */
   router_jev: ConfigRouterJev | null;
+  /**
+   * 29/09/2026: as ferramentas de CONSULTA rodam de verdade (agenda, catálogo, objeções, matriz),
+   * pelo executor real em modo teste — nada é gravado. As que gravam ou enviam seguem simuladas.
+   */
+  ferramentas_reais: boolean;
 };
 
 export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
@@ -134,7 +139,7 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
     if (Object.keys(m).some((k) => k !== 'role' && k !== 'content')) throw new Error('histórico aceita somente role e content');
     return { role: m.role, content: texto(m.content, 'content', true) };
   });
-  for (const campo of ['usar_router', 'sem_presente_escola', 'esta_na_escola', 'ficha']) {
+  for (const campo of ['usar_router', 'sem_presente_escola', 'esta_na_escola', 'ficha', 'ferramentas_reais']) {
     if (body[campo] !== undefined && typeof body[campo] !== 'boolean') throw new Error(`${campo} deve ser booleano`);
   }
   if (body.agente_atual != null && body.agente_atual !== 'agente_validacao' && body.agente_atual !== 'agente_qualificador') {
@@ -197,6 +202,7 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
     ficha: body.ficha === true,
     router_jev: routerJev,
     prompt: conjuntoPrompt,
+    ferramentas_reais: body.ferramentas_reais === true,
   };
 }
 

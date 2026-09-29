@@ -43,7 +43,9 @@ import {
   INSTRUCAO_TEMPO_FICHA, montarBlocoFicha, ORIENTACAO_NAO_E_FALA, perguntasFeitas, registrarBloqueioNaJornada, registrarEnvioNaJornada, type Jornada,
 } from '../crm-agente-sdr/fichaAtendimento.ts';
 import { comGanchoDoLote, cursoDaConversa } from '../crm-agente-sdr/ganchoLote.ts';
-import { bloqueioProximaTurmaDeEstudante } from '../crm-agente-sdr/tools.ts';
+import { bloqueioProximaTurmaDeEstudante, type CtxConversa, executarTool } from '../crm-agente-sdr/tools.ts';
+import { consultarAprovacao, recusaElegibilidade } from '../crm-agente-sdr/elegibilidadeAgendamento.ts';
+import { TOOLS_REAIS_NO_TESTE } from '../crm-webchat/modoTeste.ts';
 import { blocoConviteAgenda } from '../crm-agente-sdr/contexto.ts';
 import { resultadoConfirmacao } from '../crm-agente-sdr/confirmacaoAgendamento.ts';
 import { blocoPerguntasRecentes, falasDoLead } from '../crm-agente-sdr/perguntasRecentes.ts';
@@ -56,6 +58,8 @@ import { agendaRealNoDia, diagnosticoDoProvedor, disponibilidadeSimulada, execut
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE);
+// `ferramentas_reais`: número que não existe (DDD 00), então nenhuma leitura casa com lead de produção.
+const TELEFONE_SINTETICO = '5500000000000';
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data, null, 2), { status, headers: { 'Content-Type': 'application/json' } });
@@ -336,6 +340,25 @@ Deno.serve(async (req) => {
   const aulaPiloto = Boolean(fichaSim && entrada.persona === 'aula' && provedorAlternativo?.nome === 'openai');
   // Slots de cada consulta de agenda simulada deste ensaio (a trava de confirmar/remarcar lê daqui).
   const consultasDoEnsaio: OpcaoAgenda[][] = [];
+  // Ferramentas reais (29/09/2026): as de CONSULTA (TOOLS_REAIS_NO_TESTE, a mesma lista do modo teste
+  // do webchat) vão ao executor real em modoTeste — agenda, catálogo, objeções e matriz de verdade,
+  // sem gravar nada (elegibilidade fica só em memória, troca de curso não é salva). O telefone é
+  // sintético: nunca casa com lead de produção. Agendar, remarcar, pausar, enviar material e salvar
+  // dados continuam simulados; o agendar simulado só passa com a aprovação REAL da matriz.
+  const ctxReal: CtxConversa | null = entrada.ferramentas_reais ? {
+    telefone: TELEFONE_SINTETICO, remotejid: `${TELEFONE_SINTETICO}@s.whatsapp.net`,
+    waAccountId: null, leadId: null, oportunidadeId: null, modoTeste: true, nome: entrada.nome_lead || null,
+    ...(fichaSim ? { ficha: { inicioRodada: fichaSim.inicioRodada } } : {}),
+  } : null;
+  let chamadaReal = 0;
+  const ferramentaReal = async (nome: string, dados: Record<string, unknown>): Promise<string> => {
+    try {
+      const { id: _id, ...saida } = await executarTool(supabase, { id: `ensaio-${++chamadaReal}`, name: nome, input: dados }, ctxReal!) as Record<string, unknown>;
+      return JSON.stringify({ ...saida, ferramenta_real: true });
+    } catch (e) {
+      return JSON.stringify({ resultado: `Erro ao executar ${nome}: ${(e as Error).message}`, ferramenta_real: true });
+    }
+  };
   const aberturaControlada = provedorAlternativo?.nome === 'openai';
   let aberturaPendente = aberturaControlada && Boolean(entrada.troca_de_numero);
   // Espelho do index.ts (canário): o cumprimento da fala do lead é retribuído, uma vez por turno.
@@ -509,7 +532,20 @@ Deno.serve(async (req) => {
           const { id: _id, ...recusa } = bloqueioProximaTurmaDeEstudante('');
           return JSON.stringify(recusa);
         }
-        const resposta = await mockTool(nome, dados, entrada.mocks, fichaSim, entrada.persona === 'aula' && !entrada.aula?.curso_nome);
+        // Com a matriz real, o agendar simulado exige a aprovação que ela deu neste ensaio (como a produção).
+        if (ctxReal && nome === 'confirmar_agendamento') {
+          const aprovacao = await consultarAprovacao(supabase, ctxReal, dados.curso_escolhido);
+          if (!aprovacao.aprovada) {
+            const { id: _id, ...recusa } = recusaElegibilidade('ensaio', aprovacao.motivo) as Record<string, unknown>;
+            return JSON.stringify(recusa);
+          }
+        }
+        const real = Boolean(ctxReal && TOOLS_REAIS_NO_TESTE.has(nome));
+        const resposta = real
+          ? await ferramentaReal(nome, dados)
+          : await mockTool(nome, dados, entrada.mocks, fichaSim, entrada.persona === 'aula' && !entrada.aula?.curso_nome);
+        // A ficha simulada conta a objeção como o mock contava (o executor real grava no lead, que aqui não existe).
+        if (real && nome === 'consulta_objecoes' && fichaSim) fichaSim.jornada = contarObjecaoNaJornada(fichaSim.jornada, String(dados?.tipo_objecao ?? ''));
         if (nome === 'consulta_disponibilidade') consultasDoEnsaio.push(slotsDoTextoDeAgenda(resposta));
         if (nome === 'verificar_compatibilidade_curso') reprovadoPorPrazo = resposta.startsWith('REPROVADO_PRAZO') || resposta.includes('"output":"REPROVADO_PRAZO"');
         if (nome === 'atualizar_dados_lead') {
@@ -523,6 +559,7 @@ Deno.serve(async (req) => {
       ...resultado, modelo: resultado.chamadas.at(-1)?.modelo ?? (provedorAlternativo?.formato === 'openai' ? provedorAlternativo.modelo : MODELO_AGENTE), provedor: entrada.provedor, esforco: provedorAlternativo?.formato === 'openai' ? provedorAlternativo.esforco : null,
       raciocinio_encadeado: provedorAlternativo?.formato === 'openai' && provedorAlternativo.raciocinio === true,
       usar_router: entrada.usar_router, routers, memoria_versao: VERSAO_MEMORIA_HUMANA,
+      ferramentas_reais: entrada.ferramentas_reais ? [...TOOLS_REAIS_NO_TESTE] : [],
       ...(fichaSim ? { ficha: { cadastro: fichaSim.cadastro, jornada: fichaSim.jornada } } : {}),
     });
   } catch (e) {
