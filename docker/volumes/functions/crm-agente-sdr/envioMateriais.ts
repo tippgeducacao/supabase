@@ -100,6 +100,7 @@ type ContextoMaterial = { telefone: string; waAccountId: string | null };
 type MensagemMaterial = Record<string, unknown>;
 type ConsultaMateriais = PromiseLike<{ data: MensagemMaterial[] | null; error: unknown }> & {
   eq: (coluna: string, valor: string) => ConsultaMateriais;
+  gte: (coluna: string, valor: string) => ConsultaMateriais;
   in: (coluna: string, valores: string[]) => ConsultaMateriais;
   order: (coluna: string, opcoes: { ascending: boolean }) => ConsultaMateriais;
   limit: (quantidade: number) => ConsultaMateriais;
@@ -109,14 +110,17 @@ const SEM_STATUS = '\n\nSTATUS ATUAL DOS MATERIAIS INDISPONÍVEL. Não use o his
 
 // Relê receipts a cada volta do SDR. Não altera o histórico: uma recusa assíncrona
 // precisa superar o sucesso antigo sem apagar o que aconteceu na conversa.
-export async function carregarStatusMateriais(supabase: BancoMateriais, ctx: ContextoMaterial): Promise<string> {
+// `desde`: teste recomeçado com /limpar (limparTeste.ts) — envio anterior não conta mais.
+export async function carregarStatusMateriais(supabase: BancoMateriais, ctx: ContextoMaterial, desde?: string | null): Promise<string> {
   const telefones = phoneVariants(ctx.telefone);
   if (!ctx.waAccountId || !telefones.length) return SEM_STATUS;
   try {
-    const { data, error } = await supabase.from('crm_whatsapp_messages')
+    let consulta = supabase.from('crm_whatsapp_messages')
       .select('wa_message_id,tipo,template_name,status_entrega,erro,anexos,created_at')
       .eq('wa_account_id', ctx.waAccountId).in('telefone', telefones)
-      .eq('direcao', 'outbound').in('tipo', ['document', 'template'])
+      .eq('direcao', 'outbound').in('tipo', ['document', 'template']);
+    if (desde) consulta = consulta.gte('created_at', desde);
+    const { data, error } = await consulta
       .order('created_at', { ascending: false }).order('id', { ascending: false }).limit(12);
     if (error) return SEM_STATUS;
     if (!data?.length) return '\n\nSem registro recente de documento/template nesta conta. Isso não comprova envio nem impede um novo pedido.';

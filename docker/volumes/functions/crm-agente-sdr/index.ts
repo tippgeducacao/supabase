@@ -56,6 +56,7 @@ import {
   aplicarDeclaracaoNaJornada, carregarFicha, declaracaoDeConclusao, detectarPedidoDeCronograma, marcarPerguntasDaFicha, registrarNaJornada,
 } from './fichaAtendimento.ts';
 import { comGanchoDoLote, cursoDaConversa } from './ganchoLote.ts';
+import { ehComandoLimpar, ehTelefoneDeTeste, limparConversaDeTeste, limpoEm } from './limparTeste.ts';
 import { blocoConviteAgenda } from './contexto.ts';
 import { prepararMensagem } from './midia.ts';
 import { persistirEntradasDoLote, registrarEntrada } from './historicoEntradaPausa.ts';
@@ -419,10 +420,12 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   const aberturaControlada = modoTroca === 'ativo' && provedor?.nome === 'openai' && ctx.canal !== 'webchat';
   registrarFalaAposEnvio ||= aberturaControlada;
   const contasNoLote = new Set(itens.map((i: any) => i?.wa_account_id).filter(Boolean)).size;
+  // Teste recomeçado com /limpar (limparTeste.ts): o chat do SAC de antes não conta mais.
+  const desdeLimpeza = limpoEm(lead);
   const sinalTroca: SinalTrocaDeNumero = modoTroca === 'off'
     ? sinalInerte(ctx.waAccountId ?? null, contasNoLote, 'desligado')
     : await carregarSinalTrocaDeNumero(supabase, { telefone, contaAtual: ctx.waAccountId, itens, contasNoLote,
-      somenteSaidas: aberturaControlada });
+      somenteSaidas: aberturaControlada, desde: desdeLimpeza });
 
   // ▸ Variáveis do prompt (n8n: nó Set): viram os {{nome}}, {{curso}}… dentro do texto do prompt.
   // Contexto do lead + temporal (mesma montagem do node "normalizador").
@@ -902,7 +905,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   for (let rodada = 0; rodada < MAX_RODADAS_TOOLS; rodada++) {
     const [historico, contextoEntregaMateriais, fichaLida] = await Promise.all([
       carregarHistorico(supabase, remotejid),
-      carregarStatusMateriais(supabase, ctx),
+      carregarStatusMateriais(supabase, ctx, desdeLimpeza),
       // Relida a cada volta: a tool da volta anterior pode ter preenchido a coleta.
       ctx.ficha ? carregarFicha(supabase, ctx) : Promise.resolve(null),
     ]);
@@ -1539,6 +1542,16 @@ Deno.serve(async (req) => {
     await excluirDadosLead(supabase, payload.remotejid);
     await supabase.from('crm_agente_sdr_buffer').delete().eq('remotejid', payload.remotejid);
     return json({ ok: true, reset: true });
+  }
+  // /limpar (29/09/2026): recomeça o TESTE do zero mantendo o cadastro, só para telefones de teste
+  // (limparTeste.ts). Número fora da lista segue o fluxo normal, como qualquer mensagem.
+  if (ehComandoLimpar(payload.conteudo) && await ehTelefoneDeTeste(supabase, String(payload.telefone))) {
+    try {
+      return json({ ok: true, limpo: true, ...(await limparConversaDeTeste(supabase, payload.remotejid, String(payload.telefone))) });
+    } catch (e) {
+      console.error('[crm-agente-sdr] /limpar falhou:', (e as Error)?.message ?? e);
+      return json({ ok: false, limpo: false, erro: (e as Error)?.message ?? String(e) }, 500);
+    }
   }
 
   // Gate de atendimento. A persona é decidida pelo LEAD primeiro, depois pelo número:

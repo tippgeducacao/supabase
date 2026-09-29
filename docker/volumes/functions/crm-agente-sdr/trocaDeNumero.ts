@@ -266,18 +266,22 @@ export async function carregarModoTrocaNumero(supabase: any, telefone?: string):
 
 export async function carregarSinalTrocaDeNumero(
   supabase: any,
-  args: { telefone: string; contaAtual: string | null | undefined; itens: readonly any[]; contasNoLote: number; somenteSaidas?: boolean },
+  args: { telefone: string; contaAtual: string | null | undefined; itens: readonly any[]; contasNoLote: number; somenteSaidas?: boolean;
+    /** Teste recomeçado com /limpar: só mensagens a partir daqui (limparTeste.ts). */
+    desde?: string | null },
 ): Promise<SinalTrocaDeNumero> {
   const contaAtual = args.contaAtual ? String(args.contaAtual) : null;
   if (!contaAtual) return sinalInerte(null, args.contasNoLote, 'sem_conta');
   try {
     const variants = phoneVariants(args.telefone);
     if (!variants.length) return sinalInerte(contaAtual, args.contasNoLote, 'sem_historico_crm');
-    const { data, error } = await supabase
+    let consulta = supabase
       .from('crm_whatsapp_messages')
       .select('wa_account_id, direcao, tipo, template_name, conteudo, created_at, wa_message_id, status_entrega')
       .in('telefone', variants)
-      .not('wa_account_id', 'is', null)
+      .not('wa_account_id', 'is', null);
+    if (args.desde) consulta = consulta.gte('created_at', args.desde);
+    const { data, error } = await consulta
       .order('created_at', { ascending: false })
       .limit(LIMITE_LINHAS_CRM);
     if (error) throw new Error(error.message);
