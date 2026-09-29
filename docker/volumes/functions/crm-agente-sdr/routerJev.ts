@@ -11,7 +11,8 @@
 //             ou sem chave, chama o router de sempre — ele segue sendo a rede de proteção.
 // Promover ao qualificador é o erro caro (o ratchet não deixa voltar), por isso o limiar vale
 // para os dois lados e o meio do caminho nunca é decidido pelo Jev.
-import { INICIO_HISTORICO_HUMANO, MARCADOR_ATENDIMENTO_HUMANO, MARCADOR_FOLLOWUP, type Msg } from './historico.ts';
+import type { Msg } from './historico.ts';
+import { chamarJev, conversaParaJev, PRAZO_JEV_MS } from './jev.ts';
 
 export type AgenteRouter = 'agente_validacao' | 'agente_qualificador';
 export type ModoRouterJev = 'off' | 'sombra' | 'ativo';
@@ -36,8 +37,7 @@ export interface LeituraJev {
 
 export const LIMIAR_PADRAO = 0.9;
 export const JANELA_TURNOS = 16;
-export const PRAZO_JEV_MS = 3000;
-const URL_JEV = 'https://api.typesafe.ai/v1/systemone';
+export { PRAZO_JEV_MS };
 
 // Mesma régua do PROMPT_ROUTER, reescrita como pergunta + regras. Medido em 28/09/2026 contra
 // 30 cenários inventados: 30/30, 90% com p ≥ 0,90; as 4 perguntas sim/não combinadas deram 28/30.
@@ -59,33 +59,13 @@ export const PERGUNTA_ROUTER = {
   },
 } as const;
 
-// Dado pessoal não muda a decisão: link, e-mail e número longo (telefone, CPF) saem mascarados.
-const RE_LINK = /https?:\/\/\S+|www\.\S+/gi;
-const RE_EMAIL = /[\w.+-]+@[\w-]+\.[\w.]+/g;
-const RE_NUMERO_LONGO = /\+?\d(?:[\s().-]?\d){9,}/g;
-const RE_CABECALHO_HUMANO = /\[ATENDIMENTO_HUMANO\][^\n]*\n?/g;
-const mascarar = (t: string) => t.replace(RE_LINK, '[LINK]').replace(RE_EMAIL, '[EMAIL]').replace(RE_NUMERO_LONGO, '[NUMERO]');
-
 /**
  * Histórico JÁ limpo pelo `limparParaRouter` → estado do Jev: `{ conversa: [{de, texto}] }`,
  * só os últimos turnos (o Jev perde precisão com contexto que não importa). A nota de troca
  * de número, que o `comNotaParaRouter` funde na fala do lead, sai do texto e vira campo próprio.
  */
 export function estadoParaJev(historicoLimpo: readonly Msg[], opts: { nota?: string | null; janela?: number } = {}) {
-  const conversa: { de: string; texto: string }[] = [];
-  for (const m of historicoLimpo) {
-    let texto = typeof m.content === 'string' ? m.content : '';
-    if (opts.nota) texto = texto.replace(opts.nota, '');
-    texto = texto.replace(MARCADOR_FOLLOWUP, '').replace(INICIO_HISTORICO_HUMANO, '').trim();
-    if (!texto) continue;
-    const de = m.role === 'user' ? 'lead'
-      : texto.includes(MARCADOR_ATENDIMENTO_HUMANO) ? 'vendedor (humano da equipe)' : 'sdr';
-    // O cabeçalho da fala humana ("[ATENDIMENTO_HUMANO] Nome · data") já está no rótulo `de`.
-    texto = texto.replace(RE_CABECALHO_HUMANO, '').trim();
-    if (!texto) continue;
-    conversa.push({ de, texto: mascarar(texto).slice(0, 1500) });
-  }
-  const recorte = conversa.slice(-(opts.janela ?? JANELA_TURNOS));
+  const recorte = conversaParaJev(historicoLimpo, { nota: opts.nota, janela: opts.janela ?? JANELA_TURNOS });
   return {
     conversa: recorte.length ? recorte : [{ de: 'lead', texto: '[início de conversa]' }],
     ...(opts.nota ? { nota_do_sistema: opts.nota } : {}),
@@ -104,36 +84,16 @@ export async function perguntarAoJev(
   fetchFn: typeof fetch = fetch,
   prazoMs = PRAZO_JEV_MS,
 ): Promise<{ p: number; confianca: number | null; modelo: string | null; tokens_entrada: number | null }> {
-  const controle = new AbortController();
-  const timer = setTimeout(() => controle.abort(), prazoMs);
-  try {
-    const res = await fetchFn(URL_JEV, {
-      method: 'POST',
-      signal: controle.signal,
-      headers: { authorization: `Bearer ${chave}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'jev-latest', state: estado, questions: { agente: PERGUNTA_ROUTER } }),
-    });
-    // Só o status: o corpo de erro pode ecoar o estado (a conversa).
-    if (!res.ok) {
-      await res.body?.cancel().catch(() => {});
-      throw new Error(`Jev: HTTP ${res.status}`);
-    }
-    const dados = await res.json();
-    const resposta = dados?.answers?.agente;
-    const p = resposta?.probabilities?.horario_escolhido;
-    if (typeof p !== 'number' || !Number.isFinite(p)) throw new Error('Jev: resposta sem probabilidade');
-    return {
-      p,
-      confianca: typeof resposta?.confidence === 'number' ? resposta.confidence : null,
-      modelo: typeof dados?.model === 'string' ? dados.model : null,
-      tokens_entrada: typeof dados?.usage?.input_tokens === 'number' ? dados.usage.input_tokens : null,
-    };
-  } catch (e) {
-    if (controle.signal.aborted) throw new Error(`Jev: sem resposta em ${prazoMs} ms`);
-    throw e;
-  } finally {
-    clearTimeout(timer);
-  }
+  const r = await chamarJev(estado, { agente: PERGUNTA_ROUTER }, chave, fetchFn, prazoMs);
+  const resposta = r.answers.agente;
+  const p = resposta?.probabilities?.horario_escolhido;
+  if (typeof p !== 'number' || !Number.isFinite(p)) throw new Error('Jev: resposta sem probabilidade');
+  return {
+    p,
+    confianca: typeof resposta?.confidence === 'number' ? resposta.confidence : null,
+    modelo: r.modelo,
+    tokens_entrada: r.tokens_entrada,
+  };
 }
 
 /**

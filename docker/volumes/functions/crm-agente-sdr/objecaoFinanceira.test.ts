@@ -32,7 +32,7 @@ beforeEach(() => {
   });
 });
 
-async function conferirFiltro(mensagem: string, tipoEsperado: string) {
+async function conferirFiltro(mensagem: string, tipoEsperado: string, ctx: CtxConversa = CONTEXTO) {
   const supabase = {
     rpc: vi.fn(async (nome: string, _params: Record<string, unknown>) => {
       if (nome !== 'match_ppg_voyage') throw new Error(`RPC não prevista: ${nome}`);
@@ -45,7 +45,7 @@ async function conferirFiltro(mensagem: string, tipoEsperado: string) {
     // Modalidade agora consulta o catálogo estruturado. Canal mantém o ensaio
     // da precedência financeira sobre uma categoria informada pelo modelo.
     input: { mensagem_lead: mensagem, tipo_objecao: 'objecao_canal' },
-  }, CONTEXTO);
+  }, ctx);
 
   if (tipoEsperado === 'pergunta_condicao') {
     expect(resposta.resposta_objecao).toContain('As condições comerciais são apresentadas');
@@ -99,5 +99,17 @@ describe('consulta_objecoes: dificuldade financeira afirmada', () => {
     'Estou sem dinheiro, não estou?',
   ])('prioriza pergunta_condicao: %s', async (mensagem) => {
     await conferirFiltro(mensagem, 'pergunta_condicao');
+  });
+});
+
+describe('consulta_objecoes: leitura do Jev (canário, 29/09/2026)', () => {
+  it('a dor lida pelo Jev vale mesmo sem palavra do léxico', async () => {
+    await conferirFiltro('perdi o emprego mês passado, tá complicado', 'pergunta_condicao', { ...CONTEXTO, leituraJev: { dorFinanceira: true } });
+  });
+  it('sem a leitura, a mesma frase segue a categoria do modelo', async () => {
+    await conferirFiltro('perdi o emprego mês passado, tá complicado', 'objecao_canal');
+  });
+  it('o Jev só soma: sem dor lida, o léxico continua valendo', async () => {
+    await conferirFiltro('estou sem dinheiro', 'pergunta_condicao', { ...CONTEXTO, leituraJev: {} });
   });
 });

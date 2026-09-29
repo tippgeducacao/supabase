@@ -49,6 +49,7 @@ import { contextoEspecialidadeCannabis } from './especialidadeCannabis.ts';
 import { rodarEsteiraFollowupTemplate } from './followup-template.ts';
 import { criarTelemetria, resumir, type Telemetria } from './eventos.ts';
 import { type AgenteRouter, carregarConfigRouterJev, type LeituraJev, rotearComJev } from './routerJev.ts';
+import { blocoDaLeitura, carregarConfigLeituraJev, efeitosDaLeitura, lerLeadComJev, type LeituraLead } from './leituraJev.ts';
 import { carregarModoTrocaNumero, carregarSinalTrocaDeNumero, comNotaNoContexto, comNotaParaRouter, notaTrocaDeNumero, resumoDoSinal, sinalInerte, type SinalTrocaDeNumero } from './trocaDeNumero.ts';
 import { enviarComAberturaNumero, NOTA_ABERTURA_CONTROLADA } from './aberturaTrocaNumero.ts';
 
@@ -329,8 +330,9 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   }
   // Ficha (canário): o clique em "Receber Cronograma" (936 em 30 dias) ou o pedido em texto fica
   // anotado na jornada ANTES de o modelo falar — é o que a ficha usa para cobrar a coleta.
+  let pedidoPorPalavraChave: 'botao' | 'texto' | null = null;
   if (ctx.ficha) {
-    const pedido = detectarPedidoDeCronograma(itens);
+    const pedido = pedidoPorPalavraChave = detectarPedidoDeCronograma(itens);
     if (pedido) {
       try {
         await registrarNaJornada(supabase, telefone, (j) => ({
@@ -483,7 +485,17 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   // mandar conversa de lead real para a TypeSafe: decisão do Gustavo (DPA/LGPD), não do código.
   // A leitura do Jev vai junto do router_decisao; o Jev não entra no llm_chamada (a soma do
   // "Uso de IA" cobraria os tokens dele a preço de Sonnet).
-  const configJev = provedor?.formato === 'openai' && provedor.origem === 'lista' ? await carregarConfigRouterJev(supabase) : null;
+  const naListaDoCanario = provedor?.formato === 'openai' && provedor.origem === 'lista';
+  const [configJev, configLeitura] = naListaDoCanario
+    ? await Promise.all([carregarConfigRouterJev(supabase), ctx.ficha ? carregarConfigLeituraJev(supabase) : Promise.resolve(null)])
+    : [null, null];
+  // Leitura do lead pelo Jev para a ficha (29/09/2026, leituraJev.ts), mesmo recorte do router.
+  // Sai JÁ, em paralelo com o router e as tools; só a 1ª volta do loop espera por ela.
+  const leituraPromessa: Promise<LeituraLead | null> = configLeitura
+    ? carregarHistorico(supabase, remotejid)
+      .then((h) => lerLeadComJev(limparParaRouter(h), itens.map((i: any) => String(i?.mensagem ?? '')).filter(Boolean)))
+      .catch(() => null)
+    : Promise.resolve(null);
   const jev: { leitura?: LeituraJev } = {};
   const rotear = async (): Promise<AgenteRouter> => {
     const historicoRouter = limparParaRouter(comNotaParaRouter(await carregarHistorico(supabase, remotejid), notaTroca));
@@ -808,6 +820,8 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   };
 
   const consultasDaRodada = ctx.ficha ? new MemoriaDeConsultas() : null;
+  // Avisos da leitura do Jev: valem para todas as voltas desta rodada (a Luna pode chamar tools antes de falar).
+  let avisosDaLeitura: string[] = [];
   // Loop agêntico: igual ao n8n, o histórico é relido do banco a cada volta.
   for (let rodada = 0; rodada < MAX_RODADAS_TOOLS; rodada++) {
     const [historico, contextoEntregaMateriais, fichaLida] = await Promise.all([
@@ -830,6 +844,45 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
         } catch (e) {
           console.error('[crm-agente-sdr] conclusão do histórico na ficha:', (e as Error)?.message ?? e);
         }
+      }
+    }
+    // Leitura do lead pelo Jev (29/09/2026, leituraJev.ts): SOMA à ficha — preenche campo vazio com
+    // certeza ≥ limiar e avisa a Luna do resto; nunca apaga o que a palavra-chave ou a Luna registraram.
+    // Sombra: só registra o que faria. Sem leitura (off, sem chave, erro): a ficha de sempre.
+    if (ctx.ficha && rodada === 0 && configLeitura) {
+      const leitura = await leituraPromessa;
+      if (leitura) {
+        const efeitos = efeitosDaLeitura(leitura, configLeitura.limiar, ficha?.entrada.jornada ?? {},
+          { pedidoMaterial: Boolean(pedidoPorPalavraChave) });
+        const ativo = configLeitura.modo === 'ativo' && Boolean(ficha);
+        if (ativo) {
+          const coleta = efeitos.coleta as Record<string, unknown>;
+          if (Object.keys(coleta).length || efeitos.pedidoMaterial) {
+            try {
+              const agora = new Date().toISOString();
+              await registrarNaJornada(supabase, ctx.telefone, (j) => {
+                // Relido na hora da escrita: só entra o campo que continua vazio.
+                const atual = (j.coleta ?? {}) as Record<string, unknown>;
+                const novos = Object.fromEntries(Object.entries(coleta).filter(([k]) => !String(atual[k] ?? '').trim()));
+                return {
+                  ...j,
+                  ...(Object.keys(novos).length ? { coleta: { ...j.coleta, ...(novos as typeof j.coleta), atualizado_em: agora } } : {}),
+                  ...(efeitos.pedidoMaterial ? { cronograma: { ...(j.cronograma ?? {}), pedido_em: agora, pedido_por: 'texto' as const } } : {}),
+                };
+              });
+              ficha = (await carregarFicha(supabase, ctx)) ?? ficha;
+            } catch (e) {
+              tel.registrar('erro', { onde: 'leitura_jev_jornada' }, undefined, String((e as Error)?.message ?? e));
+            }
+          }
+          if (efeitos.dorFinanceira) ctx.leituraJev = { dorFinanceira: true };
+          avisosDaLeitura = efeitos.avisos;
+        }
+        tel.registrar('leitura_jev', {
+          ...leitura, modo: configLeitura.modo, limiar: configLeitura.limiar,
+          [ativo ? 'aplicado' : 'faria']: efeitos.aplicado,
+          palavra_chave: { pedido_cronograma: pedidoPorPalavraChave },
+        }, leitura.ms);
       }
     }
     if (ctx.ficha && rodada === 0) {
@@ -877,7 +930,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       // Sem o bloco (leitura falhou), a instrução também fica de fora: ela aponta para ele.
       // Perguntas já feitas + respostas vêm do histórico a cada volta (perguntasRecentes.ts).
       contextoFicha: baseFicha
-        ? [baseFicha, blocoPerguntasRecentes(messages), alertaFatoSemFonte(falasDoLead(messages).at(-1)), alertaSaudacao(conteudo)]
+        ? [baseFicha, blocoDaLeitura(avisosDaLeitura), blocoPerguntasRecentes(messages), alertaFatoSemFonte(falasDoLead(messages).at(-1)), alertaSaudacao(conteudo)]
           .filter(Boolean).join('\n\n')
         : undefined,
       comFicha: Boolean(ficha) || aulaPiloto,

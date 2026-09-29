@@ -74,6 +74,8 @@ export type CtxConversa = ContextoElegibilidade & {
   perguntaFormacaoPendente?: string;
   /** Persona aula com aula SEM pós relacionada (aula MVP): o material é o portfólio (portfolio.ts). */
   aulaSemPos?: boolean;
+  /** Leitura do lead pelo Jev nesta rodada (leituraJev.ts, canário): só soma às palavras-chave. */
+  leituraJev?: { dorFinanceira?: boolean };
 };
 
 function sdrApi(path: string, init: RequestInit = {}): Promise<Response> {
@@ -840,9 +842,11 @@ const TIPOS_OBJECAO = new Set([
 // Rótulo que o modelo pode emitir mas que não tem cluster próprio na base.
 const APELIDO_TIPO: Record<string, string> = { objecao_financeira: 'pergunta_condicao' };
 
-function filtroDaObjecao(input: any): Record<string, string> {
+function filtroDaObjecao(input: any, ctx?: CtxConversa): Record<string, string> {
   const mensagem = String(input?.mensagem_lead ?? '');
-  if (temDorFinanceira(mensagem)) return { tipo_objecao: 'pergunta_condicao' };
+  // Canário (29/09/2026): a leitura do Jev SOMA à palavra-chave — pega a dor dita de outro jeito,
+  // nunca desliga a que o léxico já reconhece.
+  if (ctx?.leituraJev?.dorFinanceira === true || temDorFinanceira(mensagem)) return { tipo_objecao: 'pergunta_condicao' };
   const bruto = String(input?.tipo_objecao ?? '');
   const tipo = APELIDO_TIPO[bruto] ?? bruto;
   return TIPOS_OBJECAO.has(tipo) ? { tipo_objecao: tipo } : {};
@@ -850,7 +854,7 @@ function filtroDaObjecao(input: any): Record<string, string> {
 
 async function consultaObjecoes(supabase: any, input: any, toolUseId: string, ctx?: CtxConversa) {
   try {
-    const filtro = filtroDaObjecao(input);
+    const filtro = filtroDaObjecao(input, ctx);
     // Ficha (canário): a objeção tratada fica contada na jornada — a ficha mostra "tempo 1x",
     // e o modelo não repete a mesma quebra. Falha aqui não derruba a consulta.
     if (ctx?.ficha && filtro.tipo_objecao) {
