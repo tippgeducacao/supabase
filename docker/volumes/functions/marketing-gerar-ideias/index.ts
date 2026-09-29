@@ -60,6 +60,8 @@ interface Etiqueta {
   rotulo: string;
   ementa: string | null;
   data: string | null;
+  /** Aula da base de conhecimento que alimentou esta fonte, se houver. */
+  conhecimento_id?: string | null;
 }
 
 const json = (body: unknown, status = 200) =>
@@ -105,6 +107,48 @@ serve(async (req) => {
     const praticos = (fontes as any)?.praticos ?? [];
     const datas = (fontes as any)?.datas ?? [];
 
+    // 1.5) O que o professor DISSE (base de conhecimento das transcrições, 29/09/2026).
+    //      Uma busca por aula/abertura, ancorada na aula do currículo (blueprint): é a
+    //      mesma aula dada em outra turma. Falha aqui não derruba a geração: sem base,
+    //      o motor volta a trabalhar só com a ementa, como antes.
+    const resumoDaBase = (k: any): string => {
+      if (!k) return "";
+      const f = k.ficha;
+      const partes: string[] = [];
+      partes.push(`  Na aula "${k.titulo}"${k.professor ? ` (prof. ${k.professor}` : ""}${k.professor && k.data_aula ? `, ${k.data_aula})` : k.professor ? ")" : ""}:`);
+      if (f?.resumo) partes.push(`  ${String(f.resumo).slice(0, 500)}`);
+      else if (k.resumo) partes.push(`  ${String(k.resumo).replace(/\s+/g, " ").slice(0, 600)}`);
+      const dados = (f?.dados_tecnicos ?? []).slice(0, 3).map((d: any) => `${d.dado} (${d.contexto})`);
+      if (dados.length) partes.push(`  Dados ditos: ${dados.join("; ")}`);
+      const falas = (f?.falas_marcantes ?? []).slice(0, 2);
+      if (falas.length) partes.push(`  Falas: ${falas.map((x: string) => `"${x}"`).join(" ")}`);
+      const trecho = (k.trechos ?? [])[0];
+      if (trecho) partes.push(`  Trecho: « ${String(trecho).replace(/\s+/g, " ").slice(0, 500)} »`);
+      return partes.join("\n");
+    };
+    // Só entra se for a MESMA aula (mesmo blueprint ou título quase igual, em outra turma).
+    // A busca por palavras sempre acha ALGUMA aula (casava 467 de 522): sem este filtro, o
+    // motor apresentava a aula de outro professor como "o que foi ensinado nesta aula" e a
+    // ideia citava a fala da pessoa errada (revisão de 29/09/2026).
+    const buscarNaBase = async (titulo: string, ementa: string | null, anc: any) => {
+      if (!titulo) return null;
+      const { data, error } = await userClient.rpc("marketing_conhecimento_buscar", {
+        _consulta: `${titulo} ${(ementa ?? "").slice(0, 300)}`,
+        _area_ids: anc?.area_id ? [anc.area_id] : null,
+        _blueprint_ids: anc?.blueprint_aula_id ? [anc.blueprint_aula_id] : null,
+        _pos_ids: anc?.pos_graduacao_id ? [anc.pos_graduacao_id] : null,
+        _limite: 1,
+        _titulo: titulo,
+      });
+      if (error) { console.warn("[marketing-gerar-ideias] base:", error.message); return null; }
+      const k = Array.isArray(data) && data.length ? data[0] : null;
+      return k?.mesma_aula ? k : null;
+    };
+    const [baseAulas, baseAberturas] = await Promise.all([
+      Promise.all(aulas.slice(0, 30).map((a: any) => buscarNaBase(a.titulo, a.ementa, a))),
+      Promise.all(aberturas.slice(0, 15).map((t: any) => buscarNaBase(t.aula_titulo ?? t.curso ?? "", t.aula_ementa, t))),
+    ]);
+
     // 2) Etiquetas — o modelo referencia A1/B1/C1/D1, nunca um id.
     const etiquetas = new Map<string, Etiqueta>();
     const linhas: string[] = [];
@@ -112,15 +156,17 @@ serve(async (req) => {
     aulas.forEach((a: any, i: number) => {
       const tag = `A${i + 1}`;
       const rotulo = `Aula ${a.data} — ${a.titulo}${a.curso ? ` (${a.curso})` : ""}${a.professor ? ` · ${a.professor}` : ""}`;
-      etiquetas.set(tag, { origem: "aula", id: a.id, rotulo, ementa: a.ementa ?? null, data: a.data ?? null });
-      linhas.push(`[${tag}] AULA · ${a.data} · ${a.titulo}${a.curso ? ` · curso: ${a.curso}` : ""}${a.professor ? ` · prof.: ${a.professor}` : ""}\n  Ementa: ${(a.ementa || "sem ementa").slice(0, 700)}`);
+      const k = baseAulas[i];
+      etiquetas.set(tag, { origem: "aula", id: a.id, rotulo, ementa: a.ementa ?? null, data: a.data ?? null, conhecimento_id: k?.id ?? null });
+      linhas.push(`[${tag}] AULA · ${a.data} · ${a.titulo}${a.curso ? ` · curso: ${a.curso}` : ""}${a.professor ? ` · prof.: ${a.professor}` : ""}\n  Ementa: ${(a.ementa || "sem ementa").slice(0, 700)}${k ? `\n  O QUE JÁ FOI ENSINADO NESTA AULA (base de conhecimento):\n${resumoDaBase(k)}` : ""}`);
     });
 
     aberturas.forEach((t: any, i: number) => {
       const tag = `B${i + 1}`;
       const rotulo = `Abertura ${t.data_inicio} — ${t.curso ?? "turma"}${t.aula_titulo ? ` · 1ª aula: ${t.aula_titulo}` : ""}`;
-      etiquetas.set(tag, { origem: "abertura", id: t.id, rotulo, ementa: t.aula_ementa ?? null, data: t.data_inicio ?? null });
-      linhas.push(`[${tag}] ABERTURA DE TURMA · começa em ${t.data_inicio} · ${t.curso ?? ""} ${t.turma ?? ""}\n  1ª aula: ${t.aula_titulo ?? "não definida"}\n  Ementa: ${(t.aula_ementa || "sem ementa").slice(0, 700)}`);
+      const k = baseAberturas[i];
+      etiquetas.set(tag, { origem: "abertura", id: t.id, rotulo, ementa: t.aula_ementa ?? null, data: t.data_inicio ?? null, conhecimento_id: k?.id ?? null });
+      linhas.push(`[${tag}] ABERTURA DE TURMA · começa em ${t.data_inicio} · ${t.curso ?? ""} ${t.turma ?? ""}\n  1ª aula: ${t.aula_titulo ?? "não definida"}\n  Ementa: ${(t.aula_ementa || "sem ementa").slice(0, 700)}${k ? `\n  O QUE JÁ FOI ENSINADO NESTA AULA (base de conhecimento):\n${resumoDaBase(k)}` : ""}`);
     });
 
     praticos.forEach((m: any, i: number) => {
@@ -178,7 +224,8 @@ COMO ESCREVER CADA IDEIA:
 - descricao: 2 a 4 frases de briefing para quem vai produzir. Diga o ÂNGULO e o que a peça precisa entregar (o dado, o passo, o critério). Se a fonte tem ementa, puxe dela um ponto concreto.
 - gancho: UMA frase, a primeira linha do post, do jeito que sairia publicada. Serve para quem lê a ideia julgar o ângulo na hora. Não é a legenda inteira e não leva hashtag nem CTA.
 - Proibido travessão (— ou –). Proibido tom de coach e frase motivacional vazia.
-- Não invente número, protocolo, dose, resultado de pesquisa nem nome de professor. Se não está na ementa, não entra.
+- Quando a fonte traz "O QUE JÁ FOI ENSINADO NESTA AULA", ancore a ideia nisso: um dado que o professor deu, um caso que ele contou, um erro que ele corrigiu. É o que diferencia o post de um texto genérico sobre o tema.
+- Não invente número, protocolo, dose, resultado de pesquisa nem nome de professor. Se não está na ementa nem no que foi ensinado, não entra. Nunca cite nome de aluno.
 
 Responda SOMENTE com JSON válido, sem texto antes ou depois, neste formato:
 {"ideias":[{"fonte":"A1","pilar":"tecnico","formato":"carrossel","perfil":"bovinos","titulo":"...","gancho":"...","descricao":"..."}]}
@@ -240,6 +287,9 @@ Gere ${quantos} ideias. Distribua entre os pilares, sem repetir o mesmo assunto.
           descricao: i.descricao ? tirarTravessao(String(i.descricao)).trim() : null,
           pilar_chave: chavesPilar.has(i.pilar) ? i.pilar : null,
           formato: formatosOk.has(i.formato) ? i.formato : null,
+          // A ideia agora tem LISTA de formatos (editável na tela); o motor sugere um.
+          formatos: formatosOk.has(i.formato) ? [i.formato] : [],
+          conhecimento_ids: fonte?.conhecimento_id ? [fonte.conhecimento_id] : [],
           profile_key: chavesPerfil.has(i.perfil) ? i.perfil : null,
           origem: fonte?.origem ?? "tema",
           origem_id: fonte?.id ?? null,
