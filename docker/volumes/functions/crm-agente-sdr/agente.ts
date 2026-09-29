@@ -185,7 +185,7 @@ export async function chamarRouter(
 // última mensagem, DEPOIS do breakpoint (3) — fresco em toda chamada, sem invalidar o
 // cache do histórico. NUNCA voltar com ele pro system (entre o prompt e as messages
 // ele estourava qualquer cache de mensagem a cada minuto).
-export async function chamarAgentePrincipal(opts: {
+export type OpcoesPedidoPrincipal = {
   promptAgente: string;
   contextoTemporal: string;
   contextoEntregaMateriais?: string;
@@ -201,7 +201,13 @@ export async function chamarAgentePrincipal(opts: {
   prazoModeloMs?: number;
   /** 'luna' = os blocos de prompts-luna.ts (só o canário); ausente/'producao' = os de sempre. */
   conjunto?: ConjuntoPrompt;
-}): Promise<any> {
+};
+
+/**
+ * Resposta que sai SEM chamar o modelo (falha de catálogo / aceite depois de falha da matriz),
+ * ou null. Separada do pedido (29/09/2026) para o agente no n8n aplicar a mesma regra.
+ */
+export function respostaSemModelo(opts: Pick<OpcoesPedidoPrincipal, 'messages' | 'comFicha'>): Record<string, unknown> | null {
   const falhaCatalogo = respostaParaFalhaCatalogo(opts.messages);
   if (falhaCatalogo) return {
     content: [{ type: 'text', text: falhaCatalogo }], stop_reason: 'end_turn',
@@ -212,6 +218,15 @@ export async function chamarAgentePrincipal(opts: {
     content: [{ type: 'text', text: aceiteAposFalha }], stop_reason: 'end_turn',
     origem: 'aceite_apos_falha_compatibilidade', usage: { input_tokens: 0, output_tokens: 0 },
   };
+  return null;
+}
+
+/**
+ * O PEDIDO da volta, no formato da Anthropic, sem chamar ninguém (29/09/2026: o agente no n8n
+ * recebe este pedido traduzido para a Responses API e faz a chamada ele mesmo). Ordem e
+ * breakpoints de cache descritos acima — a montagem é uma só para os dois caminhos.
+ */
+export function montarPedidoPrincipal(opts: OpcoesPedidoPrincipal): { pedido: Record<string, any>; ferramentasDisponiveis: Set<string> } {
   const falhaCompatibilidade = opts.comFicha && ultimaCompatibilidadeFalhou(opts.messages);
   // O MESMO pedido, na MESMA ordem; só muda de onde vem o texto (29/09/2026: a Luna tem a sua cópia,
   // prompts-luna.ts, para ser cortada sem mexer no João dos outros leads).
@@ -291,6 +306,14 @@ export async function chamarAgentePrincipal(opts: {
     messages,
     tools,
   };
+  return { pedido, ferramentasDisponiveis };
+}
+
+export async function chamarAgentePrincipal(opts: OpcoesPedidoPrincipal): Promise<any> {
+  const semModelo = respostaSemModelo(opts);
+  if (semModelo) return semModelo;
+  const { pedido, ferramentasDisponiveis } = montarPedidoPrincipal(opts);
+  const system = pedido.system as any[];
   const provedor = opts.provedor ?? null;
   const resposta = await chamarAnthropic(pedido, {}, provedor, opts.prazoModeloMs);
   const contemBastidor = (texto: string) => contemRaciocinioVazado(texto) || contemMeta(texto);
