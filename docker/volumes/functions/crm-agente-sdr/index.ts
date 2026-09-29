@@ -35,7 +35,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3';
 import { pausaVigente } from './pausa.ts';
-import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO } from './prompts.ts';
+import { blocosDoPrompt, type ConjuntoPrompt } from './conjuntoPrompt.ts';
 import { AGENTE_RECONTATO, montarDossieRecontato } from './prompts-recontato.ts';
 import { AGENTE_CAMPANHA_DIRETA } from './prompts-campanha-direta.ts';
 import { AGENTE_AULA, type AulaParaPrompt, montarVarsAula, semCertificadoAntesDoFim } from './prompts-aula.ts';
@@ -340,6 +340,11 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   // ▸ Qual IA responde este lead: a Luna (OpenAI) se o telefone está no canário; senão, `null` = Claude.
   let provedor = await provedorDoLead(telefone);
   let registrarFalaAposEnvio = Boolean(configurarVoz(telefone, (nome) => Deno.env.get(nome), provedor?.nome));
+  // ▸ Qual TEXTO a IA lê: a Luna tem a sua cópia do prompt (prompts-luna.ts, 29/09/2026), para ser
+  //   cortada e testada sem mudar o João dos outros leads. Fixado aqui, no início: se a Luna cair no
+  //   meio da rodada e o Claude assumir, ele continua com o mesmo texto que a rodada começou.
+  const conjuntoPrompt: ConjuntoPrompt = provedor?.formato === 'openai' ? 'luna' : 'producao';
+  const textosDoPrompt = blocosDoPrompt(conjuntoPrompt);
   if (provedor) {
     tel.registrar('provedor_ia', {
       provedor: provedor.nome, modelo: provedor.formato === 'openai' ? provedor.modelo : null,
@@ -622,7 +627,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       ...(jev.leitura ? { jev: jev.leitura } : {}),
     }, Date.now() - inicioRouter);
     promptAgente = renderPrompt(
-      agenteAtual === 'agente_qualificador' ? AGENTE_QUALIFICADOR : AGENTE_CAMPANHA_DIRETA,
+      agenteAtual === 'agente_qualificador' ? textosDoPrompt.qualificador : AGENTE_CAMPANHA_DIRETA,
       vars,
     );
     tools = await toolsDaVez(agenteAtual, true, provedor);
@@ -656,7 +661,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     // 9 da validação); o fechamento é o qualificador de sempre.
     const abrirComAula = persona === 'aula' && agenteAtual !== 'agente_qualificador';
     promptAgente = renderPrompt(
-      agenteAtual === 'agente_qualificador' ? AGENTE_QUALIFICADOR : abrirComAula ? AGENTE_AULA : AGENTE_VALIDACAO,
+      agenteAtual === 'agente_qualificador' ? textosDoPrompt.qualificador : abrirComAula ? AGENTE_AULA : textosDoPrompt.validacao,
       vars,
     );
     tools = await carregarTools(supabase, abrirComAula ? 'agente_aula' : agenteAtual, provedor);
@@ -1007,6 +1012,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
         : undefined,
       comFicha: Boolean(ficha) || aulaPiloto,
       ...(aulaPiloto ? { instrucaoFicha: INSTRUCAO_AULA_PILOTO } : {}),
+      conjunto: conjuntoPrompt,
       // Encerramento vence reação: a despedida é o que importa nessa volta.
       contextoTemporal: encerrouPorTool
         ? `${contextoComMateriais}\n\n${instrucaoEncerramento}`

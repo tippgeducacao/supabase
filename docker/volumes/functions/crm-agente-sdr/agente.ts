@@ -12,11 +12,10 @@ import { respostaParaFalhaCatalogo } from './falhaCatalogo.ts';
 import { INSTRUCAO_FALHA_COMPATIBILIDADE, respostaAoAceiteAposFalha, ultimaCompatibilidadeFalhou } from './falhaCompatibilidade.ts';
 import { comPrazoModelo, PRAZO_MODELO_PILOTO_MS } from './prazoModelo.ts';
 import { INSTRUCAO_FATOS_DO_LEAD } from './fatosLead.ts';
-import { INSTRUCAO_FICHA } from './fichaAtendimento.ts';
-import { INSTRUCAO_VOZ } from './vozDoJoao.ts';
+import { blocosDoPrompt, type ConjuntoPrompt } from './conjuntoPrompt.ts';
 import { contemMeta, contemRaciocinioVazado } from './saida.ts';
 import {
-  avaliarCanalResposta, INSTRUCAO_CANAL_RESPOSTA, NOME_TOOL_RESPOSTA,
+  avaliarCanalResposta, NOME_TOOL_RESPOSTA,
   normalizarRespostaCanal, somarUsoModelo, TOOL_RESPONDER_AO_CLIENTE,
 } from './canalResposta.ts';
 import { hidratarRaciocinio, paraPedidoOpenai, paraRespostaAnthropic, registrarRaciocinio, semRaciocinioOpenai, type MemoriaRaciocinio } from './provedorOpenai.ts';
@@ -199,6 +198,8 @@ export async function chamarAgentePrincipal(opts: {
   /** null/ausente = Anthropic. */
   provedor?: ProvedorIA | null;
   prazoModeloMs?: number;
+  /** 'luna' = os blocos de prompts-luna.ts (só o canário); ausente/'producao' = os de sempre. */
+  conjunto?: ConjuntoPrompt;
 }): Promise<any> {
   const falhaCatalogo = respostaParaFalhaCatalogo(opts.messages);
   if (falhaCatalogo) return {
@@ -211,17 +212,20 @@ export async function chamarAgentePrincipal(opts: {
     origem: 'aceite_apos_falha_compatibilidade', usage: { input_tokens: 0, output_tokens: 0 },
   };
   const falhaCompatibilidade = opts.comFicha && ultimaCompatibilidadeFalhou(opts.messages);
+  // O MESMO pedido, na MESMA ordem; só muda de onde vem o texto (29/09/2026: a Luna tem a sua cópia,
+  // prompts-luna.ts, para ser cortada sem mexer no João dos outros leads).
+  const b = blocosDoPrompt(opts.conjunto ?? 'producao');
   const system: any[] = [
     { type: 'text', text: opts.promptAgente },
-    { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA },
-    { type: 'text', text: INSTRUCAO_FATOS_DO_LEAD },
-    { type: 'text', text: INSTRUCAO_DISPONIBILIDADE_CONTATO },
-    { type: 'text', text: INSTRUCAO_EVENTOS },
+    { type: 'text', text: b.memoriaHumana },
+    { type: 'text', text: b.fatosDoLead },
+    { type: 'text', text: b.disponibilidade },
+    { type: 'text', text: b.eventos },
     // Ficha do atendimento (canário): bloco ESTÁTICO, só para quem tem a ficha — o prefixo
     // desse lead é outro, mas continua idêntico entre as voltas e as rodadas dele.
     // Canário: a ficha (estado) e a VOZ DO JOÃO (persona, 21/09/2026) entram juntas.
-    ...(opts.comFicha ? [{ type: 'text', text: opts.instrucaoFicha ?? INSTRUCAO_FICHA }, { type: 'text', text: INSTRUCAO_VOZ }] : []),
-    { type: 'text', text: INSTRUCAO_CANAL_RESPOSTA, cache_control: { type: 'ephemeral' } },
+    ...(opts.comFicha ? [{ type: 'text', text: opts.instrucaoFicha ?? b.ficha }, { type: 'text', text: b.voz }] : []),
+    { type: 'text', text: b.canalResposta, cache_control: { type: 'ephemeral' } },
   ];
 
   // O canal é local e tem definição controlada em código, mesmo que o catálogo

@@ -5,6 +5,7 @@ import { sanitizarHistorico, type Msg } from '../crm-agente-sdr/historico.ts';
 import type { Telemetria } from '../crm-agente-sdr/eventos.ts';
 import type { ProvedorIA } from '../crm-agente-sdr/agente.ts';
 import { type ConfigRouterJev, LIMIAR_PADRAO } from '../crm-agente-sdr/routerJev.ts';
+import type { ConjuntoPrompt } from '../crm-agente-sdr/conjuntoPrompt.ts';
 import { modeloOpenaiPermitido } from '../crm-agente-sdr/modelosOpenai.ts';
 import { contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from '../crm-agente-sdr/contextoAulaPiloto.ts';
 import { avaliarEvidenciaSemGraduacao, bloqueioSemEvidenciaGraduacao } from '../crm-agente-sdr/evidenciaFormacao.ts';
@@ -61,6 +62,8 @@ export type EntradaSimulacao = {
   raciocinio_encadeado: boolean;
   /** Liga a ficha do atendimento (canário): bloco + instrução + trava do cronograma no mock. */
   ficha: boolean;
+  /** Texto que a IA principal lê: 'luna' = prompts-luna.ts (padrão com provedor openai), 'producao' = o de sempre. */
+  prompt: ConjuntoPrompt;
   /** Router pelo Jev (routerJev.ts) neste ensaio; exige usar_router. null = o router de sempre. */
   router_jev: ConfigRouterJev | null;
 };
@@ -138,6 +141,9 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
     throw new Error('agente_atual inválido');
   }
   if (body.mocks != null && (typeof body.mocks !== 'object' || Array.isArray(body.mocks))) throw new Error('mocks deve ser objeto');
+  // Mesma regra da produção: provedor openai lê a cópia da Luna, a não ser que o ensaio peça a outra.
+  if (body.prompt !== undefined && body.prompt !== 'luna' && body.prompt !== 'producao') throw new Error("prompt deve ser 'luna' ou 'producao'");
+  const conjuntoPrompt: ConjuntoPrompt = (body.prompt as ConjuntoPrompt | undefined) ?? (provedor === 'openai' ? 'luna' : 'producao');
   let routerJev: ConfigRouterJev | null = null;
   if (body.router_jev != null) {
     const r = body.router_jev as Record<string, unknown>;
@@ -190,6 +196,7 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
     raciocinio_encadeado: body.raciocinio_encadeado === true,
     ficha: body.ficha === true,
     router_jev: routerJev,
+    prompt: conjuntoPrompt,
   };
 }
 

@@ -16,7 +16,7 @@
 
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3';
-import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO } from '../crm-agente-sdr/prompts.ts';
+import { blocosDoPrompt } from '../crm-agente-sdr/conjuntoPrompt.ts';
 import { AGENTE_CAMPANHA_DIRETA } from '../crm-agente-sdr/prompts-campanha-direta.ts';
 import { AGENTE_AULA, montarVarsAula } from '../crm-agente-sdr/prompts-aula.ts';
 import { carregarTools, chamarAgentePrincipal, chamarRouter, MODELO_AGENTE, provedorDeepseek, provedorOpenai } from '../crm-agente-sdr/agente.ts';
@@ -426,7 +426,7 @@ Deno.serve(async (req) => {
         }
         const promptBase = agente === 'agente_campanha_direta' ? AGENTE_CAMPANHA_DIRETA
           : agente === 'agente_aula' ? AGENTE_AULA
-          : agente === 'agente_qualificador' ? AGENTE_QUALIFICADOR : AGENTE_VALIDACAO;
+          : agente === 'agente_qualificador' ? blocosDoPrompt(entrada.prompt).qualificador : blocosDoPrompt(entrada.prompt).validacao;
         // Persona aula: as vars da aula (quando ocorre, link, pós vinculada) vêm do objeto
         // `aula` da entrada; o curso do lead é a pós vinculada, vazia quando a aula não tem pós.
         const varsAula = entrada.aula ? montarVarsAula(entrada.aula) : {};
@@ -460,7 +460,7 @@ Deno.serve(async (req) => {
         return { agente: agenteTools, promptAgente: promptFinal, contextoTemporal: contextoFinal, tools, comFicha: Boolean(fichaSim),
           ...(aulaPiloto ? { instrucaoFicha: INSTRUCAO_AULA_PILOTO } : {}) };
       },
-      chamarPrincipal: (opts: Parameters<typeof chamarAgentePrincipal>[0]) => chamarAgentePrincipal({ ...opts, provedor: provedorAlternativo }),
+      chamarPrincipal: (opts: Parameters<typeof chamarAgentePrincipal>[0]) => chamarAgentePrincipal({ ...opts, provedor: provedorAlternativo, conjunto: entrada.prompt }),
       humanizar: humanizarTexto,
       prepararFala: texto => {
         if (aberturaPendente) {
