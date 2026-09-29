@@ -39,7 +39,7 @@ const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
 const MODELO = "claude-opus-5";
-const MAX_TENTATIVAS = 3;
+const MAX_TENTATIVAS = 5;
 
 class ErroPassageiro extends Error {}
 class SemCredito extends Error {}
@@ -114,12 +114,15 @@ REGRAS
 - "duvidas_frequentes": perguntas feitas na aula e a resposta dada.
 - "ganchos_de_conteudo": 3 a 5 ângulos de post que só esta aula permite (formato: carrossel, reels, story ou feed).
 - Lista sem conteúdo fica vazia. Não invente para preencher.
+- Tetos: até 8 tópicos, 12 dados técnicos, 6 casos, 8 falas, 8 dúvidas, 8 erros comuns, 5 ganchos e 12 palavras-chave. Escolha os mais úteis para conteúdo; frases curtas.
 - Sem travessão (— ou –), sem tom de coach.`;
 
 async function chamarClaude(apiKey: string, conteudo: string): Promise<{ ficha: any; uso: any }> {
   const corpo: Record<string, unknown> = {
     model: MODELO,
-    max_tokens: 8000,
+    // 8000 cortava a ficha das aulas longas (3 de 5 na 1ª amostra, 29/09/2026): o raciocínio
+    // do modelo também conta neste teto, e a ficha sozinha já passava de 7 mil tokens.
+    max_tokens: 16000,
     system: SISTEMA,
     output_config: { effort: "low", format: { type: "json_schema", schema: ESQUEMA } },
     messages: [{ role: "user", content: conteudo }],
@@ -127,7 +130,7 @@ async function chamarClaude(apiKey: string, conteudo: string): Promise<{ ficha: 
 
   // Conteúdo de sanidade (zoonoses, Salmonella, influenza aviária) pode esbarrar no
   // classificador de biossegurança. Com o fallback, a recusa é refeita em outro modelo.
-  const tentar = async (comFallback: boolean) => {
+  const tentar = async (comFallback: boolean, semFormato = false) => {
     const controle = new AbortController();
     const timer = setTimeout(() => controle.abort(), PRAZO_MS);
     try {
@@ -137,6 +140,13 @@ async function chamarClaude(apiKey: string, conteudo: string): Promise<{ ficha: 
         "anthropic-version": "2023-06-01",
       };
       const body = { ...corpo };
+      if (semFormato) {
+        // Plano B quando o compilador do JSON garantido da Anthropic cai (503 "Grammar
+        // compilation is temporarily unavailable", 29/09/2026, ~6 min): o mesmo pedido, com
+        // o formato descrito no texto. O parse abaixo já tolera texto em volta do JSON.
+        body.output_config = { effort: "low" };
+        body.system = `${SISTEMA}\n\nResponda SOMENTE com um objeto JSON válido, sem nada antes ou depois, seguindo exatamente este esquema:\n${JSON.stringify(ESQUEMA)}`;
+      }
       if (comFallback) {
         headers["anthropic-beta"] = "server-side-fallback-2026-07-01";
         body.fallbacks = "default";
@@ -167,6 +177,15 @@ async function chamarClaude(apiKey: string, conteudo: string): Promise<{ ficha: 
     }
     throw e;
   }
+  if (!res.ok && [503, 529].includes(res.status)) {
+    const t = await res.text();
+    if (!/grammar/i.test(t)) throw new ErroPassageiro(`Claude ${res.status}: ${t.slice(0, 300)}`);
+    try {
+      res = await tentar(true, true);
+    } catch (e) {
+      throw new ErroPassageiro(e instanceof Error ? e.message : String(e));
+    }
+  }
   if (!res.ok) {
     const t = (await res.text()).slice(0, 300);
     if (/credit balance/i.test(t)) throw new SemCredito("Sem crédito na Anthropic.");
@@ -184,7 +203,8 @@ async function chamarClaude(apiKey: string, conteudo: string): Promise<{ ficha: 
   const texto = (r?.content ?? []).filter((c: any) => c?.type === "text").map((c: any) => c.text).join("");
   let ficha: any;
   try {
-    ficha = JSON.parse(texto);
+    // Do primeiro { ao último }: no plano B (sem JSON garantido) pode vir texto em volta.
+    ficha = JSON.parse(texto.slice(texto.indexOf("{"), texto.lastIndexOf("}") + 1));
   } catch {
     throw new Error("A IA devolveu JSON inválido.");
   }

@@ -8,6 +8,13 @@
 //
 // O fecho do convite ("ainda hoje" × "amanhã cedo") NÃO é escrito pelo modelo: vem da frase
 // CONVITE DE AGENDA do contexto temporal (contexto.ts → fraseConviteAgenda), relida a cada volta.
+//
+// 29/09/2026: a Luna (prompts-luna.ts) tem o texto do lote ESCRITO no próprio prompt, com esta
+// seção. Prompt que já traz TITULO_SECAO_GANCHO não é tocado: a troca por regex abaixo ficou só
+// para os textos da produção (campanha direta e o João do Claude quando cai no canário). Assim o
+// .md da Luna mostra exatamente o que ela lê, sem camada escondida.
+
+export const TITULO_SECAO_GANCHO = '## Gancho e convite (primeiro lote promocional)';
 
 const TROCAS_DO_GANCHO: [RegExp, string][] = [
   [/a secretaria liberou hoje uma condição especial pra matrícula na pós/g, 'estamos no fechamento do primeiro lote promocional da pós'],
@@ -34,6 +41,14 @@ export function nomeDeConversa(curso: string): string {
   const mba = limpo.match(/^mba\s+(?:em\s+)?(.+)$/i);
   return mba ? `MBA em ${mba[1].toLowerCase()}` : limpo.toLowerCase();
 }
+/**
+ * "da pós em clínica de pequenos animais" / "do MBA em gestão…": o curso como se fala, para o
+ * `{{ $json.curso_com_artigo }}` do prompt da Luna. Sem curso no cadastro: "da pós".
+ */
+export function cursoDaConversa(curso: string | null | undefined): string {
+  const c = String(curso ?? '').trim();
+  return c ? cursoComArtigo(c) : 'da pós';
+}
 function cursoComArtigo(curso: string): string {
   const nome = nomeDeConversa(curso);
   return nome.startsWith('MBA ') ? `do ${nome}` : `da pós em ${nome}`;
@@ -51,7 +66,7 @@ export function secaoGanchoLote(vars: { nome: string; curso: string }): string {
   const nome = vars.nome.trim() || 'lead';
   const curso = vars.curso.trim() || 'pós de interesse';
   return [
-    '## Gancho e convite (primeiro lote promocional)',
+    TITULO_SECAO_GANCHO,
     '⛔ **O nome da oferta é "primeiro lote promocional".** Diga "estamos no fechamento do primeiro lote promocional" e "a condição do primeiro lote promocional". As expressões "condição especial", "condição da secretaria" e "a secretaria liberou" NÃO existem nesta conversa: não as use nem misturadas. Você diz que o lote está fechando; o que é a condição, só o monitor apresenta.',
     `- **1ª abordagem (uma mensagem só, com estas palavras):** "${ABERTURA_1(curso)} ${ABERTURA_2}" + uma frase do CONVITE DE AGENDA. Antes dela, UMA reação curta que ligue o que ele disse à pós (o JEITO é "bacana, [o que ELE faz] tem tudo a ver com essa pós": use a palavra dele e nunca copie um exemplo, ele pode não ter falado de leite), nunca um eco ("legal, fazenda de leite"). A reação NUNCA vai sozinha: enquanto o lote ainda não foi apresentado nesta conversa, a mesma resposta traz a reação + a 1ª abordagem inteira + o convite (21/09: depois de checar a formação o João mandou só uma reação e parou, sem abertura e sem pergunta).`,
     '- **Todo convite para a reunião termina com a frase CONVITE DE AGENDA** que vem no contexto do sistema: elas já dizem "ainda hoje" ou "amanhã cedo" conforme o relógio. Use UMA delas, sem mudar o dia, e nunca repita a que já usou nesta conversa; nunca escreva "ainda hoje" por conta própria.',
@@ -64,7 +79,7 @@ export type ResultadoGancho = { prompt: string; trocas: { abertura: number; exem
 /** Aplica o gancho ao prompt RENDERIZADO do João de vendas. Idempotente: rodar duas vezes não muda nada. */
 export function comGanchoDoLote(prompt: string, vars: { nome: string; curso: string }): ResultadoGancho {
   const secao = secaoGanchoLote(vars);
-  if (prompt.includes('## Gancho e convite (primeiro lote promocional)')) {
+  if (prompt.includes(TITULO_SECAO_GANCHO)) {
     return { prompt, trocas: { abertura: 0, exemplo: 0, fecho: 0, gancho: 0 } };
   }
   const contar = (re: RegExp, texto: string) => (texto.match(new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`)) ?? []).length;

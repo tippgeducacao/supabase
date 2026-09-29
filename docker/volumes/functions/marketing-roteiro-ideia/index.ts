@@ -203,7 +203,11 @@ serve(async (req) => {
       // "Mesma aula" = mesmo blueprint ou título quase igual. O resto é aula de OUTRO
       // assunto/professor que a busca por palavras trouxe: serve de apoio, nunca como "o
       // que foi dito nesta aula".
-      const relacao = f?.mesma_aula ? "MESMA AULA (outra turma)" : "AULA RELACIONADA (outro tema/professor)";
+      const relacao = f?.mesma_aula
+        ? "MESMA AULA (outra turma)"
+        : f?.mesma_pos
+          ? "MESMO CURSO (outra aula)"
+          : `AULA RELACIONADA DE OUTRO CURSO (${f?.curso ?? "outro curso"})`;
       return [
         `[K${i + 1}] ${relacao} · ${f.titulo}${f.professor ? ` · prof. ${f.professor}` : ""}${f.data_aula ? ` · ${f.data_aula}` : ""}${f.curso ? ` · ${f.curso}` : ""}`,
         ficha ? `  FICHA: ${ficha}` : `  RESUMO: ${String(f?.resumo ?? "").slice(0, 3000)}`,
@@ -231,8 +235,9 @@ ${bp.regras_estilo ? `REGRAS DE ESTILO: ${s(bp.regras_estilo)}` : ""}` : ""}
 
 REGRAS
 - Número, dose, idade, prazo, índice: só se estiver nas fontes K ou na ementa, e do jeito que está lá. Se precisar de um dado que não existe nas fontes, escreva [CONFERIR COM O PROFESSOR] no lugar.
-- Fonte marcada "MESMA AULA" é o conteúdo desta aula dado em outra turma: use à vontade. Fonte "AULA RELACIONADA" é outra aula: use só o que for do MESMO assunto da ideia; se não for, ignore e não cite.
-- Fala de professor entra com o nome DO PROFESSOR DAQUELA FONTE (se a fonte trouxer) e nunca é atribuída a outra pessoa. Nunca cite nome de aluno ou participante.
+- Fonte "MESMA AULA" é o conteúdo desta aula dado em outra turma, e "MESMO CURSO" é outra aula do mesmo curso: use à vontade, e o professor DAQUELA fonte pode ser citado pelo nome.
+- Fonte "AULA RELACIONADA DE OUTRO CURSO" só serve se tratar do MESMO assunto técnico da ideia. Mesmo quando usar, NUNCA escreva no post o nome do professor nem o nome dessa aula ou desse curso: é de outro produto e confunde quem lê. Se ela não for do mesmo assunto, ignore e não a coloque em "fontes".
+- Nunca atribua uma fala a outra pessoa. Nunca cite nome de aluno ou participante.
 - "escrever": o que a peça PRECISA dizer (os pontos obrigatórios, na ordem).
 - "evitar": o que NÃO escrever nesta peça, específico (termos, promessas, exageros, erros técnicos comuns sobre este tema). Nada genérico como "evite erros de português".
 - "incluir": o que mais colocar para a peça ficar completa (dado de apoio, exemplo de campo, recurso visual, marcação de professor, trilha).
@@ -266,7 +271,7 @@ REGRAS
     const t0 = Date.now();
     let resposta: any;
     try {
-      const chamar = (comFallback: boolean) => {
+      const chamar = (comFallback: boolean, semFormato = false) => {
         const headers: Record<string, string> = {
           "Content-Type": "application/json",
           "x-api-key": keyRow.api_key,
@@ -279,6 +284,13 @@ REGRAS
           output_config: { effort: "low", format: { type: "json_schema", schema: ESQUEMA } },
           messages: [{ role: "user", content: conteudo }],
         };
+        if (semFormato) {
+          // Plano B quando o compilador do JSON garantido da Anthropic cai (503 "Grammar
+          // compilation is temporarily unavailable" — ~6 min em 29/09/2026): o mesmo pedido
+          // com o formato descrito no texto, para a pessoa não ver erro por isso.
+          body.output_config = { effort: "low" };
+          body.system = `${sistema}\n\nResponda SOMENTE com um objeto JSON válido, sem nada antes ou depois, seguindo exatamente este esquema:\n${JSON.stringify(ESQUEMA)}`;
+        }
         // Tema de sanidade (zoonose, patógeno) pode esbarrar no classificador; o
         // fallback refaz a recusa em outro modelo dentro da mesma chamada.
         if (comFallback) {
@@ -294,6 +306,11 @@ REGRAS
         const t = await res.text();
         if (!/fallback/i.test(t)) throw new Error(`Claude 400: ${t.slice(0, 300)}`);
         res = await chamar(false);
+      }
+      if (!res.ok && [503, 529].includes(res.status)) {
+        const t = await res.text();
+        if (!/grammar/i.test(t)) throw new Error(`Claude ${res.status}: ${t.slice(0, 300)}`);
+        res = await chamar(true, true);
       }
       if (!res.ok) throw new Error(`Claude ${res.status}: ${(await res.text()).slice(0, 300)}`);
       resposta = await res.json();
@@ -315,7 +332,8 @@ REGRAS
     const texto = (resposta?.content ?? []).filter((c: any) => c?.type === "text").map((c: any) => c.text).join("");
     let roteiro: any;
     try {
-      roteiro = limpar(JSON.parse(texto));
+      // Do primeiro { ao último }: no plano B (sem JSON garantido) pode vir texto em volta.
+      roteiro = limpar(JSON.parse(texto.slice(texto.indexOf("{"), texto.lastIndexOf("}") + 1)));
     } catch {
       return json({ error: "A IA respondeu fora do formato. Tente de novo." }, 502);
     }

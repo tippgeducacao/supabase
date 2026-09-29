@@ -25,6 +25,7 @@ import { avaliarEvidenciaSemGraduacao, bloqueioSemEvidenciaGraduacao } from './e
 import { chamarAnthropic } from './agente.ts';
 import { INSTRUCAO_FALHA_COMPATIBILIDADE } from './falhaCompatibilidade.ts';
 import { temDorFinanceira } from './objecaoFinanceira.ts';
+import { conferirHorarioDaFerramenta } from './travasDeterministicas.ts';
 import { montarRetornoInformacoes } from './envioMateriais.ts';
 import { consultarCatalogo } from './catalogoCursos.ts';
 import { resultadoConfirmacao } from './confirmacaoAgendamento.ts';
@@ -339,6 +340,12 @@ async function deletarEventoMeet(supabase: any, calendarId: string, eventId: str
 }
 
 async function confirmarAgendamento(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
+  // Canário (29/09/2026, travasDeterministicas.ts): data, horário e vendedor têm de ser um slot que a
+  // agenda devolveu nesta conversa, e no futuro. Antes o agendamento aceitava o que a IA mandasse.
+  if (ctx.ficha) {
+    const trava = conferirHorarioDaFerramenta(input, ctx.historicoConversa ?? [], { vendedorObrigatorio: true });
+    if (!trava.ok) return { resultado: trava.mensagem, trava: trava.motivo, agendamento_id: null, id: toolUseId };
+  }
   // 05/09/2026: a análise pode REPROVAR depois de salvar a formação. A autorização
   // agora vem da decisão persistida, e a RPC de criação confere de novo sob lock.
   let aprovacao: Awaited<ReturnType<typeof consultarAprovacao>>;
@@ -438,6 +445,11 @@ async function confirmarAgendamento(supabase: any, input: any, ctx: CtxConversa,
 // Acha o agendamento ativo do lead, faz PATCH (fn_sdr_api_reagendar) com a nova data e
 // MOVE o evento do Google Calendar pro novo horário (mesmo link). NÃO cria agendamento novo.
 async function remarcarAgendamento(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
+  // Canário (29/09/2026): o novo horário também tem de ter saído da agenda (sem vendedor = mantém o atual).
+  if (ctx.ficha) {
+    const trava = conferirHorarioDaFerramenta(input, ctx.historicoConversa ?? [], { vendedorObrigatorio: false });
+    if (!trava.ok) return { resultado: trava.mensagem, trava: trava.motivo, id: toolUseId };
+  }
   try {
     // 1) acha o agendamento ATIVO do lead — MESMA régua do guard de duplicata do
     //    fn_sdr_api_agendar_reuniao (status <> cancelado + SEM resultado). ⚠️ NÃO

@@ -1459,7 +1459,21 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
             // como se fosse ideia do assistente, no meio da conversa.
             content: r === 'agendada'
               ? 'Anotado. Não fale nada sobre isso, siga a conversa normalmente.'
-              : 'Anotado, mas não cabe oferecer o próximo passo agora. Siga a conversa normalmente.',
+              // ⚠️⚠️ OFERTA VIVA: ele está RESPONDENDO ao que você já ofereceu.
+              //
+              // 29/09/2026, Paola Nogara: a oferta do material didático saiu às 08:45, ela
+              // respondeu "Simm" às 08:50, e o modelo chamou ESTA ferramenta em vez de
+              // entregar. O banco recusou certo (`ja_havia_oferta_viva`), mas o texto que
+              // voltava aqui era "siga a conversa normalmente" — então ele explicou onde fica
+              // o material em vez de mandar o vídeo, e a aluna que disse SIM não recebeu nada.
+              // Recusar não basta: o resultado tem de EMPURRAR para a ferramenta certa.
+              : r === 'ja_havia_oferta_viva'
+                ? 'NÃO. Você JÁ ofereceu o próximo passo a ele e está esperando a resposta. ' +
+                  'Isto que ele acabou de dizer é a resposta àquela oferta. Se não foi um NÃO, ' +
+                  'chame entregar_proximo_passo AGORA, neste mesmo turno. Não explique o ' +
+                  'conteúdo com as suas palavras e não prometa para depois: quem entrega é a ' +
+                  'ferramenta, e é ela que manda o vídeo junto.'
+                : 'Anotado, mas não cabe oferecer o próximo passo agora. Siga a conversa normalmente.',
           });
           continue;
         }

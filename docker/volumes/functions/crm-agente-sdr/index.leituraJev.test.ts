@@ -6,13 +6,13 @@ import { AVISO_DOIS_ASSUNTOS, CABECALHO_LEITURA, type LeituraLead } from './leit
 const f = vi.hoisted(() => ({
   from: vi.fn(), rpc: vi.fn(), buscarLead: vi.fn(), atualizarLead: vi.fn(), prepararMensagem: vi.fn(),
   chamarPrincipal: vi.fn(), enviar: vi.fn(), registrar: vi.fn(), historico: vi.fn(), tools: vi.fn(),
-  provedorOpenai: vi.fn(), carregarFicha: vi.fn(), registrarNaJornada: vi.fn(), lerLead: vi.fn(),
+  provedorOpenai: vi.fn(), carregarFicha: vi.fn(), registrarNaJornada: vi.fn(), lerLead: vi.fn(), gravar: vi.fn(),
   buffer: [] as { id: number; payload: Record<string, unknown> }[], modoLeitura: 'ativo' as string,
 }));
 vi.mock('https://esm.sh/@supabase/supabase-js@2.50.3', () => ({ createClient: () => ({ from: f.from, rpc: f.rpc }) }));
 vi.mock('./historico.ts', async (original) => ({
   ...await original<typeof import('./historico')>(),
-  buscarLead: f.buscarLead, criarLead: vi.fn(), atualizarLead: f.atualizarLead, carregarHistorico: f.historico, gravarMensagem: vi.fn(),
+  buscarLead: f.buscarLead, criarLead: vi.fn(), atualizarLead: f.atualizarLead, carregarHistorico: f.historico, gravarMensagem: f.gravar,
 }));
 vi.mock('./agente.ts', () => ({
   carregarTools: f.tools, chamarAgentePrincipal: f.chamarPrincipal, chamarRouter: vi.fn(), provedorOpenai: f.provedorOpenai,
@@ -144,5 +144,23 @@ describe('leitura do Jev na rodada do canário', () => {
     expect(f.chamarPrincipal.mock.calls[0][0].contextoFicha).not.toContain(CABECALHO_LEITURA);
     expect(f.registrar).toHaveBeenCalledWith('leitura_jev', expect.objectContaining({ erro: 'Jev: HTTP 529', aplicado: [] }), 280);
     expect(f.enviar).toHaveBeenCalledOnce();
+  });
+});
+
+// Travas da fala no canário (29/09/2026, travasDeterministicas.ts): a regra de ouro de valor saiu do
+// prompt; o código confere. 1ª vez a fala volta para a IA corrigir; a corrigida é a que sai.
+describe('travas da fala na rodada do canário', () => {
+  it('preço que não veio de ferramenta: não sai, volta para correção, e sai a fala corrigida', async () => {
+    f.modoLeitura = 'off';
+    f.chamarPrincipal
+      .mockResolvedValueOnce({ stop_reason: 'end_turn', model: 'gpt-5.6-luna', content: [{ type: 'text', text: 'fica em torno de R$ 300 por mês' }] })
+      .mockResolvedValueOnce({ stop_reason: 'end_turn', model: 'gpt-5.6-luna', content: [{ type: 'text', text: 'o valor o monitor te mostra na conversa' }] });
+    await chamar();
+    const correcao = f.gravar.mock.calls.map((c) => c[2]).find((m) => String(m?.content ?? '').startsWith('[CORRECAO_INTERNA_AUTO_IGNORE]'));
+    expect(correcao?.role).toBe('user');
+    expect(String(correcao?.content)).toContain('R$ 300');
+    expect(f.registrar).toHaveBeenCalledWith('trava_fala', expect.objectContaining({ motivo: 'valor', acao: 'reinstruido' }));
+    expect(f.enviar).toHaveBeenCalledOnce();
+    expect(f.enviar.mock.calls[0][1]).toContain('o valor o monitor te mostra');
   });
 });

@@ -73,6 +73,61 @@ function buildEventContext(
   return lines.join("\n");
 }
 
+/**
+ * Escopo das aulas da Nutrição de Leads: o que a pessoa escolheu na Central
+ * (`_aulas_escopo` = "pos:<id>" | "area:<id>" | "todas:<marca>" | "todas") ou, sem escolha, o
+ * padrão do perfil (pós → área → marca dos cursos → todas).
+ */
+function escopoDasAulas(vars: Record<string, any>, bp: any): { area: string | null; pos: string | null; marca: string | null } {
+  const e = String(vars?._aulas_escopo ?? "");
+  if (e === "todas") return { area: null, pos: null, marca: null };
+  if (e.startsWith("todas:")) return { area: null, pos: null, marca: e.slice(6) || null };
+  if (e.startsWith("pos:")) return { area: null, pos: e.slice(4) || null, marca: null };
+  if (e.startsWith("area:")) return { area: e.slice(5) || null, pos: null, marca: null };
+  if (bp?.pos_graduacao_id) return { area: null, pos: bp.pos_graduacao_id, marca: null };
+  if (bp?.area_id) return { area: bp.area_id, pos: null, marca: null };
+  return { area: null, pos: null, marca: bp?.marca_cursos ?? null };
+}
+
+const dataBR = (iso: string) => {
+  const [y, m, d] = String(iso).slice(0, 10).split("-");
+  return `${d}/${m}${y ? `/${y}` : ""}`;
+};
+
+/**
+ * O bloco "AULAS AO VIVO DA SEMANA" (Nutrição de Leads, 29/09/2026): as aulas curriculares da
+ * semana da Data do evento e, quando a base tem a MESMA aula de outra turma, o que o professor
+ * ensinou nela. É isso que tira a segunda, a quarta e a quinta do genérico.
+ */
+function blocoAulasDaSemana(res: any): string {
+  const aulas: any[] = Array.isArray(res?.aulas) ? res.aulas : [];
+  const cab = `AULAS AO VIVO DA SEMANA (${dataBR(res?.inicio)} a ${dataBR(res?.fim)})${res?.fallback_area ? ` (a pós escolhida não tem aula nesta semana; estas são as aulas da área ${res.fallback_area})` : ""}:`;
+  if (!aulas.length) {
+    return `${cab}\n(nenhuma aula curricular ao vivo nesta semana para este perfil: escreva sobre a área de forma geral, sem inventar aula, professor ou data)`;
+  }
+  const linhas = aulas.map((a) => {
+    const partes = [
+      `- ${dataBR(a.data)} · ${a.titulo}${a.professor ? ` · prof. ${a.professor}` : ""}${a.curso ? ` · ${a.curso}` : ""}`,
+    ];
+    if (a.ementa) partes.push(`  Ementa: ${String(a.ementa).slice(0, 400)}`);
+    const k = a.conhecimento;
+    if (k && typeof k === "object") {
+      // Material da TURMA ANTERIOR: pode ter sido outro professor, e o trecho pode ser do
+      // resumo e não da fala. Por isso vai rotulado como material, nunca como citação.
+      partes.push(`  Material da turma anterior desta aula (pode ter sido outro professor; use como conteúdo, NÃO como citação e sem atribuir frase a ninguém): ${String(k.resumo ?? "").slice(0, 600)}`);
+      if (Array.isArray(k.dados) && k.dados.length) partes.push(`  Dados ditos em aula: ${k.dados.join("; ")}`);
+      // A RPC já entrega só trecho de FALA e sem o nome de quem falou (pode ter sido outro
+      // professor ou um aluno); aqui ele ainda vai rotulado como material, não citação.
+      const trecho = String(k.trecho ?? "").trim();
+      if (trecho) {
+        partes.push(`  Trecho da fala na turma anterior (não atribua a ninguém): ${trecho.slice(0, 400)}`);
+      }
+    }
+    return partes.join("\n");
+  });
+  return `${cab}\n${linhas.join("\n")}`;
+}
+
 function buildChannelInstruction(canal: string): string {
   if (canal === "email") {
     return `Gere o conteúdo do EMAIL no formato:
@@ -127,6 +182,22 @@ serve(async (req) => {
   );
 
   try {
+    // Quem chama tem que estar LOGADO (29/09/2026). Com `verify_jwt = false` e sem esta
+    // checagem, qualquer um com o endereço criava disparo e gastava crédito da Anthropic, e o
+    // `user_id` vinha do corpo, do jeito que o chamador quisesse. Agora ele sai do token.
+    const authHeader = req.headers.get("Authorization") || "";
+    const token = authHeader.replace("Bearer ", "");
+    const { data: auth } = token
+      ? await createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_ANON_KEY")!, {
+          auth: { persistSession: false, autoRefreshToken: false },
+        }).auth.getUser(token)
+      : { data: null as any };
+    if (!auth?.user) {
+      return new Response(JSON.stringify({ error: "Sessão inválida. Entre de novo no sistema." }), {
+        status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     const body = await req.json();
 
     // Modo novo: dispatch_id já existente em "dispatches", regenera todas as mensagens.
@@ -150,6 +221,7 @@ serve(async (req) => {
       evento_horario?: string;
       formato_saida?: string[];
     };
+    user_id = auth.user.id;
 
     // 1. Carrega chave Anthropic
     const { data: keyRow } = await supabase
@@ -235,6 +307,20 @@ serve(async (req) => {
     const brandContext = buildBrandContext(bp, {
       includeManifesto: (tipo as any).include_brand_manifesto === true,
     });
+    // Nutrição de Leads: as aulas ao vivo da semana entram sozinhas no contexto.
+    let blocoAulas = "";
+    let linhaSemana = "";
+    const porSemana = (tipo as any).fonte_conteudo === "aulas_da_semana";
+    if ((tipo as any).fonte_conteudo === "aulas_da_semana" && dispatch.evento_data) {
+      const esc = escopoDasAulas((dispatch.variaveis_evento as any) || {}, bp);
+      const { data: semana, error: errSemana } = await supabase.rpc("marketing_aulas_da_semana", {
+        _data: dispatch.evento_data, _area_id: esc.area, _pos_id: esc.pos, _marca: esc.marca,
+      });
+      if (errSemana) throw new Error(`Não consegui ler as aulas da semana: ${errSemana.message}`);
+      blocoAulas = blocoAulasDaSemana(semana);
+      linhaSemana = `SEMANA: ${dataBR((semana as any)?.inicio)} a ${dataBR((semana as any)?.fim)}`;
+    }
+
     const allowedChannels: string[] =
       Array.isArray(dispatch.formato_saida) && dispatch.formato_saida.length
         ? dispatch.formato_saida
@@ -260,13 +346,25 @@ serve(async (req) => {
       const channelsToGen = msgChannels.filter((c) => allowedChannels.includes(c));
       if (!channelsToGen.length) continue;
 
-      const eventCtx = buildEventContext(
-        schema,
-        (dispatch.variaveis_evento as any) || {},
-        dispatch.evento_data,
-        dispatch.evento_horario,
-        msg.campos_evento_usados as string[],
-      );
+      const usados = (msg.campos_evento_usados as string[]) || [];
+      // Tipo semanal: a "data do evento" é só a semana (vira a linha SEMANA), e lista vazia
+      // quer dizer NENHUM campo. Sem isto o Domingão (lista vazia) recebia todos os campos
+      // (links da dica e do podcast) como tópico obrigatório — revisão de 29/09/2026.
+      const eventCtxCampos = porSemana
+        ? [linhaSemana, usados.length ? buildEventContext(schema, (dispatch.variaveis_evento as any) || {}, undefined, undefined, usados) : ""]
+            .filter(Boolean).join("\n")
+        : buildEventContext(
+            schema,
+            (dispatch.variaveis_evento as any) || {},
+            dispatch.evento_data,
+            dispatch.evento_horario,
+            usados,
+          );
+      // O bloco das aulas só vai para as mensagens que usam as aulas (segunda, quarta,
+      // quinta); o Domingão e o corte do podcast não precisam dele.
+      const eventCtx = blocoAulas && usados.includes("aulas_da_semana")
+        ? `${eventCtxCampos}\n\n${blocoAulas}`
+        : eventCtxCampos;
 
       for (const canal of channelsToGen) {
         const channelInstr = buildChannelInstruction(canal);
@@ -326,7 +424,8 @@ REGRAS GERAIS:
 - Nunca use TERMOS PROIBIDOS se houver
 - Quando possível, incorpore TERMOS OBRIGATÓRIOS naturalmente
 - Inclua os links e dados do evento listados acima
-- Não invente fatos: se um campo do evento estiver vazio, NÃO mencione esse campo
+- Não invente fatos: se um campo do evento estiver vazio, NÃO mencione esse campo${blocoAulas && usados.includes("aulas_da_semana") ? `
+- Nunca escreva nome de aluno, ouvinte ou participante que apareça no material das aulas. Nomes de professor, convidado ou autor informados nos dados são permitidos. Não ponha frase entre aspas atribuída a professor.` : ""}
 
 ${channelInstr}${buttonsHint}`;
 

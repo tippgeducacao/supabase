@@ -50,6 +50,8 @@ const estado = vi.hoisted(() => ({
   filaCanceladas: [] as string[],
   /** Eventos `perfil:pergunta_marcada` que o desfazer encontra por fila_id. */
   marcasPergunta: [] as Record<string, unknown>[],
+  /** O que `onb_acelerada_agendar` devolve: 'agendada', 'ja_havia_oferta_viva', etc. */
+  aceleradaAgendar: 'agendada' as string,
   tcc: null as Record<string, unknown> | null,
   /** Erro que a onb_agente_registrar_perfil devolve (null = gravou). */
   perfilErro: null as string | null,
@@ -163,6 +165,7 @@ vi.mock('https://esm.sh/@supabase/supabase-js@2.50.3', () => ({
             error: null,
           };
         }
+        case 'onb_acelerada_agendar': return { data: estado.aceleradaAgendar, error: null };
         case 'onb_agente_desmarcar_pergunta': return { data: true, error: null };
         default: return { data: true, error: null };
       }
@@ -224,6 +227,7 @@ beforeEach(() => {
   vi.setSystemTime(AGORA); // cada turno avança o relógio falso alguns segundos
   estado.consultas = [];
   estado.rpcs = [];
+  estado.aceleradaAgendar = 'agendada';
   estado.ordem = [];
   estado.anthropic = [];
   estado.respostasModelo = [];
@@ -696,6 +700,51 @@ describe('crm-agente-aluno: o turno', () => {
     await chamar(C);
     expect(eventos()).not.toContain('link_do_grupo:ja_foi');
     expect(fila()[0].conteudo).toContain(LINK);
+  });
+
+  it('oferta viva + ele aceita: o resultado EMPURRA para entregar (caso Paola, 29/09)', async () => {
+    // A oferta do material didático saiu às 08:45, ela respondeu "Simm" às 08:50, e o modelo
+    // chamou marcar_passo_concluido. O banco recusou certo (`ja_havia_oferta_viva`), mas o
+    // texto que voltava era "siga a conversa normalmente" — então ele explicou onde ficava o
+    // material em vez de mandar o vídeo. Quem disse SIM não recebeu nada.
+    estado.aceleradaAgendar = 'ja_havia_oferta_viva';
+    estado.origem = mensagem({ tipo: 'text', conteudo: 'Simm' });
+    estado.respostasModelo = [
+      { content: [{ type: 'tool_use', id: 't1', name: 'marcar_passo_concluido', input: { como_ele_disse: 'Simm' } }] },
+      { content: [{ type: 'text', text: 'Segue o vídeo do material didático.' }] },
+    ];
+    await chamar(C);
+    const segunda = estado.anthropic[1] as { messages: { content: Linha[] }[] };
+    const resultado = String(segunda.messages[segunda.messages.length - 1].content[0].content);
+    expect(resultado).toContain('entregar_proximo_passo');
+    expect(resultado).not.toMatch(/siga a conversa normalmente/i);
+  });
+
+  it('sem oferta viva, marcar_passo_concluido segue mudo como sempre foi', async () => {
+    estado.aceleradaAgendar = 'agendada';
+    estado.origem = mensagem({ tipo: 'text', conteudo: 'consegui entrar, obrigada' });
+    estado.respostasModelo = [
+      { content: [{ type: 'tool_use', id: 't1', name: 'marcar_passo_concluido', input: { como_ele_disse: 'consegui entrar' } }] },
+      { content: [{ type: 'text', text: 'Que bom que deu certo.' }] },
+    ];
+    await chamar(C);
+    const segunda = estado.anthropic[1] as { messages: { content: Linha[] }[] };
+    const resultado = String(segunda.messages[segunda.messages.length - 1].content[0].content);
+    expect(resultado).toMatch(/siga a conversa normalmente/i);
+    expect(resultado).not.toContain('entregar_proximo_passo');
+  });
+
+  it('recusa por outro motivo (teto do dia) não manda entregar nada', async () => {
+    estado.aceleradaAgendar = 'teto_do_dia';
+    estado.origem = mensagem({ tipo: 'text', conteudo: 'vi o vídeo' });
+    estado.respostasModelo = [
+      { content: [{ type: 'tool_use', id: 't1', name: 'marcar_passo_concluido', input: { como_ele_disse: 'vi o vídeo' } }] },
+      { content: [{ type: 'text', text: 'Boa.' }] },
+    ];
+    await chamar(C);
+    const segunda = estado.anthropic[1] as { messages: { content: Linha[] }[] };
+    const resultado = String(segunda.messages[segunda.messages.length - 1].content[0].content);
+    expect(resultado).not.toContain('entregar_proximo_passo');
   });
 
   it('"Não estou" sem link e depois "parem de me mandar": uma passagem por assunto', async () => {

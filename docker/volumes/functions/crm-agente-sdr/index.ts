@@ -55,7 +55,7 @@ import { carregarStatusMateriais } from './envioMateriais.ts';
 import {
   aplicarDeclaracaoNaJornada, carregarFicha, declaracaoDeConclusao, detectarPedidoDeCronograma, marcarPerguntasDaFicha, registrarNaJornada,
 } from './fichaAtendimento.ts';
-import { comGanchoDoLote } from './ganchoLote.ts';
+import { comGanchoDoLote, cursoDaConversa } from './ganchoLote.ts';
 import { blocoConviteAgenda } from './contexto.ts';
 import { prepararMensagem } from './midia.ts';
 import { persistirEntradasDoLote, registrarEntrada } from './historicoEntradaPausa.ts';
@@ -74,6 +74,7 @@ import { type AgenteRouter, carregarConfigRouterJev, type LeituraJev, rotearComJ
 import { blocoDaLeitura, carregarConfigLeituraJev, efeitosDaLeitura, lerLeadComJev, type LeituraLead } from './leituraJev.ts';
 import { carregarModoTrocaNumero, carregarSinalTrocaDeNumero, comNotaNoContexto, comNotaParaRouter, notaTrocaDeNumero, resumoDoSinal, sinalInerte, type SinalTrocaDeNumero } from './trocaDeNumero.ts';
 import { enviarComAberturaNumero, NOTA_ABERTURA_CONTROLADA } from './aberturaTrocaNumero.ts';
+import { afirmaReuniaoSemCriar, correcaoDaFala, horariosNaoOfertados, valoresInventados } from './travasDeterministicas.ts';
 
 declare const EdgeRuntime: { waitUntil?: (p: Promise<unknown>) => void } | undefined;
 
@@ -429,6 +430,8 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
   const vars: Record<string, string> = {
     nome: extrairPrimeiroNome(lead?.nome),
     curso_interesse_original: lead?.curso_interesse_original ?? '',
+    // O curso como se fala ("da pós em x", "do MBA em y"): a abertura da Luna usa (ganchoLote.ts).
+    curso_com_artigo: cursoDaConversa(lead?.curso_interesse_original),
     pergunta_formacao: montarPerguntaFormacao(formacaoNormalizada),
   };
   // PERSONA AULA (16/09/2026, PRD — Persona por disparo): o disparo grava `contexto_campanha`
@@ -804,6 +807,7 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
     + '"sem ação necessária"): esse texto é enviado ao WhatsApp dele.';
   if (levaSoReacao) tel.registrar('leva_so_reacao', { conteudo: conteudo.slice(0, 40) });
   let corrigiuHorario = false; // guarda de horário inventado: re-instrui só 1x
+  const corrigiuTrava = new Set<'valor' | 'reuniao'>(); // canário: travas de valor/reunião, 1x cada
   let corrigiuVazio = false;   // resposta 100% bastidor: pede de novo 1x antes de calar
   let corrigiuSilencio = false; // silêncio explícito com pergunta do lead no ar: pede a fala 1x
   // CONFIRMAÇÃO DE AGENDAMENTO EM CÓDIGO (24/09/2026): a reunião criada por confirmar_agendamento
@@ -1185,7 +1189,9 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
       // fala do lead, turnos anteriores) = slot INVENTADO — o Sonnet 5 fez isso em
       // resposta-reflexo, oferecendo inclusive horários já passados. Re-instrui o
       // modelo 1x (turno interno + volta do loop); na reincidência, não envia.
-      const inventados = horariosInventados(texto, conversaTexto(messages));
+      // Canário (29/09/2026): conferência estrita — só horário das últimas consultas de agenda, do lead
+      // ou de agendamento real (travasDeterministicas.ts). A de sempre aceitava qualquer horário já visto.
+      const inventados = ctx.ficha ? horariosNaoOfertados(texto, messages) : horariosInventados(texto, conversaTexto(messages));
       if (inventados.length && !corrigiuHorario) {
         corrigiuHorario = true;
         tel.registrar('horario_inventado', { horarios: inventados, acao: 'reinstruido', texto: resumir(texto, 600) });
@@ -1217,6 +1223,26 @@ async function rodadaAgente(remotejid: string, itens: any[], tel: Telemetria): P
         const enviou = await enviarConfirmacaoEmCodigo('fala_descartada_apos_agendamento');
         tel.registrar('rodada_fim', { voltas_llm: rodada + 1, respondeu: enviou }, Date.now() - inicioRodada);
         return;
+      }
+      // Canário (29/09/2026, travasDeterministicas.ts): as regras de ouro de VALOR e de REUNIÃO saíram
+      // do prompt e viraram conferência. Mesmo trato do horário: 1ª vez volta para a IA corrigir
+      // (preservando o resto da fala); na reincidência a fala não sai.
+      if (ctx.ficha) {
+        const valores = valoresInventados(texto, messages);
+        const motivoTrava = valores.length ? 'valor' as const
+          : afirmaReuniaoSemCriar(texto, messages, lead?.agendado === true) ? 'reuniao' as const : null;
+        if (motivoTrava && !corrigiuTrava.has(motivoTrava)) {
+          corrigiuTrava.add(motivoTrava);
+          tel.registrar('trava_fala', { motivo: motivoTrava, acao: 'reinstruido', valores, texto: resumir(texto, 600) });
+          await gravarMensagem(supabase, remotejid, { role: 'user', content: correcaoDaFala(motivoTrava, texto, valores.join(', ')) });
+          continue;
+        }
+        if (motivoTrava) {
+          tel.registrar('trava_fala', { motivo: motivoTrava, acao: 'descartado', valores, texto: resumir(texto, 600) });
+          const enviou = await enviarConfirmacaoEmCodigo('fala_descartada_apos_agendamento');
+          tel.registrar('rodada_fim', { voltas_llm: rodada + 1, respondeu: enviou }, Date.now() - inicioRodada);
+          return;
+        }
       }
       // Resposta que só existia como bastidor: pede de novo em vez de calar.
       if (!humanizarTexto(texto) && !corrigiuVazio) {

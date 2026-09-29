@@ -9,12 +9,16 @@ import {
 import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO } from './prompts';
 import { blocosDoPrompt } from './conjuntoPrompt';
 import { renderPrompt } from './contexto';
-import { comGanchoDoLote, secaoGanchoLote } from './ganchoLote';
+import { comGanchoDoLote, cursoDaConversa, secaoGanchoLote, TITULO_SECAO_GANCHO } from './ganchoLote';
 import { MARCADOR_MENSAGEM_LEAD_PAUSA } from './memoriaHumana';
 import { SCRIPT_ANTES_DO_CRONOGRAMA, SCRIPT_PERGUNTA_POS } from './fichaAtendimento';
 import { NOME_TOOL_RESPOSTA } from './canalResposta';
 
-const vars = { nome: 'Gustavo', curso_interesse_original: 'MBA GESTÃO DA PECUÁRIA LEITERA', pergunta_formacao: 'qual é a sua graduação?' };
+// As mesmas variáveis que o index.ts preenche.
+const vars = {
+  nome: 'Gustavo', curso_interesse_original: 'MBA GESTÃO DA PECUÁRIA LEITERA', pergunta_formacao: 'qual é a sua graduação?',
+  curso_com_artigo: cursoDaConversa('MBA GESTÃO DA PECUÁRIA LEITERA'),
+};
 const ocorrencias = (texto: string, re: RegExp) => (texto.match(re) ?? []).length;
 const naSecao = (re: RegExp) => ocorrencias(secaoGanchoLote({ nome: 'Gustavo', curso: vars.curso_interesse_original }), re);
 
@@ -39,12 +43,31 @@ describe('prompt da Luna: o que o código procura dentro do texto', () => {
     expect(LUNA_CANAL_RESPOSTA).toContain(NOME_TOOL_RESPOSTA);
   });
 
-  it('gancho do lote (ganchoLote.ts) ainda acha a abertura e troca TODA menção à secretaria', () => {
-    const r = comGanchoDoLote(renderPrompt(LUNA_AGENTE_VALIDACAO, vars), { nome: 'Gustavo', curso: vars.curso_interesse_original });
-    expect(r.trocas.abertura, 'o gancho procura o passo 1 "Abra pela condição" da abertura; cortou? ajuste RE_PASSO_ABERTURA em ganchoLote.ts').toBe(1);
-    expect(ocorrencias(r.prompt, /secretaria/gi)).toBe(naSecao(/secretaria/gi));
-    const f = comGanchoDoLote(renderPrompt(LUNA_AGENTE_QUALIFICADOR, vars), { nome: 'Gustavo', curso: vars.curso_interesse_original });
-    expect(ocorrencias(f.prompt, /secretaria/gi)).toBe(naSecao(/secretaria/gi));
+  // 29/09/2026: o lote está ESCRITO no prompt da Luna (antes, ganchoLote.ts trocava por regex).
+  it('lote escrito no prompt: a seção do gancho está nas duas personas e a troca por regex não mexe nelas', () => {
+    for (const [nome, persona] of [['abertura', LUNA_AGENTE_VALIDACAO], ['fechamento', LUNA_AGENTE_QUALIFICADOR]] as const) {
+      const texto = renderPrompt(persona, vars);
+      expect(ocorrencias(texto, new RegExp(TITULO_SECAO_GANCHO.replace(/[()]/g, '\\$&'), 'g')),
+        `${nome}: sem "${TITULO_SECAO_GANCHO}" o ganchoLote.ts volta a trocar o texto por regex e cola a seção de novo`).toBe(1);
+      expect(comGanchoDoLote(texto, { nome: 'Gustavo', curso: vars.curso_interesse_original }).prompt).toBe(texto);
+      // Só a frase da regra cita as expressões proibidas; fora dela, a oferta é "primeiro lote promocional".
+      expect(ocorrencias(texto, /secretaria/gi), `${nome}: "secretaria" fora da regra do nome da oferta`).toBe(naSecao(/secretaria/gi));
+      expect(ocorrencias(texto, /condição especial/gi), `${nome}: "condição especial" fora da regra`).toBe(naSecao(/condição especial/gi));
+      expect(texto, `${nome}: "condição liberada hoje" é o nome antigo da oferta`).not.toMatch(/condição (especial )?liberada hoje/i);
+      expect(texto.match(/\{\{\s*\$json\.\w+\s*\}\}/g), `${nome}: variável sem valor no index.ts`).toBeNull();
+    }
+  });
+
+  it('abertura da Luna: as palavras de 21/09, com o curso do jeito que se fala', () => {
+    const texto = renderPrompt(LUNA_AGENTE_VALIDACAO, vars);
+    expect(texto).toContain('a gente tá fechando o primeiro lote promocional do MBA em gestão da pecuária leitera, e eu queria te mostrar a condição');
+    expect(texto).toContain('é uma conversa rápida no meet com um monitor especialista, uns 10 minutos, e vc já tira suas dúvidas.');
+  });
+
+  it('produção (Claude no canário) continua recebendo a troca por regex', () => {
+    const r = comGanchoDoLote(renderPrompt(AGENTE_VALIDACAO, vars), { nome: 'Gustavo', curso: vars.curso_interesse_original });
+    expect(r.trocas.abertura).toBe(1);
+    expect(r.prompt).toContain(TITULO_SECAO_GANCHO);
   });
 });
 

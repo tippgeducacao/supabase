@@ -42,12 +42,13 @@ import {
   aplicarColetaNaJornada, aplicarDeclaracaoNaJornada, aplicarPerguntasNaJornada, avaliarFicha, declaracaoDeConclusao, bloqueioCronograma, contarObjecaoNaJornada, detectarPedidoDeCronograma,
   INSTRUCAO_TEMPO_FICHA, montarBlocoFicha, ORIENTACAO_NAO_E_FALA, perguntasFeitas, registrarBloqueioNaJornada, registrarEnvioNaJornada, type Jornada,
 } from '../crm-agente-sdr/fichaAtendimento.ts';
-import { comGanchoDoLote } from '../crm-agente-sdr/ganchoLote.ts';
+import { comGanchoDoLote, cursoDaConversa } from '../crm-agente-sdr/ganchoLote.ts';
 import { bloqueioProximaTurmaDeEstudante } from '../crm-agente-sdr/tools.ts';
 import { blocoConviteAgenda } from '../crm-agente-sdr/contexto.ts';
 import { resultadoConfirmacao } from '../crm-agente-sdr/confirmacaoAgendamento.ts';
 import { blocoPerguntasRecentes, falasDoLead } from '../crm-agente-sdr/perguntasRecentes.ts';
 import { alertaFatoSemFonte } from '../crm-agente-sdr/fatoSemFonte.ts';
+import { conferirHorarioDaFerramenta, historicoDeConsultas, type OpcaoAgenda, slotsDoTextoDeAgenda } from '../crm-agente-sdr/travasDeterministicas.ts';
 import { alertaSaudacao, garantirSaudacao } from '../crm-agente-sdr/saudacao.ts';
 import { passoAulaSemPos, pedidoDePortfolio, resultadoPortfolio } from '../crm-agente-sdr/portfolio.ts';
 import { agendaRealNoDia, diagnosticoDoProvedor, disponibilidadeSimulada, executarFollowupSimulado, executarSimulacao, extrairUso, MAX_CARACTERES_SIMULACAO, validarEntradaSimulacao, type AgenteRouter } from './simulacao.ts';
@@ -333,6 +334,8 @@ Deno.serve(async (req) => {
     inicioRodada: new Date().toISOString(),
   } : null;
   const aulaPiloto = Boolean(fichaSim && entrada.persona === 'aula' && provedorAlternativo?.nome === 'openai');
+  // Slots de cada consulta de agenda simulada deste ensaio (a trava de confirmar/remarcar lê daqui).
+  const consultasDoEnsaio: OpcaoAgenda[][] = [];
   const aberturaControlada = provedorAlternativo?.nome === 'openai';
   let aberturaPendente = aberturaControlada && Boolean(entrada.troca_de_numero);
   // Espelho do index.ts (canário): o cumprimento da fala do lead é retribuído, uma vez por turno.
@@ -430,10 +433,13 @@ Deno.serve(async (req) => {
         // Persona aula: as vars da aula (quando ocorre, link, pós vinculada) vêm do objeto
         // `aula` da entrada; o curso do lead é a pós vinculada, vazia quando a aula não tem pós.
         const varsAula = entrada.aula ? montarVarsAula(entrada.aula) : {};
+        const cursoDoLead = entrada.aula ? (varsAula.curso_interesse_original ?? '') : entrada.curso;
         const vars = {
           ...varsAula,
           nome: extrairPrimeiroNome(estado.nome),
-          curso_interesse_original: entrada.aula ? (varsAula.curso_interesse_original ?? '') : entrada.curso,
+          curso_interesse_original: cursoDoLead,
+          // Espelho do index.ts: o curso como se fala, para a abertura da Luna.
+          curso_com_artigo: cursoDaConversa(cursoDoLead),
           pergunta_formacao: montarPerguntaFormacao(encontrarFormacao(estado.formacao)),
         };
         let promptAgente = renderPrompt(promptBase, vars);
@@ -491,12 +497,20 @@ Deno.serve(async (req) => {
       },
       mockTool: async (nome, input) => {
         const dados = input as Record<string, unknown>;
+        // Canário (29/09/2026): a mesma trava da produção (travasDeterministicas.ts) — agenda/remarca
+        // só com um slot que as consultas simuladas deste ensaio ofereceram.
+        if (fichaSim && (nome === 'confirmar_agendamento' || nome === 'remarcar_agendamento')) {
+          const trava = conferirHorarioDaFerramenta(dados, historicoDeConsultas(consultasDoEnsaio.slice(-3)),
+            { vendedorObrigatorio: nome === 'confirmar_agendamento' });
+          if (!trava.ok) return JSON.stringify({ resultado: trava.mensagem, trava: trava.motivo, agendamento_id: null });
+        }
         // Espelho do executor real: reprovado por PRAZO não entra em "próxima turma".
         if (nome === 'temporizador_proxima_turma' && reprovadoPorPrazo) {
           const { id: _id, ...recusa } = bloqueioProximaTurmaDeEstudante('');
           return JSON.stringify(recusa);
         }
         const resposta = await mockTool(nome, dados, entrada.mocks, fichaSim, entrada.persona === 'aula' && !entrada.aula?.curso_nome);
+        if (nome === 'consulta_disponibilidade') consultasDoEnsaio.push(slotsDoTextoDeAgenda(resposta));
         if (nome === 'verificar_compatibilidade_curso') reprovadoPorPrazo = resposta.startsWith('REPROVADO_PRAZO') || resposta.includes('"output":"REPROVADO_PRAZO"');
         if (nome === 'atualizar_dados_lead') {
           if (typeof dados?.nome === 'string') estado.nome = dados.nome;
