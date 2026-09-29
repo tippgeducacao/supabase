@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
-import { casaSubscriber, enviarComDonoDaConversa, enviarPeloManychat } from './igManychat';
+import { casaSubscriber, enviarComDonoDaConversa, enviarPeloManychat, humanoAssumiuDuranteBusca } from './igManychat';
 
 // Instagram, ManyChat e banco simulados: nenhuma DM sai, nenhuma linha é escrita.
 const ALVO = { contaId: 'conta-1', igsid: '1404604485122474', token: 'IGAA-x', nome: 'Ana Souza', username: 'ana.vet' };
 const DONO_OUTRO = { error: { code: 100, error_subcode: 2534037, message: 'not the thread owner' } };
 
 type Chamada = { url: string; corpo: any };
-function rede(respostas: { ig?: any; igStatus?: number; busca?: any; envio?: any; envioStatus?: number }) {
+function rede(respostas: { ig?: any; igStatus?: number; busca?: any; buscas?: any[]; envio?: any; envioStatus?: number }) {
   const chamadas: Chamada[] = [];
   const f = vi.fn(async (url: string, init?: RequestInit) => {
     const corpo = init?.body ? JSON.parse(String(init.body)) : null;
@@ -14,7 +14,11 @@ function rede(respostas: { ig?: any; igStatus?: number; busca?: any; envio?: any
     if (String(url).includes('graph.instagram.com')) {
       return new Response(JSON.stringify(respostas.ig ?? { message_id: 'mid-ig' }), { status: respostas.igStatus ?? 200 });
     }
-    if (String(url).includes('findByName')) return new Response(JSON.stringify(respostas.busca ?? { status: 'success', data: [] }));
+    if (String(url).includes('findByName')) {
+      // `buscas`: uma resposta por chamada, em ordem (contato que só aparece depois).
+      const proxima = respostas.buscas?.length ? respostas.buscas.shift() : respostas.busca;
+      return new Response(JSON.stringify(proxima ?? { status: 'success', data: [] }));
+    }
     return new Response(JSON.stringify(respostas.envio ?? { status: 'success' }), { status: respostas.envioStatus ?? 200 });
   });
   return { f: f as unknown as typeof fetch, chamadas };
@@ -132,6 +136,51 @@ describe('enviarComDonoDaConversa (28/09/2026)', () => {
     const r = await enviarComDonoDaConversa(db, ALVO, 'oi', { origem: 'ia' }, f);
     expect(r).toMatchObject({ ok: false, via: 'manychat', erro: { status: 404 } });
     expect(escritas).toEqual([]);
+  });
+
+  // 29/09/2026: contato novo só ganha nome no ManyChat depois que a pessoa responde.
+  it('contato novo ainda sem nome no ManyChat: espera, procura de novo e acha', async () => {
+    const ACHADA = { status: 'success', data: [{ id: 88, name: 'Ana Souza', ig_id: 1404604485122474, ig_username: 'ana.vet' }] };
+    const VAZIA = { status: 'success', data: [] };
+    // 1ª rodada: nome e @ vazios; 2ª rodada: acha pelo nome.
+    const { f, chamadas } = rede({ ig: DONO_OUTRO, igStatus: 400, buscas: [VAZIA, VAZIA, ACHADA] });
+    const esperas: number[] = [];
+    const r = await enviarComDonoDaConversa(banco().db, ALVO, 'oi', { origem: 'ia' }, f, {
+      esperasBuscaMs: [15_000, 20_000], dormir: async (ms) => { esperas.push(ms); },
+    });
+    expect(r).toEqual({ ok: true, mid: '', via: 'manychat' });
+    expect(esperas).toEqual([15_000]);
+    expect(chamadas.find((c) => c.url.includes('sendContent'))?.corpo.subscriber_id).toBe(88);
+  });
+
+  it('esgotou as buscas: o erro diz quantas e o que o ManyChat respondeu', async () => {
+    const { f } = rede({ ig: DONO_OUTRO, igStatus: 400 });
+    const r = await enviarComDonoDaConversa(banco().db, ALVO, 'oi', { origem: 'ia' }, f, {
+      esperasBuscaMs: [1, 1], dormir: async () => {},
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.erro.message).toContain('3 busca(s)');
+    expect(r.erro.message).toContain('"Ana Souza": 0 resultado(s)');
+  });
+
+  it('alguém do time assumiu durante a espera: para sem enviar e sem marcar pendente', async () => {
+    const { f, chamadas } = rede({ ig: DONO_OUTRO, igStatus: 400 });
+    const { db, escritas } = banco();
+    const r = await enviarComDonoDaConversa(db, ALVO, 'oi', { origem: 'ia' }, f, {
+      esperasBuscaMs: [15_000], dormir: async () => {}, aindaPode: async () => false,
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(humanoAssumiuDuranteBusca(r.erro)).toBe(true);
+    expect(chamadas.some((c) => c.url.includes('sendContent'))).toBe(false);
+    expect(escritas).toEqual([]);
+  });
+
+  it('sem esperas (resposta pelo SAC): uma rodada só, sem dormir', async () => {
+    const { f, chamadas } = rede({ ig: DONO_OUTRO, igStatus: 400 });
+    await enviarComDonoDaConversa(banco().db, ALVO, 'oi', { origem: 'humano' }, f);
+    expect(chamadas.filter((c) => c.url.includes('findByName'))).toHaveLength(2); // nome e @
   });
 
   it('o ManyChat recusou: o pendente vira "falhou" (o eco não vai casar com nada)', async () => {

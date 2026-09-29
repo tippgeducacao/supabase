@@ -24,7 +24,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { avaliarGateIg, conversaComecadaPeloTime, JANELA_CONVERSA_DO_TIME_DIAS } from "../_shared/igAgenteGate.ts";
 import { ehTokenInvalido, type ResultadoEnvioIg } from "../_shared/igMensageria.ts";
-import { enviarComDonoDaConversa } from "../_shared/igManychat.ts";
+import { enviarComDonoDaConversa, ESPERAS_BUSCA_MANYCHAT_IA_MS, humanoAssumiuDuranteBusca } from "../_shared/igManychat.ts";
 import {
   areaDoRecibo,
   componentesDoRecibo,
@@ -152,10 +152,15 @@ async function linkDoRecibo(): Promise<string> {
 }
 
 // Instagram; se a conversa é do ManyChat (roteamento de conversas da Meta), pelo ManyChat.
+// Contato novo demora a aparecer no ManyChat: a IA procura de novo por ~1 min, parando se
+// alguém do time assumir nesse meio tempo (ESPERAS_BUSCA_MANYCHAT_IA_MS).
 function enviarDireto(c: Conversa, texto: string, origem: "ia" | "sistema") {
   return enviarComDonoDaConversa(supabase, {
     contaId: c.contaId, igsid: c.igsid, token: c.token, nome: c.nome, username: c.username,
-  }, texto, { origem });
+  }, texto, { origem }, fetch, {
+    esperasBuscaMs: ESPERAS_BUSCA_MANYCHAT_IA_MS,
+    aindaPode: async () => !(await estaPausada(c)),
+  });
 }
 
 async function estaPausada(c: Conversa): Promise<boolean> {
@@ -355,6 +360,11 @@ async function responderRodada(c: Conversa, tokenReserva: string, reserva: Reser
     }
     if (enviados > 0) await dormir(atrasoEntreBaloesMs(balao));
     const envio = await enviarDireto(c, balao, "ia");
+    if (!envio.ok && humanoAssumiuDuranteBusca(envio.erro)) {
+      humanoAssumiu = true;
+      log("humano assumiu enquanto a IA procurava a pessoa no ManyChat — não enviou", c.igsid);
+      break;
+    }
     // Pelo ManyChat não há mid: a linha nasce do eco, marcada como da IA pelo gatilho
     // trg_ig_mensagens_eco_manychat (ig_envios_manychat).
     if (!(envio.ok && envio.via === "manychat")) await registrarSaida(c, balao, envio, metadata);

@@ -21,6 +21,24 @@ import { type ErroEnvioIg, enviarTextoIg, type ResultadoEnvioIg } from "./igMens
 
 export const MANYCHAT_API_URL = "https://api.manychat.com";
 
+/**
+ * Contato NOVO no ManyChat só ganha nome depois que a pessoa RESPONDE (a Meta só libera o
+ * perfil depois de uma mensagem dela) — e a IA responde segundos depois dessa resposta.
+ * 29/09/2026, 1º dia ligado: Sarah (9 s depois da resposta) e Jucilene (24 s) deram
+ * "contato não encontrado", e horas depois as duas eram achadas pelo nome. Por isso a IA
+ * procura de novo por ~1 min antes de desistir. O SAC não espera: o atendente está na tela.
+ */
+export const ESPERAS_BUSCA_MANYCHAT_IA_MS = [15_000, 20_000, 25_000];
+
+/** Alguém do time respondeu enquanto a IA esperava o ManyChat: ela não fala por cima. */
+const HUMANO_ASSUMIU = "ManyChat: parou de procurar — alguém do time assumiu a conversa";
+
+export function humanoAssumiuDuranteBusca(erro: ErroEnvioIg): boolean {
+  return erro.status === 409 && erro.message === HUMANO_ASSUMIU;
+}
+
+const dormirPadrao = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 /** (#100) subcode 2534037: outro app (o ManyChat) é o dono da conversa. */
 export function ehConversaDeOutroApp(erro: ErroEnvioIg): boolean {
   return erro.subcode === 2534037;
@@ -73,22 +91,33 @@ async function chamarManychat(
   }
 }
 
-/** Procura o contato no ManyChat pelos nomes dados (nome do perfil, @) e confere o id. */
+/**
+ * Procura o contato no ManyChat pelos nomes dados (nome do perfil, @) e confere o id.
+ * `resumo` diz o que o ManyChat respondeu a cada nome: antes, erro da API e "não existe"
+ * davam a mesma mensagem, e a falha não tinha como ser lida depois.
+ */
 export async function buscarSubscriberManychat(
   chave: string,
   nomes: (string | null | undefined)[],
   igsid: string,
   username: string | null | undefined,
   f: typeof fetch = fetch,
-): Promise<SubscriberManychat | null> {
+): Promise<{ achado: SubscriberManychat | null; resumo: string }> {
   const tentativas = [...new Set(nomes.map((n) => String(n ?? "").trim()).filter(Boolean))];
+  const partes: string[] = [];
   for (const nome of tentativas) {
     const r = await chamarManychat(chave, `/fb/subscriber/findByName?name=${encodeURIComponent(nome)}`, null, f);
-    if (!r.ok || !Array.isArray(r.json.data)) continue;
-    const achado = casaSubscriber(r.json.data as SubscriberManychat[], igsid, username);
-    if (achado) return achado;
+    if (!r.ok || !Array.isArray(r.json.data)) {
+      const msg = r.json?.message ? ` ${String(r.json.message).slice(0, 60)}` : "";
+      partes.push(`"${nome}": HTTP ${r.status}${msg}`);
+      continue;
+    }
+    const lista = r.json.data as SubscriberManychat[];
+    const achado = casaSubscriber(lista, igsid, username);
+    if (achado) return { achado, resumo: `"${nome}": achado` };
+    partes.push(`"${nome}": ${lista.length} resultado(s), nenhum com este IGSID/@`);
   }
-  return null;
+  return { achado: null, resumo: partes.join("; ") || "sem nome nem @ para procurar" };
 }
 
 /** Um balão de texto pelo ManyChat (conteúdo dinâmico v2, canal instagram). */
@@ -133,6 +162,14 @@ export type QuemEnvia = {
   enviadoPorNome?: string | null;
 };
 
+export type OpcoesEnvioDireto = {
+  /** Pausas entre novas buscas do contato no ManyChat enquanto ele não aparece. */
+  esperasBuscaMs?: number[];
+  /** Conferido antes de cada nova busca: false = parar (alguém do time assumiu). */
+  aindaPode?: () => Promise<boolean>;
+  dormir?: (ms: number) => Promise<void>;
+};
+
 /**
  * Manda pelo Instagram; se a conversa é do ManyChat e a conta tem a chave dele, manda
  * pelo ManyChat. `via: "manychat"` com ok = enviado, SEM mid: a linha em ig_mensagens
@@ -145,6 +182,7 @@ export async function enviarComDonoDaConversa(
   texto: string,
   quem: QuemEnvia,
   f: typeof fetch = fetch,
+  opcoes: OpcoesEnvioDireto = {},
 ): Promise<ResultadoEnvioDireto> {
   const direto = await enviarTextoIg(alvo.token, alvo.igsid, texto, f);
   if (direto.ok || !ehConversaDeOutroApp(direto.erro)) return { ...direto, via: "instagram" };
@@ -155,24 +193,41 @@ export async function enviarComDonoDaConversa(
   if (!chave) return { ...direto, via: "instagram" };
 
   let subscriberId: string | number | null = null;
+  let buscas = 0;
+  let resumo = "";
   const { data: cache } = await db.from("ig_manychat_contatos").select("subscriber_id")
     .eq("conta_id", alvo.contaId).eq("igsid", alvo.igsid).maybeSingle();
   if (cache?.subscriber_id) {
     subscriberId = cache.subscriber_id;
   } else {
-    const achado = await buscarSubscriberManychat(chave, [alvo.nome, alvo.username], alvo.igsid, alvo.username, f);
-    if (achado) {
-      subscriberId = achado.id;
-      await db.from("ig_manychat_contatos").upsert({
-        conta_id: alvo.contaId, igsid: alvo.igsid, subscriber_id: Number(achado.id),
-        ig_username: achado.ig_username ?? alvo.username ?? null, atualizado_em: new Date().toISOString(),
-      }, { onConflict: "conta_id,igsid" });
+    for (const espera of [0, ...(opcoes.esperasBuscaMs ?? [])]) {
+      if (espera > 0) {
+        await (opcoes.dormir ?? dormirPadrao)(espera);
+        if (opcoes.aindaPode && !(await opcoes.aindaPode())) {
+          return { ok: false, via: "manychat", erro: { status: 409, message: HUMANO_ASSUMIU } };
+        }
+      }
+      buscas++;
+      const b = await buscarSubscriberManychat(chave, [alvo.nome, alvo.username], alvo.igsid, alvo.username, f);
+      resumo = b.resumo;
+      if (b.achado) {
+        subscriberId = b.achado.id;
+        await db.from("ig_manychat_contatos").upsert({
+          conta_id: alvo.contaId, igsid: alvo.igsid, subscriber_id: Number(b.achado.id),
+          ig_username: b.achado.ig_username ?? alvo.username ?? null, atualizado_em: new Date().toISOString(),
+        }, { onConflict: "conta_id,igsid" });
+        break;
+      }
     }
   }
   if (subscriberId == null) {
+    const detalhe = `${buscas} busca(s); última: ${resumo}`;
     return {
       ok: false, via: "manychat",
-      erro: { status: 404, message: "ManyChat: contato não encontrado (a conversa é do ManyChat e não achei a pessoa nele)" },
+      erro: {
+        status: 404,
+        message: `ManyChat: contato não encontrado (a conversa é do ManyChat e não achei a pessoa nele — ${detalhe})`.slice(0, 480),
+      },
     };
   }
 
