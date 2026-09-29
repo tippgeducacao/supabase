@@ -10,9 +10,19 @@ function forma(t: Record<string, unknown>): unknown {
 }
 
 describe('ferramentas da Luna: contrato com o código', () => {
+  // 29/09/2026: travado POR AGENTE (o que a API recebe), não pelo apelido: cada agente tem a sua cópia.
   it('nome, parâmetros, tipos, valores permitidos e obrigatórios não mudam pelo Markdown', () => {
-    const formas = Object.fromEntries(Object.entries(FERRAMENTAS).map(([apelido, t]) => [apelido, forma(t)]));
+    const formas = Object.fromEntries(Object.entries(FERRAMENTAS_POR_AGENTE).sort(([a], [b]) => a.localeCompare(b))
+      .map(([agente, apelidos]) => [agente, apelidos.map((a) => forma(FERRAMENTAS[a]))]));
     expect(formas).toMatchSnapshot();
+  });
+
+  it('cada cópia pertence a UM agente só (editar a da aula não mexe na da abertura)', () => {
+    const donos = new Map<string, string[]>();
+    for (const [agente, apelidos] of Object.entries(FERRAMENTAS_POR_AGENTE)) {
+      for (const a of apelidos) donos.set(a, [...(donos.get(a) ?? []), agente]);
+    }
+    for (const [apelido, agentes] of donos) expect(agentes, apelido).toHaveLength(1);
   });
 
   it('cada persona recebe ferramentas que existem, sem nome repetido', () => {

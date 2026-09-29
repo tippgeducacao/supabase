@@ -2,437 +2,1448 @@
 
 exports[`ferramentas da Luna: contrato com o código > nome, parâmetros, tipos, valores permitidos e obrigatórios não mudam pelo Markdown 1`] = `
 {
-  "agendar_retorno": {
-    "name": "agendar_retorno",
-    "parameters": {
-      "properties": {
-        "dias": {
-          "maximum": 7,
-          "minimum": 1,
-          "type": "integer",
+  "agente_aula": [
+    {
+      "name": "consulta_disponibilidade",
+      "parameters": {
+        "properties": {
+          "curso_escolhido": {
+            "type": "string",
+          },
+          "data_desejada": {
+            "type": "string",
+          },
+          "horario_inicio_desejado": {
+            "type": "string",
+          },
+          "periodo_desejado": {
+            "enum": [
+              "manhã",
+              "tarde",
+              "noite",
+              "qualquer",
+            ],
+            "type": "string",
+          },
         },
-        "meses": {
-          "maximum": 36,
-          "minimum": 1,
-          "type": "integer",
-        },
-        "motivo": {
-          "type": "string",
-        },
-        "tipo": {
-          "enum": [
-            "analise",
-            "formatura",
-          ],
-          "type": "string",
-        },
+        "required": [
+          "curso_escolhido",
+          "data_desejada",
+        ],
+        "type": "object",
       },
-      "required": [
-        "tipo",
-      ],
-      "type": "object",
+      "strict": false,
+      "type": "function",
     },
-    "strict": false,
-    "type": "function",
-  },
-  "atualizar_dados_lead": {
-    "name": "atualizar_dados_lead",
-    "parameters": {
-      "properties": {
-        "area_atuacao": {
-          "type": "string",
+    {
+      "name": "consulta_objecoes",
+      "parameters": {
+        "properties": {
+          "curso_consulta": {
+            "type": "string",
+          },
+          "mensagem_lead": {
+            "type": "string",
+          },
+          "tipo_objecao": {
+            "enum": [
+              "objecao_tempo",
+              "objecao_canal",
+              "pergunta_preco",
+              "objecao_financeira",
+              "objecao_adiamento",
+              "objecao_desconfianca",
+              "objecao_duvida",
+              "pergunta_condicao",
+              "objecao_terceiro",
+              "pergunta_modalidade",
+              "pergunta_instituicao",
+            ],
+            "type": "string",
+          },
         },
-        "atua_na_area": {
-          "enum": [
-            "sim",
-            "nao",
-          ],
-          "type": "string",
-        },
-        "formacao": {
-          "type": "string",
-        },
-        "graduacao_concluida": {
-          "enum": [
-            "sim",
-            "cursando",
-            "nao",
-          ],
-          "type": "string",
-        },
-        "nome": {
-          "type": "string",
-        },
-        "possui_pos": {
-          "enum": [
-            "sim",
-            "nao",
-          ],
-          "type": "string",
-        },
-        "qual_pos": {
-          "type": "string",
-        },
-        "tempo_formacao": {
-          "type": "string",
-        },
+        "required": [
+          "mensagem_lead",
+          "tipo_objecao",
+        ],
+        "type": "object",
       },
-      "type": "object",
+      "strict": false,
+      "type": "function",
     },
-    "strict": false,
-    "type": "function",
-  },
-  "atualizar_dados_lead__campanha": {
-    "name": "atualizar_dados_lead",
-    "parameters": {
-      "properties": {
-        "area_atuacao": {
-          "type": "string",
+    {
+      "name": "envia_informacoes",
+      "parameters": {
+        "properties": {
+          "conteudo": {
+            "enum": [
+              "cronograma",
+              "valor",
+              "cronograma_e_valor",
+              "portfolio",
+            ],
+            "type": "string",
+          },
+          "curso_escolhido": {
+            "type": "string",
+          },
         },
-        "atua_na_area": {
-          "enum": [
-            "sim",
-            "nao",
-          ],
-          "type": "string",
-        },
-        "formacao": {
-          "type": "string",
-        },
-        "graduacao_concluida": {
-          "enum": [
-            "sim",
-            "cursando",
-            "nao",
-          ],
-          "type": "string",
-        },
-        "nome": {
-          "type": "string",
-        },
-        "possui_pos": {
-          "enum": [
-            "sim",
-            "nao",
-          ],
-          "type": "string",
-        },
-        "qual_pos": {
-          "type": "string",
-        },
-        "tempo_formacao": {
-          "type": "string",
-        },
+        "required": [
+          "curso_escolhido",
+          "conteudo",
+        ],
+        "type": "object",
       },
-      "type": "object",
+      "strict": false,
+      "type": "function",
     },
-    "strict": false,
-    "type": "function",
-  },
-  "confirmar_agendamento": {
-    "name": "confirmar_agendamento",
-    "parameters": {
-      "properties": {
-        "curso_escolhido": {
-          "type": "string",
+    {
+      "name": "temporizador_proxima_turma",
+      "parameters": {
+        "properties": {
+          "curso": {
+            "type": "string",
+          },
+          "motivo": {
+            "type": "string",
+          },
         },
-        "data_escolhida": {
-          "type": "string",
-        },
-        "horario_escolhido": {
-          "type": "string",
-        },
-        "vendedor_id": {
-          "type": "string",
-        },
+        "required": [
+          "motivo",
+        ],
+        "type": "object",
       },
-      "required": [
-        "curso_escolhido",
-        "data_escolhida",
-        "horario_escolhido",
-        "vendedor_id",
-      ],
-      "type": "object",
+      "strict": false,
+      "type": "function",
     },
-    "strict": false,
-    "type": "function",
-  },
-  "consulta_disponibilidade": {
-    "name": "consulta_disponibilidade",
-    "parameters": {
-      "properties": {
-        "curso_escolhido": {
-          "type": "string",
+    {
+      "name": "consulta_pos_disponiveis",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "curso_consulta": {
+            "type": "string",
+          },
+          "trocar_para": {
+            "type": "string",
+          },
         },
-        "data_desejada": {
-          "type": "string",
-        },
-        "horario_inicio_desejado": {
-          "type": "string",
-        },
-        "periodo_desejado": {
-          "enum": [
-            "manhã",
-            "tarde",
-            "noite",
-            "qualquer",
-          ],
-          "type": "string",
-        },
+        "type": "object",
       },
-      "required": [
-        "curso_escolhido",
-        "data_desejada",
-      ],
-      "type": "object",
+      "strict": false,
+      "type": "function",
     },
-    "strict": false,
-    "type": "function",
-  },
-  "consulta_disponibilidade__fechamento_recontato": {
-    "name": "consulta_disponibilidade",
-    "parameters": {
-      "properties": {
-        "curso_escolhido": {
-          "type": "string",
+    {
+      "name": "pausa_ia",
+      "parameters": {
+        "properties": {
+          "motivo": {
+            "type": "string",
+          },
+          "tipo": {
+            "enum": [
+              "pausa",
+              "nao_perturbe",
+              "sem_graduacao",
+            ],
+            "type": "string",
+          },
         },
-        "data_desejada": {
-          "type": "string",
-        },
-        "horario_inicio_desejado": {
-          "type": "string",
-        },
-        "periodo_desejado": {
-          "enum": [
-            "manha",
-            "tarde",
-            "noite",
-            "qualquer",
-          ],
-          "type": "string",
-        },
+        "required": [
+          "motivo",
+          "tipo",
+        ],
+        "type": "object",
       },
-      "required": [
-        "curso_escolhido",
-        "data_desejada",
-      ],
-      "type": "object",
+      "strict": false,
+      "type": "function",
     },
-    "strict": false,
-    "type": "function",
-  },
-  "consulta_objecoes": {
-    "name": "consulta_objecoes",
-    "parameters": {
-      "properties": {
-        "curso_consulta": {
-          "type": "string",
+    {
+      "name": "atualizar_dados_lead",
+      "parameters": {
+        "properties": {
+          "area_atuacao": {
+            "type": "string",
+          },
+          "atua_na_area": {
+            "enum": [
+              "sim",
+              "nao",
+            ],
+            "type": "string",
+          },
+          "formacao": {
+            "type": "string",
+          },
+          "graduacao_concluida": {
+            "enum": [
+              "sim",
+              "cursando",
+              "nao",
+            ],
+            "type": "string",
+          },
+          "nome": {
+            "type": "string",
+          },
+          "possui_pos": {
+            "enum": [
+              "sim",
+              "nao",
+            ],
+            "type": "string",
+          },
+          "qual_pos": {
+            "type": "string",
+          },
+          "tempo_formacao": {
+            "type": "string",
+          },
         },
-        "mensagem_lead": {
-          "type": "string",
-        },
-        "tipo_objecao": {
-          "enum": [
-            "objecao_tempo",
-            "objecao_canal",
-            "pergunta_preco",
-            "objecao_financeira",
-            "objecao_adiamento",
-            "objecao_desconfianca",
-            "objecao_duvida",
-            "pergunta_condicao",
-            "objecao_terceiro",
-            "pergunta_modalidade",
-            "pergunta_instituicao",
-          ],
-          "type": "string",
-        },
+        "type": "object",
       },
-      "required": [
-        "mensagem_lead",
-        "tipo_objecao",
-      ],
-      "type": "object",
+      "strict": false,
+      "type": "function",
     },
-    "strict": false,
-    "type": "function",
-  },
-  "consulta_pos_disponiveis": {
-    "name": "consulta_pos_disponiveis",
-    "parameters": {
-      "additionalProperties": false,
-      "properties": {
-        "curso_consulta": {
-          "type": "string",
+    {
+      "name": "verificar_compatibilidade_curso",
+      "parameters": {
+        "properties": {
+          "area_trabalho": {
+            "type": "string",
+          },
+          "conclusao_graduacao": {
+            "type": "string",
+          },
+          "conclusao_graduacao_bruta": {
+            "type": "string",
+          },
+          "contexto_qualificacao": {
+            "enum": [
+              "normal",
+              "estudante_apto",
+              "estudante_fora_do_prazo",
+              "correcao_sem_formacao",
+            ],
+            "type": "string",
+          },
+          "curso_interesse": {
+            "type": "string",
+          },
+          "formacao_academica": {
+            "type": "string",
+          },
+          "objetivos_profissionais": {
+            "type": "string",
+          },
         },
-        "trocar_para": {
-          "type": "string",
-        },
+        "required": [
+          "formacao_academica",
+          "curso_interesse",
+        ],
+        "type": "object",
       },
-      "type": "object",
+      "strict": false,
+      "type": "function",
     },
-    "strict": false,
-    "type": "function",
-  },
-  "envia_informacoes": {
-    "name": "envia_informacoes",
-    "parameters": {
-      "properties": {
-        "conteudo": {
-          "enum": [
-            "cronograma",
-            "valor",
-            "cronograma_e_valor",
-          ],
-          "type": "string",
+    {
+      "name": "agendar_retorno",
+      "parameters": {
+        "properties": {
+          "dias": {
+            "maximum": 7,
+            "minimum": 1,
+            "type": "integer",
+          },
+          "meses": {
+            "maximum": 36,
+            "minimum": 1,
+            "type": "integer",
+          },
+          "motivo": {
+            "type": "string",
+          },
+          "tipo": {
+            "enum": [
+              "analise",
+              "formatura",
+            ],
+            "type": "string",
+          },
         },
-        "curso_escolhido": {
-          "type": "string",
-        },
+        "required": [
+          "tipo",
+        ],
+        "type": "object",
       },
-      "required": [
-        "curso_escolhido",
-        "conteudo",
-      ],
-      "type": "object",
+      "strict": false,
+      "type": "function",
     },
-    "strict": false,
-    "type": "function",
-  },
-  "envia_informacoes__aula": {
-    "name": "envia_informacoes",
-    "parameters": {
-      "properties": {
-        "conteudo": {
-          "enum": [
-            "cronograma",
-            "valor",
-            "cronograma_e_valor",
-            "portfolio",
-          ],
-          "type": "string",
+  ],
+  "agente_campanha_direta": [
+    {
+      "name": "envia_informacoes",
+      "parameters": {
+        "properties": {
+          "conteudo": {
+            "enum": [
+              "cronograma",
+              "valor",
+              "cronograma_e_valor",
+            ],
+            "type": "string",
+          },
+          "curso_escolhido": {
+            "type": "string",
+          },
         },
-        "curso_escolhido": {
-          "type": "string",
-        },
+        "required": [
+          "curso_escolhido",
+          "conteudo",
+        ],
+        "type": "object",
       },
-      "required": [
-        "curso_escolhido",
-        "conteudo",
-      ],
-      "type": "object",
+      "strict": false,
+      "type": "function",
     },
-    "strict": false,
-    "type": "function",
-  },
-  "pausa_ia": {
-    "name": "pausa_ia",
-    "parameters": {
-      "properties": {
-        "motivo": {
-          "type": "string",
+    {
+      "name": "temporizador_proxima_turma",
+      "parameters": {
+        "properties": {
+          "curso": {
+            "type": "string",
+          },
+          "motivo": {
+            "type": "string",
+          },
         },
-        "tipo": {
-          "enum": [
-            "pausa",
-            "nao_perturbe",
-            "sem_graduacao",
-          ],
-          "type": "string",
-        },
+        "required": [
+          "motivo",
+        ],
+        "type": "object",
       },
-      "required": [
-        "motivo",
-        "tipo",
-      ],
-      "type": "object",
+      "strict": false,
+      "type": "function",
     },
-    "strict": false,
-    "type": "function",
-  },
-  "remarcar_agendamento": {
-    "name": "remarcar_agendamento",
-    "parameters": {
-      "properties": {
-        "data_escolhida": {
-          "type": "string",
+    {
+      "name": "consulta_pos_disponiveis",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "curso_consulta": {
+            "type": "string",
+          },
+          "trocar_para": {
+            "type": "string",
+          },
         },
-        "horario_escolhido": {
-          "type": "string",
-        },
-        "vendedor_id": {
-          "type": "string",
-        },
+        "type": "object",
       },
-      "required": [
-        "data_escolhida",
-        "horario_escolhido",
-        "vendedor_id",
-      ],
-      "type": "object",
+      "strict": false,
+      "type": "function",
     },
-    "strict": false,
-    "type": "function",
-  },
-  "temporizador_proxima_turma": {
-    "name": "temporizador_proxima_turma",
-    "parameters": {
-      "properties": {
-        "curso": {
-          "type": "string",
+    {
+      "name": "verificar_compatibilidade_curso",
+      "parameters": {
+        "properties": {
+          "area_trabalho": {
+            "type": "string",
+          },
+          "conclusao_graduacao": {
+            "type": "string",
+          },
+          "conclusao_graduacao_bruta": {
+            "type": "string",
+          },
+          "contexto_qualificacao": {
+            "enum": [
+              "normal",
+              "estudante_apto",
+              "estudante_fora_do_prazo",
+              "correcao_sem_formacao",
+            ],
+            "type": "string",
+          },
+          "curso_interesse": {
+            "type": "string",
+          },
+          "formacao_academica": {
+            "type": "string",
+          },
+          "objetivos_profissionais": {
+            "type": "string",
+          },
         },
-        "motivo": {
-          "type": "string",
-        },
+        "required": [
+          "formacao_academica",
+          "curso_interesse",
+        ],
+        "type": "object",
       },
-      "required": [
-        "motivo",
-      ],
-      "type": "object",
+      "strict": false,
+      "type": "function",
     },
-    "strict": false,
-    "type": "function",
-  },
-  "verificar_compatibilidade_curso": {
-    "name": "verificar_compatibilidade_curso",
-    "parameters": {
-      "properties": {
-        "area_trabalho": {
-          "type": "string",
+    {
+      "name": "consulta_disponibilidade",
+      "parameters": {
+        "properties": {
+          "curso_escolhido": {
+            "type": "string",
+          },
+          "data_desejada": {
+            "type": "string",
+          },
+          "horario_inicio_desejado": {
+            "type": "string",
+          },
+          "periodo_desejado": {
+            "enum": [
+              "manhã",
+              "tarde",
+              "noite",
+              "qualquer",
+            ],
+            "type": "string",
+          },
         },
-        "conclusao_graduacao": {
-          "type": "string",
-        },
-        "conclusao_graduacao_bruta": {
-          "type": "string",
-        },
-        "contexto_qualificacao": {
-          "enum": [
-            "normal",
-            "estudante_apto",
-            "estudante_fora_do_prazo",
-            "correcao_sem_formacao",
-          ],
-          "type": "string",
-        },
-        "curso_interesse": {
-          "type": "string",
-        },
-        "formacao_academica": {
-          "type": "string",
-        },
-        "objetivos_profissionais": {
-          "type": "string",
-        },
+        "required": [
+          "curso_escolhido",
+          "data_desejada",
+        ],
+        "type": "object",
       },
-      "required": [
-        "formacao_academica",
-        "curso_interesse",
-      ],
-      "type": "object",
+      "strict": false,
+      "type": "function",
     },
-    "strict": false,
-    "type": "function",
-  },
+    {
+      "name": "consulta_objecoes",
+      "parameters": {
+        "properties": {
+          "curso_consulta": {
+            "type": "string",
+          },
+          "mensagem_lead": {
+            "type": "string",
+          },
+          "tipo_objecao": {
+            "enum": [
+              "objecao_tempo",
+              "objecao_canal",
+              "pergunta_preco",
+              "objecao_financeira",
+              "objecao_adiamento",
+              "objecao_desconfianca",
+              "objecao_duvida",
+              "pergunta_condicao",
+              "objecao_terceiro",
+              "pergunta_modalidade",
+              "pergunta_instituicao",
+            ],
+            "type": "string",
+          },
+        },
+        "required": [
+          "mensagem_lead",
+          "tipo_objecao",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "pausa_ia",
+      "parameters": {
+        "properties": {
+          "motivo": {
+            "type": "string",
+          },
+          "tipo": {
+            "enum": [
+              "pausa",
+              "nao_perturbe",
+              "sem_graduacao",
+            ],
+            "type": "string",
+          },
+        },
+        "required": [
+          "motivo",
+          "tipo",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "atualizar_dados_lead",
+      "parameters": {
+        "properties": {
+          "area_atuacao": {
+            "type": "string",
+          },
+          "atua_na_area": {
+            "enum": [
+              "sim",
+              "nao",
+            ],
+            "type": "string",
+          },
+          "formacao": {
+            "type": "string",
+          },
+          "graduacao_concluida": {
+            "enum": [
+              "sim",
+              "cursando",
+              "nao",
+            ],
+            "type": "string",
+          },
+          "nome": {
+            "type": "string",
+          },
+          "possui_pos": {
+            "enum": [
+              "sim",
+              "nao",
+            ],
+            "type": "string",
+          },
+          "qual_pos": {
+            "type": "string",
+          },
+          "tempo_formacao": {
+            "type": "string",
+          },
+        },
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "agendar_retorno",
+      "parameters": {
+        "properties": {
+          "dias": {
+            "maximum": 7,
+            "minimum": 1,
+            "type": "integer",
+          },
+          "meses": {
+            "maximum": 36,
+            "minimum": 1,
+            "type": "integer",
+          },
+          "motivo": {
+            "type": "string",
+          },
+          "tipo": {
+            "enum": [
+              "analise",
+              "formatura",
+            ],
+            "type": "string",
+          },
+        },
+        "required": [
+          "tipo",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+  ],
+  "agente_qualificador": [
+    {
+      "name": "consulta_objecoes",
+      "parameters": {
+        "properties": {
+          "curso_consulta": {
+            "type": "string",
+          },
+          "mensagem_lead": {
+            "type": "string",
+          },
+          "tipo_objecao": {
+            "enum": [
+              "objecao_tempo",
+              "objecao_canal",
+              "pergunta_preco",
+              "objecao_financeira",
+              "objecao_adiamento",
+              "objecao_desconfianca",
+              "objecao_duvida",
+              "pergunta_condicao",
+              "objecao_terceiro",
+              "pergunta_modalidade",
+              "pergunta_instituicao",
+            ],
+            "type": "string",
+          },
+        },
+        "required": [
+          "mensagem_lead",
+          "tipo_objecao",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "pausa_ia",
+      "parameters": {
+        "properties": {
+          "motivo": {
+            "type": "string",
+          },
+          "tipo": {
+            "enum": [
+              "pausa",
+              "nao_perturbe",
+              "sem_graduacao",
+            ],
+            "type": "string",
+          },
+        },
+        "required": [
+          "motivo",
+          "tipo",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "envia_informacoes",
+      "parameters": {
+        "properties": {
+          "conteudo": {
+            "enum": [
+              "cronograma",
+              "valor",
+              "cronograma_e_valor",
+            ],
+            "type": "string",
+          },
+          "curso_escolhido": {
+            "type": "string",
+          },
+        },
+        "required": [
+          "curso_escolhido",
+          "conteudo",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "temporizador_proxima_turma",
+      "parameters": {
+        "properties": {
+          "curso": {
+            "type": "string",
+          },
+          "motivo": {
+            "type": "string",
+          },
+        },
+        "required": [
+          "motivo",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "consulta_pos_disponiveis",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "curso_consulta": {
+            "type": "string",
+          },
+          "trocar_para": {
+            "type": "string",
+          },
+        },
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "confirmar_agendamento",
+      "parameters": {
+        "properties": {
+          "curso_escolhido": {
+            "type": "string",
+          },
+          "data_escolhida": {
+            "type": "string",
+          },
+          "horario_escolhido": {
+            "type": "string",
+          },
+          "vendedor_id": {
+            "type": "string",
+          },
+        },
+        "required": [
+          "curso_escolhido",
+          "data_escolhida",
+          "horario_escolhido",
+          "vendedor_id",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "consulta_disponibilidade",
+      "parameters": {
+        "properties": {
+          "curso_escolhido": {
+            "type": "string",
+          },
+          "data_desejada": {
+            "type": "string",
+          },
+          "horario_inicio_desejado": {
+            "type": "string",
+          },
+          "periodo_desejado": {
+            "enum": [
+              "manha",
+              "tarde",
+              "noite",
+              "qualquer",
+            ],
+            "type": "string",
+          },
+        },
+        "required": [
+          "curso_escolhido",
+          "data_desejada",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "verificar_compatibilidade_curso",
+      "parameters": {
+        "properties": {
+          "area_trabalho": {
+            "type": "string",
+          },
+          "conclusao_graduacao": {
+            "type": "string",
+          },
+          "conclusao_graduacao_bruta": {
+            "type": "string",
+          },
+          "contexto_qualificacao": {
+            "enum": [
+              "normal",
+              "estudante_apto",
+              "estudante_fora_do_prazo",
+              "correcao_sem_formacao",
+            ],
+            "type": "string",
+          },
+          "curso_interesse": {
+            "type": "string",
+          },
+          "formacao_academica": {
+            "type": "string",
+          },
+          "objetivos_profissionais": {
+            "type": "string",
+          },
+        },
+        "required": [
+          "formacao_academica",
+          "curso_interesse",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "remarcar_agendamento",
+      "parameters": {
+        "properties": {
+          "data_escolhida": {
+            "type": "string",
+          },
+          "horario_escolhido": {
+            "type": "string",
+          },
+          "vendedor_id": {
+            "type": "string",
+          },
+        },
+        "required": [
+          "data_escolhida",
+          "horario_escolhido",
+          "vendedor_id",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "agendar_retorno",
+      "parameters": {
+        "properties": {
+          "dias": {
+            "maximum": 7,
+            "minimum": 1,
+            "type": "integer",
+          },
+          "meses": {
+            "maximum": 36,
+            "minimum": 1,
+            "type": "integer",
+          },
+          "motivo": {
+            "type": "string",
+          },
+          "tipo": {
+            "enum": [
+              "analise",
+              "formatura",
+            ],
+            "type": "string",
+          },
+        },
+        "required": [
+          "tipo",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "atualizar_dados_lead",
+      "parameters": {
+        "properties": {
+          "area_atuacao": {
+            "type": "string",
+          },
+          "atua_na_area": {
+            "enum": [
+              "sim",
+              "nao",
+            ],
+            "type": "string",
+          },
+          "formacao": {
+            "type": "string",
+          },
+          "graduacao_concluida": {
+            "enum": [
+              "sim",
+              "cursando",
+              "nao",
+            ],
+            "type": "string",
+          },
+          "nome": {
+            "type": "string",
+          },
+          "possui_pos": {
+            "enum": [
+              "sim",
+              "nao",
+            ],
+            "type": "string",
+          },
+          "qual_pos": {
+            "type": "string",
+          },
+          "tempo_formacao": {
+            "type": "string",
+          },
+        },
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+  ],
+  "agente_recontato": [
+    {
+      "name": "temporizador_proxima_turma",
+      "parameters": {
+        "properties": {
+          "curso": {
+            "type": "string",
+          },
+          "motivo": {
+            "type": "string",
+          },
+        },
+        "required": [
+          "motivo",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "consulta_pos_disponiveis",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "curso_consulta": {
+            "type": "string",
+          },
+          "trocar_para": {
+            "type": "string",
+          },
+        },
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "consulta_objecoes",
+      "parameters": {
+        "properties": {
+          "curso_consulta": {
+            "type": "string",
+          },
+          "mensagem_lead": {
+            "type": "string",
+          },
+          "tipo_objecao": {
+            "enum": [
+              "objecao_tempo",
+              "objecao_canal",
+              "pergunta_preco",
+              "objecao_financeira",
+              "objecao_adiamento",
+              "objecao_desconfianca",
+              "objecao_duvida",
+              "pergunta_condicao",
+              "objecao_terceiro",
+              "pergunta_modalidade",
+              "pergunta_instituicao",
+            ],
+            "type": "string",
+          },
+        },
+        "required": [
+          "mensagem_lead",
+          "tipo_objecao",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "pausa_ia",
+      "parameters": {
+        "properties": {
+          "motivo": {
+            "type": "string",
+          },
+          "tipo": {
+            "enum": [
+              "pausa",
+              "nao_perturbe",
+              "sem_graduacao",
+            ],
+            "type": "string",
+          },
+        },
+        "required": [
+          "motivo",
+          "tipo",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "envia_informacoes",
+      "parameters": {
+        "properties": {
+          "conteudo": {
+            "enum": [
+              "cronograma",
+              "valor",
+              "cronograma_e_valor",
+            ],
+            "type": "string",
+          },
+          "curso_escolhido": {
+            "type": "string",
+          },
+        },
+        "required": [
+          "curso_escolhido",
+          "conteudo",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "confirmar_agendamento",
+      "parameters": {
+        "properties": {
+          "curso_escolhido": {
+            "type": "string",
+          },
+          "data_escolhida": {
+            "type": "string",
+          },
+          "horario_escolhido": {
+            "type": "string",
+          },
+          "vendedor_id": {
+            "type": "string",
+          },
+        },
+        "required": [
+          "curso_escolhido",
+          "data_escolhida",
+          "horario_escolhido",
+          "vendedor_id",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "consulta_disponibilidade",
+      "parameters": {
+        "properties": {
+          "curso_escolhido": {
+            "type": "string",
+          },
+          "data_desejada": {
+            "type": "string",
+          },
+          "horario_inicio_desejado": {
+            "type": "string",
+          },
+          "periodo_desejado": {
+            "enum": [
+              "manha",
+              "tarde",
+              "noite",
+              "qualquer",
+            ],
+            "type": "string",
+          },
+        },
+        "required": [
+          "curso_escolhido",
+          "data_desejada",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "verificar_compatibilidade_curso",
+      "parameters": {
+        "properties": {
+          "area_trabalho": {
+            "type": "string",
+          },
+          "conclusao_graduacao": {
+            "type": "string",
+          },
+          "conclusao_graduacao_bruta": {
+            "type": "string",
+          },
+          "contexto_qualificacao": {
+            "enum": [
+              "normal",
+              "estudante_apto",
+              "estudante_fora_do_prazo",
+              "correcao_sem_formacao",
+            ],
+            "type": "string",
+          },
+          "curso_interesse": {
+            "type": "string",
+          },
+          "formacao_academica": {
+            "type": "string",
+          },
+          "objetivos_profissionais": {
+            "type": "string",
+          },
+        },
+        "required": [
+          "formacao_academica",
+          "curso_interesse",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "remarcar_agendamento",
+      "parameters": {
+        "properties": {
+          "data_escolhida": {
+            "type": "string",
+          },
+          "horario_escolhido": {
+            "type": "string",
+          },
+          "vendedor_id": {
+            "type": "string",
+          },
+        },
+        "required": [
+          "data_escolhida",
+          "horario_escolhido",
+          "vendedor_id",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "agendar_retorno",
+      "parameters": {
+        "properties": {
+          "dias": {
+            "maximum": 7,
+            "minimum": 1,
+            "type": "integer",
+          },
+          "meses": {
+            "maximum": 36,
+            "minimum": 1,
+            "type": "integer",
+          },
+          "motivo": {
+            "type": "string",
+          },
+          "tipo": {
+            "enum": [
+              "analise",
+              "formatura",
+            ],
+            "type": "string",
+          },
+        },
+        "required": [
+          "tipo",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+  ],
+  "agente_validacao": [
+    {
+      "name": "envia_informacoes",
+      "parameters": {
+        "properties": {
+          "conteudo": {
+            "enum": [
+              "cronograma",
+              "valor",
+              "cronograma_e_valor",
+            ],
+            "type": "string",
+          },
+          "curso_escolhido": {
+            "type": "string",
+          },
+        },
+        "required": [
+          "curso_escolhido",
+          "conteudo",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "temporizador_proxima_turma",
+      "parameters": {
+        "properties": {
+          "curso": {
+            "type": "string",
+          },
+          "motivo": {
+            "type": "string",
+          },
+        },
+        "required": [
+          "motivo",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "consulta_pos_disponiveis",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "curso_consulta": {
+            "type": "string",
+          },
+          "trocar_para": {
+            "type": "string",
+          },
+        },
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "verificar_compatibilidade_curso",
+      "parameters": {
+        "properties": {
+          "area_trabalho": {
+            "type": "string",
+          },
+          "conclusao_graduacao": {
+            "type": "string",
+          },
+          "conclusao_graduacao_bruta": {
+            "type": "string",
+          },
+          "contexto_qualificacao": {
+            "enum": [
+              "normal",
+              "estudante_apto",
+              "estudante_fora_do_prazo",
+              "correcao_sem_formacao",
+            ],
+            "type": "string",
+          },
+          "curso_interesse": {
+            "type": "string",
+          },
+          "formacao_academica": {
+            "type": "string",
+          },
+          "objetivos_profissionais": {
+            "type": "string",
+          },
+        },
+        "required": [
+          "formacao_academica",
+          "curso_interesse",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "consulta_disponibilidade",
+      "parameters": {
+        "properties": {
+          "curso_escolhido": {
+            "type": "string",
+          },
+          "data_desejada": {
+            "type": "string",
+          },
+          "horario_inicio_desejado": {
+            "type": "string",
+          },
+          "periodo_desejado": {
+            "enum": [
+              "manhã",
+              "tarde",
+              "noite",
+              "qualquer",
+            ],
+            "type": "string",
+          },
+        },
+        "required": [
+          "curso_escolhido",
+          "data_desejada",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "consulta_objecoes",
+      "parameters": {
+        "properties": {
+          "curso_consulta": {
+            "type": "string",
+          },
+          "mensagem_lead": {
+            "type": "string",
+          },
+          "tipo_objecao": {
+            "enum": [
+              "objecao_tempo",
+              "objecao_canal",
+              "pergunta_preco",
+              "objecao_financeira",
+              "objecao_adiamento",
+              "objecao_desconfianca",
+              "objecao_duvida",
+              "pergunta_condicao",
+              "objecao_terceiro",
+              "pergunta_modalidade",
+              "pergunta_instituicao",
+            ],
+            "type": "string",
+          },
+        },
+        "required": [
+          "mensagem_lead",
+          "tipo_objecao",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "pausa_ia",
+      "parameters": {
+        "properties": {
+          "motivo": {
+            "type": "string",
+          },
+          "tipo": {
+            "enum": [
+              "pausa",
+              "nao_perturbe",
+              "sem_graduacao",
+            ],
+            "type": "string",
+          },
+        },
+        "required": [
+          "motivo",
+          "tipo",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "agendar_retorno",
+      "parameters": {
+        "properties": {
+          "dias": {
+            "maximum": 7,
+            "minimum": 1,
+            "type": "integer",
+          },
+          "meses": {
+            "maximum": 36,
+            "minimum": 1,
+            "type": "integer",
+          },
+          "motivo": {
+            "type": "string",
+          },
+          "tipo": {
+            "enum": [
+              "analise",
+              "formatura",
+            ],
+            "type": "string",
+          },
+        },
+        "required": [
+          "tipo",
+        ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "atualizar_dados_lead",
+      "parameters": {
+        "properties": {
+          "area_atuacao": {
+            "type": "string",
+          },
+          "atua_na_area": {
+            "enum": [
+              "sim",
+              "nao",
+            ],
+            "type": "string",
+          },
+          "formacao": {
+            "type": "string",
+          },
+          "graduacao_concluida": {
+            "enum": [
+              "sim",
+              "cursando",
+              "nao",
+            ],
+            "type": "string",
+          },
+          "nome": {
+            "type": "string",
+          },
+          "possui_pos": {
+            "enum": [
+              "sim",
+              "nao",
+            ],
+            "type": "string",
+          },
+          "qual_pos": {
+            "type": "string",
+          },
+          "tempo_formacao": {
+            "type": "string",
+          },
+        },
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+  ],
 }
 `;

@@ -456,7 +456,7 @@ describe('carregarTools: cada provedor lê a SUA tabela', () => {
     expect(lidas).toEqual([]);
     expect(tools.map((t) => t.name)).toEqual(FERRAMENTAS_POR_AGENTE.agente_recontato.map((a) => FERRAMENTAS[a].name));
     // o modelo recebe exatamente o texto do arquivo: sem o prefixo que descreverToolsSdr põe em pausa_ia
-    expect(tools.find((t) => t.name === 'pausa_ia')?.description).toBe(FERRAMENTAS.pausa_ia.description);
+    expect(tools.find((t) => t.name === 'pausa_ia')?.description).toBe(FERRAMENTAS.pausa_ia__recontato.description);
   });
 
   it('openai: ida e volta pelo tradutor devolve as mesmas function tools do arquivo', async () => {
