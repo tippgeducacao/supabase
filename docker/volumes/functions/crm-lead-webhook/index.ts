@@ -1250,9 +1250,18 @@ Deno.serve(async (req) => {
         const row: any = Array.isArray(pick) ? pick[0] : pick;
         return { id: row?.usuario_id ?? null, logId: row?.log_id ?? null };
       }
-      const lista: string[] = Array.isArray(resp?.usuarios)
+      const listaConfigurada: string[] = Array.isArray(resp?.usuarios)
         ? resp.usuarios.filter((x: any) => typeof x === "string" && x)
         : [];
+      // Pausa de leads (30/09/2026): quem está com um bloqueio de agenda com "pausar leads"
+      // valendo "finge que não está na fila" — sai da lista do sorteio. Se a RPC falhar,
+      // segue com a lista inteira (melhor distribuir do que perder o lead).
+      let lista = listaConfigurada;
+      if (listaConfigurada.length > 0) {
+        const { data: livres, error: errPausa } = await admin.rpc("usuarios_sem_pausa_leads", { p_ids: listaConfigurada });
+        if (!errPausa && Array.isArray(livres)) lista = livres as string[];
+        else if (errPausa) console.error("[crm-lead-webhook] usuarios_sem_pausa_leads erro:", errPausa.message);
+      }
       if (lista.length === 0) return { id: null, logId: null };
       if (estrategia === "aleatorio") return { id: lista[Math.floor(Math.random() * lista.length)] ?? null, logId: null };
       if (estrategia === "sequencial") {
