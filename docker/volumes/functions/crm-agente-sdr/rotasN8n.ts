@@ -13,7 +13,10 @@ import type { CtxConversa } from './tools.ts';
 
 // midia: áudio/imagem → texto · rodada: o lote do buffer do n8n vira uma rodada do agente
 // ferramenta: o 04 do n8n executa uma ferramenta com o ctx da rodada
-export const ACOES_N8N = ['midia', 'rodada', 'ferramenta'] as const;
+// iniciar → definir → volta ⇄ executar/gravar → enviar: o agente POR PASSOS (passosRodada.ts), o loop desenhado no n8n.
+// fim: o n8n avisa que a rodada quebrou no meio (solta a trava do lead).
+export const ACOES_N8N = ['midia', 'rodada', 'ferramenta', 'iniciar', 'definir', 'volta', 'executar', 'gravar', 'enviar', 'fim'] as const;
+export const PASSOS_COM_ESTADO = new Set<string>(['definir', 'volta', 'executar', 'gravar', 'enviar']);
 export type AcaoN8n = typeof ACOES_N8N[number];
 
 export function ehAcaoN8n(v: unknown): v is AcaoN8n {
@@ -161,4 +164,32 @@ export function payloadDaMensagem(lote: any, item: Record<string, unknown>): Rec
     wa_account_id: item.wa_account_id, agente_ia_persona: item.agente_ia_persona,
     lead_id: item.lead_id, oportunidade_id: item.oportunidade_id,
   };
+}
+
+// ═══ ASSINATURA DO ESTADO (30/09/2026) ═══════════════════════════════════════
+// O estado da rodada viaja no n8n e pode ser editado lá (é o que permite testar um prompt sem
+// deploy). O que NÃO pode mudar é QUEM: o lead, o telefone, a conta e a oportunidade. Esses campos
+// são assinados com o segredo do desvio; mexeu em algum, o sistema recusa o passo.
+function quemDoEstado(e: { rodadaId?: unknown; remotejid?: unknown; telefone?: unknown; ctx?: any }): string {
+  const c = e?.ctx ?? {};
+  return JSON.stringify([e?.rodadaId ?? null, e?.remotejid ?? null, e?.telefone ?? null,
+    c.remotejid ?? null, c.telefone ?? null, c.waAccountId ?? null, c.leadId ?? null, c.oportunidadeId ?? null]);
+}
+
+async function hmac(segredo: string, texto: string): Promise<string> {
+  const chave = await crypto.subtle.importKey('raw', new TextEncoder().encode(segredo), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const assinatura = await crypto.subtle.sign('HMAC', chave, new TextEncoder().encode(texto));
+  return [...new Uint8Array(assinatura)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+export async function assinarEstado(e: Record<string, any>, segredo: string): Promise<string> {
+  return await hmac(segredo, quemDoEstado(e));
+}
+
+/** O estado é de um número de teste, coerente (ctx = lead do estado) e com a assinatura certa? */
+export async function estadoConfere(e: any, assinatura: unknown, cfg: DesvioN8n): Promise<boolean> {
+  if (!e || typeof e !== 'object' || typeof assinatura !== 'string' || !cfg.segredo) return false;
+  if (!mesmoTelefone(e.remotejid, e.telefone) || e.ctx?.remotejid !== e.remotejid || !mesmoTelefone(e.ctx?.telefone, e.telefone)) return false;
+  if (!vaiParaN8n(cfg, e.telefone)) return false;
+  return mesmoTexto(await assinarEstado(e, cfg.segredo), assinatura);
 }

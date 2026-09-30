@@ -40,6 +40,20 @@ export function conversaParaJev(historicoLimpo: readonly Msg[], opts: { nota?: s
 
 export type RespostaJev = { answers: Record<string, any>; modelo: string | null; tokens_entrada: number | null };
 
+/** O corpo do POST ao Jev. Separado da chamada (30/09/2026): o agente no n8n faz a chamada ele mesmo. */
+export function corpoJev(estado: unknown, perguntas: Record<string, unknown>) {
+  return { model: 'jev-latest', state: estado, questions: perguntas };
+}
+
+/** O JSON que o Jev devolve → o que o agente usa. */
+export function respostaJev(dados: any): RespostaJev {
+  return {
+    answers: dados?.answers && typeof dados.answers === 'object' ? dados.answers : {},
+    modelo: typeof dados?.model === 'string' ? dados.model : null,
+    tokens_entrada: typeof dados?.usage?.input_tokens === 'number' ? dados.usage.input_tokens : null,
+  };
+}
+
 /** Uma chamada, todas as perguntas em paralelo. Erro diz só o status: o corpo pode ecoar a conversa. */
 export async function chamarJev(
   estado: unknown,
@@ -55,18 +69,13 @@ export async function chamarJev(
       method: 'POST',
       signal: controle.signal,
       headers: { authorization: `Bearer ${chave}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'jev-latest', state: estado, questions: perguntas }),
+      body: JSON.stringify(corpoJev(estado, perguntas)),
     });
     if (!res.ok) {
       await res.body?.cancel().catch(() => {});
       throw new Error(`Jev: HTTP ${res.status}`);
     }
-    const dados = await res.json();
-    return {
-      answers: dados?.answers && typeof dados.answers === 'object' ? dados.answers : {},
-      modelo: typeof dados?.model === 'string' ? dados.model : null,
-      tokens_entrada: typeof dados?.usage?.input_tokens === 'number' ? dados.usage.input_tokens : null,
-    };
+    return respostaJev(await res.json());
   } catch (e) {
     if (controle.signal.aborted) throw new Error(`Jev: sem resposta em ${prazoMs} ms`);
     throw e;

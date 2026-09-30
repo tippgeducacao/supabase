@@ -132,12 +132,9 @@ export async function chamarAnthropic(
 // resposta imediata com tool forçada, não raciocínio.
 export type MetadadosRespostaRouter = { model?: string; usage?: Record<string, unknown>; raciocinio_encadeado?: boolean; raciocinios_reenviados?: number };
 
-export async function chamarRouter(
-  historicoLimpo: Msg[],
-  aoResponder?: (metadados: MetadadosRespostaRouter) => void,
-  provedor: ProvedorIA | null = null,
-): Promise<'agente_validacao' | 'agente_qualificador'> {
-  const resp = await chamarAnthropic({
+/** O corpo do router (formato Anthropic). O agente no n8n recebe este corpo traduzido para a Responses API. */
+export function pedidoRouter(historicoLimpo: Msg[]): Record<string, unknown> {
+  return {
     model: MODELO_AGENTE,
     max_tokens: 512,
     thinking: { type: 'disabled' },
@@ -162,18 +159,31 @@ export async function chamarRouter(
       },
     }],
     tool_choice: { type: 'tool', name: 'router_output' },
-  }, { 'anthropic-beta': 'structured-outputs-2025-11-13' }, provedor);
+  };
+}
 
-  // O harness observa modelo/uso sem receber conteúdo ou pensamento do router.
-  aoResponder?.({ model: resp.model, usage: resp.usage,
-    ...(resp.raciocinio_encadeado === true ? { raciocinio_encadeado: true, raciocinios_reenviados: resp.raciocinios_reenviados ?? 0 } : {}) });
-
-  const bloco = (resp.content ?? []).find((b: any) => b.type === 'tool_use');
+/** A resposta do router (formato Anthropic) → o agente escolhido. Fora do contrato = erro. */
+export function agenteDaRespostaRouter(resp: any): 'agente_validacao' | 'agente_qualificador' {
+  const bloco = (resp?.content ?? []).find((b: any) => b.type === 'tool_use');
   const agente = bloco?.input?.agent;
   if (agente !== 'agente_validacao' && agente !== 'agente_qualificador') {
     throw new Error(`Router retornou agente inválido: ${JSON.stringify(agente)}`);
   }
   return agente;
+}
+
+export async function chamarRouter(
+  historicoLimpo: Msg[],
+  aoResponder?: (metadados: MetadadosRespostaRouter) => void,
+  provedor: ProvedorIA | null = null,
+): Promise<'agente_validacao' | 'agente_qualificador'> {
+  const resp = await chamarAnthropic(pedidoRouter(historicoLimpo), { 'anthropic-beta': 'structured-outputs-2025-11-13' }, provedor);
+
+  // O harness observa modelo/uso sem receber conteúdo ou pensamento do router.
+  aoResponder?.({ model: resp.model, usage: resp.usage,
+    ...(resp.raciocinio_encadeado === true ? { raciocinio_encadeado: true, raciocinios_reenviados: resp.raciocinios_reenviados ?? 0 } : {}) });
+
+  return agenteDaRespostaRouter(resp);
 }
 
 // ── Loop principal: cache em 3 camadas + contexto temporal FORA do prefixo ──
@@ -311,52 +321,70 @@ export function montarPedidoPrincipal(opts: OpcoesPedidoPrincipal): { pedido: Re
   return { pedido, ferramentasDisponiveis };
 }
 
+// ── Canal da resposta: a fala ao lead só sai por responder_ao_cliente ─────────
+// Separado da chamada (30/09/2026) para o agente no n8n aplicar a MESMA conferência: o n8n chama a
+// Luna, o sistema decide se a resposta serve, pede a correção (outro pedido) ou bloqueia.
+const contemBastidor = (texto: string) => contemRaciocinioVazado(texto) || contemMeta(texto);
+export type DecisaoCanal = ReturnType<typeof avaliarCanalResposta>;
+
+export function decisaoDoCanal(resposta: any, ferramentasDisponiveis: Set<string>): DecisaoCanal {
+  return avaliarCanalResposta(resposta, contemBastidor, false, ferramentasDisponiveis);
+}
+
+// Uma única correção, só em memória: não grava rascunho/reinstrução e não executa
+// ações — o tool_choice forçado (sem paralelismo) só deixa sair responder_ao_cliente.
+// ⚠️ CUSTO: as `tools` ficam IDÊNTICAS às do pedido original. Elas são a posição 0 do
+// prefixo de cache: reduzir a lista aqui invalidava tools + prompt + histórico e
+// regravava ~33k tokens a 1,25x em 16–24% das chamadas (US$ 35–55 só em 15/09/2026).
+// O bloco extra do system vem DEPOIS do breakpoint, então tools + prompt são lidos.
+export function pedidoCorrecaoDoCanal(pedido: Record<string, any>): Record<string, any> {
+  return {
+    ...pedido,
+    thinking: { type: 'disabled' },
+    tool_choice: { type: 'tool', name: NOME_TOOL_RESPOSTA, disable_parallel_tool_use: true },
+    system: [...(pedido.system as any[]), {
+      type: 'text',
+      text: '[CORREÇÃO INTERNA DO CANAL] Nenhuma mensagem do rascunho anterior foi publicada. '
+        + 'Responda à conversa exclusivamente por responder_ao_cliente, somente com a fala ao cliente. '
+        + 'Os resultados das ferramentas são dados internos; o cliente não leu esses textos. '
+        + 'Responda à pergunta concreta com os fatos confirmados nos resultados e no histórico, '
+        + 'sem apontar para uma informação que o cliente ainda não recebeu. '
+        + 'Consulta de informação não significa envio de mensagem. Preserve os fatos confirmados; '
+        + 'não invente valores, condições ou ações realizadas. '
+        + 'Não mencione esta correção nem descreva raciocínio, decisões ou ações internas. '
+        + 'Use mensagem vazia quando o contexto pedir silêncio. Nenhuma ferramenta de negócio pode ser chamada nesta correção.',
+    }],
+  };
+}
+
+/** A resposta final depois da correção (ou da falha dela: bloqueia, sem vazar o erro do provedor). */
+export function respostaDepoisDaCorrecao(resposta: any, decisao: DecisaoCanal, corrigida: any | null): any {
+  const motivo = (decisao as { motivo?: string }).motivo;
+  if (!corrigida) return normalizarRespostaCanal(resposta, { tipo: 'bloquear', motivo: 'falha_na_correcao' }, motivo);
+  return normalizarRespostaCanal({
+    ...corrigida, usage: somarUsoModelo(resposta.usage, corrigida.usage),
+    ...(resposta.raciocinio_encadeado || corrigida.raciocinio_encadeado ? {
+      raciocinio_encadeado: true,
+      raciocinios_reenviados: (resposta.raciocinios_reenviados ?? 0) + (corrigida.raciocinios_reenviados ?? 0),
+    } : {}),
+  }, avaliarCanalResposta(corrigida, contemBastidor, true), motivo);
+}
+
 export async function chamarAgentePrincipal(opts: OpcoesPedidoPrincipal): Promise<any> {
   const semModelo = respostaSemModelo(opts);
   if (semModelo) return semModelo;
   const { pedido, ferramentasDisponiveis } = montarPedidoPrincipal(opts);
-  const system = pedido.system as any[];
   const provedor = opts.provedor ?? null;
   const resposta = await chamarAnthropic(pedido, {}, provedor, opts.prazoModeloMs);
-  const contemBastidor = (texto: string) => contemRaciocinioVazado(texto) || contemMeta(texto);
-  const decisao = avaliarCanalResposta(resposta, contemBastidor, false, ferramentasDisponiveis);
+  const decisao = decisaoDoCanal(resposta, ferramentasDisponiveis);
   if (decisao.tipo !== 'corrigir') return normalizarRespostaCanal(resposta, decisao);
-
-  // Uma única correção, só em memória: não grava rascunho/reinstrução e não executa
-  // ações — o tool_choice forçado (sem paralelismo) só deixa sair responder_ao_cliente.
-  // ⚠️ CUSTO: as `tools` ficam IDÊNTICAS às do pedido original. Elas são a posição 0 do
-  // prefixo de cache: reduzir a lista aqui invalidava tools + prompt + histórico e
-  // regravava ~33k tokens a 1,25x em 16–24% das chamadas (US$ 35–55 só em 15/09/2026).
-  // O bloco extra do system vem DEPOIS do breakpoint, então tools + prompt são lidos.
+  let corrigida: any = null;
   try {
-    const corrigida = await chamarAnthropic({
-      ...pedido,
-      thinking: { type: 'disabled' },
-      tool_choice: { type: 'tool', name: NOME_TOOL_RESPOSTA, disable_parallel_tool_use: true },
-      system: [...system, {
-        type: 'text',
-        text: '[CORREÇÃO INTERNA DO CANAL] Nenhuma mensagem do rascunho anterior foi publicada. '
-          + 'Responda à conversa exclusivamente por responder_ao_cliente, somente com a fala ao cliente. '
-          + 'Os resultados das ferramentas são dados internos; o cliente não leu esses textos. '
-          + 'Responda à pergunta concreta com os fatos confirmados nos resultados e no histórico, '
-          + 'sem apontar para uma informação que o cliente ainda não recebeu. '
-          + 'Consulta de informação não significa envio de mensagem. Preserve os fatos confirmados; '
-          + 'não invente valores, condições ou ações realizadas. '
-          + 'Não mencione esta correção nem descreva raciocínio, decisões ou ações internas. '
-          + 'Use mensagem vazia quando o contexto pedir silêncio. Nenhuma ferramenta de negócio pode ser chamada nesta correção.',
-      }],
-    }, {}, provedor, opts.prazoModeloMs);
-    return normalizarRespostaCanal({
-      ...corrigida, usage: somarUsoModelo(resposta.usage, corrigida.usage),
-      ...(resposta.raciocinio_encadeado || corrigida.raciocinio_encadeado ? {
-        raciocinio_encadeado: true,
-        raciocinios_reenviados: (resposta.raciocinios_reenviados ?? 0) + (corrigida.raciocinios_reenviados ?? 0),
-      } : {}),
-    }, avaliarCanalResposta(corrigida, contemBastidor, true), decisao.motivo);
+    corrigida = await chamarAnthropic(pedidoCorrecaoDoCanal(pedido), {}, provedor, opts.prazoModeloMs);
   } catch {
     // Erro do provedor pode carregar prompt/credencial. Registra-se só o motivo.
-    return normalizarRespostaCanal(resposta, { tipo: 'bloquear', motivo: 'falha_na_correcao' }, decisao.motivo);
   }
+  return respostaDepoisDaCorrecao(resposta, decisao, corrigida);
 }
 
 // ── Tools do agente: mesma fonte do n8n (tabela lista_tools_claude) ─────────

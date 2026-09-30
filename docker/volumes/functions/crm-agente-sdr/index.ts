@@ -59,9 +59,16 @@ import { comGanchoDoLote, cursoDaConversa } from './ganchoLote.ts';
 import { ehComandoLimpar, ehTelefoneDeTeste, limparConversaDeTeste, limpoEm } from './limparTeste.ts';
 import { carregarDesvioN8n, type DesvioN8n, vaiParaN8n } from '../_shared/desvioN8n.ts';
 import {
-  autorizarN8n, ctxDeJson, ctxParaJson, ehAcaoN8n, executarFerramentaPeloN8n, itensDoLoteN8n, mesmoTelefone, payloadDaMensagem,
-  provedorPeloN8n, segredoDoPedido, tratarMidiaN8n,
+  assinarEstado, autorizarN8n, ctxDeJson, ctxParaJson, ehAcaoN8n, estadoConfere, executarFerramentaPeloN8n, itensDoLoteN8n,
+  mesmoTelefone, PASSOS_COM_ESTADO, payloadDaMensagem, provedorPeloN8n, segredoDoPedido, tratarMidiaN8n,
 } from './rotasN8n.ts';
+import {
+  type DepsPassos, enviar as enviarPasso, estadoInicial, type EstadoRodada, executarFerramenta as executarFerramentaPasso,
+  gravarResultados, lerResposta, montarVolta, type Saida,
+} from './passosRodada.ts';
+import { agenteDaRespostaRouter, pedidoRouter } from './agente.ts';
+import { paraPedidoOpenai, paraRespostaAnthropic } from './provedorOpenai.ts';
+import { respostaJev } from './jev.ts';
 import { blocoConviteAgenda } from './contexto.ts';
 import { prepararMensagem } from './midia.ts';
 import { persistirEntradasDoLote, registrarEntrada } from './historicoEntradaPausa.ts';
@@ -76,11 +83,15 @@ import { rodarEsteiraFollowup } from './followup.ts';
 import { contextoEspecialidadeCannabis } from './especialidadeCannabis.ts';
 import { rodarEsteiraFollowupTemplate } from './followup-template.ts';
 import { criarTelemetria, resumir, type Telemetria } from './eventos.ts';
-import { type AgenteRouter, carregarConfigRouterJev, type LeituraJev, rotearComJev } from './routerJev.ts';
-import { blocoDaLeitura, carregarConfigLeituraJev, efeitosDaLeitura, lerLeadComJev, type LeituraLead } from './leituraJev.ts';
+import { type AgenteRouter, carregarConfigRouterJev, type LeituraJev, leituraDoRouter, pedidoJevRouter, rotearComJev } from './routerJev.ts';
+import { blocoDaLeitura, carregarConfigLeituraJev, efeitosDaLeitura, leituraDasRespostas, lerLeadComJev, type LeituraLead, pedidoJevLeitura } from './leituraJev.ts';
 import { carregarModoTrocaNumero, carregarSinalTrocaDeNumero, comNotaNoContexto, comNotaParaRouter, notaTrocaDeNumero, resumoDoSinal, sinalInerte, type SinalTrocaDeNumero } from './trocaDeNumero.ts';
 import { enviarComAberturaNumero, NOTA_ABERTURA_CONTROLADA } from './aberturaTrocaNumero.ts';
 import { afirmaReuniaoSemCriar, correcaoDaFala, horariosNaoOfertados, valoresInventados } from './travasDeterministicas.ts';
+import {
+  CORRECAO_SILENCIO, CORRECAO_VAZIO, ehLevaSoReacao, instrucaoPosPausa, INSTRUCAO_POS_RETORNO, INSTRUCAO_REACAO, RE_RETENCAO,
+  semRaciocinioNoTexto, TOOLS_QUE_ENCERRAM, TOOLS_QUE_PAUSAM,
+} from './regrasDaRodada.ts';
 
 declare const EdgeRuntime: { waitUntil?: (p: Promise<unknown>) => void } | undefined;
 
@@ -203,20 +214,6 @@ async function iaPausada(remotejid: string): Promise<boolean> {
   return pausaVigente(data);
 }
 
-// Raciocínio simulado em <thinking>…</thinking> DENTRO do bloco de texto não pode
-// ficar no histórico: o modelo lê o próprio turno anterior e repete o padrão na volta
-// seguinte (auto-reforço). O envio já é protegido em saida.ts; aqui é a 2ª camada.
-// ⚠️ Só troca o texto quando sobra conteúdo — bloco `text` VAZIO no histórico é 400 na
-// Anthropic, então turno que era só raciocínio é gravado como veio (fiel, e nunca sai).
-function semRaciocinioNoTexto(content: any): any {
-  if (!Array.isArray(content)) return content;
-  return content.map((b: any) => {
-    if (b?.type !== 'text' || typeof b.text !== 'string') return b;
-    const limpo = removerRaciocinioVazado(b.text);
-    return limpo && limpo !== b.text ? { ...b, text: limpo } : b;
-  });
-}
-
 // ALUNO MATRICULADO ⇒ a IA NÃO ATENDE, pausa e devolve pro humano.
 // A IA comercial trata todo mundo como lead novo: com aluno ela qualifica, oferece horário e
 // agenda reunião de VENDA — e, pressionada, inventa um motivo pra conversa (caso Hariadne,
@@ -320,7 +317,7 @@ async function toolsDaVez(agenteEfetivo: string, ehCampanha: boolean, provedor: 
 // o contexto, a persona, roda o router e fecha o prompt e as ferramentas. Extraído de rodadaAgente SEM
 // mudar uma linha, para o agente no n8n usar o MESMO preparo (endpoint de início da rodada).
 // null = o lote não tinha entrada ativa (tudo chegou em pausa).
-async function prepararRodada(remotejid: string, itensDoLote: any[], tel: Telemetria) {
+async function prepararAntesDoRouter(remotejid: string, itensDoLote: any[], tel: Telemetria) {
   let itens = itensDoLote;
   const inicioRodada = Date.now();
   // 08/09/2026: a pausa pode ter capturado parte do lote antes da drenagem.
@@ -541,21 +538,6 @@ async function prepararRodada(remotejid: string, itensDoLote: any[], tel: Teleme
   // Pergunta única: o lead já escolheu um horário concreto? Sim → qualificador; não → validação.
   // "Ratchet": quem virou qualificador nunca volta. No canário, o Jev pode responder no lugar
   // (routerJev.ts) e também lê a mensagem para a ficha (leituraJev.ts).
-  // O router é uma chamada paga como as outras (1 por rodada, histórico inteiro): sem
-  // este registro o painel "Uso de IA" ficava ~US$ 40 abaixo da fatura num dia de pico
-  // (15/09/2026). `volta: 0` + `agente: 'router'` separam do loop principal.
-  const registrarUsoRouter = (m: MetadadosRespostaRouter) => tel.registrar('llm_chamada', {
-    volta: 0,
-    agente: 'router',
-    provedor: provedor?.nome ?? 'anthropic',
-    modelo: m.model ?? null,
-    raciocinio_encadeado: m.raciocinio_encadeado === true,
-    raciocinios_reenviados: m.raciocinios_reenviados ?? 0,
-    tokens_entrada: m.usage?.input_tokens ?? null,
-    tokens_saida: m.usage?.output_tokens ?? null,
-    cache_lido: m.usage?.cache_read_input_tokens ?? null,
-    cache_escrito: m.usage?.cache_creation_input_tokens ?? null,
-  });
   // Router pelo Jev (28/09/2026, routerJev.ts): só para os TELEFONES da lista do canário da Luna
   // (não para a fatia `luna_percentual`) e só com `router_jev_modo` ligado. Abrir para a fatia =
   // mandar conversa de lead real para a TypeSafe: decisão do Gustavo (DPA/LGPD), não do código.
@@ -565,19 +547,52 @@ async function prepararRodada(remotejid: string, itensDoLote: any[], tel: Teleme
   const [configJev, configLeitura] = naListaDoCanario
     ? await Promise.all([carregarConfigRouterJev(supabase), ctx.ficha ? carregarConfigLeituraJev(supabase) : Promise.resolve(null)])
     : [null, null];
-  // Leitura do lead pelo Jev para a ficha (29/09/2026, leituraJev.ts), mesmo recorte do router.
-  // Sai JÁ, em paralelo com o router e as tools; só a 1ª volta do loop espera por ela.
-  const leituraPromessa: Promise<LeituraLead | null> = configLeitura
-    ? carregarHistorico(supabase, remotejid)
-      .then((h) => lerLeadComJev(limparParaRouter(h), itens.map((i: any) => String(i?.mensagem ?? '')).filter(Boolean)))
-      .catch(() => null)
-    : Promise.resolve(null);
-  const jev: { leitura?: LeituraJev } = {};
-  const rotear = async (): Promise<AgenteRouter> => {
-    const historicoRouter = limparParaRouter(comNotaParaRouter(await carregarHistorico(supabase, remotejid), notaTroca));
-    return rotearComJev(historicoRouter, configJev, () => chamarRouter(historicoRouter, registrarUsoRouter, provedor),
-      { nota: notaTroca, aoLerJev: (l) => { jev.leitura = l; } });
+  // O router é consultado? Recontato tem missão fixa (nunca). Campanha direta só para PROMOVER ao
+  // fechamento, e só depois da coleta (nome + formação) — ver definirAgente. O resto, sempre.
+  const coletaFeita = Boolean(String(lead?.nome ?? '').trim() && String(lead?.formacao_academica ?? '').trim());
+  const precisaRouter = persona === 'recontato' ? false
+    : ehCampanha ? agenteAnterior !== 'agente_qualificador' && coletaFeita
+    : true;
+  return {
+    provedor,
+    // JSON puro (nada de função/promessa): o agente no n8n guarda isto entre os passos.
+    pre: {
+      remotejid, telefone, inicioRodada, conteudo, itens, registrarFalaAposEnvio, conjuntoPrompt, ctx, lead,
+      pedidoPorPalavraChave, modoTroca, aberturaControlada, desdeLimpeza, sinalTroca, vars, campanha, aulaPiloto,
+      aulaDaCampanha, contextoTemporal, persona, ehCampanha, aplicarTroca, agenteAnterior, notaTroca, naListaDoCanario,
+      configJev, configLeitura, coletaFeita, precisaRouter,
+    },
   };
+}
+
+type PreRouter = NonNullable<Awaited<ReturnType<typeof prepararAntesDoRouter>>>['pre'];
+/** O que o router decidiu (null = não respondeu: mantém o agente atual). `fonte` só no agente pelo n8n. */
+type DecisaoRouter = { agente: AgenteRouter | null; ms: number; jev?: LeituraJev; fonte?: string };
+
+// Router do sistema (produção): Jev na frente quando ligado, Luna/Claude de reserva. Erro = agente: null.
+async function rotearNoSistema(pre: PreRouter, provedor: ProvedorIA | null, registrarUsoRouter: (m: MetadadosRespostaRouter) => void): Promise<DecisaoRouter> {
+  const inicio = Date.now();
+  const jev: { leitura?: LeituraJev } = {};
+  try {
+    const historicoRouter = limparParaRouter(comNotaParaRouter(await carregarHistorico(supabase, pre.remotejid), pre.notaTroca));
+    const agente = await rotearComJev(historicoRouter, pre.configJev, () => chamarRouter(historicoRouter, registrarUsoRouter, provedor),
+      { nota: pre.notaTroca, aoLerJev: (l) => { jev.leitura = l; } });
+    return { agente, ms: Date.now() - inicio, ...(jev.leitura ? { jev: jev.leitura } : {}) };
+  } catch (e) {
+    console.error(pre.ehCampanha
+      ? '[crm-agente-sdr] router (campanha direta) falhou, mantendo a abertura:'
+      : '[crm-agente-sdr] router falhou, mantendo agente atual:', e);
+    return { agente: null, ms: Date.now() - inicio, ...(jev.leitura ? { jev: jev.leitura } : {}) };
+  }
+}
+
+// ═══ DEPOIS DO ROUTER — persona, prompt e ferramentas ═══════════════════════════
+// Recebe a decisão pronta (do sistema ou do n8n) e aplica o ratchet, o prompt da persona e os acabamentos.
+async function definirAgente(pre: PreRouter, provedor: ProvedorIA | null, tel: Telemetria, decisao: DecisaoRouter | null) {
+  const { remotejid, ctx, lead, vars, campanha, aulaPiloto, aulaDaCampanha, contextoTemporal, persona, ehCampanha,
+    agenteAnterior, notaTroca, aberturaControlada, sinalTroca } = pre;
+  const textosDoPrompt = blocosDoPrompt(pre.conjuntoPrompt);
+  const extrasDaDecisao = { ...(decisao?.jev ? { jev: decisao.jev } : {}), ...(decisao?.fonte ? { fonte: decisao.fonte } : {}) };
   let promptAgente: string;
   let tools: any[];
   // A nota vai no bloco de contexto temporal: relido a cada volta, fora do prefixo cacheado.
@@ -615,20 +630,13 @@ async function prepararRodada(remotejid: string, itensDoLote: any[], tel: Teleme
     // motivo desta persona existir. O router segue consultado só pra PROMOVER ao
     // fechamento, e a promoção só vale DEPOIS que nome E formação já foram coletados.
     // O ratchet continua valendo: promovido a qualificador, não volta pra abertura.
-    const coletaFeita = Boolean(
-      String(lead?.nome ?? '').trim() && String(lead?.formacao_academica ?? '').trim(),
-    );
+    const coletaFeita = pre.coletaFeita;
     let agenteAtual = agenteAnterior === 'agente_qualificador' ? 'agente_qualificador' : 'agente_validacao';
     let decidiu: string = agenteAtual;
-    const consultarRouter = agenteAtual !== 'agente_qualificador' && coletaFeita;
-    const inicioRouter = Date.now();
-    if (consultarRouter) {
-      try {
-        decidiu = await rotear();
-        if (decidiu === 'agente_qualificador') agenteAtual = 'agente_qualificador';
-      } catch (e) {
-        console.error('[crm-agente-sdr] router (campanha direta) falhou, mantendo a abertura:', e);
-      }
+    const consultarRouter = pre.precisaRouter;
+    if (consultarRouter && decisao?.agente) {
+      decidiu = decisao.agente;
+      if (decidiu === 'agente_qualificador') agenteAtual = 'agente_qualificador';
     }
     await atualizarLead(supabase, remotejid, { agente_atual: agenteAtual });
     agenteEfetivo = agenteAtual;
@@ -641,8 +649,8 @@ async function prepararRodada(remotejid: string, itensDoLote: any[], tel: Teleme
       router_consultado: consultarRouter,
       troca_numero: sinalTroca.trocou,
       ratchet_ignorado: agenteAnterior !== (lead?.agente_atual ?? null),
-      ...(jev.leitura ? { jev: jev.leitura } : {}),
-    }, Date.now() - inicioRouter);
+      ...extrasDaDecisao,
+    }, decisao?.ms ?? 0);
     promptAgente = renderPrompt(
       agenteAtual === 'agente_qualificador' ? textosDoPrompt.qualificador : AGENTE_CAMPANHA_DIRETA,
       vars,
@@ -651,16 +659,10 @@ async function prepararRodada(remotejid: string, itensDoLote: any[], tel: Teleme
   } else {
     // ▸ Caminho C — padrão (e aula): o router decide e o ratchet grava em agente_atual.
     // Router (em erro, mantém o agente atual — não derruba a conversa).
-    let proximo: 'agente_validacao' | 'agente_qualificador';
-    const inicioRouter = Date.now();
-    let routerFallback = false;
-    try {
-      proximo = await rotear();
-    } catch (e) {
-      console.error('[crm-agente-sdr] router falhou, mantendo agente atual:', e);
-      routerFallback = true;
-      proximo = agenteAnterior === 'agente_qualificador' ? 'agente_qualificador' : 'agente_validacao';
-    }
+    // Sem decisão (o router falhou): mantém o agente atual — não derruba a conversa.
+    const routerFallback = !decisao?.agente;
+    const proximo: AgenteRouter = decisao?.agente
+      ?? (agenteAnterior === 'agente_qualificador' ? 'agente_qualificador' : 'agente_validacao');
     const agenteAtual = await atualizarAgenteComRatchet(supabase, remotejid, agenteAnterior, proximo);
     agenteEfetivo = agenteAtual;
     tel.registrar('router_decisao', {
@@ -671,8 +673,8 @@ async function prepararRodada(remotejid: string, itensDoLote: any[], tel: Teleme
       troca_numero: sinalTroca.trocou,
       ratchet_ignorado: agenteAnterior !== (lead?.agente_atual ?? null),
       persona,
-      ...(jev.leitura ? { jev: jev.leitura } : {}),
-    }, Date.now() - inicioRouter);
+      ...extrasDaDecisao,
+    }, decisao?.ms ?? 0);
     // (campanha_direta não cai aqui — tem branch próprio, sem router na abertura)
     // Persona aula: a abertura é o prompt da aula com as tools de `agente_aula` (as mesmas
     // 9 da validação); o fechamento é o qualificador de sempre.
@@ -713,8 +715,45 @@ async function prepararRodada(remotejid: string, itensDoLote: any[], tel: Teleme
     promptAgente = gancho.prompt;
     tel.registrar('gancho_lote', gancho.trocas);
   }
-  return { itens, inicioRodada, conteudo, doUltimoCom, telefone, provedor, registrarFalaAposEnvio, conjuntoPrompt, textosDoPrompt, ctx, lead, pedidoPorPalavraChave, modoTroca, aberturaControlada, contasNoLote, desdeLimpeza, sinalTroca, formacaoNormalizada, vars, campanha, aulaPiloto, aulaDaCampanha, contextoTemporal, personaDoNumero, persona, ehCampanha, aplicarTroca, agenteAnterior, notaTroca, registrarUsoRouter, naListaDoCanario, configJev, configLeitura, leituraPromessa, jev, rotear, promptAgente, tools, contextoEfetivo, agenteEfetivo, estaNaEscola };
+  return { promptAgente, tools, contextoEfetivo, agenteEfetivo, estaNaEscola };
 }
+
+// Preparo completo da PRODUÇÃO: as duas metades com o router do sistema no meio (o agente no n8n
+// chama as metades separadas, com o router dele no meio). Mesma ordem de antes do corte.
+async function prepararRodada(remotejid: string, itensDoLote: any[], tel: Telemetria) {
+  const inicio = await prepararAntesDoRouter(remotejid, itensDoLote, tel);
+  if (!inicio) return null;
+  const { pre, provedor } = inicio;
+  // O router é uma chamada paga como as outras (1 por rodada, histórico inteiro): sem
+  // este registro o painel "Uso de IA" ficava ~US$ 40 abaixo da fatura num dia de pico
+  // (15/09/2026). `volta: 0` + `agente: 'router'` separam do loop principal.
+  const registrarUsoRouter = (m: MetadadosRespostaRouter) => tel.registrar('llm_chamada', {
+    volta: 0,
+    agente: 'router',
+    provedor: provedor?.nome ?? 'anthropic',
+    modelo: m.model ?? null,
+    raciocinio_encadeado: m.raciocinio_encadeado === true,
+    raciocinios_reenviados: m.raciocinios_reenviados ?? 0,
+    tokens_entrada: m.usage?.input_tokens ?? null,
+    tokens_saida: m.usage?.output_tokens ?? null,
+    cache_lido: m.usage?.cache_read_input_tokens ?? null,
+    cache_escrito: m.usage?.cache_creation_input_tokens ?? null,
+  });
+  // Leitura do lead pelo Jev para a ficha (29/09/2026, leituraJev.ts), mesmo recorte do router.
+  // Sai JÁ, em paralelo com o router e as tools; só a 1ª volta do loop espera por ela.
+  const leituraPromessa: Promise<LeituraLead | null> = pre.configLeitura
+    ? carregarHistorico(supabase, remotejid)
+      .then((h) => lerLeadComJev(limparParaRouter(h), pre.itens.map((i: any) => String(i?.mensagem ?? '')).filter(Boolean)))
+      .catch(() => null)
+    : Promise.resolve(null);
+  const decisao = pre.precisaRouter ? await rotearNoSistema(pre, provedor, registrarUsoRouter) : null;
+  const depois = await definirAgente(pre, provedor, tel, decisao);
+  const doUltimoCom = (campo: string): any =>
+    [...pre.itens].reverse().find((i: any) => i?.[campo] != null)?.[campo] ?? null;
+  return { ...pre, doUltimoCom, provedor, leituraPromessa, ...depois };
+}
+
+
 
 // As duas pontas que o agente no n8n assume (rotasN8n.ts): a chamada da Luna e a execução das
 // ferramentas. Sem `pontas` = produção, tudo aqui dentro, como sempre foi.
@@ -727,7 +766,7 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
   const preparo = await prepararRodada(remotejid, itensDoLote, tel);
   if (!preparo) return;
   // `let`: o loop reatribui parte delas (provedor no fallback, lead, contexto…), como antes.
-  let { itens, inicioRodada, conteudo, doUltimoCom, telefone, provedor, registrarFalaAposEnvio, conjuntoPrompt, textosDoPrompt, ctx, lead, pedidoPorPalavraChave, modoTroca, aberturaControlada, contasNoLote, desdeLimpeza, sinalTroca, formacaoNormalizada, vars, campanha, aulaPiloto, aulaDaCampanha, contextoTemporal, personaDoNumero, persona, ehCampanha, aplicarTroca, agenteAnterior, notaTroca, registrarUsoRouter, naListaDoCanario, configJev, configLeitura, leituraPromessa, jev, rotear, promptAgente, tools, contextoEfetivo, agenteEfetivo, estaNaEscola } = preparo;
+  let { inicioRodada, conteudo, doUltimoCom, telefone, provedor, registrarFalaAposEnvio, conjuntoPrompt, ctx, lead, pedidoPorPalavraChave, aberturaControlada, desdeLimpeza, sinalTroca, aulaPiloto, aulaDaCampanha, aplicarTroca, configLeitura, leituraPromessa, promptAgente, tools, contextoEfetivo, agenteEfetivo, estaNaEscola } = preparo;
   // Agente no n8n: a Luna é chamada pelo webhook do n8n (o router, feito no preparo, não).
   if (pontas?.provedor && provedor) provedor = pontas.provedor(provedor);
   const executarFerramenta = pontas?.executarFerramenta ?? ((chamada, c) => executarTool(supabase, chamada, c));
@@ -738,23 +777,7 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
   const fracionamentoAtual = () => respostaOperacional || (ctx.ficha && provedor?.nome === 'openai' && provedor.formato === 'openai')
     ? 'codigo' as const : 'modelo' as const;
 
-  // Tools que pausam a IA por decisão do PRÓPRIO agente (pausa_ia, e o
-  // temporizador_proxima_turma, que pausa via RPC). A despedida que acompanha
-  // essas tools precisa sair MESMO com o flag de pausa já setado: o recheck de
-  // pausa existe pra honrar pausa de ATENDENTE durante a geração, não pra
-  // engolir a própria despedida do agente.
-  // ▸ Regras de encerramento: quais ferramentas terminam o atendimento e qual despedida sai em cada caso.
-  const TOOLS_QUE_PAUSAM = new Set(['pausa_ia', 'temporizador_proxima_turma']);
-  // ⚠️ ENCERRAR ≠ PAUSAR. `agendar_retorno` também termina o atendimento (o lead volta
-  // perto da formatura / no prazo que pediu) e a despedida vem NA MESMA volta da tool —
-  // mas ela NÃO pausa a IA, então o recheck de pausa continua valendo pra ela.
-  // Caso Matheus (2026-08-08): o modelo escreveu a mensagem CERTA ("como ainda falta um
-  // caminho pra concluir a graduação, no momento não dá pra seguir… vou te procurar mais
-  // pra frente") e ela foi ENGOLIDA pelo `continue`, porque só as tools de PAUSA tinham
-  // o envio. O lead ficou com "Show, 10h30 então" como última informação e no dia
-  // seguinte mandou "Bom dia" esperando a reunião. Medido: 33 de 238 rodadas com
-  // agendar_retorno (13,9%) terminaram MUDAS em 30 dias.
-  const TOOLS_QUE_ENCERRAM = new Set([...TOOLS_QUE_PAUSAM, 'agendar_retorno']);
+  // ▸ Regras de encerramento e instruções pós-pausa/retorno: regrasDaRodada.ts (o motor por passos usa as mesmas).
   let pausouPorTool = false;
   let encerrouPorTool = false;
   let retornoPorFormatura = false;
@@ -763,80 +786,11 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
   // e merecem tratamento oposto. Ver mereceOPresente() em escolaGratuita.ts.
   let encerramento: Encerramento | null = null;
 
-  // Quando a tool de pausa vem SEM texto junto, o loop dá mais uma volta pro modelo
-  // escrever a despedida — e é EXATAMENTE nessa volta que ele, sem nada a dizer,
-  // responde ao SISTEMA ("sem nova mensagem do lead", "*sem resposta necessária*").
-  // Proibir sem dar o que fazer não funciona com LLM, então a instrução chega no
-  // momento exato, COM a despedida-exemplo. Vai anexada ao contexto temporal (que já
-  // muda a cada minuto ⇒ não custa cache) e é EFÊMERA: não é gravada no histórico,
-  // então não polui as rodadas seguintes nem vira turno que o modelo reinterprete.
-  // ⚠️ A despedida-exemplo daqui carrega o PRESENTE DA ESCOLA (2026-08-05): na telemetria,
-  // a esmagadora maioria das pausas vem SEM texto junto, então é NESTA volta que a última
-  // mensagem ao lead nasce — sem o convite aqui, o presente simplesmente não sairia.
-  // ⚠️ A despedida-exemplo daqui MUDA conforme a pessoa já tenha ou não acesso à Escola:
-  // pedir "despeça-se COM o presente" a quem já está dentro é instruir o erro na origem, e
-  // aí nenhuma guarda de saída resolve — ela só apagaria o que o modelo acabou de escrever.
-  const INSTRUCAO_POS_PAUSA = '[SISTEMA — você acabou de encerrar/pausar este atendimento. '
-    + 'NÃO relate isso e NÃO descreva o estado do atendimento.]\n'
-    + (estaNaEscola
-      ? 'Se você ainda NÃO se despediu nesta conversa, escreva SÓ a despedida curta ao lead, '
-        + 'por exemplo: "tranquilo, agradeço sua preferência pelo Grupo PPG e fico à disposição '
-        + 'se precisar no futuro."\n'
-        + '⛔ Esta pessoa JÁ tem acesso à Escola de Especialização — NÃO ofereça a biblioteca '
-        + 'gratuita e NÃO mande o link.\n'
-      : 'Se você ainda NÃO se despediu nesta conversa, escreva SÓ a despedida curta ao lead, JÁ COM o '
-        + 'presente da Escola (a conversa acabou sem reunião), por exemplo: '
-        + '"tranquilo, agradeço sua preferência pelo Grupo PPG e fico à disposição se precisar no futuro. '
-        + 'antes de te deixar ir: a ppgvet tem uma biblioteca de conteúdo aberta e totalmente gratuita, '
-        + 'com mais de 10 cursos, artigos, e-books, aulas abertas de pós e certificados. '
-        + 'é um presente da ppgvet educação pra vc, aproveita: ' + LINK_ESCOLA_GRATUITA + '"\n'
-        + 'Se você JÁ mandou o convite da Escola nesta conversa, não repita — mande só a despedida.\n')
-    + 'Se a despedida já foi enviada, responda com texto vazio.\n'
-    + 'NUNCA escreva frases como "sem nova mensagem do lead", "*sem resposta necessária*", '
-    + '"atendimento pausado" ou "nenhuma ação necessária": elas são enviadas ao WhatsApp do lead.';
-  // Retorno agendado por FORMATURA: o lead segue interessado e volta a ser elegível quando
-  // se formar — a despedida é OUTRA (não é "agradeço a preferência"), e precisa dizer POR QUE
-  // não dá agora. Sem isso o lead não entende que a pós exige graduação concluída e, se um
-  // horário chegou a ser oferecido, fica esperando a reunião (caso Matheus).
-  const INSTRUCAO_POS_RETORNO = '[SISTEMA — você acabou de agendar o retorno deste lead pra perto '
-    + 'da formatura dele. NÃO relate isso e NÃO descreva o estado do atendimento.]\n'
-    + 'Escreva SÓ a mensagem ao lead, deixando DUAS coisas claras com as suas palavras: '
-    + '(1) a pós é lato sensu e a matrícula exige a GRADUAÇÃO CONCLUÍDA, então agora ainda não dá; '
-    + '(2) vc vai procurá-lo quando ele estiver terminando o curso.\n'
-    + 'Se vc ofereceu ou combinou algum HORÁRIO de reunião nesta conversa, desfaça de forma '
-    + 'explícita ("não vou marcar aquele horário que falei") — senão ele fica esperando uma '
-    + 'reunião que não vai acontecer.\n'
-    + 'Feche com o presente da Escola (a conversa acabou sem reunião), a menos que vc já tenha '
-    + 'mandado o convite nesta conversa.\n'
-    + 'Nunca mencione a data-limite, "prazo" ou "elegibilidade". Se a mensagem já foi enviada, '
-    + 'responda com texto vazio.';
+  const INSTRUCAO_POS_PAUSA = instrucaoPosPausa(estaNaEscola);
   // ▸ Casos especiais preparados antes do loop: lead que só reagiu com emoji, IA que ficou calada,
   //   oferta de "te chamo na próxima turma" (desliga o follow-up). Cada um com o incidente que o criou.
-  // ── LEVA SÓ DE REAÇÃO (2026-08-06, caso Peterson) ─────────────────────────
-  // O lead reage com 👍 e não escreve nada. O agente acorda, não tem o que dizer
-  // e RELATA ao sistema ("nenhuma resposta necessária, o lead apenas reagiu com
-  // um emoji") — 35 balões desses em 15 dias, 6 dos 8 últimos com reação como
-  // gatilho. Não adianta proibir: LLM não produz vazio de forma confiável, ele
-  // PREENCHE. Então a instrução dá um ALVO CURTO pra ele acertar, no momento exato
-  // (mesmo padrão da INSTRUCAO_POS_PAUSA — efêmera, anexada ao contexto temporal,
-  // fora do prefixo cacheado, nunca gravada no histórico).
-  // ⚠️ Reação NÃO é sempre "nada a dizer": quando responde uma PERGUNTA nossa
-  // (o caso Peterson era 👍 em "passando só pra confirmar nossa reunião às 17h"),
-  // ela é um SIM e o fluxo tem que seguir. Por isso a instrução ramifica.
-  // ⚠️ SEM emoji nos exemplos: o prompt do João proíbe emoji fora da confirmação
-  // final — sugerir "👍" aqui brigaria com a régua de voz dele.
-  const RE_SO_REACAO = /^\[reacao\]/;
-  const levaSoReacao = conteudo.trim().length > 0
-    && conteudo.split('\n').map((l) => l.trim()).filter(Boolean).every((l) => RE_SO_REACAO.test(l));
-  const INSTRUCAO_REACAO = '[SISTEMA — o lead NÃO escreveu nada: ele apenas REAGIU com um emoji '
-    + 'à sua última mensagem. Isso é o "ok" dele.]\n'
-    + 'Se a sua última mensagem tinha uma PERGUNTA ou pedia confirmação, trate a reação como um SIM '
-    + 'e siga o fluxo normalmente (confirme e siga adiante).\n'
-    + 'Se NÃO havia pergunta pendente, mande SÓ uma confirmação curtíssima e informal, no seu tom: '
-    + '"beleza", "é nois", "combinado", "show", "tmj". No máximo 3 palavras, sem pergunta nova, '
-    + 'sem recomeçar assunto e sem repetir o que já foi combinado.\n'
-    + 'NUNCA descreva a situação ("o lead apenas reagiu", "nenhuma resposta necessária", '
-    + '"sem ação necessária"): esse texto é enviado ao WhatsApp dele.';
+  // Reação sem texto (caso Peterson) e a instrução dela: regrasDaRodada.ts.
+  const levaSoReacao = ehLevaSoReacao(conteudo);
   if (levaSoReacao) tel.registrar('leva_so_reacao', { conteudo: conteudo.slice(0, 40) });
   let corrigiuHorario = false; // guarda de horário inventado: re-instrui só 1x
   const corrigiuTrava = new Set<'valor' | 'reuniao'>(); // canário: travas de valor/reunião, 1x cada
@@ -871,34 +825,7 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
     }
     return true;
   };
-  // SILÊNCIO INDEVIDO (21/09/2026, teste do usuário): o lead perguntou "mais cedo?", o modelo consultou
-  // a agenda duas vezes e fechou a volta com responder_ao_cliente VAZIO — a conversa travou sem erro
-  // nenhum. Silêncio só é resposta válida quando a rodada encerrou por tool (a despedida já saiu) ou
-  // quando o lote era só reação. Fora disso, a fala é pedida de novo, uma vez.
-  const CORRECAO_SILENCIO =
-    '[CORRECAO_INTERNA_AUTO_IGNORE] Você encerrou esta volta SEM mandar mensagem, mas o lead acabou de escrever e ' +
-    'está esperando resposta. Silêncio aqui trava a conversa. Responda agora à última mensagem dele, na voz do João, ' +
-    'usando os resultados das ferramentas que você já tem nesta conversa (se consultou a agenda, ofereça os horários ' +
-    'que ela devolveu; se não há o que ele pediu, diga isso em uma frase e ofereça o mais próximo). ' +
-    'Não mencione esta correção ao lead.';
-
-  // ── SILÊNCIO NÃO É RESPOSTA (2026-08-12, medido no harness) ─────────────────
-  // Quando a limpeza de saída derruba a mensagem INTEIRA (era só narração), o
-  // agente ficava mudo — em 2 de 50 rodadas do cenário Carolina a última fala do
-  // lead ficou sem resposta. Calar é melhor que vazar, mas é o pior dos dois
-  // resultados aceitáveis: o lead falou e ninguém respondeu. Agora pedimos a
-  // mensagem DE NOVO, uma vez, dizendo o que estava errado — mesma mecânica da
-  // trava de horário inventado. Se a segunda também vier só de bastidor, aí sim
-  // silêncio (a rodada fica no Debug do Agente com `resposta_vazia_reinstruida`).
-  const CORRECAO_VAZIO =
-    '[CORRECAO_INTERNA_AUTO_IGNORE] Sua última mensagem NÃO foi enviada: ela era inteiramente ' +
-    'raciocínio/relatório de bastidor, e depois da limpeza não sobrou NADA para o lead ler. ' +
-    'O texto barrado foi:\n"""\n%TEXTO%\n"""\n' +
-    'Escreva agora a mensagem que o lead vai LER, na voz do João, começando direto na primeira ' +
-    'palavra dela. Nada de comentar a conversa, o roteiro, as tentativas de contorno, o que você ' +
-    'decidiu ou o que vai fazer; nada de falar do lead na terceira pessoa ("ele", "ela", "o lead") ' +
-    '— fale COM a pessoa. Se o certo aqui é se despedir, mande só a despedida. ' +
-    'Não mencione esta correção ao lead.';
+  // Correções de silêncio (CORRECAO_SILENCIO) e de fala só de bastidor (CORRECAO_VAZIO): regrasDaRodada.ts.
 
   // ── RETENÇÃO PENDENTE ⇒ DESLIGA AS ESTEIRAS (2026-07-14) ──────────────────
   // Quando o lead demonstra desinteresse, o prompt manda fazer UMA pergunta de
@@ -915,7 +842,6 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
   // ⚠️ Casa a OFERTA de retenção ("te chame quando abrir a próxima turma"), NUNCA
   // "próxima turma" solta — o template de abertura do disparo fala em "vagas da
   // próxima turma" e um regex frouxo desligaria a esteira de lead normal.
-  const RE_RETENCAO = /(te cham\w*|te avis\w*)[^.?!]{0,40}pr[óo]xima turma/i;
   const suspenderEsteirasSeRetencao = async (texto: string) => {
     if (!RE_RETENCAO.test(texto)) return;
     await atualizarLead(supabase, remotejid, { followup_ativado: false });
@@ -1515,6 +1441,180 @@ async function rodadaPeloN8n(lote: any, cfg: DesvioN8n): Promise<Response> {
   return json({ ok: true, rodada: 'iniciada' });
 }
 
+// ═══ AGENTE POR PASSOS (30/09/2026, passosRodada.ts) — o loop desenhado no n8n ══════════════
+//   iniciar  → gates + trava + preparo; devolve os pedidos do router (Jev e Luna) e da leitura do Jev
+//   definir  → recebe a decisão do router e a leitura; ratchet, prompt, ferramentas → 1ª volta
+//   volta    → a resposta da Luna → ferramentas | corrigir | enviar | fim
+//   executar → uma ferramenta · gravar → os resultados · enviar → WhatsApp
+// Fim da rodada: se chegou mensagem no meio, já devolve a próxima rodada (nova_rodada); senão solta a trava.
+
+function depsDoPasso(e: { remotejid: string }, provedor: ProvedorIA | null, tel: Telemetria): DepsPassos {
+  return { supabase, tel, provedor, iaPausada: () => iaPausada(e.remotejid), renovar: lockRenovar(e.remotejid) };
+}
+
+async function comAssinatura(corpo: Record<string, any>, cfg: DesvioN8n): Promise<Response> {
+  return json({ ok: true, ...corpo, ...(corpo.estado ? { assinatura: await assinarEstado(corpo.estado, cfg.segredo) } : {}) });
+}
+
+/** Pedidos que o n8n faz no router: Jev (se ligado), Luna (reserva) e a leitura do Jev para a ficha. */
+async function pedidosDoRouter(pre: PreRouter, provedor: ProvedorIA & { formato: 'openai' }) {
+  const historico = await carregarHistorico(supabase, pre.remotejid);
+  const historicoRouter = limparParaRouter(comNotaParaRouter(historico, pre.notaTroca));
+  const novas = pre.itens.map((i: any) => String(i?.mensagem ?? '')).filter(Boolean);
+  return {
+    precisa: pre.precisaRouter,
+    jev: pre.precisaRouter && pre.configJev
+      ? { modo: pre.configJev.modo, limiar: pre.configJev.limiar, pedido: pedidoJevRouter(historicoRouter, pre.notaTroca) } : null,
+    luna: pre.precisaRouter
+      ? { pedido: paraPedidoOpenai(pedidoRouter(historicoRouter), { modelo: provedor.modelo, esforco: provedor.esforco, raciocinio: provedor.raciocinio }) }
+      : null,
+    leitura: pre.configLeitura
+      ? { modo: pre.configLeitura.modo, limiar: pre.configLeitura.limiar, pedido: pedidoJevLeitura(limparParaRouter(historico), novas) }
+      : null,
+  };
+}
+
+/** Começa uma rodada com a trava já pega: preparo até o router. */
+async function comecarRodadaPorPassos(remotejid: string, itens: any[], cfg: DesvioN8n): Promise<Record<string, unknown>> {
+  if (await iaPausada(remotejid)) {
+    await persistirEntradasDoLote(supabase, remotejid, itens, true);
+    criarTelemetria(supabase, remotejid).registrar('envio_abortado_pausa', { onde: 'agente_por_passos', mensagens_preservadas: itens.length });
+    await lockSoltar(remotejid);
+    return { acao: 'fim', motivo: 'ia_pausada' };
+  }
+  const tel = criarTelemetria(supabase, remotejid);
+  tel.registrar('agente_pelo_n8n', { mensagens: itens.length, passos: true });
+  const inicio = await prepararAntesDoRouter(remotejid, itens, tel);
+  if (!inicio) {
+    await lockSoltar(remotejid);
+    return { acao: 'fim', motivo: 'lote_sem_entrada_ativa' };
+  }
+  const { pre, provedor } = inicio;
+  if (provedor?.formato !== 'openai') {
+    // O agente no n8n é só a Luna. Número fora do canário dela não roda aqui (e não fica sem trava).
+    tel.registrar('erro', { onde: 'agente_por_passos' }, undefined, 'telefone fora do canário da Luna');
+    await lockSoltar(remotejid);
+    return { acao: 'fim', motivo: 'sem_luna' };
+  }
+  const { ctx, ...resto } = pre;
+  const estado = { fase: 'router', rodadaId: tel.rodadaId, remotejid: pre.remotejid, telefone: pre.telefone, ctx: ctxParaJson(ctx), pre: resto };
+  return { acao: 'rotear', estado, router: await pedidosDoRouter(pre, provedor) };
+}
+
+async function iniciarPorPassos(lote: any, cfg: DesvioN8n): Promise<Response> {
+  let remotejid = String(lote?.remotejid ?? '');
+  if (!remotejid || !mesmoTelefone(remotejid, lote?.telefone)) return json({ error: 'remotejid/telefone obrigatórios' }, 400);
+  const itens = itensDoLoteN8n(lote);
+  if (!itens.length) return json({ error: 'lote_vazio' }, 400);
+  for (const item of itens) {
+    const payload = payloadDaMensagem(lote, item);
+    const barrado = await gatesDeEntrada(payload, true);
+    if (barrado) return json({ ok: true, acao: 'barrado', gate: await barrado.json() });
+    remotejid = String(payload.remotejid ?? remotejid);
+  }
+  if (!(await lockClaim(remotejid))) {
+    for (const item of itens) await bufferInserir(remotejid, item);
+    return json({ ok: true, acao: 'enfileirado' });
+  }
+  try {
+    return await comAssinatura(await comecarRodadaPorPassos(remotejid, itens, cfg), cfg);
+  } catch (e) {
+    await lockSoltar(remotejid);
+    throw e;
+  }
+}
+
+/** Fim de rodada: mensagem que chegou no meio vira a próxima rodada; senão, solta a trava. */
+async function depoisDoPasso(saida: Saida, cfg: DesvioN8n): Promise<Response> {
+  if (saida.acao !== 'fim') return await comAssinatura(saida as Record<string, any>, cfg);
+  const remotejid = saida.estado.remotejid;
+  const proximos = await bufferDrenar(remotejid);
+  if (proximos.length) {
+    const nova = await comecarRodadaPorPassos(remotejid, proximos, cfg);
+    return await comAssinatura({ ...nova, anterior: { respondeu: saida.respondeu, motivo: saida.motivo ?? null, enviado: (saida as any).enviado ?? null },
+      ...(nova.acao === 'rotear' ? { acao: 'nova_rodada' } : {}) }, cfg);
+  }
+  await lockSoltar(remotejid);
+  const { estado: _e, ...resto } = saida as Record<string, any>;
+  return json({ ok: true, ...resto, agente: saida.estado.agenteEfetivo, voltas: saida.estado.volta });
+}
+
+async function definirPorPassos(corpo: any, cfg: DesvioN8n): Promise<Response> {
+  const e = corpo.estado;
+  const pre = { ...e.pre, ctx: ctxDeJson(e.ctx) } as PreRouter;
+  const provedor = await provedorDoLead(pre.telefone);
+  const tel = criarTelemetria(supabase, pre.remotejid, e.rodadaId);
+  await lockRenovar(pre.remotejid)();
+  let decisao: DecisaoRouter | null = null;
+  if (pre.precisaRouter) {
+    const r = corpo.router ?? {};
+    const leituraJev = pre.configJev && (r.jev_resposta || r.jev_erro)
+      ? leituraDoRouter(r.jev_resposta ? respostaJev(r.jev_resposta) : null, pre.configJev, Number(r.jev_ms ?? 0), r.jev_erro)
+      : undefined;
+    let agente: AgenteRouter | null = null;
+    let fonte = 'nenhuma';
+    if (leituraJev && pre.configJev?.modo === 'ativo'
+      && (leituraJev.decisao === 'agente_validacao' || leituraJev.decisao === 'agente_qualificador')) {
+      agente = leituraJev.decisao;
+      fonte = 'jev';
+    } else if (r.luna_resposta) {
+      try {
+        const resp: any = paraRespostaAnthropic(r.luna_resposta);
+        tel.registrar('llm_chamada', {
+          volta: 0, agente: 'router', provedor: 'openai', modelo: resp.model ?? null,
+          tokens_entrada: resp.usage?.input_tokens ?? null, tokens_saida: resp.usage?.output_tokens ?? null,
+          cache_lido: resp.usage?.cache_read_input_tokens ?? null, cache_escrito: resp.usage?.cache_creation_input_tokens ?? null,
+          agente_pelo_n8n: true,
+        });
+        agente = agenteDaRespostaRouter(resp);
+        fonte = 'luna';
+      } catch (err) {
+        console.error('[crm-agente-sdr] router (n8n) sem decisão, mantendo agente atual:', err);
+      }
+    }
+    decisao = { agente, ms: Number(r.ms ?? 0), fonte,
+      ...(leituraJev ? { jev: { ...leituraJev, decidiu_sozinho: fonte === 'jev' } } : {}) };
+  }
+  const depois = await definirAgente(pre, provedor, tel, decisao);
+  const l = corpo.leitura ?? {};
+  const leitura = pre.configLeitura
+    ? leituraDasRespostas(l.resposta ? respostaJev(l.resposta) : null, Number(l.ms ?? 0), l.erro ?? (l.resposta ? undefined : 'sem leitura'))
+    : null;
+  const estado = estadoInicial(pre as any, depois, e.rodadaId, leitura);
+  const saida = await montarVolta(depsDoPasso(estado, provedor, tel), estado);
+  // A decisão do router vai junto da resposta, para o n8n mostrar (não muda nada no fluxo).
+  const res = await depoisDoPasso(saida, cfg);
+  const dados = await res.json();
+  return json({ ...dados, router_decidiu: { agente: depois.agenteEfetivo, fonte: decisao?.fonte ?? 'sem_router' } }, res.status);
+}
+
+async function passoPorPassos(acao: string, corpo: any, cfg: DesvioN8n): Promise<Response> {
+  const e = corpo.estado as EstadoRodada;
+  const provedor = await provedorDoLead(e.telefone);
+  const tel = criarTelemetria(supabase, e.remotejid, e.rodadaId);
+  await lockRenovar(e.remotejid)();
+  const deps = depsDoPasso(e, provedor, tel);
+  if (acao === 'executar') {
+    if (!corpo?.chamada?.id || !corpo?.chamada?.name) return json({ error: 'chamada_invalida' }, 400);
+    const r = await executarFerramentaPasso(deps, e, corpo.chamada, Array.isArray(corpo.anteriores) ? corpo.anteriores : []);
+    return json({ ok: true, ...r });
+  }
+  const saida = acao === 'volta' ? await lerResposta(deps, e, { resposta: corpo.resposta, erro: corpo.erro, correcao: corpo.correcao === true })
+    : acao === 'gravar' ? await gravarResultados(deps, e, corpo.chamadas ?? [], corpo.resultados ?? [])
+    : await enviarPasso(deps, e, { tipo: corpo.tipo, texto: corpo.texto, motivo: corpo.motivo });
+  return await depoisDoPasso(saida, cfg);
+}
+
+/** O n8n avisa que a rodada quebrou no meio: registra e solta a trava (o lote fica no histórico). */
+async function encerrarPorPassos(corpo: any): Promise<Response> {
+  const remotejid = String(corpo?.remotejid ?? '');
+  if (!remotejid || !mesmoTelefone(remotejid, corpo?.telefone)) return json({ error: 'remotejid/telefone obrigatórios' }, 400);
+  criarTelemetria(supabase, remotejid, typeof corpo?.rodadaId === 'string' ? corpo.rodadaId : undefined)
+    .registrar('erro', { onde: 'agente_por_passos', no_n8n: String(corpo?.no ?? '') }, undefined, String(corpo?.erro ?? 'rodada interrompida no n8n').slice(0, 500));
+  await lockSoltar(remotejid);
+  return json({ ok: true, acao: 'fim', motivo: 'interrompida' });
+}
+
 async function ferramentaPeloN8n(chamada: any, ctx: CtxConversa): Promise<Response> {
   if (!chamada?.id || !chamada?.name) return json({ error: 'chamada_invalida' }, 400);
   if (!mesmoTelefone(ctx.remotejid, ctx.telefone)) return json({ error: 'ctx_invalido' }, 400);
@@ -1724,15 +1824,25 @@ Deno.serve(async (req) => {
     try { corpo = await req.json(); } catch { return json({ error: 'payload inválido' }, 400); }
     const desvio = await carregarDesvioN8n(supabase);
     const ctxDaFerramenta = acao === 'ferramenta' ? ctxDeJson(corpo?.ctx) : null;
-    const alvo = acao === 'ferramenta' ? ctxDaFerramenta?.telefone : (corpo?.remotejid ?? corpo?.telefone);
+    const alvo = acao === 'ferramenta' ? ctxDaFerramenta?.telefone
+      : PASSOS_COM_ESTADO.has(acao) ? corpo?.estado?.telefone
+      : (corpo?.remotejid ?? corpo?.telefone);
     const auth = autorizarN8n(desvio, segredoDoPedido(req), alvo);
     if (!auth.ok) return json({ error: auth.erro }, auth.status);
+    // O estado viajou pelo n8n: quem (lead, conta, oportunidade) não pode ter mudado.
+    if (PASSOS_COM_ESTADO.has(acao) && !(await estadoConfere(corpo?.estado, corpo?.assinatura, desvio!))) {
+      return json({ error: 'estado_invalido' }, 403);
+    }
     try {
       if (acao === 'midia') {
         return json({ ok: true, ...(await tratarMidiaN8n(corpo, criarTelemetria(supabase, String(corpo.remotejid ?? '')))) });
       }
       if (acao === 'ferramenta') return await ferramentaPeloN8n(corpo?.chamada, ctxDaFerramenta!);
-      return await rodadaPeloN8n(corpo, desvio!);
+      if (acao === 'rodada') return await rodadaPeloN8n(corpo, desvio!);
+      if (acao === 'iniciar') return await iniciarPorPassos(corpo, desvio!);
+      if (acao === 'definir') return await definirPorPassos(corpo, desvio!);
+      if (acao === 'fim') return await encerrarPorPassos(corpo);
+      return await passoPorPassos(acao, corpo, desvio!);
     } catch (e) {
       console.error(`[crm-agente-sdr] n8n/${acao} falhou:`, (e as Error)?.message ?? e);
       return json({ ok: false, error: `falha_${acao}` }, 502);

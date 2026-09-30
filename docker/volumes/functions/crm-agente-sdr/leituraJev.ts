@@ -17,7 +17,7 @@
 import { FORMACOES_OFICIAIS } from './contexto.ts';
 import type { ColetaJornada, Jornada } from './fichaAtendimento.ts';
 import type { Msg } from './historico.ts';
-import { chamarJev, conversaParaJev, escolhaDoJev, mascarar, PRAZO_JEV_MS, simDoJev, type TurnoJev } from './jev.ts';
+import { chamarJev, conversaParaJev, corpoJev, escolhaDoJev, mascarar, PRAZO_JEV_MS, type RespostaJev, simDoJev, type TurnoJev } from './jev.ts';
 
 export type ModoLeituraJev = 'off' | 'sombra' | 'ativo';
 export interface ConfigLeituraJev { modo: Exclude<ModoLeituraJev, 'off'>; limiar: number }
@@ -124,6 +124,31 @@ export function estadoDaLeitura(historicoLimpo: readonly Msg[], novas: readonly 
   };
 }
 
+/** O pedido da leitura ao Jev (o agente no n8n faz a chamada com este corpo). */
+export function pedidoJevLeitura(historicoLimpo: readonly Msg[], novas: readonly string[]) {
+  return corpoJev(estadoDaLeitura(historicoLimpo, novas), PERGUNTAS_LEITURA);
+}
+
+/** Resposta do Jev (ou a falha dela) → LeituraLead. */
+export function leituraDasRespostas(r: RespostaJev | null, ms: number, erro?: string): LeituraLead {
+  if (!r) {
+    return {
+      conclusao: null, graduacao: null, informou_data: null, pediu_material: null, dois_assuntos: null, dor_financeira: null,
+      modelo: null, tokens_entrada: null, ms, erro: String(erro ?? 'Jev: sem resposta').slice(0, 200),
+    };
+  }
+  const a = r.answers;
+  return {
+    conclusao: escolhaDoJev(a.conclusao),
+    graduacao: escolhaDoJev(a.graduacao),
+    informou_data: simDoJev(a.informou_data),
+    pediu_material: simDoJev(a.pediu_material),
+    dois_assuntos: simDoJev(a.dois_assuntos),
+    dor_financeira: simDoJev(a.dor_financeira),
+    modelo: r.modelo, tokens_entrada: r.tokens_entrada, ms,
+  };
+}
+
 export async function lerLeadComJev(
   historicoLimpo: readonly Msg[],
   novas: readonly string[],
@@ -134,21 +159,9 @@ export async function lerLeadComJev(
   const inicio = Date.now();
   try {
     const r = await chamarJev(estadoDaLeitura(historicoLimpo, novas), PERGUNTAS_LEITURA, chave, opts.fetchFn, opts.prazoMs ?? PRAZO_JEV_MS);
-    const a = r.answers;
-    return {
-      conclusao: escolhaDoJev(a.conclusao),
-      graduacao: escolhaDoJev(a.graduacao),
-      informou_data: simDoJev(a.informou_data),
-      pediu_material: simDoJev(a.pediu_material),
-      dois_assuntos: simDoJev(a.dois_assuntos),
-      dor_financeira: simDoJev(a.dor_financeira),
-      modelo: r.modelo, tokens_entrada: r.tokens_entrada, ms: Date.now() - inicio,
-    };
+    return leituraDasRespostas(r, Date.now() - inicio);
   } catch (e) {
-    return {
-      conclusao: null, graduacao: null, informou_data: null, pediu_material: null, dois_assuntos: null, dor_financeira: null,
-      modelo: null, tokens_entrada: null, ms: Date.now() - inicio, erro: String((e as Error)?.message ?? e).slice(0, 200),
-    };
+    return leituraDasRespostas(null, Date.now() - inicio, String((e as Error)?.message ?? e));
   }
 }
 

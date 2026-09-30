@@ -12,7 +12,7 @@
 // Promover ao qualificador é o erro caro (o ratchet não deixa voltar), por isso o limiar vale
 // para os dois lados e o meio do caminho nunca é decidido pelo Jev.
 import type { Msg } from './historico.ts';
-import { chamarJev, conversaParaJev, PRAZO_JEV_MS } from './jev.ts';
+import { chamarJev, conversaParaJev, corpoJev, PRAZO_JEV_MS, type RespostaJev } from './jev.ts';
 
 export type AgenteRouter = 'agente_validacao' | 'agente_qualificador';
 export type ModoRouterJev = 'off' | 'sombra' | 'ativo';
@@ -78,13 +78,13 @@ export function decisaoPorLimiar(p: number, limiar: number): AgenteRouter | 'inc
   return 'incerto';
 }
 
-export async function perguntarAoJev(
-  estado: unknown,
-  chave: string,
-  fetchFn: typeof fetch = fetch,
-  prazoMs = PRAZO_JEV_MS,
-): Promise<{ p: number; confianca: number | null; modelo: string | null; tokens_entrada: number | null }> {
-  const r = await chamarJev(estado, { agente: PERGUNTA_ROUTER }, chave, fetchFn, prazoMs);
+/** O pedido do router ao Jev (o agente no n8n faz a chamada com este corpo). */
+export function pedidoJevRouter(historicoLimpo: readonly Msg[], nota?: string | null) {
+  return corpoJev(estadoParaJev(historicoLimpo, { nota }), { agente: PERGUNTA_ROUTER });
+}
+
+/** Resposta do Jev → probabilidade de "horário escolhido". Sem probabilidade = erro. */
+export function probabilidadeDoRouter(r: RespostaJev): { p: number; confianca: number | null; modelo: string | null; tokens_entrada: number | null } {
   const resposta = r.answers.agente;
   const p = resposta?.probabilities?.horario_escolhido;
   if (typeof p !== 'number' || !Number.isFinite(p)) throw new Error('Jev: resposta sem probabilidade');
@@ -94,6 +94,31 @@ export async function perguntarAoJev(
     modelo: r.modelo,
     tokens_entrada: r.tokens_entrada,
   };
+}
+
+export async function perguntarAoJev(
+  estado: unknown,
+  chave: string,
+  fetchFn: typeof fetch = fetch,
+  prazoMs = PRAZO_JEV_MS,
+): Promise<{ p: number; confianca: number | null; modelo: string | null; tokens_entrada: number | null }> {
+  return probabilidadeDoRouter(await chamarJev(estado, { agente: PERGUNTA_ROUTER }, chave, fetchFn, prazoMs));
+}
+
+/** A leitura do router pelo Jev (telemetria + decisão), a partir de uma resposta já obtida (agente no n8n). */
+export function leituraDoRouter(r: RespostaJev | null, config: ConfigRouterJev, ms: number, erro?: string): LeituraJev {
+  const modo = config.modo === 'off' ? 'ativo' : config.modo;
+  const { limiar } = config;
+  try {
+    if (!r) throw new Error(erro ?? 'Jev: sem resposta');
+    const x = probabilidadeDoRouter(r);
+    const decisao = decisaoPorLimiar(x.p, limiar);
+    return { modo, limiar, p: x.p, confianca: x.confianca, decisao,
+      decidiu_sozinho: modo === 'ativo' && decisao !== 'incerto', modelo: x.modelo, tokens_entrada: x.tokens_entrada, ms };
+  } catch (e) {
+    return { modo, limiar, p: null, confianca: null, decisao: 'erro', decidiu_sozinho: false, modelo: null,
+      tokens_entrada: null, ms, erro: String((e as Error)?.message ?? e).slice(0, 200) };
+  }
 }
 
 /**

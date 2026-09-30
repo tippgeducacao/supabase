@@ -29,6 +29,17 @@ function ordenado(v: unknown): unknown {
 export class MemoriaDeConsultas {
   private vistas = new Set<string>();
 
+  /** A memória em JSON (o agente no n8n guarda o estado da rodada entre os pedidos). */
+  paraJson(): string[] {
+    return [...this.vistas];
+  }
+
+  static deJson(vistas: unknown): MemoriaDeConsultas {
+    const m = new MemoriaDeConsultas();
+    if (Array.isArray(vistas)) for (const v of vistas) if (typeof v === 'string') m.vistas.add(v);
+    return m;
+  }
+
   /** true = esta chamada repete uma consulta idêntica desta rodada (não execute). */
   repetida(nome: string, input: unknown): boolean {
     if (!CONSULTAS.has(nome)) {

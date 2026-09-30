@@ -8,8 +8,9 @@ export type Telemetria = {
   registrar: (tipo: string, dados?: Record<string, unknown>, duracaoMs?: number, erro?: string) => void;
 };
 
-export function criarTelemetria(supabase: any, remotejid: string): Telemetria {
-  const rodadaId = crypto.randomUUID();
+// `rodadaId` já existente: o agente no n8n faz a rodada em vários pedidos, e a trilha é uma só.
+export function criarTelemetria(supabase: any, remotejid: string, rodadaExistente?: string): Telemetria {
+  const rodadaId = rodadaExistente ?? crypto.randomUUID();
   return {
     rodadaId,
     registrar(tipo, dados = {}, duracaoMs, erro) {

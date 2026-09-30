@@ -22,7 +22,8 @@ describe('rotas do agente no n8n', () => {
     expect(ehAcaoN8n('midia')).toBe(true);
     expect(ehAcaoN8n('rodada')).toBe(true);
     expect(ehAcaoN8n('ferramenta')).toBe(true);
-    expect(ehAcaoN8n('executar')).toBe(false);
+    expect(ehAcaoN8n('executar')).toBe(true);
+    expect(ehAcaoN8n('apagar_tudo')).toBe(false);
     expect(ehAcaoN8n(null)).toBe(false);
   });
 
