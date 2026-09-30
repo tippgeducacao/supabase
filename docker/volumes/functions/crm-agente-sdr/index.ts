@@ -57,8 +57,11 @@ import {
 } from './fichaAtendimento.ts';
 import { comGanchoDoLote, cursoDaConversa } from './ganchoLote.ts';
 import { ehComandoLimpar, ehTelefoneDeTeste, limparConversaDeTeste, limpoEm } from './limparTeste.ts';
-import { carregarDesvioN8n, vaiParaN8n } from '../_shared/desvioN8n.ts';
-import { autorizarN8n, ehAcaoN8n, segredoDoPedido, tratarMidiaN8n } from './rotasN8n.ts';
+import { carregarDesvioN8n, type DesvioN8n, vaiParaN8n } from '../_shared/desvioN8n.ts';
+import {
+  autorizarN8n, ctxDeJson, ctxParaJson, ehAcaoN8n, executarFerramentaPeloN8n, itensDoLoteN8n, mesmoTelefone, payloadDaMensagem,
+  provedorPeloN8n, segredoDoPedido, tratarMidiaN8n,
+} from './rotasN8n.ts';
 import { blocoConviteAgenda } from './contexto.ts';
 import { prepararMensagem } from './midia.ts';
 import { persistirEntradasDoLote, registrarEntrada } from './historicoEntradaPausa.ts';
@@ -713,11 +716,21 @@ async function prepararRodada(remotejid: string, itensDoLote: any[], tel: Teleme
   return { itens, inicioRodada, conteudo, doUltimoCom, telefone, provedor, registrarFalaAposEnvio, conjuntoPrompt, textosDoPrompt, ctx, lead, pedidoPorPalavraChave, modoTroca, aberturaControlada, contasNoLote, desdeLimpeza, sinalTroca, formacaoNormalizada, vars, campanha, aulaPiloto, aulaDaCampanha, contextoTemporal, personaDoNumero, persona, ehCampanha, aplicarTroca, agenteAnterior, notaTroca, registrarUsoRouter, naListaDoCanario, configJev, configLeitura, leituraPromessa, jev, rotear, promptAgente, tools, contextoEfetivo, agenteEfetivo, estaNaEscola };
 }
 
-async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetria): Promise<void> {
+// As duas pontas que o agente no n8n assume (rotasN8n.ts): a chamada da Luna e a execução das
+// ferramentas. Sem `pontas` = produção, tudo aqui dentro, como sempre foi.
+type PontasDaRodada = {
+  provedor?: (p: ProvedorIA) => ProvedorIA;
+  executarFerramenta?: (chamada: { id: string; name: string; input: any }, ctx: CtxConversa) => Promise<Record<string, unknown>>;
+};
+
+async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetria, pontas?: PontasDaRodada): Promise<void> {
   const preparo = await prepararRodada(remotejid, itensDoLote, tel);
   if (!preparo) return;
   // `let`: o loop reatribui parte delas (provedor no fallback, lead, contexto…), como antes.
   let { itens, inicioRodada, conteudo, doUltimoCom, telefone, provedor, registrarFalaAposEnvio, conjuntoPrompt, textosDoPrompt, ctx, lead, pedidoPorPalavraChave, modoTroca, aberturaControlada, contasNoLote, desdeLimpeza, sinalTroca, formacaoNormalizada, vars, campanha, aulaPiloto, aulaDaCampanha, contextoTemporal, personaDoNumero, persona, ehCampanha, aplicarTroca, agenteAnterior, notaTroca, registrarUsoRouter, naListaDoCanario, configJev, configLeitura, leituraPromessa, jev, rotear, promptAgente, tools, contextoEfetivo, agenteEfetivo, estaNaEscola } = preparo;
+  // Agente no n8n: a Luna é chamada pelo webhook do n8n (o router, feito no preparo, não).
+  if (pontas?.provedor && provedor) provedor = pontas.provedor(provedor);
+  const executarFerramenta = pontas?.executarFerramenta ?? ((chamada, c) => executarTool(supabase, chamada, c));
   const renovar = lockRenovar(remotejid);
   // 22/09/2026: candidato local, só no canário OpenAI já selecionado pelo telefone.
   // Consulta o provedor na HORA da saída: fallback para Claude conserva o legado.
@@ -1130,7 +1143,7 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
         const repetida = consultasDaRodada?.repetida(tu.name, tu.input) ?? false;
         const output = repetida
           ? { id: tu.id, resultado: AVISO_CONSULTA_REPETIDA }
-          : await executarTool(supabase, tu, ctx);
+          : await executarFerramenta(tu, ctx);
         tel.registrar('tool_exec', {
           tool: tu.name,
           input: resumir(tu.input, 800),
@@ -1451,107 +1464,68 @@ async function processarInbound(payload: any): Promise<void> {
   }
 }
 
-// ═══ NÓ 1 · TRIGGER — a porta de entrada (n8n: nó Webhook) ══════════════════
-// Toda mensagem do lead chega aqui por HTTP, vinda do crm-whatsapp-webhook. Os crons também
-// batem aqui para rodar as esteiras de follow-up (mode=followup / followup-template).
-// Responde 200 NA HORA (o webhook desiste em 10 s) e o trabalho segue em segundo plano.
-// ── entrada ─────────────────────────────────────────────────────────────────
-
-Deno.serve(async (req) => {
-  if (req.method === 'OPTIONS') return new Response('ok');
-  if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405);
-
-  const url = new URL(req.url);
-
-  // Esteira de follow-up de JANELA ABERTA: disparada pelo cron (mode=followup),
-  // não é um inbound. Varre os leads devidos e reabre as conversas que esfriaram.
-  // Auth por SEGREDO COMPARTILHADO no banco (crm_agente_sdr_config.followup_secret),
-  // enviado pelo cron no header x-followup-key. No self-hosted o service_role do
-  // pg_net NÃO bate com o SUPABASE_SERVICE_ROLE_KEY do container, então não dá pra
-  // autenticar por service_role; o segredo do banco resolve (e o front não lê, RLS
-  // bloqueia). Vem ANTES da checagem do token de inbound. ?wait=1 roda síncrono
-  // (teste manual vê estatísticas); sem isso, background + 200 na hora.
-  // ▸ Não é mensagem de lead: é o cron do follow-up de janela aberta (followup.ts).
-  if (url.searchParams.get('mode') === 'followup') {
-    const { data: cfg } = await supabase
-      .from('crm_agente_sdr_config')
-      .select('followup_secret')
-      .eq('id', 1)
-      .maybeSingle();
-    const segredo = cfg?.followup_secret ?? '';
-    if (!segredo || req.headers.get('x-followup-key') !== segredo) {
-      return json({ error: 'unauthorized' }, 401);
-    }
-    const limiteParam = Number(url.searchParams.get('limite'));
-    const trabalho = rodarEsteiraFollowup(supabase, Number.isFinite(limiteParam) && limiteParam > 0 ? limiteParam : undefined);
-    if (url.searchParams.get('wait') === '1') {
-      return json({ ok: true, esteira: 'followup', ...(await trabalho) });
-    }
-    if (typeof EdgeRuntime !== 'undefined' && EdgeRuntime?.waitUntil) EdgeRuntime.waitUntil(trabalho);
-    else await trabalho;
-    return json({ ok: true, esteira: 'followup', modo: 'background' });
+// ═══ AGENTE PELO n8n (30/09/2026, rotasN8n.ts) ═══════════════════════════════
+// O n8n fez o buffer (Redis, 5 s) e a mídia; daqui para a frente é o MESMO caminho da produção:
+// gates → trava do lead → rodadaAgente. Só a chamada da Luna e as ferramentas saem pelo n8n.
+async function rodadaPeloN8n(lote: any, cfg: DesvioN8n): Promise<Response> {
+  let remotejid = String(lote?.remotejid ?? '');
+  if (!remotejid || !mesmoTelefone(remotejid, lote?.telefone)) return json({ error: 'remotejid/telefone obrigatórios' }, 400);
+  const itens = itensDoLoteN8n(lote);
+  if (!itens.length) return json({ error: 'lote_vazio' }, 400);
+  // Cada mensagem passa pelos gates, como passaria vinda do gateway (registra a entrada, pausa, /limpar…).
+  for (const item of itens) {
+    const payload = payloadDaMensagem(lote, item);
+    const barrado = await gatesDeEntrada(payload, true);
+    if (barrado) return barrado;
+    remotejid = String(payload.remotejid ?? remotejid);
   }
-
-  // Esteira de TEMPLATE (janela fechada): mesma auth da janela aberta. O cron chama
-  // em vários horários do dia; o módulo espalha o envio por lead e respeita a trava
-  // de 24h. ?wait=1 roda síncrono (vê estatísticas); ?hora=<0-23> força a hora do
-  // tick (teste); ?limite=<n> limita os leads do tick.
-  // ▸ Cron da esteira de template, para janela de 24 h fechada (followup-template.ts).
-  if (url.searchParams.get('mode') === 'followup-template') {
-    const { data: cfg } = await supabase
-      .from('crm_agente_sdr_config')
-      .select('followup_secret')
-      .eq('id', 1)
-      .maybeSingle();
-    const segredo = cfg?.followup_secret ?? '';
-    if (!segredo || req.headers.get('x-followup-key') !== segredo) {
-      return json({ error: 'unauthorized' }, 401);
-    }
-    const limiteParam = Number(url.searchParams.get('limite'));
-    // ⚠️ Number(null) === 0 — sem o guard de presença, tick SEM ?hora= rodava com
-    // hora forçada 0 (= 21h BRT, fora de toda janela) e os crons naturais nunca
-    // enviavam nada (bug pego em 2026-07-06, tarde inteira com devidos=0).
-    const horaRaw = url.searchParams.get('hora');
-    const horaParam = horaRaw === null ? NaN : Number(horaRaw);
-    // ?cadeia=<n>: nº da rodada encadeada — a esteira se re-invoca em lotes de 300
-    // até drenar os devidos do tick (encadearProximaRodada no followup-template.ts).
-    const cadeiaRaw = url.searchParams.get('cadeia');
-    const cadeiaParam = cadeiaRaw === null ? NaN : Number(cadeiaRaw);
-    const trabalho = rodarEsteiraFollowupTemplate(supabase, {
-      limite: Number.isFinite(limiteParam) && limiteParam > 0 ? limiteParam : undefined,
-      horaUtc: Number.isFinite(horaParam) ? horaParam : undefined,
-      cadeia: Number.isFinite(cadeiaParam) && cadeiaParam > 0 ? cadeiaParam : undefined,
-    });
-    if (url.searchParams.get('wait') === '1') {
-      return json({ ok: true, esteira: 'followup-template', ...(await trabalho) });
-    }
-    if (typeof EdgeRuntime !== 'undefined' && EdgeRuntime?.waitUntil) EdgeRuntime.waitUntil(trabalho);
-    else await trabalho;
-    return json({ ok: true, esteira: 'followup-template', modo: 'background' });
+  // Rodada em andamento (a Luna ainda está respondendo): o lote entra no buffer e é drenado por ela.
+  if (!(await lockClaim(remotejid))) {
+    for (const item of itens) await bufferInserir(remotejid, item);
+    return json({ ok: true, enfileirado: true });
   }
-
-  // ▸ Rotas do agente no n8n (rotasN8n.ts): segredo do desvio + só telefone de teste.
-  // ?mode=n8n&acao=midia → mídia do gateway vira texto (Gemini), antes de o n8n pôr no buffer.
-  if (url.searchParams.get('mode') === 'n8n') {
-    const acao = url.searchParams.get('acao');
-    if (!ehAcaoN8n(acao)) return json({ error: 'acao_desconhecida' }, 400);
-    let corpo: any;
-    try { corpo = await req.json(); } catch { return json({ error: 'payload inválido' }, 400); }
-    const auth = autorizarN8n(await carregarDesvioN8n(supabase), segredoDoPedido(req), corpo?.remotejid ?? corpo?.telefone);
-    if (!auth.ok) return json({ error: auth.erro }, auth.status);
+  const pontas: PontasDaRodada = {
+    provedor: (p) => provedorPeloN8n(p, cfg),
+    executarFerramenta: (chamada, ctx) => executarFerramentaPeloN8n(cfg, chamada, ctx),
+  };
+  const trabalho = (async () => {
+    let tel = criarTelemetria(supabase, remotejid);
     try {
-      return json({ ok: true, ...(await tratarMidiaN8n(corpo, criarTelemetria(supabase, String(corpo.remotejid ?? '')))) });
+      let proximo: any[] = itens;
+      while (proximo.length) {
+        if (await iaPausada(remotejid)) {
+          await persistirEntradasDoLote(supabase, remotejid, proximo, true);
+          tel.registrar('envio_abortado_pausa', { onde: 'agente_pelo_n8n', mensagens_preservadas: proximo.length });
+          break;
+        }
+        tel = criarTelemetria(supabase, remotejid);
+        tel.registrar('agente_pelo_n8n', { mensagens: proximo.length });
+        await rodadaAgente(remotejid, proximo, tel, pontas);
+        proximo = await bufferDrenar(remotejid);
+      }
     } catch (e) {
-      console.error('[crm-agente-sdr] n8n/midia falhou:', (e as Error)?.message ?? e);
-      return json({ ok: false, error: 'falha_ao_tratar_midia' }, 502);
+      console.error(`[crm-agente-sdr] agente pelo n8n ${remotejid}:`, e);
+      tel.registrar('erro', { onde: 'rodadaPeloN8n', stack: resumir((e as Error).stack ?? '', 1500) }, undefined, (e as Error).message);
+    } finally {
+      await lockSoltar(remotejid);
     }
-  }
+  })();
+  if (typeof EdgeRuntime !== 'undefined' && EdgeRuntime?.waitUntil) EdgeRuntime.waitUntil(trabalho);
+  else await trabalho;
+  return json({ ok: true, rodada: 'iniciada' });
+}
 
-  if (TOKEN && url.searchParams.get('token') !== TOKEN) return json({ error: 'unauthorized' }, 401);
+async function ferramentaPeloN8n(chamada: any, ctx: CtxConversa): Promise<Response> {
+  if (!chamada?.id || !chamada?.name) return json({ error: 'chamada_invalida' }, 400);
+  if (!mesmoTelefone(ctx.remotejid, ctx.telefone)) return json({ error: 'ctx_invalido' }, 400);
+  const output = await executarTool(supabase, { id: String(chamada.id), name: String(chamada.name), input: chamada.input ?? {} }, ctx);
+  return json({ ok: true, output, ctx: ctxParaJson(ctx) });
+}
 
-  let payload: any;
-  try { payload = await req.json(); } catch { return json({ error: 'payload inválido' }, 400); }
-
+// ═══ NÓ 3 · GATES (função desde 30/09/2026) ══════════════════════════════════
+// Mesmas barreiras para o relay do gateway e para o lote que vem do agente no n8n (viaN8n: aí o
+// desvio "atendido_pelo_n8n" não vale, é justamente ele chamando). null = passou em tudo.
+async function gatesDeEntrada(payload: any, viaN8n = false): Promise<Response | null> {
   // ═══ NÓ 3 · GATES — a IA pode falar com este lead? ═══════════════════════════
   // Cada `return json({ ok: true, skip: … })` abaixo é uma saída "não responder" (n8n: IF → false).
   // Ordem: é mensagem recebida? é de outro agente (aluno/RH)? pedido de reset de teste? o lead
@@ -1579,7 +1553,7 @@ Deno.serve(async (req) => {
   }
   // Telefone de teste atendido pelo agente no n8n (29/09/2026, _shared/desvioN8n.ts): o gateway já
   // manda para lá; aqui só chega pela reconciliação de órfãos, e responder daria duas IAs.
-  if (vaiParaN8n(await carregarDesvioN8n(supabase), payload.remotejid)) {
+  if (!viaN8n && vaiParaN8n(await carregarDesvioN8n(supabase), payload.remotejid)) {
     return json({ ok: true, skip: 'atendido_pelo_n8n' });
   }
   // /limpar (29/09/2026): recomeça o TESTE do zero mantendo o cadastro, só para telefones de teste
@@ -1658,6 +1632,120 @@ Deno.serve(async (req) => {
     });
     return json({ ok: true, skip: 'aluno_matriculado' });
   }
+  return null;
+}
+
+// ═══ NÓ 1 · TRIGGER — a porta de entrada (n8n: nó Webhook) ══════════════════
+// Toda mensagem do lead chega aqui por HTTP, vinda do crm-whatsapp-webhook. Os crons também
+// batem aqui para rodar as esteiras de follow-up (mode=followup / followup-template).
+// Responde 200 NA HORA (o webhook desiste em 10 s) e o trabalho segue em segundo plano.
+// ── entrada ─────────────────────────────────────────────────────────────────
+Deno.serve(async (req) => {
+  if (req.method === 'OPTIONS') return new Response('ok');
+  if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405);
+
+  const url = new URL(req.url);
+
+  // Esteira de follow-up de JANELA ABERTA: disparada pelo cron (mode=followup),
+  // não é um inbound. Varre os leads devidos e reabre as conversas que esfriaram.
+  // Auth por SEGREDO COMPARTILHADO no banco (crm_agente_sdr_config.followup_secret),
+  // enviado pelo cron no header x-followup-key. No self-hosted o service_role do
+  // pg_net NÃO bate com o SUPABASE_SERVICE_ROLE_KEY do container, então não dá pra
+  // autenticar por service_role; o segredo do banco resolve (e o front não lê, RLS
+  // bloqueia). Vem ANTES da checagem do token de inbound. ?wait=1 roda síncrono
+  // (teste manual vê estatísticas); sem isso, background + 200 na hora.
+  // ▸ Não é mensagem de lead: é o cron do follow-up de janela aberta (followup.ts).
+  if (url.searchParams.get('mode') === 'followup') {
+    const { data: cfg } = await supabase
+      .from('crm_agente_sdr_config')
+      .select('followup_secret')
+      .eq('id', 1)
+      .maybeSingle();
+    const segredo = cfg?.followup_secret ?? '';
+    if (!segredo || req.headers.get('x-followup-key') !== segredo) {
+      return json({ error: 'unauthorized' }, 401);
+    }
+    const limiteParam = Number(url.searchParams.get('limite'));
+    const trabalho = rodarEsteiraFollowup(supabase, Number.isFinite(limiteParam) && limiteParam > 0 ? limiteParam : undefined);
+    if (url.searchParams.get('wait') === '1') {
+      return json({ ok: true, esteira: 'followup', ...(await trabalho) });
+    }
+    if (typeof EdgeRuntime !== 'undefined' && EdgeRuntime?.waitUntil) EdgeRuntime.waitUntil(trabalho);
+    else await trabalho;
+    return json({ ok: true, esteira: 'followup', modo: 'background' });
+  }
+
+  // Esteira de TEMPLATE (janela fechada): mesma auth da janela aberta. O cron chama
+  // em vários horários do dia; o módulo espalha o envio por lead e respeita a trava
+  // de 24h. ?wait=1 roda síncrono (vê estatísticas); ?hora=<0-23> força a hora do
+  // tick (teste); ?limite=<n> limita os leads do tick.
+  // ▸ Cron da esteira de template, para janela de 24 h fechada (followup-template.ts).
+  if (url.searchParams.get('mode') === 'followup-template') {
+    const { data: cfg } = await supabase
+      .from('crm_agente_sdr_config')
+      .select('followup_secret')
+      .eq('id', 1)
+      .maybeSingle();
+    const segredo = cfg?.followup_secret ?? '';
+    if (!segredo || req.headers.get('x-followup-key') !== segredo) {
+      return json({ error: 'unauthorized' }, 401);
+    }
+    const limiteParam = Number(url.searchParams.get('limite'));
+    // ⚠️ Number(null) === 0 — sem o guard de presença, tick SEM ?hora= rodava com
+    // hora forçada 0 (= 21h BRT, fora de toda janela) e os crons naturais nunca
+    // enviavam nada (bug pego em 2026-07-06, tarde inteira com devidos=0).
+    const horaRaw = url.searchParams.get('hora');
+    const horaParam = horaRaw === null ? NaN : Number(horaRaw);
+    // ?cadeia=<n>: nº da rodada encadeada — a esteira se re-invoca em lotes de 300
+    // até drenar os devidos do tick (encadearProximaRodada no followup-template.ts).
+    const cadeiaRaw = url.searchParams.get('cadeia');
+    const cadeiaParam = cadeiaRaw === null ? NaN : Number(cadeiaRaw);
+    const trabalho = rodarEsteiraFollowupTemplate(supabase, {
+      limite: Number.isFinite(limiteParam) && limiteParam > 0 ? limiteParam : undefined,
+      horaUtc: Number.isFinite(horaParam) ? horaParam : undefined,
+      cadeia: Number.isFinite(cadeiaParam) && cadeiaParam > 0 ? cadeiaParam : undefined,
+    });
+    if (url.searchParams.get('wait') === '1') {
+      return json({ ok: true, esteira: 'followup-template', ...(await trabalho) });
+    }
+    if (typeof EdgeRuntime !== 'undefined' && EdgeRuntime?.waitUntil) EdgeRuntime.waitUntil(trabalho);
+    else await trabalho;
+    return json({ ok: true, esteira: 'followup-template', modo: 'background' });
+  }
+
+  // ▸ Rotas do agente no n8n (rotasN8n.ts): segredo do desvio + só telefone de teste.
+  //   midia      → mídia do gateway vira texto (Gemini), antes de o n8n pôr no buffer;
+  //   rodada     → o lote do buffer do n8n passa pelos gates e vira uma rodada (Luna e ferramentas pelo n8n);
+  //   ferramenta → o fluxo 04 do n8n executa uma ferramenta com o ctx da rodada.
+  if (url.searchParams.get('mode') === 'n8n') {
+    const acao = url.searchParams.get('acao');
+    if (!ehAcaoN8n(acao)) return json({ error: 'acao_desconhecida' }, 400);
+    let corpo: any;
+    try { corpo = await req.json(); } catch { return json({ error: 'payload inválido' }, 400); }
+    const desvio = await carregarDesvioN8n(supabase);
+    const ctxDaFerramenta = acao === 'ferramenta' ? ctxDeJson(corpo?.ctx) : null;
+    const alvo = acao === 'ferramenta' ? ctxDaFerramenta?.telefone : (corpo?.remotejid ?? corpo?.telefone);
+    const auth = autorizarN8n(desvio, segredoDoPedido(req), alvo);
+    if (!auth.ok) return json({ error: auth.erro }, auth.status);
+    try {
+      if (acao === 'midia') {
+        return json({ ok: true, ...(await tratarMidiaN8n(corpo, criarTelemetria(supabase, String(corpo.remotejid ?? '')))) });
+      }
+      if (acao === 'ferramenta') return await ferramentaPeloN8n(corpo?.chamada, ctxDaFerramenta!);
+      return await rodadaPeloN8n(corpo, desvio!);
+    } catch (e) {
+      console.error(`[crm-agente-sdr] n8n/${acao} falhou:`, (e as Error)?.message ?? e);
+      return json({ ok: false, error: `falha_${acao}` }, 502);
+    }
+  }
+
+  if (TOKEN && url.searchParams.get('token') !== TOKEN) return json({ error: 'unauthorized' }, 401);
+
+  let payload: any;
+  try { payload = await req.json(); } catch { return json({ error: 'payload inválido' }, 400); }
+
+  const barrado = await gatesDeEntrada(payload);
+  if (barrado) return barrado;
 
   // ▸ Passou nos gates: dispara o nó 2 em segundo plano e responde 200 para o webhook.
   const trabalho = processarInbound(payload);

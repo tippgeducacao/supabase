@@ -42,7 +42,9 @@ export type ProvedorIA =
     /** Privada da rodada: nunca vai para histórico, telemetria ou outro provedor. */
     memoriaRaciocinio?: MemoriaRaciocinio;
     /** Por que o lead caiu no canário (pilotoOpenai.ts): só para a telemetria. */
-    origem?: 'lista' | 'percentual' };
+    origem?: 'lista' | 'percentual';
+    /** Cabeçalhos extras da chamada: o agente no n8n (rotasN8n.ts) manda o segredo do desvio. */
+    cabecalhos?: Record<string, string> };
 export function provedorDeepseek(): ProvedorIA | null {
   const chave = Deno.env.get('AGENTE_SDR_DEEPSEEK_KEY') ?? '';
   return chave ? { nome: 'deepseek', formato: 'anthropic', base: 'https://api.deepseek.com/anthropic', chave } : null;
@@ -85,7 +87,7 @@ export async function chamarAnthropic(
     const res = openai
       ? await fetch(`${base}/v1/responses`, {
         method: 'POST', ...(sinal ? { signal: sinal } : {}),
-        headers: { authorization: `Bearer ${chave}`, 'content-type': 'application/json' },
+        headers: { authorization: `Bearer ${chave}`, 'content-type': 'application/json', ...(openai.cabecalhos ?? {}) },
         body: JSON.stringify(pedidoOpenai),
       })
       : await fetch(`${base}/v1/messages`, {
