@@ -1464,7 +1464,7 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
               // 29/09/2026, Paola Nogara: a oferta do material didático saiu às 08:45, ela
               // respondeu "Simm" às 08:50, e o modelo chamou ESTA ferramenta em vez de
               // entregar. O banco recusou certo (`ja_havia_oferta_viva`), mas o texto que
-              // voltava aqui era "siga a conversa normalmente" — então ele explicou onde fica
+              // voltava aqui era "siga a conversa normalmente", então ele explicou onde fica
               // o material em vez de mandar o vídeo, e a aluna que disse SIM não recebeu nada.
               // Recusar não basta: o resultado tem de EMPURRAR para a ferramenta certa.
               : r === 'ja_havia_oferta_viva'
