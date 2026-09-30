@@ -80,6 +80,19 @@ const TIMEOUT_MS = { templates: 20_000, cronograma: 45_000, envio: 30_000 } as c
 /** Prazo da reserva da rodada. Menor que o tick de 5 min, para a régua nunca ficar presa. */
 const RESERVA_SEGUNDOS = 240;
 
+/**
+ * D+15 · AVALIAÇÃO — a Meta não aceita mais de 3 botões QUICK_REPLY, então a nota 1-5 de
+ * verdade vem por um botão de WhatsApp FLOW (formulário nativo dentro do chat: RadioButtons
+ * 1-5 + comentário), não por link nem por QUICK_REPLY. O token nasce aqui, na hora do envio,
+ * via RPC (`onb_avaliacao_d15_criar`), e vira o `flow_token` — a Meta o ecoa de volta sozinha
+ * dentro de `nfm_reply.response_json` quando o aluno conclui a tela, e é por esse token que
+ * `crm-whatsapp-webhook` acha a linha certa em `onb_avaliacao_d15` e chama
+ * `onb_avaliacao_d15_publica_enviar`. O Flow em si (id fixo abaixo) é criado/publicado uma
+ * vez só, fora daqui, pela edge `onb-avaliacao-flow-setup`. Ver migration
+ * 20260930150207_onb_avaliacao_d15_1a5_automacao.sql e docs/CRM — Integração do Aluno.md.
+ */
+const ETAPA_D15_AVALIACAO = 'c99a8ba5-7c0a-4880-b211-d5327bec5033';
+
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
@@ -260,6 +273,13 @@ type ContextoRodada = {
   conta: string;
   /** onb_regua_config.respeitar_24h: adiar o passo de quem já recebeu modelo nas últimas 24 h. */
   respeitar24h: boolean;
+  /**
+   * onb_regua_config.flow_id_avaliacao_d15 — id do WhatsApp Flow publicado na Meta (criado
+   * pela edge onb-avaliacao-flow-setup). Fica no banco, não no código, para trocar sem
+   * redeploy se o Flow precisar ser recriado. Vazio/nulo ⇒ passo pulado com motivo próprio,
+   * em vez de mandar um botão quebrado.
+   */
+  flowIdAvaliacaoD15: string | null;
 };
 
 /**
@@ -432,13 +452,42 @@ async function processarCandidato(admin: Admin, cand: Candidato, ctx: ContextoRo
     }
   }
 
+  const components = componentsDoCorpo(vals.valores);
+  if (cand.etapa_id === ETAPA_D15_AVALIACAO) {
+    if (!ctx.flowIdAvaliacaoD15) {
+      // Sem Flow publicado configurado (onb_regua_config.flow_id_avaliacao_d15), não dá pra
+      // montar um botão que funcione — pula, não manda um template quebrado.
+      return await registrar(admin, cand, ctx, 'pulado', MOTIVO.sem_flow_avaliacao, null, telefoneEnvio);
+    }
+    const { data: tokData, error: erroTok } = await admin.rpc('onb_avaliacao_d15_criar', {
+      p_oportunidade_id: cand.oportunidade_id,
+    });
+    const tok = (tokData ?? {}) as Record<string, unknown>;
+    if (erroTok || !tok?.token) {
+      return await registrar(
+        admin, cand, ctx, 'pulado', MOTIVO.sem_token_avaliacao,
+        { erro: erroTok?.message ?? 'token vazio' }, telefoneEnvio,
+      );
+    }
+    // Botão de WhatsApp Flow: o `flow_token` é o NOSSO token (reaproveitado de
+    // onb_avaliacao_d15), não algo que a Meta gera — ela só o ecoa de volta dentro de
+    // `nfm_reply.response_json` quando o aluno conclui a tela (ver crm-whatsapp-webhook).
+    components.push({
+      type: 'button', sub_type: 'flow', index: 0,
+      parameters: [{
+        type: 'action',
+        action: { flow_token: String(tok.token), flow_action_data: {} },
+      }],
+    });
+  }
+
   const payload: Record<string, unknown> = {
     wa_account_id: ctx.conta,
     telefone: telefoneEnvio,
     tipo: 'template',
     template_name: template,
     template_lang: IDIOMA_TEMPLATE,
-    template_components: componentsDoCorpo(vals.valores),
+    template_components: components,
     ...(cabecalho
       ? {
         header_media_url: cabecalho.url,
@@ -574,6 +623,9 @@ async function rodar(req: Request): Promise<Response> {
       aprovados: await templatesAprovados(conta),
       conta,
       respeitar24h: config?.respeitar_24h !== false,
+      flowIdAvaliacaoD15: typeof config?.flow_id_avaliacao_d15 === 'string' && config.flow_id_avaliacao_d15
+        ? config.flow_id_avaliacao_d15
+        : null,
     };
 
     const resultados: Linha[] = [];

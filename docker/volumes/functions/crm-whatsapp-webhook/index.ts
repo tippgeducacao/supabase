@@ -858,6 +858,9 @@ Deno.serve(async (req) => {
           let interactiveReply: { tipo: string; id: string | null; title: string | null; description: string | null } | null = null;
           // Cartões de contato compartilhados (msg.contacts[]) — guardados crus na metadata.
           let contactCards: any[] | null = null;
+          // Dados de um WhatsApp Flow concluído (nfm_reply) — preenchido no parse abaixo,
+          // consumido no bloco de side-effects após o insert (evita fazer o JSON.parse 2x).
+          let flowReplyDados: { token: string; nota: number; comentario: string | null } | null = null;
           if (msgType === "text") {
             conteudo = msg?.text?.body ?? "";
           } else if (msgType === "interactive" && msg?.interactive?.type === "call_permission_reply") {
@@ -883,6 +886,27 @@ Deno.serve(async (req) => {
                 ? new Date(Number(cpr.expiration_timestamp) * 1000).toISOString()
                 : (permanente ? "permanente" : null),
             };
+          } else if (msgType === "interactive" && msg?.interactive?.type === "nfm_reply") {
+            // Resposta de um WhatsApp FLOW (formulário nativo no chat) — hoje só a Avaliação
+            // D+15 do Onboarding (nota 1-5 + comentário, botão FLOW do template
+            // int_aluno_15_avaliacao_v2, criado por onb-avaliacao-flow-setup). `response_json`
+            // é uma STRING JSON com os campos do formulário + `flow_token` — a Meta o ECOA de
+            // volta sozinha (é o token que a gente mandou no botão ao montar o envio, não algo
+            // que ela gera). Sem este ramo a resposta cairia no "interactive" genérico: viraria
+            // "[interativo]" na timeline e a nota/comentário se perderiam pra sempre (mesmo
+            // risco documentado no branch de call_permission_reply, abaixo).
+            let resp: Record<string, unknown> = {};
+            try { resp = JSON.parse(String(msg.interactive.nfm_reply?.response_json ?? "{}")); } catch { /* corpo inválido — segue sem dados */ }
+            const notaResp = Number(resp?.nota);
+            const comentarioResp = String(resp?.comentario ?? "").trim() || null;
+            const tokenResp = typeof resp?.flow_token === "string" ? resp.flow_token : null;
+            conteudo = Number.isFinite(notaResp)
+              ? `⭐ Avaliação enviada: nota ${notaResp}${comentarioResp ? ` — "${comentarioResp}"` : ""}`
+              : "[avaliação]";
+            interactiveReply = { tipo: "nfm_reply", id: tokenResp, title: conteudo, description: comentarioResp };
+            if (tokenResp && Number.isFinite(notaResp)) {
+              flowReplyDados = { token: tokenResp, nota: notaResp, comentario: comentarioResp };
+            }
           } else if (msgType === "interactive") {
             const br = msg?.interactive?.button_reply;
             const lr = msg?.interactive?.list_reply;
@@ -1217,6 +1241,20 @@ Deno.serve(async (req) => {
               if (permErr) console.error("[crm-whatsapp-webhook] espelho de permissão falhou:", permErr.message);
               else console.log(`[crm-whatsapp-webhook] permissão de ligação de ${from}: ${aceitou ? (permanente ? "PERMANENTE" : "7 dias") : "recusada"}`);
             }
+
+            // Avaliação D+15 do Onboarding por Flow: grava a nota pela MESMA RPC que a página
+            // pública usa (onb_avaliacao_d15_publica_enviar) — só troca quem chama (aqui é o
+            // client admin/service_role, lá era o navegador do aluno como anon). A RPC é quem
+            // resolve o token pra linha, valida a nota e (por trigger) ramifica no SAC v2.
+            if (flowReplyDados) {
+              const { error: avalErr } = await admin.rpc("onb_avaliacao_d15_publica_enviar", {
+                p_token: flowReplyDados.token,
+                p_nota: flowReplyDados.nota,
+                p_comentario: flowReplyDados.comentario,
+              });
+              if (avalErr) console.error("[crm-whatsapp-webhook] onb_avaliacao_d15_publica_enviar falhou:", avalErr.message);
+              else console.log(`[crm-whatsapp-webhook] avaliação D+15 recebida por Flow: nota ${flowReplyDados.nota}`);
+            }
             // Instagram → WhatsApp (25/09/2026): 1ª resposta de quem pediu o portfólio no
             // direct e recebeu o recibo neste número. Reivindica e grava a nota do agente
             // AQUI (antes do relay, para a rodada da IA já enxergar), manda o PDF em
@@ -1264,6 +1302,10 @@ Deno.serve(async (req) => {
               // Clique em "Permitir ligações" não é fala do lead. Repassar ao agente faria
               // o João responder a um botão de sistema com texto de venda.
               console.log(`[crm-whatsapp-webhook] resposta de permissão de ligação — relay ao agente pulado`);
+            } else if (interactiveReply?.tipo === "nfm_reply") {
+              // Idem: é a ramificação do SAC v2 (trigger em onb_avaliacao_d15) quem decide o
+              // que acontece com a nota — o assistente de IA não precisa (nem deve) reagir.
+              console.log(`[crm-whatsapp-webhook] resposta de Flow (avaliação) — relay ao agente pulado`);
             } else if (accountIaAtivo && redelivery) {
               console.warn(
                 `[crm-whatsapp-webhook] inbound de ${from} tem ${Math.round(idadeS / 60)}min ` +

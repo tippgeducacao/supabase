@@ -160,6 +160,10 @@ export const MOTIVO = {
   sem_variavel: 'sem_variavel',
   sem_cronograma: 'sem_cronograma',
   sem_turma: 'sem_turma',
+  /** D+15 · AVALIAÇÃO: a RPC onb_avaliacao_d15_criar não devolveu token. */
+  sem_token_avaliacao: 'sem_token_avaliacao',
+  /** D+15 · AVALIAÇÃO: onb_regua_config.flow_id_avaliacao_d15 vazio — Flow ainda não publicado. */
+  sem_flow_avaliacao: 'sem_flow_avaliacao',
   /**
    * A Meta recusou por ritmo de mensagem para aquela pessoa (131049/131050). NÃO existe mais
    * trava de "1 template por número a cada 24 h" na crm-whatsapp-send: ela foi removida a pedido

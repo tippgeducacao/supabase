@@ -118,6 +118,7 @@ beforeEach(() => {
       };
     }
     if (nome === 'onb_regua_template_24h') return { data: ultimoTemplate24h, error: null };
+    if (nome === 'onb_avaliacao_d15_criar') return respostaTokenAvaliacao;
     if (nome === 'onb_regua_mover') return { data: { movido: true, motivo: 'passo_sem_modelo' }, error: null };
     return { data: null, error: null };
   });
@@ -127,6 +128,7 @@ beforeEach(() => {
         templates: [
           { name: 'int_aluno_01_boasvindas_cronograma', status: 'APPROVED' },
           { name: 'int_aluno_09_documentos', status: 'APPROVED' },
+          { name: 'int_aluno_15_avaliacao', status: 'APPROVED' },
           { name: 'int_aluno_02_plataforma_texto', status: 'PENDING' },
         ],
       }));
@@ -153,6 +155,11 @@ const chamadasRpc = (nome: string) => mocks.rpc.mock.calls.filter((c) => c[0] ==
 const registros = () => chamadasRpc('onb_regua_registrar');
 /** Último modelo que a pessoa recebeu nas últimas 24 h; vazio = caminho livre. */
 let ultimoTemplate24h: unknown[] = [];
+/** D+15 · AVALIAÇÃO: o que onb_avaliacao_d15_criar devolve (o token do link). */
+let respostaTokenAvaliacao: { data: unknown; error: unknown } = {
+  data: { ok: true, id: 'aval-1', token: 'abc123def456abc123def456abc123de' },
+  error: null,
+};
 const registro = () => registros().at(-1) as Record<string, unknown>;
 
 describe('modo simulação', () => {
@@ -287,6 +294,73 @@ describe('D+1, o passo do cronograma', () => {
     expect(envios()).toHaveLength(0);
     expect(corpo.pulados).toBe(1);
     expect(registro()).toMatchObject({ p_status: 'pulado', p_motivo: 'sem_turma' });
+  });
+});
+
+describe('D+15, a avaliação por WhatsApp Flow', () => {
+  beforeEach(() => {
+    candidatos[0] = {
+      ...candidatos[0],
+      etapa_id: 'c99a8ba5-7c0a-4880-b211-d5327bec5033',
+      etapa_nome: 'D+15 · AVALIAÇÃO',
+      ordem: 9,
+      dia: 15,
+      template_nome: 'int_aluno_15_avaliacao',
+      variaveis: ['nome', 'curso'],
+      valores: ['Maria', 'Clínica Médica e Cirúrgica de Bovinos'],
+    };
+    config.flow_id_avaliacao_d15 = 'flow-987654321';
+    respostaTokenAvaliacao = {
+      data: { ok: true, id: 'aval-1', token: 'abc123def456abc123def456abc123de' },
+      error: null,
+    };
+  });
+
+  it('gera o token e manda o botão de FLOW junto do corpo do template', async () => {
+    const { corpo } = await chamar();
+    expect(chamadasRpc('onb_avaliacao_d15_criar')).toEqual([{ p_oportunidade_id: 'opo-1' }]);
+    expect(corpoDoEnvio().template_components).toEqual([
+      { type: 'body', parameters: [{ type: 'text', text: 'Maria' }, { type: 'text', text: 'Clínica Médica e Cirúrgica de Bovinos' }] },
+      {
+        type: 'button', sub_type: 'flow', index: 0,
+        parameters: [{
+          type: 'action',
+          action: { flow_token: 'abc123def456abc123def456abc123de', flow_action_data: {} },
+        }],
+      },
+    ]);
+    expect(corpo.enviados).toBe(1);
+  });
+
+  it('sem flow_id_avaliacao_d15 configurado, não chama a RPC do token e registra pulado', async () => {
+    config.flow_id_avaliacao_d15 = null;
+    const { corpo } = await chamar();
+    expect(chamadasRpc('onb_avaliacao_d15_criar')).toHaveLength(0);
+    expect(envios()).toHaveLength(0);
+    expect(corpo).toMatchObject({ pulados: 1, enviados: 0 });
+    expect(registro()).toMatchObject({ p_status: 'pulado', p_motivo: 'sem_flow_avaliacao' });
+  });
+
+  it('sem token (RPC sem linha), não envia e registra pulado', async () => {
+    respostaTokenAvaliacao = { data: null, error: null };
+    const { corpo } = await chamar();
+    expect(envios()).toHaveLength(0);
+    expect(corpo).toMatchObject({ pulados: 1, enviados: 0 });
+    expect(registro()).toMatchObject({ p_status: 'pulado', p_motivo: 'sem_token_avaliacao' });
+  });
+
+  it('erro na RPC do token também vira pulado, sem envio', async () => {
+    respostaTokenAvaliacao = { data: null, error: { message: 'timeout' } };
+    const { corpo } = await chamar();
+    expect(envios()).toHaveLength(0);
+    expect(corpo).toMatchObject({ pulados: 1, enviados: 0 });
+    expect(registro()).toMatchObject({ p_status: 'pulado', p_motivo: 'sem_token_avaliacao' });
+  });
+
+  it('outros passos da régua não chamam a RPC do token', async () => {
+    candidatos[0] = { ...candidatos[0], etapa_id: 'etapa-9', template_nome: 'int_aluno_09_documentos' };
+    await chamar();
+    expect(chamadasRpc('onb_avaliacao_d15_criar')).toHaveLength(0);
   });
 });
 
