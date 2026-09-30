@@ -953,11 +953,12 @@ async function consultaObjecoes(supabase: any, input: any, toolUseId: string, ct
       objecao_tempo: ctx?.ficha ? INSTRUCAO_TEMPO_FICHA : 'Reconheça a rotina e a falta de tempo informadas, sem minimizar. A referência desta base para a conversa com o monitor é cerca de 10 minutos; não transforme isso em 15, 20 ou outra duração. Pergunte se existe um período viável para conversar; não prometa atendimento fora dos horários disponíveis, não julgue dedicação, não compare reunião com estudar e não invente carga horária da pós. Se ele realmente não puder agora, combine um retorno conforme o prazo que ele escolher.',
       pergunta_condicao: 'As condições comerciais são apresentadas na conversa com o monitor. Se o lead relatou dificuldade financeira, acolha isso antes do convite. Não prometa que a condição cabe no orçamento, que foi criada para quem está sem dinheiro, ou que há bolsa/desconto específico. Não invente prazo de lote ou urgência. Pergunte se ele quer conhecer as condições; só depois do aceite consulte disponibilidade.',
     };
-    return { resposta_objecao: resposta ? comNomeDoLead(referenciasRevisadas[filtro.tipo_objecao] ?? resposta, ctx?.nome) : 'CONFIANCA_BAIXA', id: toolUseId,
-      limites_da_resposta: 'O texto recuperado é uma referência de abordagem, não uma confirmação dos fatos de todos os cursos. Nunca generalize 2 a 3 horas por semana, 12 a 18 meses, número de módulos, modalidades ou encontros. Não cite número, estatística ou fato (alunos, polos, processo seletivo, prazo de lote, urgência) que não esteja escrito na resposta_objecao acima: o que está nela é informação aprovada pelo comercial. Não use "reservar 10 minutos é um bom sinal" nem julgue dedicação pela disponibilidade para a reunião. Acolha falta de tempo/dinheiro; não diga que a reunião resolve horas de conversa e não garanta que a condição caberá no orçamento. Se pedir prazo para analisar, siga o fluxo de combinar retorno, sem trocar isso por mais pressão para agendar.',
-      instrucao: (resposta
-        ? 'Use somente o argumento pertinente à objeção atual. Esta base genérica não confirma existência, modalidade ou conteúdo de uma pós; para esses fatos use catálogo/material do curso escolhido. Não invente valores ou condições. Convite para conversar não é agendamento confirmado.'
-        : 'Não há argumento confirmado para esta objeção. Acolha sem fabricar uma quebra nem usar resposta de outro assunto. Consulte catálogo/material se houver uma dúvida factual.')
+    // 30/09/2026 (pedido do Gustavo): com resposta na base, volta SÓ a resposta. Os limites e a instrução
+    // que iam juntos contradiziam a própria base (proibiam os fatos que ela trazia) e a resposta saía
+    // pela metade. O que a resposta pode dizer é o que o comercial escreveu na base.
+    if (resposta) return { resposta_objecao: comNomeDoLead(referenciasRevisadas[filtro.tipo_objecao] ?? resposta, ctx?.nome), id: toolUseId };
+    return { resposta_objecao: 'CONFIANCA_BAIXA', id: toolUseId,
+      instrucao: 'Não há argumento confirmado para esta objeção. Acolha sem fabricar uma quebra nem usar resposta de outro assunto. Consulte catálogo/material se houver uma dúvida factual.'
         + (ctx?.ficha ? ` ${ORIENTACAO_NAO_E_FALA}` : '') };
   } catch (e) {
     // Fallback próprio (NÃO deixar cair no catch genérico "conduza normalmente"):
