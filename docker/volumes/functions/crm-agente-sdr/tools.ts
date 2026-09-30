@@ -13,7 +13,7 @@
 
 // deno-lint-ignore-file no-explicit-any
 import { MATRIZ_SYSTEM, MATRIZ_USER_TEMPLATE } from './prompts.ts';
-import { renderPrompt } from './contexto.ts';
+import { extrairPrimeiroNome, renderPrompt } from './contexto.ts';
 import {
   decidirPrazoEstudante,
   instrucaoPerguntarConclusao,
@@ -880,6 +880,16 @@ function filtroDaObjecao(input: any, ctx?: CtxConversa): Record<string, string> 
   return TIPOS_OBJECAO.has(tipo) ? { tipo_objecao: tipo } : {};
 }
 
+// A base de objeções (rag_ppg_voyage) escreve o nome do lead como {{nome}} — 63 das 75 respostas em
+// 30/09/2026 — e ninguém trocava: o marcador chegava cru ao modelo. Troca pelo primeiro nome; sem nome,
+// tira o marcador e a vírgula que o segue ("{{nome}}, somos…" → "somos…").
+export function comNomeDoLead(texto: string, nome: string | null | undefined): string {
+  const primeiro = extrairPrimeiroNome(nome);
+  const RE = /\{\{\s*(?:\$json\.)?nome\s*\}\}/g;
+  if (primeiro) return texto.replace(RE, primeiro);
+  return texto.replace(/\{\{\s*(?:\$json\.)?nome\s*\}\}\s*,?\s*/g, '').replace(/^\s+/, '');
+}
+
 async function consultaObjecoes(supabase: any, input: any, toolUseId: string, ctx?: CtxConversa) {
   try {
     const filtro = filtroDaObjecao(input, ctx);
@@ -943,10 +953,10 @@ async function consultaObjecoes(supabase: any, input: any, toolUseId: string, ct
       objecao_tempo: ctx?.ficha ? INSTRUCAO_TEMPO_FICHA : 'Reconheça a rotina e a falta de tempo informadas, sem minimizar. A referência desta base para a conversa com o monitor é cerca de 10 minutos; não transforme isso em 15, 20 ou outra duração. Pergunte se existe um período viável para conversar; não prometa atendimento fora dos horários disponíveis, não julgue dedicação, não compare reunião com estudar e não invente carga horária da pós. Se ele realmente não puder agora, combine um retorno conforme o prazo que ele escolher.',
       pergunta_condicao: 'As condições comerciais são apresentadas na conversa com o monitor. Se o lead relatou dificuldade financeira, acolha isso antes do convite. Não prometa que a condição cabe no orçamento, que foi criada para quem está sem dinheiro, ou que há bolsa/desconto específico. Não invente prazo de lote ou urgência. Pergunte se ele quer conhecer as condições; só depois do aceite consulte disponibilidade.',
     };
-    return { resposta_objecao: resposta ? (referenciasRevisadas[filtro.tipo_objecao] ?? resposta) : 'CONFIANCA_BAIXA', id: toolUseId,
-      limites_da_resposta: 'O texto recuperado é uma referência de abordagem, não uma confirmação dos fatos de todos os cursos. Nunca generalize 2 a 3 horas por semana, 12 a 18 meses, número de módulos, modalidades ou encontros. Não afirme estatísticas de alunos, polos, processo seletivo, prazo de lote ou urgência sem confirmação específica. Não use "reservar 10 minutos é um bom sinal" nem julgue dedicação pela disponibilidade para a reunião. Acolha falta de tempo/dinheiro; não diga que a reunião resolve horas de conversa e não garanta que a condição caberá no orçamento. Se pedir prazo para analisar, siga o fluxo de combinar retorno, sem trocar isso por mais pressão para agendar.',
+    return { resposta_objecao: resposta ? comNomeDoLead(referenciasRevisadas[filtro.tipo_objecao] ?? resposta, ctx?.nome) : 'CONFIANCA_BAIXA', id: toolUseId,
+      limites_da_resposta: 'O texto recuperado é uma referência de abordagem, não uma confirmação dos fatos de todos os cursos. Nunca generalize 2 a 3 horas por semana, 12 a 18 meses, número de módulos, modalidades ou encontros. Não cite número, estatística ou fato (alunos, polos, processo seletivo, prazo de lote, urgência) que não esteja escrito na resposta_objecao acima: o que está nela é informação aprovada pelo comercial. Não use "reservar 10 minutos é um bom sinal" nem julgue dedicação pela disponibilidade para a reunião. Acolha falta de tempo/dinheiro; não diga que a reunião resolve horas de conversa e não garanta que a condição caberá no orçamento. Se pedir prazo para analisar, siga o fluxo de combinar retorno, sem trocar isso por mais pressão para agendar.',
       instrucao: (resposta
-        ? 'Use somente o argumento pertinente à objeção atual. Esta base genérica não confirma existência, modalidade ou conteúdo de uma pós; para esses fatos use catálogo/material do curso escolhido. Não invente valores ou condições. Nenhum horário foi consultado nesta ferramenta: não cite 16h, 16h30 ou qualquer horário concreto antes de consulta_disponibilidade retornar aquela opção. Convite para conversar não é agendamento confirmado.'
+        ? 'Use somente o argumento pertinente à objeção atual. Esta base genérica não confirma existência, modalidade ou conteúdo de uma pós; para esses fatos use catálogo/material do curso escolhido. Não invente valores ou condições. Convite para conversar não é agendamento confirmado.'
         : 'Não há argumento confirmado para esta objeção. Acolha sem fabricar uma quebra nem usar resposta de outro assunto. Consulte catálogo/material se houver uma dúvida factual.')
         + (ctx?.ficha ? ` ${ORIENTACAO_NAO_E_FALA}` : '') };
   } catch (e) {
