@@ -143,20 +143,26 @@ function hojeBrasilia() {
 // Sem telefone a RPC cai no rodízio de sempre — então a chamada nunca fica sem oferta.
 // ⚠️ SÓ NO WHATSAPP: no webchat o telefone NÃO é enviado de propósito (ctx.canal),
 // então lá a agenda continua sendo o rodízio entre os vendedores da pós.
-async function consultaDisponibilidade(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
+// 30/09/2026 — a consulta de agenda em DUAS partes: os DADOS (o que aconteceu: situação + horários) e o
+// TEXTO que a Luna lê. A produção junta as duas aqui, sem mudança. O agente no n8n recebe os dados
+// (executarTool com `comDados`) e monta o texto num nó dele, à vista e editável (05 Ferramentas).
+export type SituacaoDisponibilidade = 'ok' | 'sem_horario' | 'data_passada' | 'erro_tecnico';
+export type DadosDisponibilidade = {
+  situacao: SituacaoDisponibilidade;
+  hoje: { iso: string; display: string };
+  data_pedida: string;
+  horarios: { data: string; dia_semana: string; horario: string; display: string; vendedor_id: unknown; vendedor_nome: unknown }[];
+  /** false = o lead ainda não tem a graduação registrada (a oferta é opção, não combinado). */
+  formacao_checada: boolean;
+  erro?: string;
+};
+
+async function dadosDisponibilidade(supabase: any, input: any, ctx: CtxConversa): Promise<DadosDisponibilidade> {
   const hoje = hojeBrasilia();
+  const base = { hoje: { iso: hoje.iso, display: hoje.display }, data_pedida: String(input.data_desejada ?? '').trim(), horarios: [], formacao_checada: true };
 
   // Data PASSADA nunca chega à agenda: devolve correção explícita com o HOJE real.
-  const dataPedida = String(input.data_desejada ?? '').trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(dataPedida) && dataPedida < hoje.iso) {
-    return {
-      resultado: `⚠️ A data consultada (${dataPedida}) JÁ PASSOU. HOJE é ${hoje.display} (${hoje.iso}). ` +
-        `Refaça a consulta com a data de HOJE ou uma futura — e, se você afirmou outra data/dia da semana ao lead, ` +
-        `corrija com naturalidade usando o HOJE informado aqui (nunca insista na data errada).`,
-      slots_raw: [],
-      id: toolUseId,
-    };
-  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(base.data_pedida) && base.data_pedida < hoje.iso) return { ...base, situacao: 'data_passada' };
 
   const qs = new URLSearchParams({ pos: input.curso_escolhido ?? '', limite: '6' });
   if (ctx.telefone && ctx.canal !== 'webchat') qs.set('telefone', ctx.telefone);
@@ -181,35 +187,13 @@ async function consultaDisponibilidade(supabase: any, input: any, ctx: CtxConver
     }
     if (tentativa < 2) await new Promise((r) => setTimeout(r, 600));
   }
-
-  // Falha técnica (≠ agenda vazia): NÃO dizer ao lead que não há horários. Instrui o
-  // agente a tentar de novo / não inventar indisponibilidade.
-  if (erroTecnico) {
-    return {
-      resultado: 'ERRO ao consultar a agenda (falha técnica, NÃO é falta de horário). ' +
-        'NÃO diga ao lead que não há horários nem que a agenda fechou. Tente consultar de novo; ' +
-        'se persistir, diga que vai confirmar com o time e já retorna.',
-      erro: erroTecnico,
-      slots_raw: [],
-      id: toolUseId,
-    };
-  }
+  if (erroTecnico) return { ...base, situacao: 'erro_tecnico', erro: erroTecnico };
 
   const slots: any[] = resultado.data?.slots || resultado.slots || [];
-
-  let conteudo: string;
-  if (!slots.length) {
-    // Âncora do HOJE junto: "sem horário" nunca pode reforçar uma data errada do modelo.
-    conteudo = `Nenhum horário disponível para a conversa com o monitor no período solicitado. Isso não informa nem altera o horário de aula ou evento. (Referência: HOJE é ${hoje.display}, ${hoje.iso}.)`;
-  } else {
-    const formatted = slots.map((s) => {
-      const brt = toBrasilia(s.inicio);
-      return `- ${brt.display} de ${brt.diaSemana}, dia ${brt.data} (vendedor_id: ${s.vendedor_id}, nome: ${s.vendedor_nome})`;
-    });
-    conteudo = `Horários disponíveis para a conversa com o monitor (Brasília):\n${formatted.join('\n')}\n` +
-      `(O dia da semana informado acima é o correto — use-o exatamente, não recalcule.)\n` +
-      `Ao apresentar as opções, diga que são para a conversa com o monitor. Não são horários de aula ou evento e não alteram a programação do convite. Só ofereça após aceite específico para essa conversa.`;
-  }
+  const horarios = slots.map((s) => {
+    const brt = toBrasilia(s.inicio);
+    return { data: brt.data, dia_semana: brt.diaSemana, horario: brt.horario, display: brt.display, vendedor_id: s.vendedor_id, vendedor_nome: s.vendedor_nome };
+  });
 
   // Formação ainda NÃO verificada ⇒ o horário é uma OPÇÃO, não um combinado.
   // Caso Matheus (2026-08-08): ofereceu slots, o lead escolheu, o agente respondeu
@@ -218,28 +202,60 @@ async function consultaDisponibilidade(supabase: any, input: any, ctx: CtxConver
   // prazo em 30 dias (25,3%) receberam oferta de horário ANTES da checagem.
   // ⚠️ AVISO, não bloqueio: a maioria dos leads é elegível e travar a consulta
   // quebraria o fluxo normal do qualificador. Fail-open em erro de leitura.
-  let avisoFormacao = '';
+  let formacaoChecada = true;
   try {
     const lead = await buscarLead(supabase, ctx.remotejid);
-    if (lead && !String(lead.formacao_academica ?? '').trim()) {
-      avisoFormacao = '\n⚠️ A graduação deste lead ainda NÃO foi verificada. Se ele já propôs ou escolheu '
-        + 'um dia e horário que apareceu disponível, preserve essa preferência e pergunte somente a formação/conclusão que falta, sem pedir outra escolha. '
-        + 'Se ainda não escolheu, apresente opções. NÃO responda como se estivesse fechado ("show, 10h30 então"): '
-        + 'a elegibilidade precisa ser verificada ANTES de confirmar a reunião.';
-    }
+    if (lead && !String(lead.formacao_academica ?? '').trim()) formacaoChecada = false;
   } catch (e) {
     console.log(`[crm-agente-sdr] aviso de formação na disponibilidade falhou (segue): ${(e as Error).message}`);
   }
-  conteudo += avisoFormacao;
+  return { ...base, situacao: horarios.length ? 'ok' : 'sem_horario', horarios, formacao_checada: formacaoChecada };
+}
 
+/** O texto que a Luna/o João lê para cada situação da agenda (o mesmo de sempre). */
+export function textoDisponibilidade(d: DadosDisponibilidade): string {
+  if (d.situacao === 'data_passada') {
+    return `⚠️ A data consultada (${d.data_pedida}) JÁ PASSOU. HOJE é ${d.hoje.display} (${d.hoje.iso}). ` +
+      `Refaça a consulta com a data de HOJE ou uma futura — e, se você afirmou outra data/dia da semana ao lead, ` +
+      `corrija com naturalidade usando o HOJE informado aqui (nunca insista na data errada).`;
+  }
+  if (d.situacao === 'erro_tecnico') {
+    return 'ERRO ao consultar a agenda (falha técnica, NÃO é falta de horário). ' +
+      'NÃO diga ao lead que não há horários nem que a agenda fechou. Tente consultar de novo; ' +
+      'se persistir, diga que vai confirmar com o time e já retorna.';
+  }
+  let conteudo: string;
+  if (d.situacao === 'sem_horario') {
+    // Âncora do HOJE junto: "sem horário" nunca pode reforçar uma data errada do modelo.
+    conteudo = `Nenhum horário disponível para a conversa com o monitor no período solicitado. Isso não informa nem altera o horário de aula ou evento. (Referência: HOJE é ${d.hoje.display}, ${d.hoje.iso}.)`;
+  } else {
+    const formatted = d.horarios.map((h) => `- ${h.display} de ${h.dia_semana}, dia ${h.data} (vendedor_id: ${h.vendedor_id}, nome: ${h.vendedor_nome})`);
+    conteudo = `Horários disponíveis para a conversa com o monitor (Brasília):\n${formatted.join('\n')}\n` +
+      `(O dia da semana informado acima é o correto — use-o exatamente, não recalcule.)\n` +
+      `Ao apresentar as opções, diga que são para a conversa com o monitor. Não são horários de aula ou evento e não alteram a programação do convite. Só ofereça após aceite específico para essa conversa.`;
+  }
+  if (!d.formacao_checada) {
+    conteudo += '\n⚠️ A graduação deste lead ainda NÃO foi verificada. Se ele já propôs ou escolheu '
+      + 'um dia e horário que apareceu disponível, preserve essa preferência e pergunte somente a formação/conclusão que falta, sem pedir outra escolha. '
+      + 'Se ainda não escolheu, apresente opções. NÃO responda como se estivesse fechado ("show, 10h30 então"): '
+      + 'a elegibilidade precisa ser verificada ANTES de confirmar a reunião.';
+  }
+  return conteudo;
+}
+
+/** A saída da ferramenta (o texto + os horários em dados, que a trava de horário confere). */
+export function saidaDisponibilidade(d: DadosDisponibilidade, toolUseId: string): Record<string, unknown> {
   return {
-    resultado: conteudo,
-    slots_raw: slots.map((s) => {
-      const brt = toBrasilia(s.inicio);
-      return { data: brt.data, dia_semana: brt.diaSemana, horario: brt.horario, vendedor_id: s.vendedor_id, vendedor_nome: s.vendedor_nome };
-    }),
+    resultado: textoDisponibilidade(d),
+    ...(d.erro ? { erro: d.erro } : {}),
+    slots_raw: d.horarios.map((h) => ({ data: h.data, dia_semana: h.dia_semana, horario: h.horario, vendedor_id: h.vendedor_id, vendedor_nome: h.vendedor_nome })),
     id: toolUseId,
   };
+}
+
+async function consultaDisponibilidade(supabase: any, input: any, ctx: CtxConversa, toolUseId: string, comDados = false) {
+  const dados = await dadosDisponibilidade(supabase, input, ctx);
+  return { ...saidaDisponibilidade(dados, toolUseId), ...(comDados ? { dados } : {}) };
 }
 
 // ── confirmar_agendamento (POST → GCal+Meet → PATCH link) ───────────────────
@@ -1270,6 +1286,9 @@ export async function executarTool(
   supabase: any,
   toolUse: { id: string; name: string; input: any },
   ctx: CtxConversa,
+  // comDados: o agente no n8n recebe também os DADOS da ferramenta (não só o texto), para montar o
+  // texto num nó dele. Só a consulta de agenda por enquanto (piloto de 30/09/2026).
+  opcoes: { comDados?: boolean } = {},
 ): Promise<Record<string, unknown>> {
   const { id, name, input } = toolUse;
   if (name === 'verificar_compatibilidade_curso' && ctx.ficha && ctx.compatibilidadeIndisponivel) {
@@ -1281,7 +1300,7 @@ export async function executarTool(
   }
   try {
     switch (name) {
-      case 'consulta_disponibilidade': return await consultaDisponibilidade(supabase, input, ctx, id);
+      case 'consulta_disponibilidade': return await consultaDisponibilidade(supabase, input, ctx, id, opcoes.comDados === true);
       case 'confirmar_agendamento': return await confirmarAgendamento(supabase, input, ctx, id);
       case 'remarcar_agendamento': return await remarcarAgendamento(supabase, input, ctx, id);
       case 'verificar_compatibilidade_curso': return await verificarCompatibilidade(supabase, input, ctx, id);

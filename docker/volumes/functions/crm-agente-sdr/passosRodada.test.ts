@@ -189,4 +189,16 @@ describe('agente por passos (o loop desenhado no n8n)', () => {
       }
     }
   });
+
+  it('a agenda devolve os dados para o n8n, e eles não entram na conversa', async () => {
+    const d = deps();
+    let s = await P.montarVolta(d, novoEstado());
+    s = await P.lerResposta(d, s.estado, { resposta: chamada('c1', 'consulta_disponibilidade', {}) });
+    const chamadas = (s as any).chamadas;
+    const r = await P.executarFerramenta(d, s.estado, chamadas[0]);
+    await P.gravarResultados(d, s.estado, chamadas, [{ output: { ...r.output, dados: { situacao: 'ok' } }, efeitos: r.efeitos }]);
+    const gravado = JSON.stringify(m.gravadas.find((g) => JSON.stringify(g.content).includes('tool_result'))?.content);
+    expect(gravado).toContain('10h de quarta');
+    expect(gravado).not.toContain('situacao');
+  });
 });

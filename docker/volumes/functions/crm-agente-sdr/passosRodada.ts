@@ -574,7 +574,7 @@ export async function executarFerramenta(
   const repetida = memoria?.repetida(chamada.name, chamada.input) ?? false;
   const output = repetida
     ? { id: chamada.id, resultado: AVISO_CONSULTA_REPETIDA }
-    : await executarTool(deps.supabase, chamada, ctx);
+    : await executarTool(deps.supabase, chamada, ctx, { comDados: true });
   deps.tel.registrar('tool_exec', {
     tool: chamada.name, input: resumir(chamada.input, 800), output: resumir(output, 1200),
     ...(repetida ? { repetida: true } : {}), agente_pelo_n8n: true,
@@ -605,7 +605,9 @@ export async function gravarResultados(
     memoria?.repetida(c.name, c.input);
     const r = resultados[i];
     // O id é o da chamada, venha o que vier do tratamento: é ele que casa o resultado com o pedido.
-    outputs.push({ ...(r.output ?? {}), id: c.id });
+    // `dados` é só para o n8n montar o texto (05 Ferramentas): não entra na conversa que a Luna relê.
+    const { dados: _dados, ...output } = (r.output ?? {}) as Record<string, unknown>;
+    outputs.push({ ...output, id: c.id });
     const depois = ctxDeJson({ remotejid: ctx.remotejid, telefone: ctx.telefone, ...(r.efeitos?.ctx ?? {}) });
     if (depois) {
       for (const campo of ['compatibilidadeIndisponivel', 'perguntaFormacaoPendente', 'ultimaElegibilidade', 'enviosMateriais'] as const) {
