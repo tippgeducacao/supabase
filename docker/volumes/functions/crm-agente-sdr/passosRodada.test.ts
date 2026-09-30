@@ -5,6 +5,7 @@ const m = vi.hoisted(() => ({
   historico: [] as { role: 'user' | 'assistant'; content: any }[],
   gravadas: [] as any[],
   enviadas: [] as string[],
+  vozes: [] as unknown[],
   ferramentas: [] as any[],
   claude: vi.fn(),
 }));
@@ -30,7 +31,9 @@ vi.mock('./tools.ts', async (original) => ({
 }));
 vi.mock('./saida.ts', async (original) => ({
   ...(await original<typeof import('./saida.ts')>()),
-  enviarResposta: vi.fn(async (_ctx: unknown, texto: string) => { m.enviadas.push(texto); return { aceitos: 1, canal: 'texto', estado: 'aceito' }; }),
+  enviarResposta: vi.fn(async (_ctx: unknown, texto: string, _r: unknown, _t: unknown, _p: unknown, voz: unknown) => {
+    m.enviadas.push(texto); m.vozes.push(voz); return { aceitos: 1, canal: 'texto', estado: 'aceito' };
+  }),
 }));
 vi.mock('./agente.ts', async (original) => ({
   ...(await original<typeof import('./agente.ts')>()),
@@ -73,7 +76,7 @@ const fala = (texto: string) => chamada('fala', 'responder_ao_cliente', { mensag
 
 beforeEach(() => {
   m.historico = [{ role: 'user', content: 'oi, quero marcar a conversa' }];
-  m.gravadas = []; m.enviadas = []; m.ferramentas = [];
+  m.gravadas = []; m.enviadas = []; m.ferramentas = []; m.vozes = [];
   m.claude.mockReset();
 });
 
@@ -221,5 +224,15 @@ describe('agente por passos (o loop desenhado no n8n)', () => {
     expect(s.estado.reuniaoMarcadaNaAgenda).toBe(true);
     expect(s.estado.contextoEfetivo).toContain('com Ana: MARCADA');
     expect(s.estado.contextoEfetivo).not.toContain('(velha)');
+  });
+
+  it('persona aula: a fala sai só em texto (sem as opções de voz da ElevenLabs)', async () => {
+    const d = deps();
+    const aula = { ...novoEstado(), aulaPiloto: true };
+    let s = await P.enviar(d, aula, { tipo: 'fala', texto: 'bacana! o que te chamou a atenção nessa aula?' });
+    expect(s.acao).toBe('fim');
+    expect(m.vozes.at(-1)).toBeUndefined();
+    s = await P.enviar(d, novoEstado(), { tipo: 'fala', texto: 'oi, tudo bem?' });
+    expect(m.vozes.at(-1)).toMatchObject({ origem: 'conversa' });
   });
 });

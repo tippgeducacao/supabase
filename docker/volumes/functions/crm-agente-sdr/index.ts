@@ -1270,7 +1270,8 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
           sinal: aberturaControlada && aplicarTroca ? sinalTroca : null,
           registrar: (tipo, dados) => tel.registrar(tipo, dados),
           enviar: (fala, controle) => enviarResposta(ctx, fala, renovar, tel, pausouPorTool ? undefined : () => iaPausada(remotejid),
-          encerrouPorTool ? undefined : {
+          // Sem voz (ElevenLabs) na persona AULA: pedido do Gustavo em 30/09/2026 — só texto.
+          encerrouPorTool || aulaDaCampanha || aulaPiloto ? undefined : {
             supabase, origem: 'conversa', historico, iniciadaEm: inicioRodada,
             provedorResposta: provedor?.nome === 'openai' && provedor.formato === 'openai' ? 'openai' : 'anthropic',
             interacaoId: tel.rodadaId,

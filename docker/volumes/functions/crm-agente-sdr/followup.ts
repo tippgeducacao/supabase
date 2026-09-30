@@ -549,7 +549,9 @@ export async function processarFollowupLead(supabase: any, leadSel: any, stageSe
     const { envio, texto: textoEnviado } = await enviarComAberturaNumero({
       banco: supabase, telefone, interacaoId: tel.rodadaId, texto: semCertificado.texto, sinal: sinalAbertura,
       registrar: (tipo, dados) => tel.registrar(tipo, dados),
-      enviar: (fala, controle) => enviarResposta(ctx, fala, lockRenovar(supabase, remotejid), tel, interrompido, {
+      // Sem voz (ElevenLabs) na persona AULA: pedido do Gustavo em 30/09/2026 — só texto.
+      enviar: (fala, controle) => enviarResposta(ctx, fala, lockRenovar(supabase, remotejid), tel, interrompido,
+      aulaDoLead || lead.contexto_campanha?.persona === 'aula' ? undefined : {
       supabase, origem: 'followup', historico: history, etapaFollowup: stage, iniciadaEm: inicioRodada, interrompido,
       provedorResposta,
       interacaoId: tel.rodadaId,

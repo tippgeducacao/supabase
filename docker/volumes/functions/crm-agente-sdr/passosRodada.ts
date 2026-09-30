@@ -717,7 +717,8 @@ export async function enviar(
     ? garantirSaudacao(humanizarTexto(semCertificado.texto), e.conteudo)
     : { texto: humanizarTexto(semCertificado.texto), acrescentou: null };
   if (fala.acrescentou) tel.registrar('saudacao_garantida', { prefixo: fala.acrescentou });
-  const voz = e.encerrouPorTool ? undefined : {
+  // Sem voz (ElevenLabs) na persona AULA: pedido do Gustavo em 30/09/2026 — só texto.
+  const voz = e.encerrouPorTool || e.aulaPiloto || e.aulaDaCampanha ? undefined : {
     supabase, origem: 'conversa' as const, historico, iniciadaEm: e.inicioRodada,
     provedorResposta: lunaAtiva(e, deps) ? 'openai' as const : 'anthropic' as const,
     interacaoId: e.rodadaId,
