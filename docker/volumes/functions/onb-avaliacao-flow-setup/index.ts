@@ -20,6 +20,16 @@
 //      ele pode ser referenciado (por `flow_id`) no botão FLOW do template.
 //   3. POST { action: "status", flow_id }       → consulta status/validation_errors a qualquer
 //      momento (não muda nada).
+//   4. POST { action: "find_template" }         → procura o template `int_aluno_15_avaliacao`
+//      já existente na conta (id, status, category, components atuais). Só leitura.
+//   5. POST { action: "update_template" }       → EDITA o template já aprovado NO LUGAR (POST
+//      /{template-id}, mesmo nome/id — a Meta permite trocar `components` de um template
+//      existente sem recriar; o único jeito de saber se aceita é tentando: se a Meta recusar
+//      por mudança estrutural grande demais, o fallback é `action: "create_template"`, que cria
+//      um template NOVO, com outro nome (`int_aluno_15_avaliacao_v2`) — aí
+//      `onb_regua_passos.template_nome` precisa de um UPDATE). Volta pro status PENDING (nova
+//      revisão da Meta) — NÃO manda nada pra ninguém sozinho; o envio real continua travado por
+//      `onb_regua_config.flow_id_avaliacao_d15` (ver docs/CRM — Integração do Aluno.md).
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
 const corsHeaders = {
@@ -32,6 +42,41 @@ const META_API = 'https://graph.facebook.com/v21.0';
 
 /** Mesma conta que dispara a régua de onboarding (onb-regua-dispatch/regras.ts). */
 const CONTA_SUPORTE_3250 = 'b5987306-4f73-46fb-b90a-054ad800c9ab';
+
+const TEMPLATE_NOME = 'int_aluno_15_avaliacao';
+
+/** Corpo igual ao de hoje (mesmas 2 variáveis) — só o convite final muda, do botão pro Flow. */
+const TEMPLATE_BODY = 'Oi, {{1}}! Tô muito feliz: a sua integração está concluída 🎓\n\n' +
+  'A partir de agora você segue com a sua turma e com a coordenação, e o *suporte continua ' +
+  'aqui* sempre que você precisar.\n\n' +
+  'Antes de encerrar, me ajuda com uma coisa rápida? *De 1 a 5, que nota você dá para esses ' +
+  'primeiros dias* como aluno da pós em {{2}}?\n\n' +
+  'É só tocar no botão abaixo, escolher sua nota e, se quiser, deixar um comentário — leva ' +
+  'menos de um minuto.\n\n' +
+  'Espero que você tenha a melhor experiência educacional da sua vida. Bora ser especialista! 💜';
+
+/** flow_id publicado por `action:"create"`+`"publish"` em 30/09/2026 (ver docs). */
+const FLOW_ID_AVALIACAO = '1660381502266680';
+
+function componentsTemplateAvaliacao() {
+  return [
+    {
+      type: 'BODY',
+      text: TEMPLATE_BODY,
+      example: { body_text: [['Maria', 'Clínica Médica e Cirúrgica de Bovinos']] },
+    },
+    {
+      type: 'BUTTONS',
+      buttons: [{
+        type: 'FLOW',
+        text: 'Dar minha nota',
+        flow_id: FLOW_ID_AVALIACAO,
+        flow_action: 'navigate',
+        navigate_screen: 'AVALIACAO',
+      }],
+    },
+  ];
+}
 
 /**
  * Tela única: nota 1-5 (RadioButtonsGroup) + comentário opcional (TextArea) + botão que
@@ -176,7 +221,57 @@ Deno.serve(async (req) => {
       return json({ ok: true, flow: body });
     }
 
-    return json({ ok: false, error: "action deve ser 'create', 'publish' ou 'status'" }, 400);
+    if (action === 'find_template') {
+      const metaRes = await fetch(
+        `${META_API}/${wabaId}/message_templates?name=${encodeURIComponent(TEMPLATE_NOME)}&fields=id,name,status,category,language,components&limit=10`,
+        { headers: { Authorization: `Bearer ${accessToken}` } },
+      );
+      const body = await metaRes.json().catch(() => ({}));
+      if (!metaRes.ok || body?.error) return json({ ok: false, error: body?.error ?? body }, 400);
+      return json({ ok: true, templates: body?.data ?? [] });
+    }
+
+    if (action === 'update_template') {
+      // Acha o id atual primeiro — editar exige o template_id, não o nome.
+      const findRes = await fetch(
+        `${META_API}/${wabaId}/message_templates?name=${encodeURIComponent(TEMPLATE_NOME)}&fields=id,name,status,language&limit=10`,
+        { headers: { Authorization: `Bearer ${accessToken}` } },
+      );
+      const findBody = await findRes.json().catch(() => ({}));
+      if (!findRes.ok || findBody?.error) return json({ ok: false, error: findBody?.error ?? findBody }, 400);
+      const atual = (findBody?.data ?? [])[0];
+      if (!atual?.id) {
+        return json({ ok: false, error: `Template '${TEMPLATE_NOME}' não encontrado nesta WABA — use action:"create_template"` }, 404);
+      }
+
+      const metaRes = await fetch(`${META_API}/${atual.id}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ components: componentsTemplateAvaliacao() }),
+      });
+      const body = await metaRes.json().catch(() => ({}));
+      if (!metaRes.ok || body?.error) return json({ ok: false, error: body?.error ?? body, template_id: atual.id }, 400);
+      return json({ ok: true, template_id: atual.id, success: body?.success === true });
+    }
+
+    if (action === 'create_template') {
+      const nome = typeof flow_id === 'string' && flow_id.startsWith('nome:') ? flow_id.slice(5) : `${TEMPLATE_NOME}_v2`;
+      const metaRes = await fetch(`${META_API}/${wabaId}/message_templates`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: nome,
+          language: 'pt_BR',
+          category: 'UTILITY',
+          components: componentsTemplateAvaliacao(),
+        }),
+      });
+      const body = await metaRes.json().catch(() => ({}));
+      if (!metaRes.ok || body?.error) return json({ ok: false, error: body?.error ?? body }, 400);
+      return json({ ok: true, id: body?.id, nome, status: body?.status ?? null });
+    }
+
+    return json({ ok: false, error: "action deve ser 'create', 'publish', 'status', 'find_template', 'update_template' ou 'create_template'" }, 400);
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'unknown error';
     return json({ ok: false, error: msg }, 500);
