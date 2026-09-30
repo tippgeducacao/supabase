@@ -19,7 +19,7 @@ import Anthropic from "npm:@anthropic-ai/sdk@0.128.0";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { executarFerramenta, FERRAMENTAS } from "./ferramentas.ts";
 import { blocoBase, blocoConversa, hojeEmBrasilia, PROMPT_BASE } from "./prompt.ts";
-import { criarRastreioDaTela, motivoDaReserva, rodarAgente, type EventoMimosa, type ResumoAgente } from "./agente.ts";
+import { criarRastreioDaTela, motivoDaReserva, rodarAgente, semCreditoNaIA, type EventoMimosa, type ResumoAgente } from "./agente.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -78,6 +78,10 @@ function paramsDoModelo(modelo: string): Record<string, unknown> {
 }
 
 function mensagemDeErro(e: unknown): string {
+  // Sem crédito na conta da IA: tentar de novo não resolve, então a mensagem pede o TI.
+  if (e instanceof Anthropic.APIError && semCreditoNaIA(e)) {
+    return "Estou sem créditos de IA agora. Avisa o TI pra recarregar, por favor?";
+  }
   if (e instanceof Anthropic.RateLimitError || (e instanceof Anthropic.APIError && motivoDaReserva(e) === "sobrecarga")) {
     return "Estou com muita gente me chamando agora. Tenta de novo em um minutinho?";
   }

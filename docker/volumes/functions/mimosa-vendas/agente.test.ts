@@ -6,6 +6,7 @@ import {
   MAX_PASSOS,
   motivoDaReserva,
   rodarAgente,
+  semCreditoNaIA,
   type DependenciasAgente,
   type EventoMimosa,
 } from "./agente";
@@ -285,6 +286,27 @@ describe("reserva quando a IA principal falha", () => {
     expect(chamadas.at(-1)?.tool_choice).toEqual({ type: "none" });
     expect(eventos.find((e) => e.tipo === "passo_consulta")).toEqual({ tipo: "passo_consulta", passo: 3 });
     expect(eventos.at(-1)).toEqual({ tipo: "texto", passo: 3 + MAX_PASSOS - 1, delta: "ok" });
+  });
+});
+
+describe("conta da IA sem crédito", () => {
+  // O texto que chegou em mimosa_vendas_uso.erro em 29/09/2026 (18:19–19:52).
+  const SEM_CREDITO = '400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}';
+
+  it("reconhece o 400 de saldo baixo, o 402 e o billing_error", () => {
+    expect(semCreditoNaIA(new Error(SEM_CREDITO))).toBe(true);
+    expect(semCreditoNaIA({ status: 400, message: SEM_CREDITO })).toBe(true);
+    expect(semCreditoNaIA({ status: 402 })).toBe(true);
+    expect(semCreditoNaIA({ status: 400, type: "billing_error" })).toBe(true);
+  });
+
+  it("não confunde com sobrecarga, limite de uso ou pedido inválido comum", () => {
+    expect(semCreditoNaIA({ status: 529, type: "overloaded_error" })).toBe(false);
+    expect(semCreditoNaIA({ status: 429, type: "rate_limit_error" })).toBe(false);
+    expect(semCreditoNaIA({ status: 400, type: "invalid_request_error", message: "max_tokens: too large" })).toBe(false);
+    expect(semCreditoNaIA(null)).toBe(false);
+    // e a reserva não é tentada (é a mesma conta)
+    expect(motivoDaReserva(new Error(SEM_CREDITO))).toBeNull();
   });
 });
 

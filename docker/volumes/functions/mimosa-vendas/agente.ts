@@ -105,6 +105,20 @@ export function motivoDaReserva(e: unknown): "modelo_indisponivel" | "sobrecarga
 }
 
 /**
+ * A conta da IA ficou sem crédito: a Anthropic responde 400 `invalid_request_error` com
+ * "Your credit balance is too low…" (ou 402 / `billing_error`). A reserva não adianta (é a
+ * mesma conta) e "tenta de novo" também não: a tela diz que acabou o crédito e pede o TI.
+ * Aconteceu em 29/09/2026, das 18:19 às 19:52 (15 perguntas com a mensagem genérica).
+ */
+export function semCreditoNaIA(e: unknown): boolean {
+  if (!e || typeof e !== "object") return false;
+  const x = e as { status?: unknown; type?: unknown; error?: { type?: unknown; error?: { type?: unknown } }; message?: unknown };
+  const tipo = x.type ?? x.error?.error?.type ?? x.error?.type;
+  return x.status === 402 || tipo === "billing_error"
+    || /credit balance is too low|insufficient (credit|balance)/i.test(String(x.message ?? ""));
+}
+
+/**
  * O que a pessoa já está VENDO. O texto de um passo que virou consulta (`passo_consulta`)
  * é recolhido pelo front; o de um passo refeito some. Enquanto nenhum texto de resposta
  * estiver na tela, dá para recomeçar com a reserva sem apagar nada — continuando a
