@@ -50,6 +50,7 @@ import {
   semRaciocinioNoTexto, TOOLS_QUE_ENCERRAM, TOOLS_QUE_PAUSAM,
 } from './regrasDaRodada.ts';
 import { ctxDeJson, ctxParaJson } from './rotasN8n.ts';
+import { agendamentoFeito, reunioesAgora, trocarNotaDasReunioes } from './reunioesDoLead.ts';
 
 export const MAX_VOLTAS = 8; // o mesmo MAX_RODADAS_TOOLS do index.ts
 
@@ -101,6 +102,12 @@ export type EstadoRodada = {
   raciocinios: [string, unknown][];
   /** Resposta que pediu correção de canal: espera a segunda chamada. */
   canalPendente: { resposta: any; decisao: DecisaoCanal } | null;
+  /** A agenda (lida no preparo) tem reunião futura de pé? null = não deu para ler (reunioesDoLead.ts). */
+  reuniaoMarcadaNaAgenda: boolean | null;
+  /** Reunião criada ou remarcada NESTA rodada (a agenda lida no preparo ainda não a conhece). */
+  agendouNestaRodada: boolean;
+  /** A nota das reuniões que está dentro de contextoEfetivo (para trocá-la quando a rodada agenda). */
+  notaReunioes: string;
 };
 
 export type Chamada = { id: string; name: string; input: any };
@@ -517,7 +524,8 @@ async function processarResposta(
   if (ctx.ficha) {
     const valores = valoresInventados(texto, messages);
     const motivoTrava = valores.length ? 'valor' as const
-      : afirmaReuniaoSemCriar(texto, messages, e.leadAgendado) ? 'reuniao' as const : null;
+      : afirmaReuniaoSemCriar(texto, messages, e.leadAgendado,
+        { marcadaNaAgenda: e.reuniaoMarcadaNaAgenda, agendouNestaRodada: e.agendouNestaRodada }) ? 'reuniao' as const : null;
     if (motivoTrava && !e.corrigiuTrava.includes(motivoTrava)) {
       e.corrigiuTrava.push(motivoTrava);
       tel.registrar('trava_fala', { motivo: motivoTrava, acao: 'reinstruido', valores, texto: resumir(texto, 600) });
@@ -620,6 +628,14 @@ export async function gravarResultados(
   await deps.renovar();
   await gravarMensagem(deps.supabase, e.remotejid, { role: 'user', content: montarToolResults(outputs) });
   const concluidas = chamadas.filter((_, i) => toolConcluida(outputs[i]));
+  if (chamadas.some((c, i) => agendamentoFeito(c.name, outputs[i]))) {
+    e.agendouNestaRodada = true;
+    // A nota lida no começo ficou velha (reunioesDoLead.ts, trocarNotaDasReunioes): relê a agenda.
+    const agora = await reunioesAgora(deps.supabase, e.telefone, ctx.leadId);
+    e.contextoEfetivo = trocarNotaDasReunioes(e.contextoEfetivo, e.notaReunioes, agora.nota);
+    e.notaReunioes = agora.nota;
+    e.reuniaoMarcadaNaAgenda = agora.marcada;
+  }
   if (concluidas.some((c) => TOOLS_QUE_ENCERRAM.has(c.name))) {
     e.encerrouPorTool = true;
     if (concluidas.some((c) => TOOLS_QUE_PAUSAM.has(c.name))) e.pausouPorTool = true;
@@ -738,7 +754,7 @@ export function estadoInicial(
     remotejid: string; telefone: string; inicioRodada: number; conteudo: string; itens: any[]; registrarFalaAposEnvio: boolean;
     conjuntoPrompt: ConjuntoPrompt; ctx: CtxConversa; lead: any; pedidoPorPalavraChave: 'botao' | 'texto' | null;
     aberturaControlada: boolean; aplicarTroca: boolean; sinalTroca: any; desdeLimpeza: string | null; aulaPiloto: boolean;
-    aulaDaCampanha: any; configLeitura: ConfigLeituraJev | null;
+    aulaDaCampanha: any; configLeitura: ConfigLeituraJev | null; reuniaoMarcadaNaAgenda?: boolean | null; notaReunioes?: string;
   },
   depois: { promptAgente: string; tools: any[]; contextoEfetivo: string; agenteEfetivo: string; estaNaEscola: boolean },
   rodadaId: string,
@@ -760,5 +776,6 @@ export function estadoInicial(
     retornoPorFormatura: false, encerramento: null, corrigiuHorario: false, corrigiuTrava: [], corrigiuVazio: false,
     corrigiuSilencio: false, confirmacaoPendente: null, consultas: [], avisosDaLeitura: [], ferramentasDaVolta: [],
     inicioLlm: 0, raciocinios: [], canalPendente: null,
+    reuniaoMarcadaNaAgenda: pre.reuniaoMarcadaNaAgenda ?? null, agendouNestaRodada: false, notaReunioes: pre.notaReunioes ?? '',
   };
 }

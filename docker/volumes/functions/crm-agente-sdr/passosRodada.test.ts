@@ -23,6 +23,7 @@ vi.mock('./tools.ts', async (original) => ({
   ...(await original<typeof import('./tools.ts')>()),
   executarTool: vi.fn(async (_s: unknown, chamada: any) => {
     m.ferramentas.push(chamada);
+    if (chamada.name === 'confirmar_agendamento') return { id: chamada.id, resultado: 'Agendamento confirmado.', agendamento_id: 'ag-novo' };
     return chamada.name === 'pausa_ia' ? { id: chamada.id, resultado: 'IA pausada.' } : { id: chamada.id, resultado: 'Horários livres:\n- 10h de quarta, dia 2026-10-01 (vendedor_id: v1, nome: Ana)',
       slots_raw: [{ data: '2026-10-01', horario: '10:00', vendedor_id: 'v1', vendedor_nome: 'Ana' }] };
   }),
@@ -200,5 +201,25 @@ describe('agente por passos (o loop desenhado no n8n)', () => {
     const gravado = JSON.stringify(m.gravadas.find((g) => JSON.stringify(g.content).includes('tool_result'))?.content);
     expect(gravado).toContain('10h de quarta');
     expect(gravado).not.toContain('situacao');
+  });
+
+  it('depois de confirmar de verdade, a nota das reuniões é relida da agenda (não fica "não há reunião marcada")', async () => {
+    const agenda = { data: [] as any[] };
+    const d = { ...deps(), supabase: { rpc: async () => ({ data: agenda.data, error: null }) } };
+    const e = novoEstado();
+    e.notaReunioes = '\n\nREUNIÕES DESTE LEAD NA AGENDA (velha)\nNão há reunião marcada agora.';
+    e.contextoEfetivo += e.notaReunioes;
+    e.reuniaoMarcadaNaAgenda = false;
+    e.tools.push({ name: 'confirmar_agendamento', description: 'agenda', input_schema: { type: 'object', properties: { horario_escolhido: { type: 'string' } } } });
+    let s = await P.montarVolta(d as any, e);
+    s = await P.lerResposta(d as any, s.estado, { resposta: chamada('c9', 'confirmar_agendamento', { horario_escolhido: '10:00' }) });
+    const r = await P.executarFerramenta(d as any, s.estado, (s as any).chamadas[0]);
+    agenda.data = [{ id: 'ag-novo', status: 'agendado', resultado_reuniao: null, data_agendamento: '2099-10-01T13:00:00Z', monitor: 'Ana',
+      origem: 'API SDR', mudou_em: null, mudou_por: null }];
+    s = await P.gravarResultados(d as any, s.estado, (s as any).chamadas, [r]);
+    expect(s.estado.agendouNestaRodada).toBe(true);
+    expect(s.estado.reuniaoMarcadaNaAgenda).toBe(true);
+    expect(s.estado.contextoEfetivo).toContain('com Ana: MARCADA');
+    expect(s.estado.contextoEfetivo).not.toContain('(velha)');
   });
 });

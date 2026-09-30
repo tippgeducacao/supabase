@@ -89,6 +89,9 @@ import { carregarModoTrocaNumero, carregarSinalTrocaDeNumero, comNotaNoContexto,
 import { enviarComAberturaNumero, NOTA_ABERTURA_CONTROLADA } from './aberturaTrocaNumero.ts';
 import { afirmaReuniaoSemCriar, correcaoDaFala, horariosNaoOfertados, valoresInventados } from './travasDeterministicas.ts';
 import {
+  agendamentoFeito, carregarReunioesDoLead, notaDasReunioes, reuniaoMarcadaNaAgenda, reunioesAgora, trocarNotaDasReunioes,
+} from './reunioesDoLead.ts';
+import {
   CORRECAO_SILENCIO, CORRECAO_VAZIO, ehLevaSoReacao, instrucaoPosPausa, INSTRUCAO_POS_RETORNO, INSTRUCAO_REACAO, RE_RETENCAO,
   semRaciocinioNoTexto, TOOLS_QUE_ENCERRAM, TOOLS_QUE_PAUSAM,
 } from './regrasDaRodada.ts';
@@ -483,8 +486,15 @@ async function prepararAntesDoRouter(remotejid: string, itensDoLote: any[], tel:
   // formação é o envio dele, não a checagem de compatibilidade (portfolio.ts).
   ctx.aulaSemPos = Boolean(aulaDaCampanha && !aulaDaCampanha.curso_nome);
   // O nome volta AQUI, a cada turno, e não só no cabeçalho do prompt (ver notaDoNome).
+  // Reuniões do lead pela AGENDA (30/09/2026, reunioesDoLead.ts): cancelada, remarcada, compareceu…
+  // A conversa guarda só a confirmação; sem isto a IA reafirmava reunião cancelada pela equipe.
+  const agoraDaRodada = new Date();
+  const reunioesDoLead = await carregarReunioesDoLead(supabase, telefone, ctx.leadId);
+  const marcadaNaAgendaAgora = reuniaoMarcadaNaAgenda(reunioesDoLead, agoraDaRodada);
+  const notaReunioes = notaDasReunioes(reunioesDoLead, agoraDaRodada);
   const contextoTemporal = montarContextoTemporal() + notaDoNome(vars.nome) + notaDoCurso(vars.curso_interesse_original)
-    + (provedor?.nome === 'openai' ? contextoEspecialidadeCannabis(vars.curso_interesse_original) : '');
+    + (provedor?.nome === 'openai' ? contextoEspecialidadeCannabis(vars.curso_interesse_original) : '')
+    + notaReunioes;
 
   // Persona: LEAD em modo_recontato manda (independe do número — espelha o gate de
   // entrada); senão vale a persona do número (relay/buffer). 'recontato' = no-show:
@@ -560,7 +570,7 @@ async function prepararAntesDoRouter(remotejid: string, itensDoLote: any[], tel:
       remotejid, telefone, inicioRodada, conteudo, itens, registrarFalaAposEnvio, conjuntoPrompt, ctx, lead,
       pedidoPorPalavraChave, modoTroca, aberturaControlada, desdeLimpeza, sinalTroca, vars, campanha, aulaPiloto,
       aulaDaCampanha, contextoTemporal, persona, ehCampanha, aplicarTroca, agenteAnterior, notaTroca, naListaDoCanario,
-      configJev, configLeitura, coletaFeita, precisaRouter,
+      configJev, configLeitura, coletaFeita, precisaRouter, reuniaoMarcadaNaAgenda: marcadaNaAgendaAgora, notaReunioes,
     },
   };
 }
@@ -766,7 +776,9 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
   const preparo = await prepararRodada(remotejid, itensDoLote, tel);
   if (!preparo) return;
   // `let`: o loop reatribui parte delas (provedor no fallback, lead, contexto…), como antes.
-  let { inicioRodada, conteudo, doUltimoCom, telefone, provedor, registrarFalaAposEnvio, conjuntoPrompt, ctx, lead, pedidoPorPalavraChave, aberturaControlada, desdeLimpeza, sinalTroca, aulaPiloto, aulaDaCampanha, aplicarTroca, configLeitura, leituraPromessa, promptAgente, tools, contextoEfetivo, agenteEfetivo, estaNaEscola } = preparo;
+  let { inicioRodada, conteudo, doUltimoCom, telefone, provedor, registrarFalaAposEnvio, conjuntoPrompt, ctx, lead, pedidoPorPalavraChave, aberturaControlada, desdeLimpeza, sinalTroca, aulaPiloto, aulaDaCampanha, aplicarTroca, configLeitura, leituraPromessa, promptAgente, tools, contextoEfetivo, agenteEfetivo, estaNaEscola, reuniaoMarcadaNaAgenda: marcadaNaAgenda, notaReunioes } = preparo;
+  // Reunião criada ou remarcada NESTA rodada: a agenda lida no preparo ainda não a conhece.
+  let agendouNestaRodada = false;
   // Agente no n8n: a Luna é chamada pelo webhook do n8n (o router, feito no preparo, não).
   if (pontas?.provedor && provedor) provedor = pontas.provedor(provedor);
   const executarFerramenta = pontas?.executarFerramenta ?? ((chamada, c) => executarTool(supabase, chamada, c));
@@ -1083,6 +1095,14 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
       // Uma tentativa bloqueada não pausou nem encerrou. Também não pode enviar
       // a despedida gerada junto da inferência: a próxima volta recebe a recusa.
       const toolsConcluidas = toolUses.filter((_: any, i: number) => toolConcluida(outputs[i]));
+      if (toolUses.some((tu: any, i: number) => agendamentoFeito(tu.name, outputs[i]))) {
+        agendouNestaRodada = true;
+        // A nota lida no começo ficou velha (reunioesDoLead.ts, trocarNotaDasReunioes): relê a agenda.
+        const agora = await reunioesAgora(supabase, telefone, ctx.leadId);
+        contextoEfetivo = trocarNotaDasReunioes(contextoEfetivo, notaReunioes, agora.nota);
+        notaReunioes = agora.nota;
+        marcadaNaAgenda = agora.marcada;
+      }
       if (toolsConcluidas.some((tu: any) => TOOLS_QUE_ENCERRAM.has(tu.name))) {
         encerrouPorTool = true;
         if (toolsConcluidas.some((tu: any) => TOOLS_QUE_PAUSAM.has(tu.name))) pausouPorTool = true;
@@ -1189,7 +1209,7 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
       if (ctx.ficha) {
         const valores = valoresInventados(texto, messages);
         const motivoTrava = valores.length ? 'valor' as const
-          : afirmaReuniaoSemCriar(texto, messages, lead?.agendado === true) ? 'reuniao' as const : null;
+          : afirmaReuniaoSemCriar(texto, messages, lead?.agendado === true, { marcadaNaAgenda, agendouNestaRodada }) ? 'reuniao' as const : null;
         if (motivoTrava && !corrigiuTrava.has(motivoTrava)) {
           corrigiuTrava.add(motivoTrava);
           tel.registrar('trava_fala', { motivo: motivoTrava, acao: 'reinstruido', valores, texto: resumir(texto, 600) });

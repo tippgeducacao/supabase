@@ -185,7 +185,8 @@ export function valoresInventados(resposta: string, historico: readonly Msg[]): 
 }
 
 const RE_AFIRMA_MARCADA = [
-  /\b(reuni[aã]o|conversa|hor[aá]rio|encaixe)\b[^.?!\n]{0,40}\b(est[aá]|t[aá]|ficou|foi|fica|j[aá])\s+(confirmad|marcad|agendad|reservad|garantid)[oa]/i,
+  // "segue/continua marcada" (30/09/2026): o jeito de reafirmar uma reunião que a equipe já tinha cancelado.
+  /\b(reuni[aã]o|conversa|hor[aá]rio|encaixe)\b[^.?!\n]{0,40}\b(est[aá]|t[aá]|ficou|foi|fica|j[aá]|segue|continua|permanece)\s+(confirmad|marcad|agendad|reservad|garantid)[oa]/i,
   /\b(confirmad|marcad|agendad|reservad)[oa]s?\b[^.?!\n]{0,25}\b(sua|a|nossa)\s+(reuni[aã]o|conversa)/i,
   /\b(j[aá]\s+)?(marquei|agendei|reservei|confirmei)\b/i,
   /meet\.google\.com\//i,
@@ -195,10 +196,26 @@ const RE_AFIRMA_MARCADA = [
  * A fala diz que a reunião está marcada (ou manda link do Meet) sem nenhum agendamento criado:
  * nem nesta conversa (confirmar/remarcar com sucesso) nem antes (lead já agendado).
  */
-export function afirmaReuniaoSemCriar(resposta: string, historico: readonly Msg[], leadJaAgendado: boolean): boolean {
-  if (leadJaAgendado) return false;
-  if (resultadosDeFerramenta(historico).some((r) => r.agendamento_id)) return false;
-  return RE_AFIRMA_MARCADA.some((re) => re.test(resposta));
+/**
+ * `agenda` (30/09/2026, reunioesDoLead.ts): a situação REAL das reuniões. Com ela, um agendamento antigo
+ * no histórico não vale mais como prova — a reunião pode ter sido cancelada ou remarcada pela equipe
+ * (casos Marwin e Elder). Sem ela (null/ausente, leitura falhou), a regra de sempre.
+ */
+export function afirmaReuniaoSemCriar(
+  resposta: string, historico: readonly Msg[], leadJaAgendado: boolean,
+  agenda: { marcadaNaAgenda?: boolean | null; agendouNestaRodada?: boolean } = {},
+): boolean {
+  if (leadJaAgendado || agenda.agendouNestaRodada || agenda.marcadaNaAgenda === true) return false;
+  if (agenda.marcadaNaAgenda !== false && resultadosDeFerramenta(historico).some((r) => r.agendamento_id)) return false;
+  return RE_AFIRMA_MARCADA.some((re) => re.test(resposta)) || esperaNaReuniao(resposta);
+}
+
+// "te espero às 15h30" (casos Marwin e Elder, 17 e 24/09/2026): combinado de reunião dito como fato. Só
+// conta fora de frase sobre aula/evento — "te espero às 19h na aula" é convite de aula, e está certo.
+const RE_TE_ESPERO = /\bte\s+espero\b[^.?!\n]{0,30}?(\b\d{1,2}\s*h|\b\d{1,2}:\d{2})/i;
+const RE_AULA_OU_EVENTO = /\b(aula|live|evento|palestra|webinar|transmiss[aã]o)\b/i;
+function esperaNaReuniao(resposta: string): boolean {
+  return resposta.split(/(?<=[.?!\n])/).some((frase) => RE_TE_ESPERO.test(frase) && !RE_AULA_OU_EVENTO.test(frase));
 }
 
 /** Correção interna (não vai ao lead): diz o que foi barrado e manda refazer preservando o resto. */
