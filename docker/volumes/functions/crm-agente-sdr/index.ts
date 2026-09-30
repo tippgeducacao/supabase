@@ -1456,21 +1456,23 @@ async function comAssinatura(corpo: Record<string, any>, cfg: DesvioN8n): Promis
   return json({ ok: true, ...corpo, ...(corpo.estado ? { assinatura: await assinarEstado(corpo.estado, cfg.segredo) } : {}) });
 }
 
-/** Pedidos que o n8n faz no router: Jev (se ligado), Luna (reserva) e a leitura do Jev para a ficha. */
+/**
+ * Pedidos que o n8n faz no router: Jev (router e leitura do lead) e Luna (reserva). Os do Jev vêm
+ * SEMPRE, com o modo da config: o fluxo fica em linha reta, e quem ignora a resposta de um Jev
+ * desligado ('off') é o `definir`, não um IF no n8n.
+ */
 async function pedidosDoRouter(pre: PreRouter, provedor: ProvedorIA & { formato: 'openai' }) {
   const historico = await carregarHistorico(supabase, pre.remotejid);
   const historicoRouter = limparParaRouter(comNotaParaRouter(historico, pre.notaTroca));
   const novas = pre.itens.map((i: any) => String(i?.mensagem ?? '')).filter(Boolean);
   return {
     precisa: pre.precisaRouter,
-    jev: pre.precisaRouter && pre.configJev
-      ? { modo: pre.configJev.modo, limiar: pre.configJev.limiar, pedido: pedidoJevRouter(historicoRouter, pre.notaTroca) } : null,
+    jev: pre.precisaRouter
+      ? { modo: pre.configJev?.modo ?? 'off', limiar: pre.configJev?.limiar ?? 0.9, pedido: pedidoJevRouter(historicoRouter, pre.notaTroca) } : null,
     luna: pre.precisaRouter
       ? { pedido: paraPedidoOpenai(pedidoRouter(historicoRouter), { modelo: provedor.modelo, esforco: provedor.esforco, raciocinio: provedor.raciocinio }) }
       : null,
-    leitura: pre.configLeitura
-      ? { modo: pre.configLeitura.modo, limiar: pre.configLeitura.limiar, pedido: pedidoJevLeitura(limparParaRouter(historico), novas) }
-      : null,
+    leitura: { modo: pre.configLeitura?.modo ?? 'off', limiar: pre.configLeitura?.limiar ?? 0.9, pedido: pedidoJevLeitura(limparParaRouter(historico), novas) },
   };
 }
 
@@ -1524,19 +1526,29 @@ async function iniciarPorPassos(lote: any, cfg: DesvioN8n): Promise<Response> {
   }
 }
 
-/** Fim de rodada: mensagem que chegou no meio vira a próxima rodada; senão, solta a trava. */
+/**
+ * Fim de rodada: solta a trava. Mensagem que chegou no meio (ficou na fila do sistema) volta como
+ * `nova_rodada` com o LOTE — o n8n manda para o 03 Router como se viesse do 02 (mesmas barreiras).
+ */
 async function depoisDoPasso(saida: Saida, cfg: DesvioN8n): Promise<Response> {
   if (saida.acao !== 'fim') return await comAssinatura(saida as Record<string, any>, cfg);
-  const remotejid = saida.estado.remotejid;
-  const proximos = await bufferDrenar(remotejid);
-  if (proximos.length) {
-    const nova = await comecarRodadaPorPassos(remotejid, proximos, cfg);
-    return await comAssinatura({ ...nova, anterior: { respondeu: saida.respondeu, motivo: saida.motivo ?? null, enviado: (saida as any).enviado ?? null },
-      ...(nova.acao === 'rotear' ? { acao: 'nova_rodada' } : {}) }, cfg);
-  }
-  await lockSoltar(remotejid);
+  const e = saida.estado;
+  const proximos = await bufferDrenar(e.remotejid);
+  await lockSoltar(e.remotejid);
   const { estado: _e, ...resto } = saida as Record<string, any>;
-  return json({ ok: true, ...resto, agente: saida.estado.agenteEfetivo, voltas: saida.estado.volta });
+  const resumo = { ok: true, ...resto, agente: e.agenteEfetivo, voltas: e.volta };
+  if (!proximos.length) return json(resumo);
+  return json({
+    ...resumo, acao: 'nova_rodada',
+    lote: {
+      remotejid: e.remotejid, telefone: e.telefone,
+      mensagens: proximos.map((i: any) => ({
+        id: i.msg_id ?? null, conteudo: i.mensagem ?? '', ...(i.arquivo ? { arquivo: i.arquivo } : {}), timestamp: i.timestamp ?? null,
+        wa_account_id: i.wa_account_id ?? null, agente_ia_persona: i.agente_ia_persona ?? null,
+        lead_id: i.lead_id ?? null, oportunidade_id: i.oportunidade_id ?? null,
+      })),
+    },
+  });
 }
 
 async function definirPorPassos(corpo: any, cfg: DesvioN8n): Promise<Response> {
