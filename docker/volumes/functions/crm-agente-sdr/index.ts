@@ -1611,7 +1611,7 @@ async function passoPorPassos(acao: string, corpo: any, cfg: DesvioN8n): Promise
     const r = await executarFerramentaPasso(deps, e, corpo.chamada, Array.isArray(corpo.anteriores) ? corpo.anteriores : []);
     return json({ ok: true, ...r });
   }
-  const saida = acao === 'volta' ? await lerResposta(deps, e, { resposta: corpo.resposta, erro: corpo.erro, correcao: corpo.correcao === true })
+  const saida = acao === 'volta' ? await lerResposta(deps, e, { resposta: corpo.resposta, erro: corpo.erro, correcao: corpo.correcao === true, rascunho: corpo.rascunho })
     : acao === 'gravar' ? await gravarResultados(deps, e, corpo.chamadas ?? [], corpo.resultados ?? [])
     : await enviarPasso(deps, e, { tipo: corpo.tipo, texto: corpo.texto, motivo: corpo.motivo });
   return await depoisDoPasso(saida, cfg);

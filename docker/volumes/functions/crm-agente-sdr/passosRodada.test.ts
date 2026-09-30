@@ -81,7 +81,9 @@ describe('agente por passos (o loop desenhado no n8n)', () => {
     const d = deps();
     let s = await P.montarVolta(d, novoEstado());
     expect(s.acao).toBe('chamar_ia');
-    const pedido = (s as any).pedido;
+    const pedido: any = P.montarDasPecas((s as any).pecas);
+    expect((s as any).pecas.persona).toBe('Você é a Luna.');
+    expect((s as any).pecas.contexto[0]).toContain('AGORA: terça 10h');
     expect(pedido.model).toBe('gpt-5.6-luna');
     expect(pedido.instructions).toContain('Você é a Luna.');
     expect(pedido.tools.map((t: any) => t.name)).toEqual(['consulta_disponibilidade', 'pausa_ia', 'responder_ao_cliente']);
@@ -164,5 +166,27 @@ describe('agente por passos (o loop desenhado no n8n)', () => {
     expect(await R.estadoConfere({ ...e, ctx: { ...e.ctx, waAccountId: 'outra-conta' } }, assinatura, cfg)).toBe(false);
     expect(await R.estadoConfere(e, assinatura, { ...cfg, telefones: [] })).toBe(false);
     expect(await R.estadoConfere(e, 'x', cfg)).toBe(false);
+  });
+
+  it('os pedaços remontam EXATAMENTE o pedido que o sistema monta inteiro', async () => {
+    const { montarPedidoPrincipal } = await import('./agente');
+    const { paraPedidoOpenai } = await import('./provedorOpenai');
+    const cfg = { modelo: 'gpt-5.6-luna', esforco: 'high' };
+    const tools = [{ name: 'consulta_disponibilidade', description: 'agenda', input_schema: { type: 'object', properties: {} } }];
+    const casos: any[][] = [
+      [{ role: 'user', content: 'oi' }],
+      [{ role: 'user', content: 'oi' }, { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'consulta_disponibilidade', input: {} }] },
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: '{"slots_raw":[]}' }] }],
+      [{ role: 'user', content: [{ type: 'text', text: 'foto' }, { type: 'text', text: 'Legenda do arquivo: veja' }] }],
+    ];
+    for (const messages of casos) {
+      for (const extra of [{}, { contextoEntregaMateriais: 'MATERIAIS', contextoFicha: 'FICHA', comFicha: true }]) {
+        const opts: any = { promptAgente: 'PERSONA', contextoTemporal: 'AGORA', messages, tools, conjunto: 'luna', ...extra };
+        const inteiro = paraPedidoOpenai(montarPedidoPrincipal(opts).pedido, cfg);
+        const sem = montarPedidoPrincipal({ ...opts, semBlocosDeContexto: true });
+        const pecas = P.pecasDe(paraPedidoOpenai(sem.pedido, cfg), sem.contexto, 'PERSONA');
+        expect(P.montarDasPecas(pecas)).toEqual(inteiro);
+      }
+    }
   });
 });

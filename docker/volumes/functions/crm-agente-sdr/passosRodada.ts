@@ -105,8 +105,23 @@ export type EstadoRodada = {
 
 export type Chamada = { id: string; name: string; input: any };
 
+/**
+ * O pedido da volta EM PEDAÇOS, para o n8n mostrar cada um num nó e juntar à vista (montarDasPecas):
+ * persona (o prompt da persona), regras (os blocos fixos: memória, fatos, agenda, eventos, ficha, voz,
+ * canal), historico (a conversa, já no formato da Responses API), contexto (relógio, materiais, ficha
+ * — vão no fim da última mensagem), ferramentas e config (modelo, esforço, limites).
+ */
+export type PecasDoPedido = {
+  persona: string;
+  regras: string;
+  historico: any[];
+  contexto: string[];
+  ferramentas: any[];
+  config: Record<string, unknown>;
+};
+
 export type Saida =
-  | { acao: 'chamar_ia' | 'corrigir_canal' | 'corrigir'; estado: EstadoRodada; pedido: Record<string, unknown>; motivo?: string; texto_barrado?: string }
+  | { acao: 'chamar_ia' | 'corrigir_canal' | 'corrigir'; estado: EstadoRodada; pecas: PecasDoPedido; motivo?: string; texto_barrado?: string }
   | { acao: 'ferramentas'; estado: EstadoRodada; chamadas: Chamada[] }
   | { acao: 'enviar'; estado: EstadoRodada; tipo: 'fala' | 'despedida' | 'confirmacao'; texto: string; motivo?: string }
   | { acao: 'fim'; estado: EstadoRodada; respondeu: boolean; motivo?: string; enviado?: string };
@@ -283,6 +298,35 @@ async function efeitosDaPrimeiraVolta(deps: DepsPassos, e: EstadoRodada, ctx: Ct
   }
 }
 
+/**
+ * Junta os pedaços no pedido da Responses API — o MESMO que o sistema montaria inteiro (teste em
+ * passosRodada.test.ts). O nó "Monta o pedido" do n8n roda esta mesma lógica, em JavaScript puro.
+ */
+export function montarDasPecas(p: PecasDoPedido): Record<string, unknown> {
+  const input = structuredClone(p.historico);
+  if (p.contexto.length) {
+    const partes = p.contexto.map((text) => ({ type: 'input_text', text }));
+    const ultimo = input[input.length - 1];
+    if (ultimo?.role === 'user' && Array.isArray(ultimo.content)) ultimo.content.push(...partes);
+    else input.push({ role: 'user', content: partes });
+  }
+  return { ...p.config, input, instructions: p.regras ? `${p.persona}\n${p.regras}` : p.persona, ...(p.ferramentas.length ? { tools: p.ferramentas } : {}) };
+}
+
+/** Pedido da Responses API montado SEM os blocos de contexto → pedaços (puro; testado contra o pedido inteiro). */
+export function pecasDe(pedidoSemContexto: Record<string, any>, contexto: string[], persona: string): PecasDoPedido {
+  const { instructions, input, tools, ...config } = pedidoSemContexto;
+  const texto = String(instructions ?? '');
+  if (texto !== persona && !texto.startsWith(`${persona}\n`)) throw new Error('pedido sem o prompt da persona no começo');
+  return { persona, regras: texto.slice(persona.length + 1), historico: input ?? [], contexto, ferramentas: tools ?? [], config };
+}
+
+/** O pedido da volta em pedaços (correcaoCanal: o pedido de correção do canal da resposta). */
+function pecasDoPedido(deps: DepsPassos, e: EstadoRodada, opts: OpcoesPedidoPrincipal, correcaoCanal = false): PecasDoPedido {
+  const { pedido, contexto } = montarPedidoPrincipal({ ...opts, semBlocosDeContexto: true });
+  return pecasDe(pedidoOpenaiDe(deps, e, correcaoCanal ? pedidoCorrecaoDoCanal(pedido) : pedido), contexto, opts.promptAgente);
+}
+
 function pedidoOpenaiDe(deps: DepsPassos, e: EstadoRodada, pedido: Record<string, any>): Record<string, unknown> {
   const p = deps.provedor;
   if (p?.formato !== 'openai') throw new Error('rodada sem a Luna');
@@ -317,14 +361,14 @@ export async function montarVolta(deps: DepsPassos, e: EstadoRodada): Promise<Sa
   const base = await baseDaVolta(deps, e, ctx, primeira);
   e.volta += 1;
   e.inicioLlm = Date.now();
-  const { pedido, ferramentasDisponiveis } = montarPedidoPrincipal(base.opts);
+  const { ferramentasDisponiveis } = montarPedidoPrincipal(base.opts);
   e.ferramentasDaVolta = [...ferramentasDisponiveis];
   deps.tel.registrar('llm_inicio', { volta: e.volta, provedor: lunaAtiva(e, deps) ? 'openai' : 'anthropic' });
   const semModelo = respostaSemModelo(base.opts);
   if (semModelo) return await processarResposta(deps, e, ctx, base, semModelo);
   if (!lunaAtiva(e, deps)) return await processarResposta(deps, e, ctx, base, await chamarClaude(deps, e, ctx, base));
   guardarCtx(e, ctx);
-  return { acao: 'chamar_ia', estado: e, pedido: pedidoOpenaiDe(deps, e, pedido) };
+  return { acao: 'chamar_ia', estado: e, pecas: pecasDoPedido(deps, e, base.opts) };
 }
 
 /** O Claude de reserva (a Luna falhou nesta rodada); se ele também falhar, a frase operacional. */
@@ -345,8 +389,10 @@ async function chamarClaude(deps: DepsPassos, e: EstadoRodada, ctx: CtxConversa,
  * `correcao`: esta é a resposta ao pedido de correção de canal.
  */
 export async function lerResposta(
-  deps: DepsPassos, e: EstadoRodada, entrada: { resposta?: any; erro?: string; correcao?: boolean },
+  deps: DepsPassos, e: EstadoRodada, entrada: { resposta?: any; erro?: string; correcao?: boolean; rascunho?: string[] },
 ): Promise<Saida> {
+  // Pedaço do pedido trocado por um rascunho no n8n (teste sem deploy): fica marcado na telemetria.
+  const rascunho = Array.isArray(entrada.rascunho) ? entrada.rascunho.filter((r) => typeof r === 'string') : [];
   const ctx = ctxDo(e);
   const base = await baseDaVolta(deps, e, ctx, e.volta === 1);
   const p = deps.provedor;
@@ -364,7 +410,7 @@ export async function lerResposta(
     e.canalPendente = null;
     if (!pendente) throw new Error('correção de canal sem resposta pendente');
     const corrigida = respostaValida(entrada.resposta) ? traduzir(entrada.resposta) : null;
-    return await processarResposta(deps, e, ctx, base, respostaDepoisDaCorrecao(pendente.resposta, pendente.decisao, corrigida));
+    return await processarResposta(deps, e, ctx, base, respostaDepoisDaCorrecao(pendente.resposta, pendente.decisao, corrigida), rascunho);
   }
 
   if (!respostaValida(entrada.resposta)) {
@@ -380,16 +426,17 @@ export async function lerResposta(
   if (decisao.tipo === 'corrigir') {
     e.canalPendente = { resposta, decisao };
     deps.tel.registrar('canal_correcao_pedida', { volta: e.volta, motivo: (decisao as { motivo?: string }).motivo ?? null });
-    const { pedido } = montarPedidoPrincipal(base.opts);
     guardarCtx(e, ctx);
-    return { acao: 'corrigir_canal', estado: e, pedido: pedidoOpenaiDe(deps, e, pedidoCorrecaoDoCanal(pedido)),
+    return { acao: 'corrigir_canal', estado: e, pecas: pecasDoPedido(deps, e, base.opts, true),
       motivo: (decisao as { motivo?: string }).motivo };
   }
-  return await processarResposta(deps, e, ctx, base, normalizarRespostaCanal(resposta, decisao));
+  return await processarResposta(deps, e, ctx, base, normalizarRespostaCanal(resposta, decisao), rascunho);
 }
 
 /** O que a IA respondeu (já no formato interno): telemetria, memória e as checagens da fala. */
-async function processarResposta(deps: DepsPassos, e: EstadoRodada, ctx: CtxConversa, base: BaseDaVolta, resp: any): Promise<Saida> {
+async function processarResposta(
+  deps: DepsPassos, e: EstadoRodada, ctx: CtxConversa, base: BaseDaVolta, resp: any, rascunho: string[] = [],
+): Promise<Saida> {
   const { supabase, tel } = deps;
   const blocosResp = (resp.content ?? []) as any[];
   const iaTexto = blocosResp.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
@@ -414,6 +461,7 @@ async function processarResposta(deps: DepsPassos, e: EstadoRodada, ctx: CtxConv
     texto: iaTexto ? resumir(iaTexto, 2000) : undefined,
     tools_decididas: iaTools.length ? iaTools : undefined,
     agente_pelo_n8n: true,
+    ...(rascunho.length ? { rascunho_n8n: rascunho } : {}),
   }, Date.now() - e.inicioLlm);
   if (blocosResp.length && (!e.registrarFalaAposEnvio || blocosResp.some((b) => b.type === 'tool_use'))) {
     await gravarMensagem(supabase, e.remotejid, { role: 'assistant', content: semRaciocinioNoTexto(resp.content) });

@@ -213,6 +213,11 @@ export type OpcoesPedidoPrincipal = {
   prazoModeloMs?: number;
   /** 'luna' = os blocos de prompts-luna.ts (só o canário); ausente/'producao' = os de sempre. */
   conjunto?: ConjuntoPrompt;
+  /**
+   * Agente no n8n (30/09/2026): monta o pedido SEM os blocos de contexto no fim da última mensagem;
+   * eles voltam à parte em `contexto`, para o n8n mostrar e juntar (passosRodada.ts, pecasDoPedido).
+   */
+  semBlocosDeContexto?: boolean;
 };
 
 /**
@@ -238,7 +243,7 @@ export function respostaSemModelo(opts: Pick<OpcoesPedidoPrincipal, 'messages' |
  * recebe este pedido traduzido para a Responses API e faz a chamada ele mesmo). Ordem e
  * breakpoints de cache descritos acima — a montagem é uma só para os dois caminhos.
  */
-export function montarPedidoPrincipal(opts: OpcoesPedidoPrincipal): { pedido: Record<string, any>; ferramentasDisponiveis: Set<string> } {
+export function montarPedidoPrincipal(opts: OpcoesPedidoPrincipal): { pedido: Record<string, any>; ferramentasDisponiveis: Set<string>; contexto: string[] } {
   const falhaCompatibilidade = opts.comFicha && ultimaCompatibilidadeFalhou(opts.messages);
   // O MESMO pedido, na MESMA ordem; só muda de onde vem o texto (29/09/2026: a Luna tem a sua cópia,
   // prompts-luna.ts, para ser cortada sem mexer no João dos outros leads).
@@ -272,6 +277,8 @@ export function montarPedidoPrincipal(opts: OpcoesPedidoPrincipal): { pedido: Re
       : m.content,
   }));
   const ult: any = messages[messages.length - 1];
+  // Os blocos de contexto anexados à última mensagem, na ordem (o n8n os recebe à parte).
+  const contexto: string[] = [];
   if (ult) {
     const blocos: any[] = Array.isArray(ult.content)
       ? ult.content.map((b: any) => ({ ...b }))
@@ -287,24 +294,20 @@ export function montarPedidoPrincipal(opts: OpcoesPedidoPrincipal): { pedido: Re
     // system e o trouxe pra cá). O rótulo diz o que o bloco É; a posição não muda,
     // então o cache segue intacto.
     if (opts.contextoTemporal && opts.contextoTemporal.trim() !== '') {
-      blocos.push({
-        type: 'text',
-        text: '[CONTEXTO TEMPORAL DO SISTEMA — não é mensagem do lead e não é assunto de conversa. '
+      contexto.push('[CONTEXTO TEMPORAL DO SISTEMA — não é mensagem do lead e não é assunto de conversa. '
           + 'AGORA situa esta rodada e os novos pedidos do lead; não é a data de envio do histórico ou das citações. '
           + 'Hoje ou amanhã em um convite se referem ao dia em que ele foi enviado, que pode não estar disponível. '
           + 'Este relógio não confirma que um evento de convite antigo ocorrerá hoje. '
           + 'NUNCA comente este bloco nem diga que só recebeu ele.]\n'
-          + opts.contextoTemporal,
-      });
+          + opts.contextoTemporal);
     }
     // O webhook pode atualizar o status entre duas voltas. Mantém o estado de
     // entrega fora do prefixo em cache e da memória persistida da conversa.
-    if (opts.contextoEntregaMateriais) {
-      blocos.push({ type: 'text', text: opts.contextoEntregaMateriais });
-    }
+    if (opts.contextoEntregaMateriais) contexto.push(opts.contextoEntregaMateriais);
     // Ficha do atendimento: estado determinístico, relido a cada volta, fora do cache.
-    if (opts.contextoFicha) blocos.push({ type: 'text', text: opts.contextoFicha });
-    if (falhaCompatibilidade) blocos.push({ type: 'text', text: '[ESTADO INTERNO DA CONSULTA — não é fala do lead]\n' + INSTRUCAO_FALHA_COMPATIBILIDADE });
+    if (opts.contextoFicha) contexto.push(opts.contextoFicha);
+    if (falhaCompatibilidade) contexto.push('[ESTADO INTERNO DA CONSULTA — não é fala do lead]\n' + INSTRUCAO_FALHA_COMPATIBILIDADE);
+    if (!opts.semBlocosDeContexto) for (const text of contexto) blocos.push({ type: 'text', text });
     ult.content = blocos;
   }
 
@@ -318,7 +321,7 @@ export function montarPedidoPrincipal(opts: OpcoesPedidoPrincipal): { pedido: Re
     messages,
     tools,
   };
-  return { pedido, ferramentasDisponiveis };
+  return { pedido, ferramentasDisponiveis, contexto };
 }
 
 // ── Canal da resposta: a fala ao lead só sai por responder_ao_cliente ─────────
