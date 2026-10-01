@@ -379,6 +379,10 @@ Deno.serve(async (req) => {
   const blocoDaFicha = () => {
     if (!fichaSim) return undefined;
     const entradaFicha = { cadastro: fichaSim.cadastro, jornada: fichaSim.jornada, inicioRodada: fichaSim.inicioRodada };
+    // Espelho da produção (index.ts/passosRodada.ts): na aula do piloto, a ficha vai como FATOS, sem o
+    // roteiro comercial ("se aceitar, confirme diretamente…"). Antes de 01/10/2026 o simulador mandava a
+    // ficha comercial também na aula, e o ensaio media uma ordem que a produção não dá.
+    if (aulaPiloto) return `DADOS COLETADOS (não são um roteiro): ${JSON.stringify(entradaFicha)}`;
     return montarBlocoFicha(entradaFicha, avaliarFicha(entradaFicha));
   };
   let agenteAtual: AgenteRouter = entrada.agente_atual ?? 'agente_validacao';
