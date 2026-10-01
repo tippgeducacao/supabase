@@ -31,6 +31,7 @@ import { humanizarTexto } from '../crm-agente-sdr/saida.ts';
 import { limparParaRouter } from '../crm-agente-sdr/historico.ts';
 import { gerarFollowup } from '../crm-agente-sdr/followup.ts';
 import { contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from '../crm-agente-sdr/contextoAulaPiloto.ts';
+import { blocoCarreira, carregarCarreiraPorNome } from '../crm-agente-sdr/carreiraPos.ts';
 import { contextoEspecialidadeCannabis } from '../crm-agente-sdr/especialidadeCannabis.ts';
 import { comAberturaNumero, NOTA_ABERTURA_CONTROLADA } from '../crm-agente-sdr/aberturaTrocaNumero.ts';
 import { VERSAO_MEMORIA_HUMANA } from '../crm-agente-sdr/memoriaHumana.ts';
@@ -502,7 +503,10 @@ Deno.serve(async (req) => {
         const contextoBase = comNotaNoContexto(montarContextoTemporal() + notaDoNome(vars.nome) + notaDoCurso(vars.curso_interesse_original)
           + (provedorAlternativo?.nome === 'openai' ? contextoEspecialidadeCannabis(vars.curso_interesse_original) : '')
           + (aberturaControlada ? '\n\n' + NOTA_ABERTURA_CONTROLADA : ''), notaTroca);
-        const contextoFinal = aulaPiloto ? contextoBase + contextoAulaPiloto(entrada.aula, new Date(), { semFichaAntiga: Boolean(entrada.v2) })
+        // Agentes V2: o conhecimento da pós chega como dado (bloco CARREIRA, tabela sdr_carreira_pos).
+        const carreira = entrada.v2 && entrada.aula?.curso_nome
+          ? blocoCarreira(await carregarCarreiraPorNome(supabase, entrada.aula.curso_nome), entrada.aula.curso_nome) : '';
+        const contextoFinal = aulaPiloto ? contextoBase + contextoAulaPiloto(entrada.aula, new Date(), { semFichaAntiga: Boolean(entrada.v2) }) + carreira
           : fichaSim ? `${contextoBase}\n\n${blocoConviteAgenda()}` : contextoBase;
         return { agente: agenteTools, promptAgente: promptFinal, contextoTemporal: contextoFinal, tools, comFicha: Boolean(fichaSim),
           ...(aulaPiloto ? { instrucaoFicha: INSTRUCAO_AULA_PILOTO } : {}) };
