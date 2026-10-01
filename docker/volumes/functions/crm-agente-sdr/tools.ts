@@ -1347,7 +1347,7 @@ export async function executarTool(
       reutilizado_nesta_rodada: true,
       resultado: 'A checagem já falhou nesta rodada. Nenhuma nova tentativa foi feita.',
       checagem_em_andamento: false, nova_tentativa_agendada: false,
-      instrucao: INSTRUCAO_FALHA_COMPATIBILIDADE };
+      ...(ctx.soInformar ? {} : { instrucao: INSTRUCAO_FALHA_COMPATIBILIDADE }) };
   }
   try {
     switch (name) {
@@ -1444,7 +1444,7 @@ export async function executarTool(
         ...(ctx.ficha ? { checagem_em_andamento: false, nova_tentativa_agendada: false } : {}),
         resultado: ctx.ficha ? 'A tentativa de checagem terminou sem resultado por falha técnica. Nenhuma aprovação foi obtida.'
           : `A checagem de compatibilidade NÃO rodou (falha técnica: ${(e as Error).message}).`,
-        instrucao: ctx.ficha ? INSTRUCAO_FALHA_COMPATIBILIDADE
+        instrucao: ctx.soInformar ? undefined : ctx.ficha ? INSTRUCAO_FALHA_COMPATIBILIDADE
           : 'É PROIBIDO tratar o lead como apto, dizer que a formação dele atende ou '
           + 'oferecer horário agora. Sem citar erro técnico, diga que vai confirmar a '
           + 'compatibilidade e siga a conversa; tente esta função de novo na próxima rodada.',

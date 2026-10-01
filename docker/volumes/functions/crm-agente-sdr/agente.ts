@@ -250,7 +250,7 @@ export function respostaSemModelo(opts: Pick<OpcoesPedidoPrincipal, 'messages' |
  * breakpoints de cache descritos acima — a montagem é uma só para os dois caminhos.
  */
 export function montarPedidoPrincipal(opts: OpcoesPedidoPrincipal): { pedido: Record<string, any>; ferramentasDisponiveis: Set<string>; contexto: string[] } {
-  const falhaCompatibilidade = opts.comFicha && ultimaCompatibilidadeFalhou(opts.messages);
+  const falhaCompatibilidade = opts.comFicha && !opts.regrasSubstitutas && ultimaCompatibilidadeFalhou(opts.messages);
   // O MESMO pedido, na MESMA ordem; só muda de onde vem o texto (29/09/2026: a Luna tem a sua cópia,
   // prompts-luna.ts, para ser cortada sem mexer no João dos outros leads).
   const b = blocosDoPrompt(opts.conjunto ?? 'producao');
