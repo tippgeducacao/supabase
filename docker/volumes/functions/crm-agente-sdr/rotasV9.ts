@@ -144,7 +144,8 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
         contexto += contextoAulaPiloto(aula, agora, { semFichaAntiga: true });
         contexto += blocoCarreira(await carregarCarreiraPorNome(supabase, curso), curso);
       }
-      return ok({ persona, agente_atual: lead?.agente_atual ?? null, vars, contexto, aula });
+      // As variáveis vão também soltas: o prompt no n8n as lê como {{ $json.nome }}.
+      return ok({ ...vars, persona, agente_atual: lead?.agente_atual ?? null, vars, contexto, aula });
     }
     // puxa tools do bd: as ferramentas da Luna para o agente, no formato do Claude, + o canal de resposta.
     case 'tools': {
