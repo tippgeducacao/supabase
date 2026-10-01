@@ -68,7 +68,13 @@ const json = (data: unknown, status = 200) =>
 async function autorizado(req: Request): Promise<boolean> {
   const { data } = await supabase.from('crm_agente_sdr_config').select('followup_secret').eq('id', 1).maybeSingle();
   const segredo = data?.followup_secret ?? '';
-  return Boolean(segredo) && req.headers.get('x-followup-key') === segredo;
+  if (segredo && req.headers.get('x-followup-key') === segredo) return true;
+  // O ensaio do prompt no n8n (01/10/2026) usa a credencial que o n8n já tem: o segredo do desvio
+  // (crm_sdr_n8n, cabeçalho x-ppg-sdr-segredo). O simulador não envia nem grava nada em lead.
+  const doN8n = req.headers.get('x-ppg-sdr-segredo');
+  if (!doN8n) return false;
+  const { data: n8n } = await supabase.from('crm_sdr_n8n').select('segredo, ativo').limit(1).maybeSingle();
+  return Boolean(n8n?.ativo && n8n?.segredo) && doN8n === n8n!.segredo;
 }
 
 // Catálogo + resolução de pós: espelha o executor real (tools.ts), usando as MESMAS
