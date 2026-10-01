@@ -22,3 +22,11 @@ describe('rotas do formato v9', () => {
     expect((await rotaV9('luna', { remotejid: '5546988166051@s.whatsapp.net', pedido: {} }, deps)).status).toBe(409);
   });
 });
+
+describe('contexto da aula no v9', () => {
+  it('a régua de estudante da venda vira uma linha de dado', async () => {
+    const { montarContextoTemporal } = await import('./contexto');
+    const { blocoElegibilidadeFormatura } = await import('./elegibilidadeFormatura');
+    expect(montarContextoTemporal()).toContain(blocoElegibilidadeFormatura());
+  });
+});

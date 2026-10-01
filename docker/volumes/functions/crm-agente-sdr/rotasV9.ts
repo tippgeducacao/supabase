@@ -12,6 +12,7 @@ import { notaDoNome } from './nomeDoLead.ts';
 import { contextoEspecialidadeCannabis } from './especialidadeCannabis.ts';
 import { carregarReunioesDoLead, notaDasReunioes } from './reunioesDoLead.ts';
 import { contextoAulaPiloto } from './contextoAulaPiloto.ts';
+import { blocoElegibilidadeFormatura, limiteFormaturaFormatado } from './elegibilidadeFormatura.ts';
 import { blocoCarreira, carregarCarreiraPorNome } from './carreiraPos.ts';
 import { type AulaParaPrompt, montarVarsAula } from './prompts-aula.ts';
 import { cursoDaConversa } from './ganchoLote.ts';
@@ -138,7 +139,14 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
       };
       const agora = new Date();
       const reunioes = await carregarReunioesDoLead(supabase, telefone, corpo?.lead_id ?? null);
-      let contexto = montarContextoTemporal() + notaDoNome(vars.nome) + notaDoCurso(lead?.curso_interesse_original)
+      // Na aula, o bloco de ELEGIBILIDADE da venda (régua de estudante com ordens: "pergunte mês e ano
+      // antes de decidir qualquer coisa") vira um dado só. Com ele, "me formei em janeiro" virou a
+      // pergunta do ano (teste do Gustavo, 01/10/2026). A trava de verdade é a do verificar_compatibilidade.
+      const relogio = aula
+        ? montarContextoTemporal().replace(blocoElegibilidadeFormatura(),
+          `DATA-LIMITE PARA QUEM AINDA CURSA A GRADUAÇÃO (interna, não cite): conclui até ${limiteFormaturaFormatado()}, segue; depois, retorno perto da formatura.`)
+        : montarContextoTemporal();
+      let contexto = relogio + notaDoNome(vars.nome) + notaDoCurso(lead?.curso_interesse_original)
         + contextoEspecialidadeCannabis(lead?.curso_interesse_original ?? '') + notaDasReunioes(reunioes, agora);
       // O que o cadastro e a conversa já registraram do lead (o v9 não tem a ficha do sistema).
       // Formação do formulário NÃO é confirmação: estudante também marca "Médico Veterinário".
