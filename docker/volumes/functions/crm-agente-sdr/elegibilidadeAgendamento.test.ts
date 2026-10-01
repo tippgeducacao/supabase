@@ -432,3 +432,18 @@ describe('elegibilidade comprovada antes de confirmar_agendamento', () => {
     exigirBloqueio(await confirmar(banco, 'Cannabis Medicinal', contextoTeste));
   });
 });
+
+describe('ensaio: curso da matriz com outro nome', () => {
+  it('aprova quando o resolvedor leva os dois nomes ao mesmo curso, como a produção', async () => {
+    const { finalizarAvaliacao } = await import('./elegibilidadeAgendamento.ts');
+    const id = '5aedb8e2-2869-468d-a3fe-7732616c9380';
+    const banco = { rpc: async () => ({ data: { id }, error: null }) };
+    const ctx: any = { modoTeste: true, ultimaElegibilidade: { curso: 'PÓS | CANNABIS MEDICINAL VETERINÁRIA', decisao: 'pendente' } };
+    const r = await finalizarAvaliacao(banco, ctx, { avaliacaoId: null, cursoId: null },
+      { output: 'APROVADO', pode_cursar: true, compativel: true, curso_solicitado: 'Cannabis Medicinal' });
+    expect(r.output).toBe('APROVADO');
+    const outro = { rpc: async (_n: string, p: any) => ({ data: { id: p.p_valor.includes('Bovinos') ? '11111111-1111-1111-1111-111111111111' : id }, error: null }) };
+    await expect(finalizarAvaliacao(outro, { ...ctx }, { avaliacaoId: null, cursoId: null },
+      { output: 'APROVADO', pode_cursar: true, compativel: true, curso_solicitado: 'Bovinos de Leite' })).rejects.toThrow('outro curso');
+  });
+});

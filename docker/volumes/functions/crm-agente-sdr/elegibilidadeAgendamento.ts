@@ -29,6 +29,19 @@ export function normalizarCursoTeste(curso: unknown): string {
     .replace(/^(pos|mba)\s*\|\s*/i, '').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
+async function mesmoCursoNoTeste(supabase: ClienteElegibilidade, a: unknown, b: unknown): Promise<boolean> {
+  if (normalizarCursoTeste(a) === normalizarCursoTeste(b)) return true;
+  const idDe = async (nome: unknown) => {
+    const { data } = await supabase.rpc('fn_sdr_api_resolver_pos_graduacao', { p_valor: String(nome ?? '') });
+    const id = String(objeto(data).id ?? '');
+    return UUID.test(id) ? id : null;
+  };
+  try {
+    const [ia, ib] = await Promise.all([idDe(a), idDe(b)]);
+    return ia !== null && ia === ib;
+  } catch { return false; }
+}
+
 export async function iniciarAvaliacao(
   supabase: ClienteElegibilidade, ctx: ContextoElegibilidade, input: Record<string, unknown>,
 ): Promise<AvaliacaoIniciada> {
@@ -67,7 +80,10 @@ export async function finalizarAvaliacao(
     : resultado.pode_cursar === false || resultado.compativel === false ? 'reprovado' : 'pendente';
   const motivo = String(resultado.output ?? 'PENDENTE').slice(0, 100);
   if (ctx.modoTeste) {
-    if (aprovada && normalizarCursoTeste(resultado.curso_solicitado) !== normalizarCursoTeste(ctx.ultimaElegibilidade?.curso)) {
+    // Mesmo critério da produção (crm_agente_elegibilidade_finalizar): os dois nomes viram o id do
+    // curso pelo resolvedor. Comparar o texto reprovava no ensaio quem a produção aprova — a matriz
+    // chama a pós pelo nome da tabela dela ("Cannabis Medicinal"), a IA pelo do catálogo (01/10/2026).
+    if (aprovada && !(await mesmoCursoNoTeste(supabase, resultado.curso_solicitado, ctx.ultimaElegibilidade?.curso))) {
       throw new Error('A matriz respondeu sobre outro curso');
     }
   } else {
