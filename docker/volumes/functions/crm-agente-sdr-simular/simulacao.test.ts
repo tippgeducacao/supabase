@@ -552,3 +552,25 @@ describe('ferramentas_reais (29/09/2026)', () => {
     }
   });
 });
+
+describe('v2 da IA de aula (ensaio de 01/10/2026)', () => {
+  const aula = { titulo: 'Cannabis', inicio_em: '2099-09-30T22:00:00Z', curso_nome: 'PÓS | CANNABIS MEDICINAL VETERINÁRIA' };
+  const v2 = { persona: 'PERSONA V2', regras: 'REGRAS V2', ferramentas: [{ name: 'pausa_ia', description: 'pausa', parameters: { type: 'object', properties: {} } }] };
+
+  it('aceita persona aula com openai e guarda persona, regras e ferramentas', () => {
+    const entrada = validarEntradaSimulacao({ mensagens: ['oi'], persona: 'aula', provedor: 'openai', aula, v2 });
+    expect(entrada.v2).toEqual(v2);
+  });
+
+  it('sem v2, nada muda', () => {
+    expect(validarEntradaSimulacao({ mensagens: ['oi'], persona: 'aula', provedor: 'openai', aula }).v2).toBeNull();
+  });
+
+  it('recusa fora da persona aula, fora da openai ou sem texto', () => {
+    expect(() => validarEntradaSimulacao({ mensagens: ['oi'], provedor: 'openai', v2 })).toThrow('v2 só vale');
+    expect(() => validarEntradaSimulacao({ mensagens: ['oi'], persona: 'aula', aula, v2 })).toThrow('v2 só vale');
+    expect(() => validarEntradaSimulacao({ mensagens: ['oi'], persona: 'aula', provedor: 'openai', aula, v2: { ...v2, regras: ' ' } })).toThrow('v2.regras');
+    expect(() => validarEntradaSimulacao({ mensagens: ['oi'], persona: 'aula', provedor: 'openai', aula, v2: { ...v2, ferramentas: [{ name: 'x' }] } })).toThrow('name, description e parameters');
+  });
+});
+

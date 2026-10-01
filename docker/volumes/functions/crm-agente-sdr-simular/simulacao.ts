@@ -71,7 +71,34 @@ export type EntradaSimulacao = {
    * pelo executor real em modo teste — nada é gravado. As que gravam ou enviam seguem simuladas.
    */
   ferramentas_reais: boolean;
+  /**
+   * 01/10/2026: versão NOVA inteira da IA de aula para comparar com o que foi enviado de verdade.
+   * `persona` substitui o prompt da aula, `regras` substitui TODOS os blocos fixos e `ferramentas`
+   * (formato da Responses API: name/description/parameters) substitui as descrições das tools.
+   * Só persona 'aula' com provedor 'openai'. A produção não lê nada disto.
+   */
+  v2: { persona: string; regras: string; ferramentas: { name: string; description: string; parameters: unknown; strict?: boolean }[] | null } | null;
 };
+
+function validarV2(valor: unknown, persona: string, provedor: string): EntradaSimulacao['v2'] {
+  if (valor === undefined || valor === null) return null;
+  if (persona !== 'aula' || provedor !== 'openai') throw new Error('v2 só vale com persona aula e provedor openai');
+  const v = valor as Record<string, unknown>;
+  if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('v2 deve ser um objeto');
+  if (typeof v.persona !== 'string' || !v.persona.trim()) throw new Error('v2.persona deve ter texto');
+  if (typeof v.regras !== 'string' || !v.regras.trim()) throw new Error('v2.regras deve ter texto');
+  let ferramentas: NonNullable<EntradaSimulacao['v2']>['ferramentas'] = null;
+  if (v.ferramentas !== undefined && v.ferramentas !== null) {
+    if (!Array.isArray(v.ferramentas) || !v.ferramentas.length) throw new Error('v2.ferramentas deve ser uma lista');
+    ferramentas = v.ferramentas.map((t: any) => {
+      if (!t || typeof t.name !== 'string' || typeof t.description !== 'string' || !t.parameters || typeof t.parameters !== 'object') {
+        throw new Error('cada ferramenta de v2 precisa de name, description e parameters');
+      }
+      return { name: t.name, description: t.description, parameters: t.parameters, ...(t.strict === true ? { strict: true } : {}) };
+    });
+  }
+  return { persona: v.persona, regras: v.regras, ferramentas };
+}
 
 export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
   if (!valor || typeof valor !== 'object' || Array.isArray(valor)) throw new Error('payload inválido');
@@ -193,6 +220,7 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
     sem_presente_escola: body.sem_presente_escola === true,
     esta_na_escola: body.esta_na_escola === true,
     prompt_extra: texto(body.prompt_extra, 'prompt_extra').trim(),
+    v2: validarV2(body.v2, persona as string, provedor as string),
     troca_de_numero: trocaDeNumero,
     aula: aulaSimulada,
     provedor,

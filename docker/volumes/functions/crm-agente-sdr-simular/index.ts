@@ -451,7 +451,7 @@ Deno.serve(async (req) => {
             ...(jev.leitura ? { jev: jev.leitura } : {}) });
         }
         const promptBase = agente === 'agente_campanha_direta' ? AGENTE_CAMPANHA_DIRETA
-          : agente === 'agente_aula' ? AGENTE_AULA
+          : agente === 'agente_aula' ? (entrada.v2?.persona ?? AGENTE_AULA)
           : agente === 'agente_qualificador' ? blocosDoPrompt(entrada.prompt).qualificador : blocosDoPrompt(entrada.prompt).validacao;
         // Persona aula: as vars da aula (quando ocorre, link, pós vinculada) vêm do objeto
         // `aula` da entrada; o curso do lead é a pós vinculada, vazia quando a aula não tem pós.
@@ -474,7 +474,9 @@ Deno.serve(async (req) => {
         // agente_aula ainda não tem linha própria em lista_tools_claude: usa as tools da
         // validação (que já incluem atualizar_dados_lead), como o PRD prevê.
         const agenteTools = entrada.agente_override || (agente === 'agente_aula' ? 'agente_validacao' : agente);
-        let tools = await toolsDe(agenteTools);
+        let tools = agente === 'agente_aula' && entrada.v2?.ferramentas
+          ? entrada.v2.ferramentas.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters, ...(t.strict ? { strict: true } : {}) }))
+          : await toolsDe(agenteTools);
         if (entrada.usar_router && !entrada.agente_override && entrada.persona === 'campanha_direta' && agente === 'agente_qualificador') {
           const extras = (await toolsDe('agente_campanha_direta')).filter((t) => t?.name === 'atualizar_dados_lead');
           tools = [...tools, ...extras];
@@ -489,7 +491,8 @@ Deno.serve(async (req) => {
         return { agente: agenteTools, promptAgente: promptFinal, contextoTemporal: contextoFinal, tools, comFicha: Boolean(fichaSim),
           ...(aulaPiloto ? { instrucaoFicha: INSTRUCAO_AULA_PILOTO } : {}) };
       },
-      chamarPrincipal: (opts: Parameters<typeof chamarAgentePrincipal>[0]) => chamarAgentePrincipal({ ...opts, provedor: provedorAlternativo, conjunto: entrada.prompt }),
+      chamarPrincipal: (opts: Parameters<typeof chamarAgentePrincipal>[0]) => chamarAgentePrincipal({ ...opts, provedor: provedorAlternativo, conjunto: entrada.prompt,
+        ...(entrada.v2 && entrada.persona === 'aula' ? { regrasSubstitutas: entrada.v2.regras } : {}) }),
       humanizar: humanizarTexto,
       prepararFala: texto => {
         if (aberturaPendente) {

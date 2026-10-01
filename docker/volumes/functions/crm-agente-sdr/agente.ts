@@ -218,6 +218,12 @@ export type OpcoesPedidoPrincipal = {
    * eles voltam à parte em `contexto`, para o n8n mostrar e juntar (passosRodada.ts, pecasDoPedido).
    */
   semBlocosDeContexto?: boolean;
+  /**
+   * Ensaio de prompt (01/10/2026, framework das IAs SDR): no lugar dos blocos fixos (memória humana,
+   * fatos, disponibilidade, eventos, ficha, voz, canal), o pedido leva SÓ este texto depois da persona.
+   * Usado pelo simulador para testar uma versão nova inteira; a produção nunca passa este campo.
+   */
+  regrasSubstitutas?: string;
 };
 
 /**
@@ -248,7 +254,10 @@ export function montarPedidoPrincipal(opts: OpcoesPedidoPrincipal): { pedido: Re
   // O MESMO pedido, na MESMA ordem; só muda de onde vem o texto (29/09/2026: a Luna tem a sua cópia,
   // prompts-luna.ts, para ser cortada sem mexer no João dos outros leads).
   const b = blocosDoPrompt(opts.conjunto ?? 'producao');
-  const system: any[] = [
+  const system: any[] = opts.regrasSubstitutas ? [
+    { type: 'text', text: opts.promptAgente },
+    { type: 'text', text: opts.regrasSubstitutas, cache_control: { type: 'ephemeral' } },
+  ] : [
     { type: 'text', text: opts.promptAgente },
     { type: 'text', text: b.memoriaHumana },
     { type: 'text', text: b.fatosDoLead },
