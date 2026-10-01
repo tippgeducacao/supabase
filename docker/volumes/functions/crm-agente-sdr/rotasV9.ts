@@ -13,7 +13,7 @@ import { contextoEspecialidadeCannabis } from './especialidadeCannabis.ts';
 import { carregarReunioesDoLead, notaDasReunioes } from './reunioesDoLead.ts';
 import { contextoAulaPiloto } from './contextoAulaPiloto.ts';
 import { blocoElegibilidadeFormatura, limiteFormaturaFormatado } from './elegibilidadeFormatura.ts';
-import { blocoCarreira, carregarCarreiraPorNome } from './carreiraPos.ts';
+import { carregarCarreiraPorNome, SINAIS_DO_PERFIL } from './carreiraPos.ts';
 import { type AulaParaPrompt, montarVarsAula } from './prompts-aula.ts';
 import { cursoDaConversa } from './ganchoLote.ts';
 import { carregarTools, chamarAnthropic, type ProvedorIA } from './agente.ts';
@@ -23,9 +23,28 @@ import { contaDoLead } from './conta.ts';
 import { limparConversaDeTeste } from './limparTeste.ts';
 import { carregarConfigRouterJev, pedidoJevRouter } from './routerJev.ts';
 
+// A busca do perfil (ideia do Wellinton): coletada a atuação, a IA diz o perfil e recebe só as
+// perguntas daquele perfil. Os perfis e os sinais são os de carreiraPos.ts.
+export const TOOL_BUSCA_CARREIRA = {
+  name: 'busca_carreira',
+  description: 'Busca as perguntas desta pós para o perfil do lead: a pergunta de dor, a ponte do convite e as objeções. '
+    + 'Chame assim que souber a atuação e a formação dele. É interna: o lead não vê.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      perfil: {
+        type: 'string', enum: Object.keys(SINAIS_DO_PERFIL),
+        description: 'O perfil que combina com o que ele disse. ' + Object.entries(SINAIS_DO_PERFIL).map(([p, s]) => `${p}: ${s}`).join('; ') + '.',
+      },
+    },
+    required: ['perfil'],
+    additionalProperties: false,
+  },
+};
+
 export const ACOES_V9 = [
   'lead', 'criar_lead', 'tocar_lead', 'mensagens', 'gravar_mensagem', 'apagar_mensagem', 'agente',
-  'contexto', 'tools', 'luna', 'router_pedido', 'tool', 'enviar_texto', 'limpar',
+  'contexto', 'tools', 'luna', 'router_pedido', 'tool', 'enviar_texto', 'limpar', 'carreira',
 ] as const;
 export type AcaoV9 = typeof ACOES_V9[number];
 export function ehAcaoV9(v: unknown): v is AcaoV9 {
@@ -160,7 +179,7 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
         + '\nA formação do cadastro vem do formulário e não foi confirmada pelo lead: muitos ainda na graduação marcam a profissão.';
       if (aula) {
         contexto += contextoAulaPiloto(aula, agora, { semFichaAntiga: true });
-        contexto += blocoCarreira(await carregarCarreiraPorNome(supabase, curso), curso);
+        // As perguntas da pós chegam pela busca_carreira, só a linha do perfil dele (ideia do Wellinton).
       }
       // As variáveis vão também soltas: o prompt no n8n as lê como {{ $json.nome }}.
       return ok({ ...vars, persona, agente_atual: lead?.agente_atual ?? null, vars, contexto, aula });
@@ -170,7 +189,7 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
       const provedor = await deps.provedorDoLead(soDigitos(corpo?.telefone ?? remotejid));
       const agente = String(corpo?.agente ?? 'agente_validacao');
       const base = await carregarTools(supabase, agente, provedor);
-      return ok({ agente, tools: [...base, TOOL_RESPONDER_AO_CLIENTE] });
+      return ok({ agente, tools: [...base, ...(agente === 'agente_aula' ? [TOOL_BUSCA_CARREIRA] : []), TOOL_RESPONDER_AO_CLIENTE] });
     }
     // Anthropic Claude Sonnet 4.5 → a Luna. Entra e sai no formato do Claude.
     case 'luna': {
@@ -214,6 +233,22 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
       });
       const retorno = await res.json().catch(() => null);
       return { status: res.ok ? 200 : 502, corpo: { enviado: res.ok, status: res.status, retorno } };
+    }
+    // busca_carreira: a linha da tabela de carreira da pós da aula para o perfil que a IA leu do lead.
+    case 'carreira': {
+      const perfil = String(corpo?.perfil ?? '');
+      const lead = await buscarLead(supabase, remotejid);
+      const campanha = lead?.contexto_campanha ?? null;
+      const aula = campanha?.persona === 'aula' && campanha.aula_id ? await carregarAula(supabase, campanha.aula_id) : null;
+      const nomePos = aula?.curso_nome ?? '';
+      const c = await carregarCarreiraPorNome(supabase, nomePos);
+      const linha = c?.linhas.find((l) => l.perfil === perfil) ?? null;
+      if (!linha) return ok({ encontrado: false, perfil, pos: nomePos || null, resultado: 'Sem pergunta cadastrada para este perfil nesta pós.' });
+      return ok({
+        encontrado: true, perfil, pos: nomePos,
+        pergunta_dor: linha.pergunta_dor, ponte_convite: linha.ponte_convite, observacao: linha.observacao,
+        objecoes: c!.objecoes,
+      });
     }
     // reset da conversa (/excluirdados) → Deleta o Lead + Deleta mensagens: a limpeza de teste do sistema.
     case 'limpar': {

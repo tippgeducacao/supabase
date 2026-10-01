@@ -30,3 +30,12 @@ describe('contexto da aula no v9', () => {
     expect(montarContextoTemporal()).toContain(blocoElegibilidadeFormatura());
   });
 });
+
+describe('busca_carreira', () => {
+  it('a ferramenta oferece os perfis da tabela e exige um', async () => {
+    const { TOOL_BUSCA_CARREIRA } = await import('./rotasV9');
+    expect(TOOL_BUSCA_CARREIRA.input_schema.properties.perfil.enum).toContain('plantonista');
+    expect(TOOL_BUSCA_CARREIRA.input_schema.required).toEqual(['perfil']);
+    expect(ehAcaoV9('carreira')).toBe(true);
+  });
+});
