@@ -77,6 +77,7 @@ import { conversaTexto, enviarResposta, horariosInventados, humanizarTexto, remo
 import { configurarVoz } from './envioVoz.ts';
 import { selecionarProvedorDoLead } from './pilotoOpenai.ts';
 import { contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from './contextoAulaPiloto.ts';
+import { ehAcaoV9, rotaV9 } from './rotasV9.ts';
 import { PRAZO_MODELO_PILOTO_MS, RESPOSTA_MODELO_INDISPONIVEL } from './prazoModelo.ts';
 import { contaDoLead, dadosDaConta, personaDaConta } from './conta.ts';
 import { rodarEsteiraFollowup } from './followup.ts';
@@ -1852,6 +1853,22 @@ Deno.serve(async (req) => {
   //   ferramenta → o fluxo 04 do n8n executa uma ferramenta com o ctx da rodada.
   if (url.searchParams.get('mode') === 'n8n') {
     const acao = url.searchParams.get('acao');
+    // Formato v9 (rotasV9.ts, 01/10/2026): um endpoint por nó Postgres do SDR v9.0.
+    if (ehAcaoV9(acao)) {
+      let corpoV9: any;
+      try { corpoV9 = await req.json(); } catch { return json({ error: 'payload inválido' }, 400); }
+      const desvioV9 = await carregarDesvioN8n(supabase);
+      const authV9 = autorizarN8n(desvioV9, segredoDoPedido(req), corpoV9?.remotejid ?? corpoV9?.telefone);
+      if (!authV9.ok) return json({ error: authV9.erro }, authV9.status);
+      if (corpoV9?.telefone && !mesmoTelefone(corpoV9?.remotejid, corpoV9.telefone)) return json({ error: 'remotejid/telefone divergentes' }, 400);
+      try {
+        const r = await rotaV9(acao, corpoV9, { supabase, provedorDoLead });
+        return json(r.corpo, r.status);
+      } catch (e) {
+        console.error(`[crm-agente-sdr] n8n v9/${acao} falhou:`, (e as Error)?.message ?? e);
+        return json({ ok: false, error: `falha_${acao}` }, 502);
+      }
+    }
     if (!ehAcaoN8n(acao)) return json({ error: 'acao_desconhecida' }, 400);
     let corpo: any;
     try { corpo = await req.json(); } catch { return json({ error: 'payload inválido' }, 400); }
