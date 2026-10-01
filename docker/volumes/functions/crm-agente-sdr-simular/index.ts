@@ -35,7 +35,7 @@ import { contextoEspecialidadeCannabis } from '../crm-agente-sdr/especialidadeCa
 import { comAberturaNumero, NOTA_ABERTURA_CONTROLADA } from '../crm-agente-sdr/aberturaTrocaNumero.ts';
 import { VERSAO_MEMORIA_HUMANA } from '../crm-agente-sdr/memoriaHumana.ts';
 import { montarRetornoInformacoes } from '../crm-agente-sdr/envioMateriais.ts';
-import { proximoPassoDaColeta } from '../crm-agente-sdr/proximoPassoColeta.ts';
+import { fatoDaColeta, proximoPassoDaColeta } from '../crm-agente-sdr/proximoPassoColeta.ts';
 import { instrucaoResultadoMaterial } from '../_shared/resultadoEnvioMaterial.ts';
 import { comNotaNoContexto, comNotaParaRouter, notaTrocaDeNumero, sinalInerte } from '../crm-agente-sdr/trocaDeNumero.ts';
 import {
@@ -104,7 +104,13 @@ type FichaSimulada = { jornada: Jornada; cadastro: string | null; inicioRodada: 
 
 // Retornos plausíveis das tools — texto no MESMO espírito dos executores reais
 // (tools.ts), porque é o texto que guia a próxima decisão do modelo.
-async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimulada | null = null, aulaSemPos = false): Promise<string> {
+async function valorDoCadastro(curso: string): Promise<string | null> {
+  if (!curso.trim()) return null;
+  const { data } = await supabase.from('cursos').select('valor_integral').ilike('nome', `%${curso.trim()}%`).not('valor_integral', 'is', null).limit(1);
+  return (data?.[0]?.valor_integral as string | undefined) ?? null;
+}
+
+async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimulada | null = null, aulaSemPos = false, soInformar = false): Promise<string> {
   // Replay de conversa real (24/09/2026): `mocks.respostas_reais[tool]` é o que a tool REAL
   // devolveu naquela rodada (agenda, matriz, cronograma…). Se o modelo chamar a mesma tool,
   // recebe o mesmo fato; tool que a rodada real não chamou cai no mock sintético abaixo.
@@ -136,7 +142,8 @@ async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimula
       if (ficha) ficha.jornada = aplicarColetaNaJornada(ficha.jornada, input ?? {});
       const partes = ['nome', 'formacao', 'tempo_formacao', 'area_atuacao', 'atua_na_area', 'graduacao_concluida', 'possui_pos', 'qual_pos']
         .filter((k) => input?.[k]).map((k) => `${k}="${input[k]}"`);
-      const passo = aulaSemPos ? passoAulaSemPos(input ?? {}) : ficha ? proximoPassoDaColeta(input ?? {}) : '';
+      const passo = aulaSemPos ? passoAulaSemPos(input ?? {}) : soInformar ? fatoDaColeta(input ?? {}) : ficha ? proximoPassoDaColeta(input ?? {}) : '';
+      if (soInformar) return partes.length ? `Registrado no cadastro: ${partes.join(', ')}.${passo ? ` ${passo}` : ''}` : 'Nada a atualizar.';
       return partes.length
         ? `Registrado no cadastro: ${partes.join(', ')}.${passo ? ` ${passo}` : ''} NUNCA comente com o lead que registrou os dados.`
         : 'Nada a atualizar.';
@@ -155,10 +162,13 @@ async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimula
       // Formato da API real (24/09/2026): matrícula e link chegam no mesmo campo.
       if (input?.conteudo === 'valor') return JSON.stringify(montarRetornoInformacoes(true, {
         data: {
-          curso: input?.curso_escolhido ?? null, valor_integral: 'R$ 4.200,00 em até 24x no cartão de crédito',
+          curso: input?.curso_escolhido ?? null,
+          // v2 (ensaio com lead real): o valor do cadastro da pós, como a sdr-api devolveria.
+          valor_integral: (soInformar ? await valorDoCadastro(String(input?.curso_escolhido ?? '')) : null) ?? 'R$ 4.200,00 em até 24x no cartão de crédito',
           valor_matricula: 'R$ 200,00 e o link da matrícula https://go.eduq.tec.br/r/harness-simulador',
         },
       }, 'valor', 'harness-consulta-valor', {
+        semGuia: soInformar,
         condicao: ficha ? 'a condição do primeiro lote promocional' : 'a condição especial que a secretaria liberou hoje',
         variante: Math.floor(Math.random() * 3),
       }));
@@ -349,6 +359,8 @@ Deno.serve(async (req) => {
     telefone: TELEFONE_SINTETICO, remotejid: `${TELEFONE_SINTETICO}@s.whatsapp.net`,
     waAccountId: null, leadId: null, oportunidadeId: null, modoTeste: true, nome: entrada.nome_lead || null,
     ...(fichaSim ? { ficha: { inicioRodada: fichaSim.inicioRodada } } : {}),
+    // IA de aula v2: ferramentas só informam (tools.ts, CtxConversa.soInformar).
+    ...(entrada.v2 ? { soInformar: true } : {}),
   } : null;
   let chamadaReal = 0;
   const ferramentaReal = async (nome: string, dados: Record<string, unknown>): Promise<string> => {
@@ -486,7 +498,7 @@ Deno.serve(async (req) => {
         const contextoBase = comNotaNoContexto(montarContextoTemporal() + notaDoNome(vars.nome) + notaDoCurso(vars.curso_interesse_original)
           + (provedorAlternativo?.nome === 'openai' ? contextoEspecialidadeCannabis(vars.curso_interesse_original) : '')
           + (aberturaControlada ? '\n\n' + NOTA_ABERTURA_CONTROLADA : ''), notaTroca);
-        const contextoFinal = aulaPiloto ? contextoBase + contextoAulaPiloto(entrada.aula)
+        const contextoFinal = aulaPiloto ? contextoBase + contextoAulaPiloto(entrada.aula, new Date(), { semFichaAntiga: Boolean(entrada.v2) })
           : fichaSim ? `${contextoBase}\n\n${blocoConviteAgenda()}` : contextoBase;
         return { agente: agenteTools, promptAgente: promptFinal, contextoTemporal: contextoFinal, tools, comFicha: Boolean(fichaSim),
           ...(aulaPiloto ? { instrucaoFicha: INSTRUCAO_AULA_PILOTO } : {}) };
@@ -532,7 +544,7 @@ Deno.serve(async (req) => {
         }
         // Espelho do executor real: reprovado por PRAZO não entra em "próxima turma".
         if (nome === 'temporizador_proxima_turma' && reprovadoPorPrazo) {
-          const { id: _id, ...recusa } = bloqueioProximaTurmaDeEstudante('');
+          const { id: _id, ...recusa } = bloqueioProximaTurmaDeEstudante('', Boolean(entrada.v2));
           return JSON.stringify(recusa);
         }
         // Com a matriz real, o agendar simulado exige a aprovação que ela deu neste ensaio (como a produção).
@@ -546,7 +558,7 @@ Deno.serve(async (req) => {
         const real = Boolean(ctxReal && TOOLS_REAIS_NO_TESTE.has(nome));
         const resposta = real
           ? await ferramentaReal(nome, dados)
-          : await mockTool(nome, dados, entrada.mocks, fichaSim, entrada.persona === 'aula' && !entrada.aula?.curso_nome);
+          : await mockTool(nome, dados, entrada.mocks, fichaSim, entrada.persona === 'aula' && !entrada.aula?.curso_nome, Boolean(entrada.v2));
         // A ficha simulada conta a objeção como o mock contava (o executor real grava no lead, que aqui não existe).
         if (real && nome === 'consulta_objecoes' && fichaSim) fichaSim.jornada = contarObjecaoNaJornada(fichaSim.jornada, String(dados?.tipo_objecao ?? ''));
         if (nome === 'consulta_disponibilidade') consultasDoEnsaio.push(slotsDoTextoDeAgenda(resposta));

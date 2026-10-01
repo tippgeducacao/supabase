@@ -56,7 +56,7 @@ export function guiaRespostaValor(d: Record<string, unknown>, condicao: string, 
 
 // Mantém informações de preço em chamadas mistas, mesmo quando o PDF falha.
 export function montarRetornoInformacoes(httpOk: boolean, valor: unknown, conteudo: string, id: string,
-  opcoes: { condicao?: string; variante?: number } = {}) {
+  opcoes: { condicao?: string; variante?: number; semGuia?: boolean } = {}) {
   const body = objetoMaterial(valor);
   const d = objetoMaterial(body.data ?? body);
   const pedeMaterial = conteudo !== 'valor';
@@ -87,7 +87,7 @@ export function montarRetornoInformacoes(httpOk: boolean, valor: unknown, conteu
     if (!erroEnvelope && d.valor_matricula) partes.push(`Matrícula: ${d.valor_matricula}. Nunca diga que esse valor pode ser reduzido ou negociado.`);
     if (!erroEnvelope && d.link_matricula) partes.push(`Link da matrícula no valor integral: ${d.link_matricula}.`);
     // Só na consulta de VALOR: com cronograma junto, quem manda na resposta é a instrução do envio.
-    const guia = conteudo === 'valor' && !erroEnvelope ? guiaRespostaValor(d, opcoes.condicao ?? 'a condição especial', opcoes.variante ?? 0) : null;
+    const guia = conteudo === 'valor' && !erroEnvelope && !opcoes.semGuia ? guiaRespostaValor(d, opcoes.condicao ?? 'a condição especial', opcoes.variante ?? 0) : null;
     if (guia) partes.push(`\n${guia}`);
   }
   return { id, ...envio, ...reenvio,

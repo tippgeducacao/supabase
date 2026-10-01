@@ -61,3 +61,34 @@ export function proximoPassoDaColeta(input: Record<string, unknown> | null | und
     + `chame (se ainda não chamou) verificar_compatibilidade_curso${formacao ? ` com formacao_academica="${formacao}"` : ' com a graduação que ele informou'} `
     + 'e o curso de interesse, e siga o resultado.';
 }
+
+/**
+ * IA de aula v2 (01/10/2026, pedido do Gustavo: tirar as ordens escondidas das ferramentas). O mesmo
+ * retrato da formação e do prazo que `proximoPassoDaColeta` lê, mas SEM dizer o que fazer: a sequência
+ * da conversa é do fluxo da persona (docs/Agente SDR — Conversa de Aula). Só com `ctx.soInformar`.
+ */
+export function fatoDaColeta(input: Record<string, unknown> | null | undefined, agora: Date = new Date()): string {
+  const formacao = texto(input?.formacao);
+  const tempo = texto(input?.tempo_formacao);
+  const concluida = texto(input?.graduacao_concluida).toLowerCase();
+  if (concluida === 'nao' || (!formacao && !tempo && !concluida)) return '';
+  const leitura = tempo ? avaliarConclusao(tempo, null, agora) : null;
+  const dataLida = leitura?.leitura.tipo === 'data' ? leitura.leitura.data : null;
+  const estudante = concluida === 'cursando' || (concluida !== 'sim' && (
+    (dataLida !== null && dataLida > agora) || leitura?.leitura.tipo === 'posicao_no_curso' || /\bcursando\b/i.test(tempo)));
+  const grad = formacao ? `graduação: ${formacao}` : 'graduação não informada';
+  if (!estudante) return `SITUAÇÃO: formado (${grad}). Compatibilidade com a pós ainda não verificada.`;
+  if (leitura?.veredito === 'fora_do_prazo' && dataLida) {
+    return `SITUAÇÃO: estudante (${grad}); conclui em ${mesAno(dataLida)}, depois da data-limite de elegibilidade `
+      + `desta turma (${limiteFormaturaFormatado(agora)}).`;
+  }
+  if (leitura?.veredito === 'apto' && dataLida) {
+    return `SITUAÇÃO: estudante (${grad}); conclui em ${mesAno(dataLida)}, dentro da data-limite de elegibilidade. `
+      + 'Compatibilidade com a pós ainda não verificada.';
+  }
+  if (leitura?.leitura.tipo === 'posicao_no_curso') {
+    return `SITUAÇÃO: estudante (${grad}); "${tempo}" é a posição no curso, não a data de conclusão. Mês e ano de conclusão ainda não informados.`;
+  }
+  return `SITUAÇÃO: estudante (${grad}); mês e ano de conclusão ainda não informados.`;
+}
+

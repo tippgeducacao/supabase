@@ -29,7 +29,7 @@ import { conferirHorarioDaFerramenta } from './travasDeterministicas.ts';
 import { montarRetornoInformacoes } from './envioMateriais.ts';
 import { consultarCatalogo } from './catalogoCursos.ts';
 import { resultadoConfirmacao } from './confirmacaoAgendamento.ts';
-import { proximoPassoDaColeta } from './proximoPassoColeta.ts';
+import { fatoDaColeta, proximoPassoDaColeta } from './proximoPassoColeta.ts';
 import { enviarPortfolio, passoAulaSemPos, pedidoDePortfolio } from './portfolio.ts';
 import {
   type ContextoElegibilidade, iniciarAvaliacao, finalizarAvaliacao, consultarAprovacao,
@@ -75,6 +75,13 @@ export type CtxConversa = ContextoElegibilidade & {
   perguntaFormacaoPendente?: string;
   /** Persona aula com aula SEM pós relacionada (aula MVP): o material é o portfólio (portfolio.ts). */
   aulaSemPos?: boolean;
+  /**
+   * IA de aula v2 (01/10/2026, Gustavo: "remove essas porras"): as ferramentas só INFORMAM o fato
+   * (situação, dado, status) e não dão ordem de próximo passo ("pergunte…", "conecte à agenda",
+   * "termine perguntando…", roteiro de preço). A sequência é do fluxo da persona. As travas que
+   * barram inventar preço, horário ou reunião continuam. Produção (vendas) não liga isto.
+   */
+  soInformar?: boolean;
   /** Leitura do lead pelo Jev nesta rodada (leituraJev.ts, canário): só soma às palavras-chave. */
   leituraJev?: { dorFinanceira?: boolean };
 };
@@ -213,6 +220,18 @@ async function dadosDisponibilidade(supabase: any, input: any, ctx: CtxConversa)
 }
 
 /** O texto que a Luna/o João lê para cada situação da agenda (o mesmo de sempre). */
+/** Agenda em fatos, sem condução (IA de aula v2, `ctx.soInformar`). As linhas de horário são as mesmas: a trava as lê. */
+export function textoDisponibilidadeSoFatos(d: DadosDisponibilidade): string {
+  const formacao = d.formacao_checada ? '' : '\nFormação do lead ainda não verificada.';
+  if (d.situacao === 'data_passada') return `A data consultada (${d.data_pedida}) já passou. Hoje é ${d.hoje.display} (${d.hoje.iso}).`;
+  if (d.situacao === 'erro_tecnico') return 'Falha técnica ao consultar a agenda: não é falta de horário.';
+  if (d.situacao === 'sem_horario') {
+    return `Nenhum horário livre para a conversa com o monitor no período pedido. Hoje é ${d.hoje.display} (${d.hoje.iso}).${formacao}`;
+  }
+  const linhas = d.horarios.map((h) => `- ${h.display} de ${h.dia_semana}, dia ${h.data} (vendedor_id: ${h.vendedor_id}, nome: ${h.vendedor_nome})`);
+  return `Horários livres para a conversa com o monitor (Brasília; o dia da semana já está calculado):\n${linhas.join('\n')}${formacao}`;
+}
+
 export function textoDisponibilidade(d: DadosDisponibilidade): string {
   if (d.situacao === 'data_passada') {
     return `⚠️ A data consultada (${d.data_pedida}) JÁ PASSOU. HOJE é ${d.hoje.display} (${d.hoje.iso}). ` +
@@ -244,9 +263,9 @@ export function textoDisponibilidade(d: DadosDisponibilidade): string {
 }
 
 /** A saída da ferramenta (o texto + os horários em dados, que a trava de horário confere). */
-export function saidaDisponibilidade(d: DadosDisponibilidade, toolUseId: string): Record<string, unknown> {
+export function saidaDisponibilidade(d: DadosDisponibilidade, toolUseId: string, soInformar = false): Record<string, unknown> {
   return {
-    resultado: textoDisponibilidade(d),
+    resultado: soInformar ? textoDisponibilidadeSoFatos(d) : textoDisponibilidade(d),
     ...(d.erro ? { erro: d.erro } : {}),
     slots_raw: d.horarios.map((h) => ({ data: h.data, dia_semana: h.dia_semana, horario: h.horario, vendedor_id: h.vendedor_id, vendedor_nome: h.vendedor_nome })),
     id: toolUseId,
@@ -255,7 +274,7 @@ export function saidaDisponibilidade(d: DadosDisponibilidade, toolUseId: string)
 
 async function consultaDisponibilidade(supabase: any, input: any, ctx: CtxConversa, toolUseId: string, comDados = false) {
   const dados = await dadosDisponibilidade(supabase, input, ctx);
-  return { ...saidaDisponibilidade(dados, toolUseId), ...(comDados ? { dados } : {}) };
+  return { ...saidaDisponibilidade(dados, toolUseId, ctx.soInformar === true), ...(comDados ? { dados } : {}) };
 }
 
 // ── confirmar_agendamento (POST → GCal+Meet → PATCH link) ───────────────────
@@ -683,11 +702,11 @@ async function verificarCompatibilidade(supabase: any, input: any, ctx: CtxConve
       ctx.perguntaFormacaoPendente = pergunta;
       return {
         id: toolUseId, output: 'CONFIRMAR_CONCLUSAO', compativel: null, pode_cursar: null,
-        pergunta,
+        ...(ctx.soInformar ? {} : { pergunta }),
         resultado: 'A graduação veio do cadastro, mas a conclusão ainda não foi confirmada pelo lead. A matriz não foi chamada.',
-        instrucao: `Responda agora perguntando diretamente: "${pergunta}". Conecte a confirmação à busca de horário, conservando o período que ele pediu. `
+        ...(ctx.soInformar ? {} : { instrucao: `Responda agora perguntando diretamente: "${pergunta}". Conecte a confirmação à busca de horário, conservando o período que ele pediu. `
           + 'Não pergunte qual é a formação nem "posso confirmar?". Não chame mais ferramentas nesta rodada. '
-          + 'Na próxima resposta do lead, registre a conclusão e só depois verifique a compatibilidade.',
+          + 'Na próxima resposta do lead, registre a conclusão e só depois verifique a compatibilidade.' }),
       };
     }
   }
@@ -760,7 +779,7 @@ async function avaliarCompatibilidade(supabase: any, input: any, ctx: CtxConvers
         ? 'O lead informou a POSIÇÃO no curso, não a data de conclusão.'
         : 'O lead não informou quando conclui a graduação (ou a resposta não é uma data).',
       mensagem_para_lead: null,
-      instrucao: instrucaoPerguntarConclusao(decisao.porque),
+      ...(ctx.soInformar ? {} : { instrucao: instrucaoPerguntarConclusao(decisao.porque) }),
     };
   }
 
@@ -776,6 +795,7 @@ async function avaliarCompatibilidade(supabase: any, input: any, ctx: CtxConvers
       formacao_identificada: input.formacao_academica ?? null,
       motivo_alteracao: `Lead ainda cursando a graduação, com conclusão prevista depois da data-limite de elegibilidade (${limiteFormaturaFormatado()}).`,
       mensagem_para_lead: null,
+      ...(ctx.soInformar ? { situacao: 'Não está desinteressado: poderá cursar quando concluir a graduação.' } : {
       // ⚠️ NÃO é desinteresse — é um lead que fica elegível DEPOIS. Pausar aqui o
       // descartava pra sempre (609 casos antes desta mudança). Agora agenda o
       // retorno pra perto da formatura (teto de 12 meses, aplicado no banco).
@@ -794,6 +814,7 @@ async function avaliarCompatibilidade(supabase: any, input: any, ctx: CtxConvers
         'Se vc ofereceu ou combinou algum HORÁRIO de reunião nesta conversa, DESFAÇA de forma ' +
         'explícita ("não vou marcar aquele horário que falei") — senão ele fica esperando a reunião. ' +
         'Nunca mencione a data-limite, "prazo" ou "elegibilidade".',
+      }),
     };
   }
 
@@ -904,6 +925,13 @@ async function consultaObjecoes(supabase: any, input: any, toolUseId: string, ct
     if (filtro.tipo_objecao === 'pergunta_modalidade') {
       return { ...await consultarCatalogo(supabase, String(input.curso_consulta ?? input.curso_escolhido ?? '')), id: toolUseId };
     }
+    if (ctx?.soInformar && ['pergunta_preco', 'pergunta_conteudo', 'pergunta_duracao'].includes(filtro.tipo_objecao)) {
+      return { resposta_objecao: 'CONSULTAR_MATERIAL', id: toolUseId,
+        resultado: 'A base de objeções não responde preço, conteúdo ou duração: esses dados vêm de envia_informacoes.' };
+    }
+    if (ctx?.soInformar && !filtro.tipo_objecao) {
+      return { resposta_objecao: 'CONFIANCA_BAIXA', id: toolUseId, resultado: 'Categoria de objeção desconhecida: nenhum argumento confirmado.' };
+    }
     if (['pergunta_preco', 'pergunta_conteudo', 'pergunta_duracao'].includes(filtro.tipo_objecao)) {
       return { resposta_objecao: 'CONSULTAR_MATERIAL', id: toolUseId,
         instrucao: 'Valide a pós em consulta_pos_disponiveis se ainda não foi validada. Atenda à dúvida com envia_informacoes: valor para preço integral, cronograma para grade/conteúdo/duração. Use somente os dados e status retornados; enviar um PDF não comprova entrega e não autoriza inventar o conteúdo dele. Se o dado solicitado não vier no retorno, diga que precisa confirmar, sem estimar.' };
@@ -956,7 +984,10 @@ async function consultaObjecoes(supabase: any, input: any, toolUseId: string, ct
     // 30/09/2026 (pedido do Gustavo): com resposta na base, volta SÓ a resposta. Os limites e a instrução
     // que iam juntos contradiziam a própria base (proibiam os fatos que ela trazia) e a resposta saía
     // pela metade. O que a resposta pode dizer é o que o comercial escreveu na base.
+    // Só fatos: a resposta da base como o comercial escreveu (sem as referências revisadas, que conduzem).
+    if (resposta && ctx?.soInformar) return { resposta_objecao: comNomeDoLead(resposta, ctx?.nome), id: toolUseId };
     if (resposta) return { resposta_objecao: comNomeDoLead(referenciasRevisadas[filtro.tipo_objecao] ?? resposta, ctx?.nome), id: toolUseId };
+    if (ctx?.soInformar) return { resposta_objecao: 'CONFIANCA_BAIXA', id: toolUseId, resultado: 'Não há argumento confirmado para esta objeção na base.' };
     return { resposta_objecao: 'CONFIANCA_BAIXA', id: toolUseId,
       instrucao: 'Não há argumento confirmado para esta objeção. Acolha sem fabricar uma quebra nem usar resposta de outro assunto. Consulte catálogo/material se houver uma dúvida factual.'
         + (ctx?.ficha ? ` ${ORIENTACAO_NAO_E_FALA}` : '') };
@@ -964,6 +995,7 @@ async function consultaObjecoes(supabase: any, input: any, toolUseId: string, ct
     // Fallback próprio (NÃO deixar cair no catch genérico "conduza normalmente"):
     // sem a base, o modelo NÃO pode fabricar argumento de venda.
     console.error('[crm-agente-sdr] consulta_objecoes falhou:', e);
+    if (ctx?.soInformar) return { resposta_objecao: 'INDISPONIVEL', id: toolUseId, resultado: 'A base de objeções está fora do ar agora: nenhum argumento confirmado.' };
     return {
       resposta_objecao: 'INDISPONIVEL',
       instrucao: 'A base de quebras está indisponível agora (falha técnica — não cite isso ao lead). É PROIBIDO inventar uma quebra por conta própria: NÃO afirme características da reunião, do curso, de valores ou condições que não estejam confirmadas no histórico desta conversa. Responda CURTO e neutro: reconheça a colocação do lead e reforce que a conversa com o monitor é rápida e é onde a condição especial é apresentada. Se a objeção for "prefiro por mensagem/não consigo call", diga que consegue mandar o cronograma e o valor integral por aqui, mas que a condição especial é apresentada na reunião — sem prometer nada além disso.',
@@ -1029,6 +1061,7 @@ async function enviaInformacoes(supabase: any, input: any, ctx: CtxConversa, too
 
   // Mesmo nome da condição que o prompt da conversa usa: gancho do lote no canário (ganchoLote.ts).
   return montarRetornoInformacoes(res.ok, body, conteudo, toolUseId, {
+    semGuia: ctx.soInformar === true,
     condicao: ctx.ficha ? 'a condição do primeiro lote promocional' : 'a condição especial que a secretaria liberou hoje',
     // Versão das frases do guia de preço sorteada a cada consulta (envioMateriais.ts).
     variante: Math.floor(Math.random() * 3),
@@ -1248,8 +1281,10 @@ async function atualizarDadosLead(supabase: any, input: any, ctx: CtxConversa, t
   }
   // Canário (25/09/2026): o próximo passo exato, com o prazo já lido pelo código (proximoPassoColeta.ts).
   // Aula MVP (sem pós): depois da formação vem o portfólio, para os dois modelos (portfolio.ts).
-  const proximoPasso = ctx.aulaSemPos ? passoAulaSemPos(input ?? {}) : ctx.ficha ? proximoPassoDaColeta(input ?? {}) : '';
+  const proximoPasso = ctx.aulaSemPos ? passoAulaSemPos(input ?? {})
+    : ctx.soInformar ? fatoDaColeta(input ?? {}) : ctx.ficha ? proximoPassoDaColeta(input ?? {}) : '';
   if (!nome && !formacao && !tempoFormacao) {
+    if (ctx.soInformar) return sair(`Registrado.${registroFicha}${proximoPasso ? ` ${proximoPasso}` : ''}`);
     return sair(`Registrado.${registroFicha} ${proximoPasso ? `${proximoPasso} ` : ''}NUNCA comente com o lead que registrou ou salvou os dados dele.`);
   }
 
@@ -1274,6 +1309,7 @@ async function atualizarDadosLead(supabase: any, input: any, ctx: CtxConversa, t
     nome ? `nome "${nome}"` : null, formacao ? `graduação "${formacao}"` : null,
     tempoFormacao ? `conclusão "${tempoFormacao}"` : null,
   ].filter(Boolean);
+  if (ctx.soInformar) return sair(`Registrado no cadastro: ${partes.join(' e ')}.${registroFicha}${proximoPasso ? ` ${proximoPasso}` : ''}`);
   return sair(
     `Registrado no cadastro: ${partes.join(' e ')}.${registroFicha} ` +
     (nome ? `Use "${nome.split(' ')[0]}" ao falar com o lead (minúsculo, no máximo duas vezes na conversa). ` : '') +
@@ -1283,7 +1319,11 @@ async function atualizarDadosLead(supabase: any, input: any, ctx: CtxConversa, t
 }
 
 /** Estudante reprovado por prazo não entra no timer de próxima turma: o caminho dele é agendar_retorno formatura. */
-export function bloqueioProximaTurmaDeEstudante(id: string) {
+export function bloqueioProximaTurmaDeEstudante(id: string, soInformar = false) {
+  if (soInformar) {
+    return { id, status: 'bloqueado', output: 'USE_AGENDAR_RETORNO_FORMATURA',
+      resultado: 'Não registrado: estudante reprovado por prazo não entra no recontato de próxima turma; o caminho dele é o retorno por formatura.' };
+  }
   return {
     id, status: 'bloqueado', output: 'USE_AGENDAR_RETORNO_FORMATURA',
     resultado: 'RECUSADO: este lead ainda está CURSANDO a graduação e foi reprovado por prazo. Ele não entra no recontato de próxima turma.',
@@ -1368,7 +1408,7 @@ export async function executarTool(
         // 21/09/2026 (harness do caso Paulo Renato): reprovado por PRAZO, o modelo às vezes chama
         // "próxima turma" em vez do retorno por formatura — e aí a despedida sai sem dizer que a pós
         // é lato sensu, e o lead some do radar como desinteressado. Estudante volta pela FORMATURA.
-        if (ctx.ultimaElegibilidade?.motivo === 'REPROVADO_PRAZO') return bloqueioProximaTurmaDeEstudante(id);
+        if (ctx.ultimaElegibilidade?.motivo === 'REPROVADO_PRAZO') return bloqueioProximaTurmaDeEstudante(id, ctx.soInformar === true);
         return await temporizadorProximaTurma(supabase, input, ctx, id);
       }
       case 'consulta_pos_disponiveis': return await consultaPosDisponiveis(supabase, input, ctx, id);
