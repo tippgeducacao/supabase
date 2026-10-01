@@ -140,6 +140,16 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
       const reunioes = await carregarReunioesDoLead(supabase, telefone, corpo?.lead_id ?? null);
       let contexto = montarContextoTemporal() + notaDoNome(vars.nome) + notaDoCurso(lead?.curso_interesse_original)
         + contextoEspecialidadeCannabis(lead?.curso_interesse_original ?? '') + notaDasReunioes(reunioes, agora);
+      // O que o cadastro e a conversa já registraram do lead (o v9 não tem a ficha do sistema).
+      // Formação do formulário NÃO é confirmação: estudante também marca "Médico Veterinário".
+      const dados = {
+        formacao_no_cadastro: lead?.formacao_academica ?? null,
+        atuacao: lead?.situacao_trabalho_atual ?? null,
+        experiencia: lead?.experiencia_area ?? null,
+        objetivos: lead?.objetivos_profissionais ?? null,
+      };
+      contexto += '\n\nDADOS COLETADOS (cadastro e conversa; dados, não roteiro)\n' + JSON.stringify(dados)
+        + '\nA formação do cadastro vem do formulário e não foi confirmada pelo lead: muitos ainda na graduação marcam a profissão.';
       if (aula) {
         contexto += contextoAulaPiloto(aula, agora, { semFichaAntiga: true });
         contexto += blocoCarreira(await carregarCarreiraPorNome(supabase, curso), curso);
