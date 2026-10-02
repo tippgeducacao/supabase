@@ -245,10 +245,13 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
       const aula = campanha?.persona === 'aula' && campanha.aula_id ? await carregarAula(supabase, campanha.aula_id) : null;
       const nomePos = aula?.curso_nome ?? '';
       const c = await carregarCarreiraPorNome(supabase, nomePos);
-      const linha = c?.linhas.find((l) => l.perfil === perfil) ?? null;
+      // Perfil sem linha nesta pós (ex.: RT de frigorífico em Cannabis): os públicos são os do Ebook, e
+      // quem está fora deles é, para esta pós, um veterinário que ainda não atua no tema (quer_entrar).
+      const linha = c?.linhas.find((l) => l.perfil === perfil)
+        ?? (perfil !== 'estudante' && perfil !== 'outra_area' ? c?.linhas.find((l) => l.perfil === 'quer_entrar') : null) ?? null;
       if (!linha) return ok({ encontrado: false, perfil, pos: nomePos || null, resultado: 'Sem pergunta cadastrada para este perfil nesta pós.' });
       return ok({
-        encontrado: true, perfil, pos: nomePos,
+        encontrado: true, perfil: linha.perfil, pos: nomePos,
         pergunta_dor: linha.pergunta_dor, ponte_convite: linha.ponte_convite, observacao: linha.observacao,
         objecoes: c!.objecoes,
       });
