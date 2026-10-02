@@ -152,9 +152,30 @@ Deno.serve(async (req) => {
       auth: { persistSession: false, autoRefreshToken: false }
     })
 
+    // Autoriza ESTA criação com o cargo escolhido. O handle_new_user (trigger do auth.users) só
+    // aceita o user_type que estiver em auth_cargo_autorizado, tabela que só a service role
+    // grava; conta criada sem autorização nasce 'comum'. O user_metadata vem do cliente e não
+    // decide cargo (02/10/2026: com o cadastro público ligado, dava para se cadastrar diretor).
+    const emailNormalizado = email.trim().toLowerCase()
+    const { error: autorizacaoError } = await supabaseAdmin
+      .from('auth_cargo_autorizado')
+      .upsert({
+        email: emailNormalizado,
+        user_type: userType,
+        autorizado_por: user.id,
+        criado_em: new Date().toISOString(),
+      }, { onConflict: 'email' })
+    if (autorizacaoError) {
+      console.error('Erro ao autorizar a criação:', autorizacaoError)
+      return new Response(
+        JSON.stringify({ error: 'Erro ao preparar a criação do usuário. Tente de novo.' }),
+        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
     // Create user using Admin API
     const { data: newUser, error: createError } = await supabaseAdmin.auth.admin.createUser({
-      email: email.trim().toLowerCase(),
+      email: emailNormalizado,
       password,
       email_confirm: true, // Skip email confirmation for admin-created users
       user_metadata: {
@@ -166,6 +187,8 @@ Deno.serve(async (req) => {
 
     if (createError) {
       console.error('Erro ao criar usuário:', createError)
+      // a autorização não foi usada: não deixa ela valendo para outra criação
+      await supabaseAdmin.from('auth_cargo_autorizado').delete().eq('email', emailNormalizado)
       let friendlyMessage = 'Erro ao criar usuário'
       
       if (createError.message.includes('User already registered')) {
