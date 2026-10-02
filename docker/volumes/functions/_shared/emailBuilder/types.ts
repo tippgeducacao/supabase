@@ -83,6 +83,11 @@ export interface PropsBloco {
   /** imagem */
   src?: string;
   alt?: string;
+  /** imagem / imagem-link: arte própria para o celular (ex.: recorte quadrado no lugar
+   *  do banner). Progressivo: cliente que descarta a `<style>` mostra a do desktop. */
+  srcMobile?: string;
+  /** imagem / imagem-link: legenda logo abaixo da imagem. Aceita merge tags. */
+  legenda?: string;
   /** lista */
   itens?: string[];
   ordenada?: boolean;

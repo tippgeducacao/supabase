@@ -254,13 +254,36 @@ function compilarImagem(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao, disponivel
   ]);
   // border="0" evita a moldura azul do Outlook quando a imagem está dentro de link.
   const img = `<img${attr("src", src)} alt="${alt}" border="0"${attr("width", alvo)} style="${estilo}" />`;
+  // Arte própria do celular: segunda <img> que nasce escondida; a `@media` (ver
+  // regrasMobile) esconde a do desktop e devolve esta. `mso-hide:all` mantém o Outlook
+  // desktop — que ignora media query — mostrando só a arte do desktop.
+  const srcMobile = b.tipo === "video" ? "" : txt(b.props.srcMobile, o, false);
+  const imgMobile = srcMobile
+    ? `<img class="img-mob"${attr("src", srcMobile)} alt="${alt}" border="0" style="${css([
+      ["display", "none"], ["max-height", "0"], ["overflow", "hidden"], ["mso-hide", "all"],
+      ["width", "100%"], ["max-width", px(alvo)], ["height", "auto"],
+      ["margin", alinhamento === "center" ? "0 auto" : alinhamento === "right" ? "0 0 0 auto" : null],
+      ["border-radius", px(e.raio)], ["outline", "none"], ["text-decoration", "none"],
+    ])}" />`
+    : "";
+  const imgDesk = srcMobile ? img.replace("<img", '<img class="img-desk"') : img;
 
+  const imagens = imgDesk + imgMobile;
   const conteudo = b.tipo === "imagem-link" || b.props.href
-    ? `<a${attr("href", prepararHref(txt(b.props.href, o, false), o))}${attr("target", b.props.alvo ?? "_blank")}>${img}</a>`
-    : img;
+    ? `<a${attr("href", prepararHref(txt(b.props.href, o, false), o))}${attr("target", b.props.alvo ?? "_blank")}>${imagens}</a>`
+    : imagens;
+  // Legenda: texto simples (escapado), na tipografia global, centrada como a imagem.
+  const legenda = txt(b.props.legenda, o, false).trim();
+  const legendaHtml = legenda && b.tipo !== "video"
+    ? `<div style="${css([
+      ["font-family", g.fonte], ["font-size", px(Math.max(12, g.tamanhoFonte - 3))],
+      ["line-height", "1.4"], ["color", e.corTexto ?? g.corTexto],
+      ["text-align", e.alinhamento ?? "center"], ["padding-top", "6px"],
+    ])}">${esc(legenda).replace(/\n/g, "<br />")}</div>`
+    : "";
   // `corFundo` vira o prato atrás da imagem: é o que salva PNG transparente em modo
   // escuro, e era declarável no schema sem chegar a lugar nenhum.
-  return `<div style="${css([["text-align", e.alinhamento ?? "center"], ["background-color", e.corFundo]])}">${conteudo}</div>`;
+  return `<div style="${css([["text-align", e.alinhamento ?? "center"], ["background-color", e.corFundo]])}">${conteudo}${legendaHtml}</div>`;
 }
 
 function compilarVideo(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao, disponivel: number): string {
@@ -538,6 +561,12 @@ function regrasMobile(doc: DocumentoEmail): string {
         }
         if (!noDesktop) {
           regras.push(`.${classe}{display:block!important;max-height:none!important;overflow:visible!important}`);
+        }
+
+        // Arte própria do celular: troca qual <img> aparece (ver compilarImagem).
+        if (b.props.srcMobile && (b.tipo === "imagem" || b.tipo === "imagem-link")) {
+          regras.push(`.${classe} .img-desk{display:none!important;max-height:0!important;overflow:hidden!important}`);
+          regras.push(`.${classe} .img-mob{display:block!important;max-height:none!important;overflow:visible!important}`);
         }
 
         const m = b.estiloMobile;

@@ -83,7 +83,7 @@ export function validarDocumentoContextoEmailIA(valor: unknown): DocumentoEmail 
       for (const valorBloco of c.blocos) {
         const b = objeto(valorBloco, "bloco"); id(b); const p = objeto(b.props, "bloco.props");
         conferirEstilo(b.estilo); conferirEstilo(b.estiloMobile);
-        for (const chave of ["texto", "html", "href", "alvo", "src", "alt", "thumbnail", "variavel", "fallback"]) if (p[chave] !== undefined && typeof p[chave] !== "string") falha(`bloco.props.${chave}`, "texto inválido");
+        for (const chave of ["texto", "html", "href", "alvo", "src", "alt", "thumbnail", "srcMobile", "legenda", "variavel", "fallback"]) if (p[chave] !== undefined && typeof p[chave] !== "string") falha(`bloco.props.${chave}`, "texto inválido");
         if (p.itens !== undefined && (!Array.isArray(p.itens) || p.itens.some(item => typeof item !== "string"))) falha("bloco.props.itens", "lista de textos inválida");
         for (const chave of ["altura", "espessura"]) if (p[chave] !== undefined && (typeof p[chave] !== "number" || !Number.isFinite(p[chave]))) falha(`bloco.props.${chave}`, "número inválido");
         if (p.ordenada !== undefined && typeof p.ordenada !== "boolean") falha("bloco.props.ordenada", "booleano inválido");

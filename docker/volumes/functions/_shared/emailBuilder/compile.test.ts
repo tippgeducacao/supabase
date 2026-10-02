@@ -176,6 +176,42 @@ describe("bloco de imagem", () => {
     expect(img).toContain('border="0"');
   });
 
+  it("legenda sai abaixo da imagem, escapada", () => {
+    const { html } = compilarDocumento(doc([{ ...IMG, props: { ...IMG.props, legenda: "Turma <2026>" } }]));
+    expect(html).toContain("Turma &lt;2026&gt;");
+    expect(html.indexOf("<img")).toBeLessThan(html.indexOf("Turma &lt;2026&gt;"));
+  });
+
+  it("sem legenda não cria o bloco de legenda", () => {
+    const { html } = compilarDocumento(doc([IMG]));
+    expect(html).not.toContain("padding-top:6px");
+  });
+
+  it("arte do celular: segunda img escondida + regra na media query", () => {
+    const { html } = compilarDocumento(doc([{ ...IMG, props: { ...IMG.props, srcMobile: "https://cdn.exemplo.com/m.png" } }]));
+    const imgs = html.match(/<img[^>]*>/g) ?? [];
+    expect(imgs).toHaveLength(2);
+    expect(imgs[0]).toContain('class="img-desk"');
+    expect(imgs[1]).toContain('class="img-mob"');
+    expect(imgs[1]).toContain("mso-hide:all");
+    expect(imgs[1]).toContain("display:none");
+    expect(html).toMatch(/\.bl-i \.img-desk\{display:none!important/);
+    expect(html).toMatch(/\.bl-i \.img-mob\{display:block!important/);
+  });
+
+  it("sem arte do celular continua uma só img, sem classe", () => {
+    const { html } = compilarDocumento(doc([IMG]));
+    expect(html.match(/<img[^>]*>/g)).toHaveLength(1);
+    expect(html).not.toContain("img-mob");
+  });
+
+  it("arte do celular dentro de link: as duas imgs ficam no mesmo <a>", () => {
+    const { html } = compilarDocumento(doc([
+      { ...IMG, tipo: "imagem-link", props: { ...IMG.props, href: "https://x.com", srcMobile: "https://cdn.exemplo.com/m.png" } },
+    ]));
+    expect(html).toMatch(/<a[^>]*href="https:\/\/x\.com"[^>]*><img[^>]*><img[^>]*><\/a>/);
+  });
+
   it("imagem-link envolve a img num <a>", () => {
     const { html } = compilarDocumento(doc([
       { ...IMG, tipo: "imagem-link", props: { ...IMG.props, href: "https://x.com" } },
