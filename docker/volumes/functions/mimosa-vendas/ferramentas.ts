@@ -49,7 +49,10 @@ export const FERRAMENTAS = [
   {
     name: "detalhar_produto",
     description:
-      "Abre UM produto no cadastro ao vivo. Aceita o nome (mesmo aproximado), o slug do material ou o id. " +
+      "Abre UM produto no cadastro ao vivo. Aceita o slug do CATÁLOGO AO VIVO (use-o quando o catálogo deixar claro qual é, " +
+        "inclusive com apelido ou sigla: '3 em 1', 'POA'), o id ou o nome. Com nome, mande só as palavras do nome do produto " +
+        "(o ano da turma pode ir); se a fala servir para mais de um produto, mande as palavras e deixe a ferramenta perguntar. " +
+        "Se o nome não deixar claro qual produto é, devolve confirmar + mais_parecidos (pergunte ao vendedor). " +
       "Seções: resumo (sempre vem: preço oficial, matrícula, formato, carga horária, coordenação, quem pode cursar, avisos), " +
       "grade (módulos e aulas com professor), grade_detalhada (grade + ementa de cada aula), praticos (módulos práticos com datas " +
       "de hoje em diante, cidade, horário e professores, por coorte), professores (lista com titulação e cargo), turmas " +
@@ -59,7 +62,7 @@ export const FERRAMENTAS = [
     input_schema: {
       type: "object",
       properties: {
-        produto: { type: "string", description: "Nome do produto como o vendedor falou, slug ou id." },
+        produto: { type: "string", description: "Slug do catálogo, id, ou só as palavras do nome do produto (sem a pergunta; o ano da turma pode ir, ex.: 'cannabis 2027')." },
         secoes: {
           type: "array",
           items: { type: "string", enum: [...SECOES_PRODUTO] },
