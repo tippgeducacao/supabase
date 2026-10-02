@@ -5,7 +5,14 @@ type ModeloWebhook = {
   variaveis: Record<string, string>;
 };
 
-const VARIAVEL = /\{\{\s*([\w.]+)\s*\}\}/g;
+/**
+ * `{{nome}}` ou `{{nome | fallback:"texto"}}`. A 2ª forma é a que o editor/IA de modelos
+ * escreve (no HTML as aspas viram `&quot;`); até 02/10/2026 o envio automático não a
+ * reconhecia e barrava TODO contato com "variavel_ausente" — duas vezes: o disparo de
+ * Cannabis (28/09) e o "Email para todos da ESCOLA 9:45" (02/10). Sem valor, entra o texto
+ * do fallback. Grupos: 1 = nome, 2 = fallback entre aspas, 3 = fallback entre `&quot;`.
+ */
+export const VARIAVEL_MODELO = /\{\{\s*([\w.]+)\s*(?:\|\s*fallback:\s*(?:"([^"<>{}]*)"|&quot;((?:(?!&quot;)[^<>{}])*)&quot;))?\s*\}\}/g;
 
 function escaparHtml(valor: string): string {
   return valor.replace(/[&<>"']/g, (caractere) => ({
@@ -39,13 +46,16 @@ export function renderizarEmailWebhook(modelo: ModeloWebhook) {
     }
   }
   function renderizar(fonte: string, html: boolean, permitirDescadastro: boolean): string {
-    const resultado = fonte.replace(VARIAVEL, (_token, nome: string) => {
+    const resultado = fonte.replace(VARIAVEL_MODELO, (_token, nome: string, fbAspas?: string, fbEntidade?: string) => {
       if (nome === "descadastro_url" && permitirDescadastro) return "{{descadastro_url}}";
-      if (nome === "descadastro_url" || !Object.hasOwn(modelo.variaveis, nome)
-        || typeof modelo.variaveis[nome] !== "string" || !modelo.variaveis[nome].trim()) {
-        throw new Error("O modelo contém uma variável sem valor.");
-      }
-      return html ? escaparHtml(modelo.variaveis[nome]) : modelo.variaveis[nome];
+      if (nome === "descadastro_url") throw new Error("O modelo contém uma variável sem valor.");
+      const valor = Object.hasOwn(modelo.variaveis, nome) && typeof modelo.variaveis[nome] === "string" ? modelo.variaveis[nome] : "";
+      if (valor.trim()) return html ? escaparHtml(valor) : valor;
+      // O fallback é texto do próprio modelo: entre aspas é texto puro; entre `&quot;` já
+      // está codificado como HTML (e não aceita `<`, `>` nem chaves).
+      if (fbAspas !== undefined) return html ? escaparHtml(fbAspas) : fbAspas;
+      if (fbEntidade !== undefined) return fbEntidade;
+      throw new Error("O modelo contém uma variável sem valor.");
     });
     const semDescadastro = permitirDescadastro ? resultado.replaceAll("{{descadastro_url}}", "") : resultado;
     if (/\{\{|\}\}|\{webhook=/i.test(semDescadastro)) {

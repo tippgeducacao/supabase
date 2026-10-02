@@ -71,6 +71,19 @@ describe("ação de e-mail da integração", () => {
     expect(deps.enviar).toHaveBeenLastCalledWith(expect.objectContaining({ variaveis: expect.objectContaining({ "contato.primeiro_nome": "Dra. Maria" }) }));
   });
 
+  it("modelo com {{contato.primeiro_nome | fallback:\"Olá\"}} envia (era 'variavel_ausente' para todos — 02/10/2026)", async () => {
+    template.assunto = "Seu acesso à Escola";
+    template.corpo_html = '<html><body><p>{{contato.primeiro_nome | fallback:&quot;Olá&quot;}}, chegou!</p></body></html>';
+    template.corpo_texto = '{{contato.primeiro_nome | fallback:"Olá"}}, chegou!';
+    expect((await executarAcaoEmail(entrada(), deps)).status).toBe("enviado");
+    // Contato sem nome e valor mapeado que resolve vazio: o fallback assume, sem barrar.
+    lead.nome = "";
+    const pedido = entrada();
+    pedido.acao.params.variaveis = { "contato.primeiro_nome": "{webhook=nao_veio}" };
+    const r = await executarAcaoEmail(pedido, { ...deps, reservar: vi.fn(async () => true) });
+    expect(r.status).toBe("enviado");
+  });
+
   it.each(["resend", "ses"])("aceita provedor %s verificado", async provider => {
     remetente.provider = provider;
     expect((await executarAcaoEmail(entrada(), deps)).status).toBe("enviado");

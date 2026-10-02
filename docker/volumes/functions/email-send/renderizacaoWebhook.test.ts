@@ -14,6 +14,23 @@ describe("renderização de e-mail do webhook", () => {
     expect(resultado.corpoHtml).toContain("Ana &amp; João");
   });
 
+  it("entende {{x | fallback:\"…\"}} do editor — com valor usa o valor; sem valor, o fallback (02/10/2026)", () => {
+    const comFallback = {
+      assunto: 'Seu acesso, {{contato.primeiro_nome | fallback:"Olá"}}',
+      corpoHtml: '<p>{{contato.primeiro_nome | fallback:&quot;Olá&quot;}}, tudo bem?</p><p>{{contato.primeiro_nome | fallback:"Oi & cia"}}</p>',
+      corpoTexto: '{{contato.primeiro_nome | fallback:"Olá"}}, tudo bem?',
+    };
+    const comNome = renderizarEmailWebhook({ ...comFallback, variaveis: { "contato.primeiro_nome": "Maria" } });
+    expect(comNome.assunto).toBe("Seu acesso, Maria");
+    expect(comNome.corpoHtml).toBe("<p>Maria, tudo bem?</p><p>Maria</p>");
+    const semNome = renderizarEmailWebhook({ ...comFallback, variaveis: { "contato.primeiro_nome": "" } });
+    expect(semNome.assunto).toBe("Seu acesso, Olá");
+    expect(semNome.corpoHtml).toBe("<p>Olá, tudo bem?</p><p>Oi &amp; cia</p>");
+    expect(semNome.corpoTexto).toBe("Olá, tudo bem?");
+    // Outros filtros continuam desconhecidos: o modelo segue barrado, como antes.
+    expect(() => renderizarEmailWebhook({ ...comFallback, corpoHtml: "<p>{{contato.nome | maiusculo}}</p>", variaveis: { "contato.nome": "Ana" } })).toThrow();
+  });
+
   it("impede que o conteúdo de um formulário crie tags ou atributos HTML", () => {
     const resultado = renderizarEmailWebhook({ ...modelo, variaveis: {
       nome: '<img src=x onerror="alert(1)">', link: 'https://ppg.example/" onclick="alert(1)',

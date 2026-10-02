@@ -9,7 +9,7 @@
  * `contexto` — tipo, id e o que compõe a chave única. `executarAcaoEmail` continua sendo a
  * porta do webhook e gera exatamente a mesma chave de antes.
  */
-import { renderizarEmailWebhook } from "../email-send/renderizacaoWebhook.ts";
+import { renderizarEmailWebhook, VARIAVEL_MODELO } from "../email-send/renderizacaoWebhook.ts";
 export interface LeadEmail {
   id: string;
   nome: string | null;
@@ -119,10 +119,12 @@ function conteudoEmailLegivel(html: string): boolean {
 
 function validarModelo(modelo: string, variaveis: Record<string, string>, permiteDescadastro: boolean): boolean {
   let valido = true;
-  const restante = modelo.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_token, chave: string) => {
+  // `{{x | fallback:"…"}}` vale mesmo sem valor: o renderizador usa o texto do fallback.
+  const restante = modelo.replace(VARIAVEL_MODELO, (_token, chave: string, fbAspas?: string, fbEntidade?: string) => {
     if (chave === "descadastro_url") {
       if (!permiteDescadastro) valido = false;
-    } else if (!Object.hasOwn(variaveis, chave) || !variaveis[chave].trim()) valido = false;
+    } else if (fbAspas === undefined && fbEntidade === undefined
+      && (!Object.hasOwn(variaveis, chave) || !variaveis[chave].trim())) valido = false;
     return "";
   });
   return valido && !/\{\{|\}\}|\{webhook=/i.test(restante);
@@ -206,22 +208,31 @@ export async function executarEnvioModeloEmail(entrada: {
     });
     const mapeadas = params.variaveis ?? {};
     if (Object.keys(mapeadas).length > 100) return resultado("ignorado", "variaveis_invalidas");
+    // Variável com fallback no modelo: valor mapeado que resolve vazio (ex.: {primeiro_nome}
+    // de contato sem nome) cai no fallback em vez de barrar o envio.
+    const comFallback = new Set<string>();
+    for (const texto of [template.assunto, template.corpo_html, template.corpo_texto ?? ""]) {
+      for (const m of texto.matchAll(VARIAVEL_MODELO)) if (m[2] !== undefined || m[3] !== undefined) comFallback.add(m[1]);
+    }
     for (const [chaveVariavel, modelo] of Object.entries(mapeadas)) {
       if (!VARIAVEL.test(chaveVariavel) || ["descadastro_url", "__proto__", "prototype", "constructor"].includes(chaveVariavel)
         || typeof modelo !== "string" || modelo.length > 10_000) return resultado("ignorado", "variaveis_invalidas");
       // Resolver o texto inteiro sem validar cada token mascararia "Olá {ausente}".
-      for (const token of modelo.match(/\{webhook=[^}]+\}/g) ?? []) {
-        if (!deps.resolverVariavel(token, entrada.dados).trim()) return resultado("ignorado", "variavel_ausente");
-      }
+      const tokenVazio = (modelo.match(/\{webhook=[^}]+\}/g) ?? []).some((token) => !deps.resolverVariavel(token, entrada.dados).trim());
       const valor = deps.resolverVariavel(modelo, entrada.dados);
-      if (!valor.trim() || /\{webhook=|\{\{|\}\}/i.test(valor)) return resultado("ignorado", "variavel_ausente");
+      if (/\{webhook=|\{\{|\}\}/i.test(valor)) return resultado("ignorado", "variavel_ausente");
+      if (tokenVazio || !valor.trim()) {
+        if (comFallback.has(chaveVariavel)) continue;
+        return resultado("ignorado", "variavel_ausente");
+      }
       if (valor.length > 10_000) return resultado("ignorado", "variaveis_invalidas");
       variaveis[chaveVariavel] = valor;
     }
     if (Object.values(variaveis).some((v) => /\{webhook=|\{\{|\}\}/i.test(v))) return resultado("ignorado", "variavel_ausente");
     if (!validarModelo(template.assunto, variaveis, false) || !validarModelo(template.corpo_html, variaveis, true)
       || !validarModelo(template.corpo_texto ?? "", variaveis, true)) return resultado("ignorado", "variavel_ausente");
-    const assunto = template.assunto.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_m, k: string) => variaveis[k] ?? "");
+    const assunto = template.assunto.replace(VARIAVEL_MODELO, (_m, k: string, fbAspas?: string, fbEntidade?: string) =>
+      variaveis[k]?.trim() ? variaveis[k] : fbAspas ?? fbEntidade ?? "");
     if (temControles(assunto)) return resultado("ignorado", "assunto_invalido");
     try {
       // A mesma regra roda novamente no motor de envio, preservando template_id
