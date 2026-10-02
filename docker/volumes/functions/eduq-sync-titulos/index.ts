@@ -24,6 +24,11 @@ const TituloSchema = z
     cpf: z.string().nullable().optional(),
     valor: z.coerce.number().default(0),
     valor_atualizado: z.coerce.number().nullable().optional(),
+    // "Valor da Fatura com Melhor Desconto" do relatório 64 — o que o aluno paga se
+    // pagar em dia. É ESTE o número que vira projeção de recebimento, não o `valor`
+    // de face (que erra 35% para cima). Opcional porque o n8n ainda não manda: até
+    // lá fica null e o painel cai no `valor`.
+    valor_melhor_desconto: z.coerce.number().nullable().optional(),
     vencimento: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
     data_geracao: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
     situacao: z.string().nullable().optional(),
@@ -48,6 +53,7 @@ function toUpsertRow(t: ParsedTitulo) {
     cpf: t.cpf ?? null,
     valor: t.valor ?? 0,
     valor_atualizado: t.valor_atualizado ?? null,
+    valor_melhor_desconto: t.valor_melhor_desconto ?? null,
     vencimento: t.vencimento,
     data_geracao: t.data_geracao ?? null,
     situacao: t.situacao ?? null,
