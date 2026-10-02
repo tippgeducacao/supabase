@@ -18,6 +18,7 @@ import { type AulaParaPrompt, montarVarsAula } from './prompts-aula.ts';
 import { cursoDaConversa } from './ganchoLote.ts';
 import { carregarTools, chamarAnthropic, type ProvedorIA } from './agente.ts';
 import { TOOL_RESPONDER_AO_CLIENTE } from './canalResposta.ts';
+import { comDescricoesDaAulaV9 } from './ferramentasAulaV9.ts';
 import { type CtxConversa, executarTool } from './tools.ts';
 import { contaDoLead } from './conta.ts';
 import { limparConversaDeTeste } from './limparTeste.ts';
@@ -153,10 +154,13 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
       const campanha = lead?.contexto_campanha ?? null;
       const aula = campanha?.persona === 'aula' && campanha.aula_id ? await carregarAula(supabase, campanha.aula_id) : null;
       const persona = lead?.modo_recontato === true ? 'recontato' : aula ? 'aula' : 'qualificador';
+      // Na aula, o curso é o da aula em TUDO (vars, nota do curso, Cannabis). Até 02/10/2026 o
+      // contexto levava o do cadastro (Bovinos) junto com o da aula (Cannabis), e a IA usava o do
+      // cadastro nas ferramentas. Sem aula, segue o do cadastro.
       const curso = aula ? (aula.curso_nome ?? '') : (lead?.curso_interesse_original ?? '');
       const vars: Record<string, string> = {
-        nome: extrairPrimeiroNome(lead?.nome), curso_interesse_original: lead?.curso_interesse_original ?? '',
-        curso_com_artigo: cursoDaConversa(lead?.curso_interesse_original),
+        nome: extrairPrimeiroNome(lead?.nome), curso_interesse_original: curso,
+        curso_com_artigo: cursoDaConversa(curso),
         ...(aula ? montarVarsAula(aula) : {}),
       };
       const agora = new Date();
@@ -168,8 +172,13 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
         ? montarContextoTemporal().replace(blocoElegibilidadeFormatura(),
           `DATA-LIMITE PARA QUEM AINDA CURSA A GRADUAÇÃO (interna, não cite): conclui até ${limiteFormaturaFormatado()}, segue; depois, retorno perto da formatura.`)
         : montarContextoTemporal();
-      let contexto = relogio + notaDoNome(vars.nome) + notaDoCurso(lead?.curso_interesse_original)
-        + contextoEspecialidadeCannabis(lead?.curso_interesse_original ?? '') + notaDasReunioes(reunioes, agora);
+      // Com aula, a pós é a da aula e já está no catálogo: a nota do cadastro (que manda revalidar no
+      // catálogo e chama o curso de "dado do cadastro") confundia a IA com o curso do formulário.
+      const notaCurso = aula
+        ? '\n\n[PÓS DA AULA] ' + JSON.stringify({ pos_da_aula: curso }) + ' (já confirmada no catálogo; é esta a pós da conversa)'
+        : notaDoCurso(curso);
+      let contexto = relogio + notaDoNome(vars.nome) + notaCurso
+        + contextoEspecialidadeCannabis(curso) + notaDasReunioes(reunioes, agora);
       // O que o cadastro e a conversa já registraram do lead (o v9 não tem a ficha do sistema).
       // Formação do formulário NÃO é confirmação: estudante também marca "Médico Veterinário".
       const dados = {
@@ -192,7 +201,9 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
       const provedor = await deps.provedorDoLead(soDigitos(corpo?.telefone ?? remotejid));
       const agente = String(corpo?.agente ?? 'agente_validacao');
       const base = await carregarTools(supabase, agente, provedor);
-      return ok({ agente, tools: [...base, ...(agente === 'agente_aula' ? [TOOL_BUSCA_CARREIRA] : []), TOOL_RESPONDER_AO_CLIENTE] });
+      const tools = [...base, ...(agente === 'agente_aula' ? [TOOL_BUSCA_CARREIRA] : []), TOOL_RESPONDER_AO_CLIENTE];
+      // Na aula, as descrições enxutas (ferramentasAulaV9.ts): só os textos mudam, o contrato não.
+      return ok({ agente, tools: agente === 'agente_aula' ? comDescricoesDaAulaV9(tools) : tools });
     }
     // Anthropic Claude Sonnet 4.5 → a Luna. Entra e sai no formato do Claude.
     case 'luna': {
