@@ -449,7 +449,7 @@ Deno.serve(async (req) => {
       try {
         corpoHtml = await envolverCliquesNoHtml(
           corpoHtml,
-          (href) => linkCliqueEmail(basePublicaEmail, log.id, href),
+          (href, info) => linkCliqueEmail(basePublicaEmail, log.id, href, info),
           // O descadastro precisa chegar inteiro: tem token próprio e é o que o
           // Gmail aciona no one-click.
           (href) => href.includes("/functions/v1/email-descadastro") || href.includes("/functions/v1/email-track-"),

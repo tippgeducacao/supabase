@@ -203,7 +203,7 @@ function compilarBotao(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao): string {
     attr("width", largura && largura.endsWith("%") ? largura : largura ? parseInt(largura, 10) : null),
     ` style="${css([["width", largura], ["margin", alinha === "center" ? "0 auto" : alinha === "right" ? "0 0 0 auto" : "0"]])}">`,
     `<tr><td style="${tdEstilo}">`,
-    `<a${attr("href", href)}${attr("target", b.props.alvo ?? "_blank")} style="${aEstilo}">${esc(txt(b.props.texto, o, false))}</a>`,
+    `<a${attr("href", href)}${attr("target", b.props.alvo ?? "_blank")} data-elemento="botao" style="${aEstilo}">${esc(txt(b.props.texto, o, false))}</a>`,
     `</td></tr></table>`,
   ].join("");
 }
@@ -219,10 +219,10 @@ function compilarLink(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao): string {
     ["text-decoration", "underline"],
   ]);
   const wrap = css([["text-align", e.alinhamento ?? "left"]]);
-  return `<div style="${wrap}"><a${attr("href", href)}${attr("target", b.props.alvo ?? "_blank")} style="${estilo}">${esc(txt(b.props.texto, o, false))}</a></div>`;
+  return `<div style="${wrap}"><a${attr("href", href)}${attr("target", b.props.alvo ?? "_blank")} data-elemento="link" style="${estilo}">${esc(txt(b.props.texto, o, false))}</a></div>`;
 }
 
-function compilarImagem(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao, disponivel: number): string {
+function compilarImagem(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao, disponivel: number, elemento: "imagem" | "video" = "imagem"): string {
   const e = b.estilo ?? {};
   const src = txt(b.props.src, o, false);
   // alt SEMPRE: imagem bloqueada é o padrão em muitos clientes corporativos.
@@ -270,7 +270,7 @@ function compilarImagem(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao, disponivel
 
   const imagens = imgDesk + imgMobile;
   const conteudo = b.tipo === "imagem-link" || b.props.href
-    ? `<a${attr("href", prepararHref(txt(b.props.href, o, false), o))}${attr("target", b.props.alvo ?? "_blank")}>${imagens}</a>`
+    ? `<a${attr("href", prepararHref(txt(b.props.href, o, false), o))}${attr("target", b.props.alvo ?? "_blank")} data-elemento="${elemento}">${imagens}</a>`
     : imagens;
   // Legenda: texto simples (escapado), na tipografia global, centrada como a imagem.
   const legenda = txt(b.props.legenda, o, false).trim();
@@ -312,9 +312,9 @@ function compilarVideo(b: Bloco, g: GlobaisDoc, o: OpcoesCompilacao, disponivel:
   ]);
 
   return [
-    compilarImagem(thumb, g, o, disponivel),
+    compilarImagem(thumb, g, o, disponivel, "video"),
     `<div style="${css([["text-align", "center"], ["padding-top", "8px"]])}">`,
-    `<a${attr("href", href)}${attr("target", b.props.alvo ?? "_blank")} style="${chamada}">${rotulo}</a>`,
+    `<a${attr("href", href)}${attr("target", b.props.alvo ?? "_blank")} data-elemento="video" style="${chamada}">${rotulo}</a>`,
     `</div>`,
   ].join("");
 }

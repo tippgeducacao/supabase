@@ -127,7 +127,18 @@ export async function conferirCliqueEmail(envioId: string, url: string, token: s
   return igualSeguro(await assinarCliqueEmail(envioId, url), token);
 }
 
-export async function linkCliqueEmail(baseUrl: string, envioId: string, url: string): Promise<string> {
+/**
+ * `info` diz QUE elemento é (botão, link, imagem, vídeo) e o rótulo dele — vai nos
+ * parâmetros `k` e `r`. Ficam FORA da assinatura de propósito: links já enviados (sem eles)
+ * continuam válidos, e adulterar `k`/`r` só rotula errado o clique de quem o fez; o destino,
+ * que é o que dá poder de redirecionar, segue assinado.
+ */
+export async function linkCliqueEmail(
+  baseUrl: string, envioId: string, url: string, info?: { elemento: string; rotulo: string },
+): Promise<string> {
   const token = await assinarCliqueEmail(envioId, url);
-  return `${baseUrl}/functions/v1/email-track-click?e=${encodeURIComponent(envioId)}&t=${token}&u=${encodeURIComponent(url)}`;
+  const extra = info
+    ? `&k=${encodeURIComponent(info.elemento)}${info.rotulo ? `&r=${encodeURIComponent(info.rotulo)}` : ""}`
+    : "";
+  return `${baseUrl}/functions/v1/email-track-click?e=${encodeURIComponent(envioId)}&t=${token}${extra}&u=${encodeURIComponent(url)}`;
 }

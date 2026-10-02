@@ -17,6 +17,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { conferirCliqueEmail } from "../_shared/envioComum.ts";
 import { candidatosDeDestino } from "./destino.ts";
+import { ehElementoClique, limparRotuloClique } from "../_shared/emailBuilder/links.ts";
 
 const HTML_ERRO = `<!doctype html><html lang="pt-BR"><meta charset="utf-8">`
   + `<title>Link inválido</title><body style="font-family:Arial,Helvetica,sans-serif;padding:32px;color:#1f2937">`
@@ -42,6 +43,11 @@ Deno.serve(async (req) => {
   const envioId = url.searchParams.get("e") ?? "";
   const token = url.searchParams.get("t") ?? "";
   const destinoBruto = url.searchParams.get("u") ?? "";
+  // Que elemento foi clicado (botão, link, imagem, vídeo) e o rótulo dele. Fora da assinatura:
+  // link antigo não os tem e segue valendo; valor inválido vira null, nunca erro.
+  const elementoBruto = url.searchParams.get("k");
+  const elemento = ehElementoClique(elementoBruto) ? elementoBruto : null;
+  const rotulo = limparRotuloClique(url.searchParams.get("r") ?? "") || null;
 
   if (!envioId || !token) return erro(400);
   // Links enviados de 22 a 28/09/2026 chegam com lixo depois do destino (ver destino.ts).
@@ -74,6 +80,7 @@ Deno.serve(async (req) => {
     const campanhaId = log.contexto_tipo === "campanha" ? log.contexto_id : null;
     await supabase.from("email_cliques").insert({
       email_enviado_id: log.id, campanha_id: campanhaId, url: destino.slice(0, 2048),
+      elemento, rotulo,
     });
 
     // Campanha: propaga para a linha da fila e para o contador do card, do mesmo

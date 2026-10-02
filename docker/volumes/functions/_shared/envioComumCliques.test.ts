@@ -75,3 +75,39 @@ describe("assinatura do link rastreado", () => {
     expect(url.searchParams.get("t")).toBe(await assinarCliqueEmail("envio-1", destino));
   });
 });
+
+describe("elemento e rótulo no link rastreado", () => {
+  it("sem info o link é o de sempre (compatível com o que já foi enviado)", async () => {
+    const { linkCliqueEmail } = await carregar();
+    const l = new URL(await linkCliqueEmail("https://api.test", "env-1", "https://x.com/a"));
+    expect(l.searchParams.get("k")).toBeNull();
+    expect(l.searchParams.get("r")).toBeNull();
+    expect(l.searchParams.get("u")).toBe("https://x.com/a");
+  });
+
+  it("com info leva k e r, e u continua sendo o último parâmetro", async () => {
+    const { linkCliqueEmail } = await carregar();
+    const bruto = await linkCliqueEmail("https://api.test", "env-1", "https://x.com/a?b=1&c=2", { elemento: "botao", rotulo: "Quero saber mais & muito" });
+    const l = new URL(bruto);
+    expect(l.searchParams.get("k")).toBe("botao");
+    expect(l.searchParams.get("r")).toBe("Quero saber mais & muito");
+    expect(l.searchParams.get("u")).toBe("https://x.com/a?b=1&c=2");
+    expect(bruto.indexOf("&u=")).toBeGreaterThan(bruto.indexOf("&r="));
+  });
+
+  it("rótulo vazio não cria o parâmetro r", async () => {
+    const { linkCliqueEmail } = await carregar();
+    const l = new URL(await linkCliqueEmail("https://api.test", "env-1", "https://x.com/a", { elemento: "imagem", rotulo: "" }));
+    expect(l.searchParams.get("k")).toBe("imagem");
+    expect(l.searchParams.get("r")).toBeNull();
+  });
+
+  it("o token só depende de envio e destino: k/r não o alteram (nem adulterá-los vale como outro destino)", async () => {
+    const { linkCliqueEmail, conferirCliqueEmail } = await carregar();
+    const a = new URL(await linkCliqueEmail("https://api.test", "env-1", "https://x.com/a"));
+    const b = new URL(await linkCliqueEmail("https://api.test", "env-1", "https://x.com/a", { elemento: "link", rotulo: "Ver" }));
+    expect(a.searchParams.get("t")).toBe(b.searchParams.get("t"));
+    expect(await conferirCliqueEmail("env-1", "https://x.com/a", b.searchParams.get("t")!)).toBe(true);
+    expect(await conferirCliqueEmail("env-1", "https://evil.com/a", b.searchParams.get("t")!)).toBe(false);
+  });
+});

@@ -118,6 +118,51 @@ function escaparHref(href: string): string {
   return href.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
 }
 
+/** Que elemento do e-mail recebeu o clique. Vem do atributo data-elemento que o compilador
+ *  põe em cada <a>; em HTML legado (sem o atributo) é deduzido: tem <img> = imagem, senão link. */
+export const ELEMENTOS_CLIQUE = ["botao", "link", "imagem", "video"] as const;
+export type ElementoClique = typeof ELEMENTOS_CLIQUE[number];
+export const LIMITE_ROTULO_CLIQUE = 80;
+
+export interface InfoClique {
+  elemento: ElementoClique;
+  /** Texto do botão/link ou alt da imagem. Só para o relatório se entender; até 80 caracteres. */
+  rotulo: string;
+}
+
+export function ehElementoClique(v: unknown): v is ElementoClique {
+  return typeof v === "string" && (ELEMENTOS_CLIQUE as readonly string[]).includes(v);
+}
+
+/** Rótulo seguro para guardar/exibir: sem tag, sem quebra, sem caractere de controle. */
+export function limparRotuloClique(bruto: string): string {
+  return decodificarHref(bruto)
+    .replace(/<[^>]*>/g, " ")
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, LIMITE_ROTULO_CLIQUE);
+}
+
+/**
+ * Lê, no HTML, o elemento e o rótulo do <a> que começa em `inicio`. O tag vai até o
+ * primeiro ">" e o conteúdo até o próximo </a> (ou o próximo <a>, se o HTML estiver mal fechado).
+ */
+function infoDoAnchor(html: string, inicio: number): InfoClique {
+  const fimTag = html.indexOf(">", inicio);
+  const tag = fimTag < 0 ? html.slice(inicio) : html.slice(inicio, fimTag + 1);
+  const corpoDepois = fimTag < 0 ? "" : html.slice(fimTag + 1);
+  const proximoFecha = corpoDepois.search(/<\/a\s*>|<a\b/i);
+  const interno = proximoFecha < 0 ? corpoDepois.slice(0, 2000) : corpoDepois.slice(0, proximoFecha);
+  const declarado = /\bdata-elemento\s*=\s*["']([a-z]+)["']/i.exec(tag)?.[1]?.toLowerCase();
+  const temImagem = /<img\b/i.test(interno);
+  const elemento: ElementoClique = ehElementoClique(declarado) ? declarado : temImagem ? "imagem" : "link";
+  let rotulo = limparRotuloClique(interno);
+  if (!rotulo && temImagem) rotulo = limparRotuloClique(/<img\b[^>]*\balt\s*=\s*(["'])(.*?)\1/i.exec(interno)?.[2] ?? "");
+  return { elemento, rotulo };
+}
+
 /**
  * Reescreve os `href` de um HTML JÁ PRONTO para passarem pelo redirecionador de
  * cliques. É async porque a URL rastreada é ASSINADA (ver `linkCliqueEmail`), e
@@ -131,26 +176,35 @@ function escaparHref(href: string): string {
  * O que NÃO é embrulhado: mailto/tel/âncora, merge tag não resolvida e qualquer
  * link que `ignorar` recusar (o descadastro, que precisa chegar inteiro ao
  * destinatário e tem trava própria).
+ *
+ * `rastrear` recebe também QUE ELEMENTO é (botão, link, imagem, vídeo) e o rótulo dele,
+ * para o relatório dizer onde a pessoa clicou — não só para qual URL ela foi. Um mesmo
+ * destino em dois elementos (botão E imagem) gera dois links rastreados distintos.
  */
 export async function envolverCliquesNoHtml(
   html: string,
-  rastrear: (href: string) => Promise<string>,
+  rastrear: (href: string, info: InfoClique) => Promise<string>,
   ignorar: (href: string) => boolean = () => false,
 ): Promise<string> {
   if (!html) return html;
-  const encontrados: string[] = [];
   const padrao = /(<a\b[^>]*?\bhref\s*=\s*)(["'])(.*?)\2/gi;
-  for (const [, , , href] of html.matchAll(padrao)) {
-    const limpo = decodificarHref(href);
-    if (ehLinkNavegavel(limpo) && !ignorar(limpo) && !encontrados.includes(limpo)) encontrados.push(limpo);
+  const chave = (destino: string, info: InfoClique) => destino + "\n" + info.elemento + "\n" + info.rotulo;
+  const encontrados = new Map<string, { destino: string; info: InfoClique }>();
+  for (const m of html.matchAll(padrao)) {
+    const limpo = decodificarHref(m[3]);
+    if (!ehLinkNavegavel(limpo) || ignorar(limpo)) continue;
+    const info = infoDoAnchor(html, m.index ?? 0);
+    const k = chave(limpo, info);
+    if (!encontrados.has(k)) encontrados.set(k, { destino: limpo, info });
   }
-  if (encontrados.length === 0) return html;
-  // Assina uma vez por destino distinto: e-mail com o mesmo CTA em três botões
-  // faria três HMACs idênticos.
+  if (encontrados.size === 0) return html;
+  // Assina uma vez por (destino, elemento, rótulo): e-mail com o mesmo CTA em três botões
+  // de mesmo texto faria três HMACs idênticos.
   const mapa = new Map<string, string>();
-  for (const destino of encontrados) mapa.set(destino, await rastrear(destino));
-  return html.replace(padrao, (inteiro, antes: string, aspas: string, href: string) => {
-    const novo = mapa.get(decodificarHref(href));
+  for (const [k, { destino, info }] of encontrados) mapa.set(k, await rastrear(destino, info));
+  return html.replace(padrao, (inteiro, antes: string, aspas: string, href: string, deslocamento: number) => {
+    const limpo = decodificarHref(href);
+    const novo = mapa.get(chave(limpo, infoDoAnchor(html, deslocamento)));
     // A aspa de FECHAMENTO também foi consumida pelo padrão — tem que voltar. De 22/09 a
     // 28/09/2026 ela faltava: o href engolia o atributo seguinte (`…u=…%2F target=`), a
     // assinatura não conferia e TODO link rastreado caía em "Link inválido" (0 cliques em
