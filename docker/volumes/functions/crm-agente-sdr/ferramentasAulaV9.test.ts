@@ -57,7 +57,9 @@ describe('descrições enxutas da aula no v9', () => {
     const depois = comDescricoesDaAulaV9(antes);
     for (let i = 0; i < antes.length; i++) {
       expect(depois[i].description.length).toBeLessThan(antes[i].description.length);
-      expect(tamanho(depois[i])).toBeLessThan(tamanho(antes[i]));
+      // busca_carreira já nasceu enxuta; o campo perfil lista os sinais de SINAIS_DO_PERFIL (fonte única)
+      // e pode crescer quando um sinal ganha exemplo. As outras precisam encolher.
+      if (antes[i].name !== 'busca_carreira') expect(tamanho(depois[i])).toBeLessThan(tamanho(antes[i]));
       const textos = [depois[i].description, ...Object.values(depois[i].input_schema.properties).map((p: any) => p.description ?? '')].join('\n');
       for (const p of PROIBIDAS) expect(textos).not.toContain(p);
     }
