@@ -93,6 +93,8 @@ describe("renderização de e-mail do webhook", () => {
   it("fluxo de automação recebe o mesmo tratamento do webhook (28/09/2026)", () => {
     expect(contextoDeAutomacao("fluxo")).toBe(true);
     expect(contextoDeAutomacao("webhook")).toBe(true);
+    expect(contextoDeAutomacao("automacao_crm")).toBe(true);
+    expect(contextoDeAutomacao("automacao_sac")).toBe(true);
     expect(contextoDeAutomacao("campanha")).toBe(false);
     expect(contextoDeAutomacao("tarefa")).toBe(false);
     expect(contextoDeAutomacao(undefined)).toBe(false);

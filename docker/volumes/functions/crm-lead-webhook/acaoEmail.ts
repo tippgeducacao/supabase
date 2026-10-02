@@ -51,15 +51,16 @@ export interface PayloadEmailWebhook {
   destinatario_email: string;
   destinatario_nome: string;
   variaveis: Record<string, string>;
-  contexto_tipo: "webhook" | "fluxo";
+  contexto_tipo: ContextoEnvioModelo["tipo"];
   contexto_id: string;
   idempotencia_key: string;
 }
 
 /** De onde vem o envio e o que o torna único (além do endereço). */
 export interface ContextoEnvioModelo {
-  tipo: "webhook" | "fluxo";
-  /** Integração (webhook) ou fluxo. Vai para `emails_enviados.contexto_id`. */
+  /** `automacao_crm`/`automacao_sac`: automações de funil (CRM V2) e do SAC 2.0 (02/10/2026). */
+  tipo: "webhook" | "fluxo" | "automacao_crm" | "automacao_sac";
+  /** Integração (webhook), fluxo ou automação. Vai para `emails_enviados.contexto_id`. */
   id: string;
   /** Prefixo versionado do hash — mudar invalida as reservas existentes. */
   namespace: string;

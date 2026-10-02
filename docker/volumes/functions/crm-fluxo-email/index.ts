@@ -1,4 +1,6 @@
 // crm-fluxo-email: despachante da fila de e-mails dos Fluxos de Automação (28/09/2026).
+// Desde 02/10/2026 a mesma fila leva os e-mails das automações de funil (CRM V2) e do
+// SAC 2.0 — um despachante só, para os três motores não somarem rajadas no provedor.
 //
 // Pedido do usuário: "porque não tem enviar template de e-mail aqui?" — a ação existia só
 // nos Webhooks (11/09/2026) porque o motor dos fluxos (SQL) não sabia enviar e-mail.
@@ -33,7 +35,7 @@ Deno.serve(async (req) => {
 
   const { data: fila, error } = await admin
     .from("crm_fluxo_email_envios")
-    .select("id, fluxo_id, execucao_id, passagem, no_id, acao_ref, lead_id, params")
+    .select("id, origem, fluxo_id, execucao_id, passagem, no_id, automacao_id, chave, acao_ref, lead_id, params")
     .eq("status", "pendente")
     .order("criado_em", { ascending: true })
     .limit(LOTE);

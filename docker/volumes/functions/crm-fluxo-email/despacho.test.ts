@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { processarItemFila, statusDoLog, type DependenciasFila, type ItemFilaEmail } from "./despacho.ts";
+import { contextoDoItem, processarItemFila, statusDoLog, type DependenciasFila, type ItemFilaEmail } from "./despacho.ts";
 
 const FLUXO = "66666666-6666-4666-8666-666666666666";
 const EXEC = "77777777-7777-4777-8777-777777777777";
@@ -87,6 +87,58 @@ describe("despachante da fila de e-mail dos fluxos", () => {
     await processarItemFila(item(), deps);
     await processarItemFila({ ...item(), id: "fila-2", passagem: 3 }, deps);
     expect(new Set(reservas).size).toBe(2);
+  });
+});
+
+describe("automações de funil (CRM V2) e do SAC 2.0 na mesma fila (02/10/2026)", () => {
+  const AUTOMACAO = "88888888-8888-4888-8888-888888888888";
+  const itemAutomacao = (origem: "crm_v2" | "sac_v2"): ItemFilaEmail => ({
+    ...item(), id: `fila-${origem}`, origem, fluxo_id: null, execucao_id: null, no_id: null, passagem: 0,
+    automacao_id: AUTOMACAO, chave: `${origem}:exec:1:${LEAD}`, acao_ref: "acao1:abc",
+  });
+
+  it("CRM V2: envia como automação do funil, com o id da automação, e não escreve no log do fluxo", async () => {
+    const r = await processarItemFila(itemAutomacao("crm_v2"), deps);
+    expect(r.status).toBe("enviado");
+    expect(deps.nucleo.enviar).toHaveBeenCalledWith(expect.objectContaining({
+      contexto_tipo: "automacao_crm", contexto_id: AUTOMACAO,
+      idempotencia_key: expect.stringMatching(/^crm-v2-email\/v1\//),
+    }));
+    expect(deps.registrarNoFluxo).not.toHaveBeenCalled();
+  });
+
+  it("SAC 2.0: contexto próprio", async () => {
+    await processarItemFila(itemAutomacao("sac_v2"), deps);
+    expect(deps.nucleo.enviar).toHaveBeenCalledWith(expect.objectContaining({
+      contexto_tipo: "automacao_sac", contexto_id: AUTOMACAO,
+      idempotencia_key: expect.stringMatching(/^sac-v2-email\/v1\//),
+    }));
+  });
+
+  it("chaves diferentes são envios diferentes; a mesma chave é a mesma reserva", async () => {
+    const reservas: string[] = [];
+    deps.nucleo.enviar = vi.fn(async (p: { idempotencia_key: string }) => {
+      reservas.push(p.idempotencia_key);
+      return { ok: true, status: 200, corpo: { ok: true, log_id: LOG } };
+    });
+    await processarItemFila(itemAutomacao("crm_v2"), deps);
+    await processarItemFila(itemAutomacao("crm_v2"), deps);
+    await processarItemFila({ ...itemAutomacao("crm_v2"), chave: "crm_v2:outra-exec:1" }, deps);
+    expect(reservas[0]).toBe(reservas[1]);
+    expect(new Set(reservas).size).toBe(2);
+  });
+
+  it("linha sem automação (dado torto) é descartada sem enviar", async () => {
+    const r = await processarItemFila({ ...itemAutomacao("crm_v2"), automacao_id: null }, deps);
+    expect(r).toMatchObject({ status: "ignorado", motivo: "contato_indisponivel" });
+    expect(deps.nucleo.enviar).not.toHaveBeenCalled();
+    expect(deps.descartar).toHaveBeenCalled();
+  });
+
+  it("linha antiga, sem a coluna origem, continua sendo de fluxo", () => {
+    expect(contextoDoItem(item())).toEqual({
+      tipo: "fluxo", id: FLUXO, namespace: "crm-fluxo-email/v1", partesChave: [FLUXO, EXEC, "2"],
+    });
   });
 });
 

@@ -85,10 +85,12 @@ export function renderizarEmailWebhook(modelo: ModeloWebhook) {
  * Envio AUTOMÁTICO de modelo ao contato — webhook (11/09/2026) e fluxo de automação
  * (28/09/2026). Os dois recebem o mesmo tratamento: modelo ativo obrigatório, variáveis
  * escapadas, só remetente de disparo verificado, clique rastreado e descadastro visível.
- * Origem nova que mande modelo sozinha deve entrar AQUI, não num `=== "webhook"` a mais.
+ * Origem nova que mande modelo sozinha deve entrar AQUI, não num `=== "webhook"` a mais —
+ * foi o que entrou em 02/10/2026: as automações de funil (CRM V2) e do SAC 2.0.
  */
 export function contextoDeAutomacao(contexto: string | undefined): boolean {
-  return contexto === "webhook" || contexto === "fluxo";
+  return contexto === "webhook" || contexto === "fluxo"
+    || contexto === "automacao_crm" || contexto === "automacao_sac";
 }
 
 /** A automação mantém seu contexto no histórico, e usa a finalidade do modelo. */
