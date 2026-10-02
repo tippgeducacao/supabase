@@ -5,7 +5,7 @@
 // Autorização: a mesma do resto das rotas do n8n (segredo do desvio + telefone na lista de teste),
 // feita no index.ts antes de chegar aqui. Lead de verdade não passa por estas rotas.
 
-import { atualizarAgenteComRatchet, atualizarLead, buscarLead, criarLead, jidsDoTelefone } from './historico.ts';
+import { atualizarAgenteComRatchet, atualizarLead, buscarLead, carregarHistorico, criarLead, jidsDoTelefone } from './historico.ts';
 import { pausaVigente } from './pausa.ts';
 import { extrairPrimeiroNome, montarContextoTemporal, notaDoCurso } from './contexto.ts';
 import { notaDoNome } from './nomeDoLead.ts';
@@ -82,6 +82,9 @@ async function ctxDoLead(supabase: any, corpo: any, lead: any): Promise<CtxConve
     leadId: corpo.lead_id || null, oportunidadeId: corpo.oportunidade_id || null,
     nome: lead?.nome ?? null,
     ficha: { inicioRodada: new Date().toISOString() },
+    // As travas leem a conversa (a agenda consultada, a evidência de formação): sem o histórico,
+    // o confirmar_agendamento recusava com "nenhuma consulta de agenda foi feita" (teste de 02/10/2026).
+    historicoConversa: await carregarHistorico(supabase, remotejid),
     // A IA de aula v2 lê ferramentas que só informam (soInformar).
     ...(campanha?.persona === 'aula' ? { soInformar: true } : {}),
   };
