@@ -39,7 +39,11 @@ describe("ação de e-mail da integração", () => {
     expect(r).toEqual({ acao_id: "acao-email-1", status: "enviado", log_id: LOG });
     expect(deps.enviar).toHaveBeenCalledWith(expect.objectContaining({
       template_id: TEMPLATE, remetente_id: REMETENTE, destinatario_email: "maria@example.com", destinatario_nome: "Maria Silva",
-      variaveis: { nome: "Maria Silva", primeiro_nome: "Maria", email: "maria@example.com", telefone: "5546999999999", curso: "Medicina Veterinária" },
+      variaveis: {
+        nome: "Maria Silva", primeiro_nome: "Maria", email: "maria@example.com", telefone: "5546999999999", curso: "Medicina Veterinária",
+        "contato.nome": "Maria Silva", "contato.primeiro_nome": "Maria", "contato.email": "maria@example.com",
+        "contato.telefone": "5546999999999", "curso.nome": "Medicina Veterinária",
+      },
       contexto_tipo: "webhook", contexto_id: INTEGRACAO,
       idempotencia_key: expect.stringMatching(/^crm-webhook-email\/v1\/[a-f0-9]{64}$/),
     }));
@@ -54,6 +58,17 @@ describe("ação de e-mail da integração", () => {
     template.corpo_html = "<html><body><p>{{nome}}: {{titulo}}</p></body></html>";
     await executarAcaoEmail(pedido, deps);
     expect(deps.enviar).toHaveBeenCalledWith(expect.objectContaining({ variaveis: expect.objectContaining({ nome: "Equipe & <PPG>", titulo: "Confira Aula de amanhã" }) }));
+  });
+
+  it("preenche sozinho o catálogo aninhado do editor ({{contato.primeiro_nome}}) — e valor mapeado ganha", async () => {
+    template.assunto = "Olá {{contato.primeiro_nome}}";
+    template.corpo_html = "<html><body><p>{{contato.nome}} · {{contato.email}} · {{curso.nome}}</p></body></html>";
+    template.corpo_texto = "Olá {{contato.primeiro_nome}}";
+    expect((await executarAcaoEmail(entrada(), deps)).status).toBe("enviado");
+    const pedido = entrada();
+    pedido.acao.params.variaveis = { "contato.primeiro_nome": "Dra. Maria" };
+    await executarAcaoEmail(pedido, { ...deps, reservar: vi.fn(async () => true) });
+    expect(deps.enviar).toHaveBeenLastCalledWith(expect.objectContaining({ variaveis: expect.objectContaining({ "contato.primeiro_nome": "Dra. Maria" }) }));
   });
 
   it.each(["resend", "ses"])("aceita provedor %s verificado", async provider => {

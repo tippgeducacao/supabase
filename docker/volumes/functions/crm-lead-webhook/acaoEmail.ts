@@ -194,9 +194,15 @@ export async function executarEnvioModeloEmail(entrada: {
       return resultado("ignorado", "template_incompleto");
     }
     const nome = String(lead.nome ?? "").trim();
+    const primeiroNome = nome.split(/\s+/)[0] ?? "";
+    const telefone = String(lead.whatsapp ?? "");
+    const curso = String(lead.curso_interesse ?? "");
+    // Os nomes com ponto são o catálogo aninhado do editor de modelos ({{contato.primeiro_nome}});
+    // espelham VARIAVEIS_EMAIL_AUTOMATICAS do front (webhookEmail.ts). Valor mapeado ganha.
     const variaveis: Record<string, string> = Object.assign(Object.create(null), {
-      nome, primeiro_nome: nome.split(/\s+/)[0] ?? "", email,
-      telefone: String(lead.whatsapp ?? ""), curso: String(lead.curso_interesse ?? ""),
+      nome, primeiro_nome: primeiroNome, email, telefone, curso,
+      "contato.nome": nome, "contato.primeiro_nome": primeiroNome, "contato.email": email,
+      "contato.telefone": telefone, "curso.nome": curso,
     });
     const mapeadas = params.variaveis ?? {};
     if (Object.keys(mapeadas).length > 100) return resultado("ignorado", "variaveis_invalidas");
