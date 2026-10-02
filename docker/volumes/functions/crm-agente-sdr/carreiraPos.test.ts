@@ -22,3 +22,18 @@ describe('bloco CARREIRA', () => {
     expect(await carregarCarreiraPorNome(quebrado as any, '')).toBeNull();
   });
 });
+
+describe('objeção da pós pelo tipo', () => {
+  it('devolve a resposta da pós; sem tipo ou sem pós, null', async () => {
+    const { objecaoDaPos } = await import('./carreiraPos');
+    const banco = { from: (t: string) => {
+      const q: any = { select: () => q, eq: () => q, order: () => q, limit: async () => t === 'cursos'
+        ? { data: [{ id: 'c1' }], error: null }
+        : { data: [{ objecao: 'tá caro', resposta: 'a conversa é pra vc decidir com calma' }], error: null } };
+      return q;
+    } };
+    expect(await objecaoDaPos(banco as any, 'PÓS | CANNABIS', 'objecao_financeira')).toEqual({ objecao: 'tá caro', resposta: 'a conversa é pra vc decidir com calma' });
+    expect(await objecaoDaPos(banco as any, 'PÓS | CANNABIS', '')).toBeNull();
+    expect(await objecaoDaPos(banco as any, '', 'objecao_financeira')).toBeNull();
+  });
+});

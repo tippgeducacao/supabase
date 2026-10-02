@@ -63,3 +63,20 @@ export function blocoCarreira(c: { linhas: LinhaCarreira[]; objecoes: ObjecaoCar
   return `\n\nCARREIRA — ${nomePos} (dados; escolha o perfil que combina com o que ele disse)\n${linhas.join('\n')}`
     + (objecoes.length ? `\nOBJEÇÕES DESTA PÓS:\n${objecoes.join('\n')}` : '');
 }
+
+/**
+ * A objeção da pós para o tipo que a consulta_objecoes classificou (Ebook do Wellinton). null = a pós não
+ * tem resposta para esse tipo (a base geral responde) ou a leitura falhou (idem: a conversa não para).
+ */
+export async function objecaoDaPos(banco: Banco, cursoNome: string | null | undefined, tipo: string | null | undefined): Promise<ObjecaoCarreira | null> {
+  if (!cursoNome?.trim() || !tipo?.trim()) return null;
+  try {
+    const { data: curso } = await banco.from('cursos').select('id').eq('nome', cursoNome.trim()).limit(1);
+    const cursoId = curso?.[0]?.id;
+    if (!cursoId) return null;
+    const { data, error } = await banco.from('sdr_carreira_pos_objecoes').select('objecao, resposta')
+      .eq('curso_id', cursoId).eq('tipo_objecao', tipo.trim()).eq('ativo', true).order('ordem').limit(1);
+    if (error || !data?.[0]) return null;
+    return { objecao: String(data[0].objecao), resposta: String(data[0].resposta) };
+  } catch { return null; }
+}

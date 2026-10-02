@@ -13,7 +13,7 @@ import { contextoEspecialidadeCannabis } from './especialidadeCannabis.ts';
 import { carregarReunioesDoLead, notaDasReunioes } from './reunioesDoLead.ts';
 import { contextoAulaPiloto } from './contextoAulaPiloto.ts';
 import { blocoElegibilidadeFormatura, limiteFormaturaFormatado } from './elegibilidadeFormatura.ts';
-import { carregarCarreiraPorNome, SINAIS_DO_PERFIL } from './carreiraPos.ts';
+import { carregarCarreiraPorNome, objecaoDaPos, SINAIS_DO_PERFIL } from './carreiraPos.ts';
 import { type AulaParaPrompt, montarVarsAula } from './prompts-aula.ts';
 import { cursoDaConversa } from './ganchoLote.ts';
 import { carregarTools, chamarAnthropic, type ProvedorIA } from './agente.ts';
@@ -225,6 +225,13 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
       const chamada = corpo?.chamada;
       if (!chamada?.id || !chamada?.name) return { status: 400, corpo: { error: 'chamada_invalida' } };
       const lead = await buscarLead(supabase, remotejid);
+      // IA de aula: a objeção vem primeiro da tabela da pós (Ebook). A base geral é a da venda e, para
+      // "to sem dinheiro", devolvia a resposta de condição especial já oferecendo horário (02/10/2026).
+      if (chamada.name === 'consulta_objecoes' && lead?.contexto_campanha?.persona === 'aula' && lead.contexto_campanha.aula_id) {
+        const aula = await carregarAula(supabase, lead.contexto_campanha.aula_id);
+        const daPos = await objecaoDaPos(supabase, aula?.curso_nome, chamada.input?.tipo_objecao);
+        if (daPos) return ok({ output: { id: String(chamada.id), resposta_objecao: daPos.resposta, fonte: 'pós da aula' } });
+      }
       const ctx = await ctxDoLead(supabase, corpo, lead);
       const output = await executarTool(supabase, { id: String(chamada.id), name: String(chamada.name), input: chamada.input ?? {} }, ctx, { comDados: true });
       return ok({ output: { id: String(chamada.id), ...output } });
