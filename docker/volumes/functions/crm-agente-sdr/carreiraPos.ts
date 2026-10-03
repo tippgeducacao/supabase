@@ -13,7 +13,7 @@ export type ObjecaoCarreira = { objecao: string; resposta: string };
 
 /** Como reconhecer cada perfil na fala do lead (vale para todas as pós). */
 export const SINAIS_DO_PERFIL: Record<string, string> = {
-  clinica_propria: 'tem clínica, atende por conta, autônomo, consultório',
+  clinica_propria: 'tem negócio próprio: clínica, consultório, granja ou fazenda; atende por conta, autônomo',
   plantonista: 'faz plantão',
   contratado: 'trabalha numa clínica, hospital, integradora, cooperativa ou fazenda como funcionário',
   industria_rt: 'frigorífico, laticínio, indústria, RT, controle de qualidade',
