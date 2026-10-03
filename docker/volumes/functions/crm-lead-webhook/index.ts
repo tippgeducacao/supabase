@@ -271,7 +271,8 @@ function resolveRetornoVal(template: unknown, ctx: Record<string, unknown>): str
 const ACAO_LABELS: Record<string, string> = {
   modificar_segmentos: "Modificar os segmentos do contato",
   modificar_tags:      "Modificar tags do contato",
-  salvar_utm:          "Salvar tags UTM",
+  mudar_fluxos:        "Mudar Fluxos de Automação",
+  salvar_utm:         "Salvar tags UTM",
   atualizar_lead:      "Atualizar campo do contato",
   definir_responsavel: "Mudar permissões de acesso ao contato",
   definir_responsavel_contato: "Definir responsável do contato",
@@ -1580,6 +1581,24 @@ Deno.serve(async (req) => {
         if (add.length || rem.length) {
           acoesAplicadas.push("modificar_tags");
           await logAtividade(leadId, "acao_webhook", "Ação de Webhook Integrado executada", acaoChip("modificar_tags"));
+        }
+      } else if (a?.tipo === "mudar_fluxos" && leadId) {
+        // "Mudar Fluxos de Automação" (03/10/2026): põe/tira o contato de fluxos sem o
+        // fluxo precisar de segmento/tag de entrada. A régua (travas, só Publicado, 1 vez
+        // por pessoa, remover antes de adicionar) vive na RPC — aqui só repassa os IDs.
+        const add = segArr(a?.params?.adicionar);
+        const rem = segArr(a?.params?.remover);
+        if (add.length || rem.length) {
+          const { data: fluxOut, error: fluxErr } = await admin.rpc("crm_webhook_mudar_fluxos", {
+            p_lead_id: leadId, p_adicionar: add, p_remover: rem, p_op: oportunidadeId ?? null,
+          });
+          if (fluxErr) throw fluxErr;
+          const iniciados = Array.isArray((fluxOut as any)?.iniciados) ? (fluxOut as any).iniciados.length : 0;
+          const removidos = Number((fluxOut as any)?.removidos ?? 0);
+          if (iniciados || removidos) {
+            acoesAplicadas.push("mudar_fluxos");
+            await logAtividade(leadId, "acao_webhook", "Ação de Webhook Integrado executada", acaoChip("mudar_fluxos"));
+          }
         }
       } else if (a?.tipo === "add_segmento" && a?.valor && leadId) {
         const ids = segIds(a.valor);
