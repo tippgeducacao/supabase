@@ -18,8 +18,8 @@ export const SINAIS_DO_PERFIL: Record<string, string> = {
   contratado: 'trabalha numa clínica, hospital, integradora, cooperativa ou fazenda como funcionário',
   industria_rt: 'frigorífico, laticínio, indústria, RT, controle de qualidade',
   setor_publico: 'prefeitura, vigilância, servidor, concurso',
-  quer_entrar: 'formado que ainda não atua com o tema da pós: fora da veterinária (ex.: uber, comércio) ou em outra frente dela (indústria, RT, setor público)',
-  ja_atua_no_tema: 'já faz o que a pós ensina',
+  quer_entrar: 'formado que ainda não atua com o tema da pós, mesmo trabalhando numa área próxima dele: fora da veterinária (ex.: uber, comércio) ou em outra frente dela (indústria, RT, setor público)',
+  ja_atua_no_tema: 'disse que já faz o que a pós ensina (em Cannabis: já prescreve cannabis). trabalhar numa área próxima (dor, oncologia, paliativos) não conta',
   estudante: 'ainda está na graduação',
   outra_area: 'formação fora das aceitas pela pós',
 };
