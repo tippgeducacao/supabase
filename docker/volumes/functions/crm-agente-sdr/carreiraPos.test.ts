@@ -37,3 +37,13 @@ describe('objeção da pós pelo tipo', () => {
     expect(await objecaoDaPos(banco as any, '', 'objecao_financeira')).toBeNull();
   });
 });
+
+describe('objeção de tempo: reunião ou pós', () => {
+  it('fala sobre estudar = pós; depois do convite = conversa', async () => {
+    const { sobreDaObjecaoDeTempo } = await import('./carreiraPos');
+    expect(sobreDaObjecaoDeTempo('eu gostaria mas to sem tempo', 'topa conhecer a pós numa conversa rápida no meet com o monitor?')).toBe('conversa');
+    expect(sobreDaObjecaoDeTempo('não tenho tempo pra estudar', 'topa uma conversa no meet?')).toBe('pos');
+    expect(sobreDaObjecaoDeTempo('to sem tempo', 'o que mais te chamou atenção na aula?')).toBe('pos');
+    expect(sobreDaObjecaoDeTempo('sem tempo pra reunião', 'qual sua área?')).toBe('conversa');
+  });
+});

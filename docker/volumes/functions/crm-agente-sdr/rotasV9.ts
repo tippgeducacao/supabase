@@ -13,7 +13,7 @@ import { contextoEspecialidadeCannabis } from './especialidadeCannabis.ts';
 import { carregarReunioesDoLead, notaDasReunioes } from './reunioesDoLead.ts';
 import { contextoAulaPiloto } from './contextoAulaPiloto.ts';
 import { blocoElegibilidadeFormatura, limiteFormaturaFormatado } from './elegibilidadeFormatura.ts';
-import { carregarCarreiraPorNome, objecaoDaPos, SINAIS_DO_PERFIL } from './carreiraPos.ts';
+import { carregarCarreiraPorNome, objecaoDaPos, SINAIS_DO_PERFIL, sobreDaObjecaoDeTempo } from './carreiraPos.ts';
 import { type AulaParaPrompt, montarVarsAula } from './prompts-aula.ts';
 import { cursoDaConversa } from './ganchoLote.ts';
 import { carregarTools, chamarAnthropic, type ProvedorIA } from './agente.ts';
@@ -229,8 +229,20 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
       // "to sem dinheiro", devolvia a resposta de condição especial já oferecendo horário (02/10/2026).
       if (chamada.name === 'consulta_objecoes' && lead?.contexto_campanha?.persona === 'aula' && lead.contexto_campanha.aula_id) {
         const aula = await carregarAula(supabase, lead.contexto_campanha.aula_id);
-        const daPos = await objecaoDaPos(supabase, aula?.curso_nome, chamada.input?.tipo_objecao);
-        if (daPos) return ok({ output: { id: String(chamada.id), resposta_objecao: daPos.resposta, fonte: 'pós da aula' } });
+        let sobre: 'conversa' | 'pos' | null = null;
+        if (chamada.input?.tipo_objecao === 'objecao_tempo') {
+          const historico = await carregarHistorico(supabase, remotejid);
+          const ultimaDoAgente = [...historico].reverse().find((m: any) => m?.role === 'assistant'
+            && (typeof m.content === 'string' || (Array.isArray(m.content) && m.content.some((b: any) => b?.type === 'text'))));
+          const texto = typeof ultimaDoAgente?.content === 'string' ? ultimaDoAgente.content
+            : (ultimaDoAgente?.content ?? []).filter((b: any) => b?.type === 'text').map((b: any) => b.text).join(' ');
+          sobre = sobreDaObjecaoDeTempo(String(chamada.input?.mensagem_lead ?? ''), texto);
+        }
+        const daPos = await objecaoDaPos(supabase, aula?.curso_nome, chamada.input?.tipo_objecao, sobre);
+        if (daPos) {
+          const resposta = daPos.resposta.replace(/\{nome\}/g, extrairPrimeiroNome(lead?.nome) || '').replace(/,\s*\?/g, '?');
+          return ok({ output: { id: String(chamada.id), resposta_objecao: resposta, fonte: 'pós da aula', ...(sobre ? { sobre } : {}) } });
+        }
       }
       const ctx = await ctxDoLead(supabase, corpo, lead);
       const output = await executarTool(supabase, { id: String(chamada.id), name: String(chamada.name), input: chamada.input ?? {} }, ctx, { comDados: true });

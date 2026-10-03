@@ -65,18 +65,35 @@ export function blocoCarreira(c: { linhas: LinhaCarreira[]; objecoes: ObjecaoCar
 }
 
 /**
- * A objeção da pós para o tipo que a consulta_objecoes classificou (Ebook do Wellinton). null = a pós não
- * tem resposta para esse tipo (a base geral responde) ou a leitura falhou (idem: a conversa não para).
+ * Objeção de tempo tem dois sentidos (03/10/2026): para a REUNIÃO (logo depois do convite, ou quando ele
+ * fala da conversa) ou para a PÓS (estudar, aulas, rotina). Fala do lead sobre estudar decide primeiro;
+ * senão, convite na última fala do agente indica a reunião.
  */
-export async function objecaoDaPos(banco: Banco, cursoNome: string | null | undefined, tipo: string | null | undefined): Promise<ObjecaoCarreira | null> {
+export function sobreDaObjecaoDeTempo(falaDoLead: string, ultimaFalaDoAgente: string): 'conversa' | 'pos' {
+  // Palavra inteira (com acento): "gostaria" não pode casar com "aula".
+  const tem = (texto: string, palavras: string) =>
+    new RegExp(`(^|[^a-zà-ú])(${palavras})([^a-zà-ú]|$)`).test(String(texto ?? '').toLowerCase());
+  if (tem(falaDoLead, 'estudar|aula|aulas|curso|cursar|pós|pos|rotina|faculdade|módulo|modulo')) return 'pos';
+  if (tem(falaDoLead, 'reunião|reuniao|meet|conversa|monitor')) return 'conversa';
+  return tem(ultimaFalaDoAgente, 'meet|conversa|monitor|horário|horario|horários|horarios') ? 'conversa' : 'pos';
+}
+
+/**
+ * A objeção da pós para o tipo que a consulta_objecoes classificou (Ebook do Wellinton). `sobre` escolhe
+ * entre conversa e pós (linha sem `sobre` vale para os dois). null = a pós não tem resposta (a base geral
+ * responde) ou a leitura falhou (idem: a conversa não para).
+ */
+export async function objecaoDaPos(banco: Banco, cursoNome: string | null | undefined, tipo: string | null | undefined,
+  sobre: 'conversa' | 'pos' | null = null): Promise<ObjecaoCarreira | null> {
   if (!cursoNome?.trim() || !tipo?.trim()) return null;
   try {
     const { data: curso } = await banco.from('cursos').select('id').eq('nome', cursoNome.trim()).limit(1);
     const cursoId = curso?.[0]?.id;
     if (!cursoId) return null;
-    const { data, error } = await banco.from('sdr_carreira_pos_objecoes').select('objecao, resposta')
-      .eq('curso_id', cursoId).eq('tipo_objecao', tipo.trim()).eq('ativo', true).order('ordem').limit(1);
-    if (error || !data?.[0]) return null;
-    return { objecao: String(data[0].objecao), resposta: String(data[0].resposta) };
+    const { data, error } = await banco.from('sdr_carreira_pos_objecoes').select('objecao, resposta, sobre')
+      .eq('curso_id', cursoId).eq('tipo_objecao', tipo.trim()).eq('ativo', true).order('ordem').limit(10);
+    if (error || !data?.length) return null;
+    const linha = data.find((l: any) => sobre && l.sobre === sobre) ?? data.find((l: any) => !l.sobre) ?? (sobre ? null : data[0]);
+    return linha ? { objecao: String(linha.objecao), resposta: String(linha.resposta) } : null;
   } catch { return null; }
 }
