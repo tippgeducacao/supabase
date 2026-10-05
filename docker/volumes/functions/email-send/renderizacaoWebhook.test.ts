@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { contextoDeAutomacao, emailEhMarketing, renderizarEmailWebhook } from "./renderizacaoWebhook.ts";
+import { contextoDeAutomacao, emailEhMarketing, renderizarEmailWebhook, variavelSemValorSaiEmBranco } from "./renderizacaoWebhook.ts";
 
 const modelo = {
   assunto: "Olá, {{nome}}", corpoHtml: '<p>Olá, {{nome}}</p><a href="{{link}}">Curso</a>',
@@ -100,5 +100,29 @@ describe("renderização de e-mail do webhook", () => {
     expect(contextoDeAutomacao(undefined)).toBe(false);
     expect(emailEhMarketing("fluxo", "marketing")).toBe(true);
     expect(emailEhMarketing("fluxo", "transacional")).toBe(false);
+  });
+
+  it("fluxo/automação: variável sem valor sai em branco; webhook continua barrando (05/10/2026)", () => {
+    expect(variavelSemValorSaiEmBranco("fluxo")).toBe(true);
+    expect(variavelSemValorSaiEmBranco("automacao_crm")).toBe(true);
+    expect(variavelSemValorSaiEmBranco("automacao_sac")).toBe(true);
+    expect(variavelSemValorSaiEmBranco("webhook")).toBe(false);
+    expect(variavelSemValorSaiEmBranco("campanha")).toBe(false);
+    expect(variavelSemValorSaiEmBranco(undefined)).toBe(false);
+    // O caso real: "Recebemos seu cadastro na pós em {{curso.nome}}" para contato sem curso.
+    const cadastro = {
+      assunto: "Recebemos seu cadastro na pós em {{curso.nome}}",
+      corpoHtml: '<p>{{contato.primeiro_nome}}, {{curso.nome}}. {{saudacao | fallback:"Até breve"}}</p><a href="{{link_oferta}}">Ver</a>',
+      corpoTexto: "{{contato.primeiro_nome}}: {{curso.nome}}",
+      variaveis: { "contato.primeiro_nome": "Jose", "curso.nome": "" },
+    };
+    expect(() => renderizarEmailWebhook(cadastro)).toThrow();
+    const r = renderizarEmailWebhook({ ...cadastro, semValorEmBranco: true });
+    expect(r.assunto).toBe("Recebemos seu cadastro na pós em ");
+    expect(r.corpoHtml).toBe('<p>Jose, . Até breve</p><a href="">Ver</a>');
+    expect(r.corpoTexto).toBe("Jose: ");
+    // Não é falta de dado: descadastro no assunto e filtro desconhecido seguem recusados.
+    expect(() => renderizarEmailWebhook({ ...cadastro, semValorEmBranco: true, assunto: "{{descadastro_url}}" })).toThrow();
+    expect(() => renderizarEmailWebhook({ ...cadastro, semValorEmBranco: true, corpoHtml: "<p>{{nome | maiusculo}}</p>" })).toThrow();
   });
 });

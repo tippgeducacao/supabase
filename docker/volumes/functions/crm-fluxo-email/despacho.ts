@@ -7,7 +7,7 @@
  * (`pendente` → `processando`, atômico): duas rodadas do despachante nunca enviam o mesmo
  * item. Resultado incerto fica em `processando` e não é repetido — mesma régua do webhook.
  *
- * ⚠️ Item recusado ANTES de ser assumido (lead sem e-mail, modelo inativo, variável vazia)
+ * ⚠️ Item recusado ANTES de ser assumido (lead sem e-mail, modelo inativo)
  * precisa sair de `pendente` aqui; senão a próxima rodada o pegaria de novo, para sempre.
  *
  * Desde 02/10/2026 a fila também recebe as automações de FUNIL (CRM V2, `origem='crm_v2'`)

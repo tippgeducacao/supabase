@@ -239,6 +239,35 @@ describe("núcleo compartilhado com os Fluxos (28/09/2026)", () => {
     }));
   });
 
+  it.each([
+    ["fluxo", "crm-fluxo-email/v1"],
+    ["automacao_crm", "crm-v2-email/v1"],
+    ["automacao_sac", "sac-v2-email/v1"],
+  ] as const)("origem %s: variável sem valor sai em branco, não barra (05/10/2026)", async (tipo, namespace) => {
+    // Cadência de teste: o 1º e-mail ("…pós em {{curso.nome}}") não saiu porque o contato não
+    // tinha curso, e o 3º pedia {{link_oferta}} que ninguém preencheu. No fluxo, sai em branco.
+    lead.curso_interesse = null;
+    template.assunto = "Recebemos seu cadastro na pós em {{curso.nome}}";
+    template.corpo_html = '<html><body><p>{{contato.primeiro_nome}}: {{curso.nome}}</p><a href="{{link_oferta}}">Ver</a></body></html>';
+    template.corpo_texto = "{{contato.primeiro_nome}} {{data_limite}}";
+    const r = await executarEnvioModeloEmail({
+      contexto: { tipo, id: "66666666-6666-4666-8666-666666666666", namespace, partesChave: ["x"] },
+      acao: { id: "no-acao-1", params: { template_id: TEMPLATE, remetente_id: REMETENTE, variaveis: { "contato.primeiro_nome": "", data_limite: " " } } },
+      leadId: LEAD, dados: null,
+    }, { ...deps, resolverVariavel: (modelo) => modelo, reservar: vi.fn(async () => true) });
+    expect(r.status).toBe("enviado");
+    expect(deps.enviar).toHaveBeenCalledWith(expect.objectContaining({
+      contexto_tipo: tipo, variaveis: expect.objectContaining({ "curso.nome": "", "contato.primeiro_nome": "Maria" }),
+    }));
+  });
+
+  it("origem webhook: a mesma falta de dado continua barrando", async () => {
+    lead.curso_interesse = null;
+    template.assunto = "Recebemos seu cadastro na pós em {{curso.nome}}";
+    const r = await executarAcaoEmail(entrada(), deps);
+    expect(r).toMatchObject({ status: "ignorado", motivo: "variavel_ausente" });
+  });
+
   it("origem fluxo: token de webhook não existe ali e barra o envio", async () => {
     const r = await executarEnvioModeloEmail({
       contexto: { tipo: "fluxo", id: "66666666-6666-4666-8666-666666666666", namespace: "crm-fluxo-email/v1", partesChave: ["x"] },

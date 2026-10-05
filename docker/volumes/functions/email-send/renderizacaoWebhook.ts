@@ -3,6 +3,8 @@ type ModeloWebhook = {
   corpoHtml: string;
   corpoTexto: string | null;
   variaveis: Record<string, string>;
+  /** Sem valor e sem fallback: true = sai em branco; false/ausente = barra (webhook). */
+  semValorEmBranco?: boolean;
 };
 
 /**
@@ -55,6 +57,7 @@ export function renderizarEmailWebhook(modelo: ModeloWebhook) {
       // está codificado como HTML (e não aceita `<`, `>` nem chaves).
       if (fbAspas !== undefined) return html ? escaparHtml(fbAspas) : fbAspas;
       if (fbEntidade !== undefined) return fbEntidade;
+      if (modelo.semValorEmBranco) return "";
       throw new Error("O modelo contém uma variável sem valor.");
     });
     const semDescadastro = permitirDescadastro ? resultado.replaceAll("{{descadastro_url}}", "") : resultado;
@@ -91,6 +94,18 @@ export function renderizarEmailWebhook(modelo: ModeloWebhook) {
 export function contextoDeAutomacao(contexto: string | undefined): boolean {
   return contexto === "webhook" || contexto === "fluxo"
     || contexto === "automacao_crm" || contexto === "automacao_sac";
+}
+
+/**
+ * Fluxo de automação e automações de funil/SAC (05/10/2026): variável sem valor sai EM
+ * BRANCO (ou com o texto padrão do modelo) e nunca barra o envio. Quem decide quem recebe é
+ * o fluxo — a trava "faltou variável" (criada junto com o e-mail do webhook, em 11/09, sem
+ * ninguém pedir) segurou o 1º e-mail de uma cadência só porque o contato não tinha curso.
+ * Pedido do usuário: "se está sendo chamado pra um fluxo de automação, só tem que respeitar
+ * as regras do fluxo de automação". O webhook continua barrando.
+ */
+export function variavelSemValorSaiEmBranco(contexto: string | undefined): boolean {
+  return contextoDeAutomacao(contexto) && contexto !== "webhook";
 }
 
 /** A automação mantém seu contexto no histórico, e usa a finalidade do modelo. */

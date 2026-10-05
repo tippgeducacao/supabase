@@ -17,7 +17,7 @@ import { urlPublicaEmail } from "../_shared/urlPublicaEmail.ts";
 import { ErroEnvio, obterProvedor, provedorEfetivo } from "../_shared/emailProviders/index.ts";
 import { buscarSupressao, supressaoSeAplica } from "../_shared/supressao.ts";
 import { conferirConsultaIdempotente, permiteNovaChaveIdempotente, respostaEnvioExistente } from "./idempotencia.ts";
-import { contextoDeAutomacao, emailEhMarketing, renderizarEmailWebhook } from "./renderizacaoWebhook.ts";
+import { contextoDeAutomacao, emailEhMarketing, renderizarEmailWebhook, variavelSemValorSaiEmBranco } from "./renderizacaoWebhook.ts";
 import { resolverModeloCampanhaAB } from "./campanhaAB.ts";
 import { expandirVariaveis, renderizarTags } from "../_shared/emailBuilder/mergeTags.ts";
 import { respostaOpcoesCampanhas } from "../_shared/emailCampanhasCapacidades.ts";
@@ -244,7 +244,8 @@ Deno.serve(async (req) => {
     if (contextoDeAutomacao(payload.contexto_tipo)) {
       try {
         if (!templateId) throw new Error("Modelo de e-mail obrigatório no envio automático.");
-        ({ assunto, corpoHtml, corpoTexto } = renderizarEmailWebhook({ assunto, corpoHtml, corpoTexto, variaveis: vars }));
+        ({ assunto, corpoHtml, corpoTexto } = renderizarEmailWebhook({ assunto, corpoHtml, corpoTexto, variaveis: vars,
+          semValorEmBranco: variavelSemValorSaiEmBranco(payload.contexto_tipo) }));
       } catch {
         return new Response(JSON.stringify({ error: "Confira o conteúdo e as variáveis do modelo de e-mail.", codigo: "modelo_webhook_invalido" }), {
           status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" },

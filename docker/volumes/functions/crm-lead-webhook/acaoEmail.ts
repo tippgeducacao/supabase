@@ -9,7 +9,7 @@
  * `contexto` — tipo, id e o que compõe a chave única. `executarAcaoEmail` continua sendo a
  * porta do webhook e gera exatamente a mesma chave de antes.
  */
-import { renderizarEmailWebhook, VARIAVEL_MODELO } from "../email-send/renderizacaoWebhook.ts";
+import { renderizarEmailWebhook, VARIAVEL_MODELO, variavelSemValorSaiEmBranco } from "../email-send/renderizacaoWebhook.ts";
 export interface LeadEmail {
   id: string;
   nome: string | null;
@@ -118,13 +118,14 @@ function conteudoEmailLegivel(html: string): boolean {
   return !!texto || /<img\b[^>]*\balt\s*=\s*(?:"[^"\s][^"]*"|'[^'\s][^']*')[^>]*>/i.test(corpo);
 }
 
-function validarModelo(modelo: string, variaveis: Record<string, string>, permiteDescadastro: boolean): boolean {
+/** `exigirValor = false` (fluxo/automação): variável sem valor sai em branco, não invalida. */
+function validarModelo(modelo: string, variaveis: Record<string, string>, permiteDescadastro: boolean, exigirValor: boolean): boolean {
   let valido = true;
   // `{{x | fallback:"…"}}` vale mesmo sem valor: o renderizador usa o texto do fallback.
   const restante = modelo.replace(VARIAVEL_MODELO, (_token, chave: string, fbAspas?: string, fbEntidade?: string) => {
     if (chave === "descadastro_url") {
       if (!permiteDescadastro) valido = false;
-    } else if (fbAspas === undefined && fbEntidade === undefined
+    } else if (exigirValor && fbAspas === undefined && fbEntidade === undefined
       && (!Object.hasOwn(variaveis, chave) || !variaveis[chave].trim())) valido = false;
     return "";
   });
@@ -207,6 +208,8 @@ export async function executarEnvioModeloEmail(entrada: {
       "contato.nome": nome, "contato.primeiro_nome": primeiroNome, "contato.email": email,
       "contato.telefone": telefone, "curso.nome": curso,
     });
+    // Fluxo/automação: a regra de quem recebe é do fluxo — dado que faltar sai em branco.
+    const emBranco = variavelSemValorSaiEmBranco(contexto.tipo);
     const mapeadas = params.variaveis ?? {};
     if (Object.keys(mapeadas).length > 100) return resultado("ignorado", "variaveis_invalidas");
     // Variável com fallback no modelo: valor mapeado que resolve vazio (ex.: {primeiro_nome}
@@ -223,15 +226,15 @@ export async function executarEnvioModeloEmail(entrada: {
       const valor = deps.resolverVariavel(modelo, entrada.dados);
       if (/\{webhook=|\{\{|\}\}/i.test(valor)) return resultado("ignorado", "variavel_ausente");
       if (tokenVazio || !valor.trim()) {
-        if (comFallback.has(chaveVariavel)) continue;
+        if (emBranco || comFallback.has(chaveVariavel)) continue;
         return resultado("ignorado", "variavel_ausente");
       }
       if (valor.length > 10_000) return resultado("ignorado", "variaveis_invalidas");
       variaveis[chaveVariavel] = valor;
     }
     if (Object.values(variaveis).some((v) => /\{webhook=|\{\{|\}\}/i.test(v))) return resultado("ignorado", "variavel_ausente");
-    if (!validarModelo(template.assunto, variaveis, false) || !validarModelo(template.corpo_html, variaveis, true)
-      || !validarModelo(template.corpo_texto ?? "", variaveis, true)) return resultado("ignorado", "variavel_ausente");
+    if (!validarModelo(template.assunto, variaveis, false, !emBranco) || !validarModelo(template.corpo_html, variaveis, true, !emBranco)
+      || !validarModelo(template.corpo_texto ?? "", variaveis, true, !emBranco)) return resultado("ignorado", "variavel_ausente");
     const assunto = template.assunto.replace(VARIAVEL_MODELO, (_m, k: string, fbAspas?: string, fbEntidade?: string) =>
       variaveis[k]?.trim() ? variaveis[k] : fbAspas ?? fbEntidade ?? "");
     if (temControles(assunto)) return resultado("ignorado", "assunto_invalido");
@@ -239,7 +242,7 @@ export async function executarEnvioModeloEmail(entrada: {
       // A mesma regra roda novamente no motor de envio, preservando template_id
       // no histórico. Aqui impede consumir uma reserva com HTML/links inválidos.
       renderizarEmailWebhook({ assunto: template.assunto, corpoHtml: template.corpo_html,
-        corpoTexto: template.corpo_texto, variaveis });
+        corpoTexto: template.corpo_texto, variaveis, semValorEmBranco: emBranco });
     } catch {
       return resultado("ignorado", "template_invalido");
     }
