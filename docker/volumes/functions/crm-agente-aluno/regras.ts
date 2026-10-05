@@ -192,8 +192,14 @@ export type RespostaDeBotao =
   | { tipo: 'grupo'; estaNoGrupo: boolean }
   | { tipo: 'ligacao'; periodo: 'comeco_da_manha' | 'fim_da_tarde' }
   | { tipo: 'entendido' }
-  | { tipo: 'duvida' }
-  | { tipo: 'combinado' };
+  // `dia`/`rotulo`/`sobre` só nos botões de 03/10/2026; o "Fiquei com dúvida" do D+3 vem sem eles.
+  | { tipo: 'duvida'; dia?: number; rotulo?: string; sobre?: string }
+  | { tipo: 'combinado' }
+  /**
+   * O "fiz" dos botões criados em 03/10/2026 (D+2, D+4, D+9, D+11 e D+13 sem TCC). Carrega o
+   * próprio dia: são cinco passos para um tipo só, e `DIA_DO_BOTAO` é um dia por tipo.
+   */
+  | { tipo: 'feito'; dia: number; rotulo: string; sobre: string };
 
 /**
  * Os botões que, por si só, FECHAM o passo do dia, sem o modelo precisar julgar.
@@ -206,7 +212,7 @@ export type RespostaDeBotao =
  * `ligacao` fica de fora: ele é do D+5, que é passo de RESGATE (não entra na esteira acelerada) e
  * abre passagem para a equipe. `duvida` também: quem ficou com dúvida não concluiu nada.
  */
-export const BOTAO_FECHA_O_PASSO = new Set(['grupo', 'entendido', 'combinado']);
+export const BOTAO_FECHA_O_PASSO = new Set(['grupo', 'entendido', 'combinado', 'feito']);
 
 /**
  * De qual PASSO é cada botão de conclusão.
@@ -220,6 +226,11 @@ export const DIA_DO_BOTAO: Record<string, number> = {
   entendido: 3,   // int_aluno_03_cronograma:            "Ok, entendido"
   combinado: 7,   // int_aluno_07_suporte:               "Combinado"
 };
+
+/** O passo do botão: os de 03/10/2026 trazem o deles; os outros vêm de `DIA_DO_BOTAO`. */
+export function diaDoBotao(b: RespostaDeBotao): number | undefined {
+  return 'dia' in b && b.dia !== undefined ? b.dia : DIA_DO_BOTAO[b.tipo];
+}
 
 /**
  * Payload fixo que os modelos da régua devem levar nos botões (decisão pendente do Rafael).
@@ -254,6 +265,19 @@ const POR_TITULO: Record<string, RespostaDeBotao> = {
   'combinado': { tipo: 'combinado' },
   'ja salvei': { tipo: 'combinado' },
   'vou salvar': { tipo: 'combinado' },
+  // 03/10/2026: dois botões ("fiz" / "não consegui") nos passos que não tinham nenhum, nos modelos
+  // `_v2` (o D+13 com TCC ficou no modelo antigo, sem botão, por decisão do Rafael). Os títulos
+  // não se repetem entre passos, então o título basta para saber de qual mensagem veio.
+  'ja acessei': { tipo: 'feito', dia: 2, rotulo: 'Já acessei', sobre: 'a plataforma' },
+  'nao consegui acessar': { tipo: 'duvida', dia: 2, rotulo: 'Não consegui acessar', sobre: 'a plataforma' },
+  'ja encontrei': { tipo: 'feito', dia: 4, rotulo: 'Já encontrei', sobre: 'o material didático' },
+  'nao encontrei': { tipo: 'duvida', dia: 4, rotulo: 'Não encontrei', sobre: 'o material didático' },
+  'ja enviei': { tipo: 'feito', dia: 9, rotulo: 'Já enviei', sobre: 'os documentos da matrícula' },
+  'tenho duvida': { tipo: 'duvida', dia: 9, rotulo: 'Tenho dúvida', sobre: 'os documentos da matrícula' },
+  'encontrei': { tipo: 'feito', dia: 11, rotulo: 'Encontrei', sobre: 'o financeiro na plataforma' },
+  'preciso de ajuda': { tipo: 'duvida', dia: 11, rotulo: 'Preciso de ajuda', sobre: 'o financeiro na plataforma' },
+  'esta tudo certo': { tipo: 'feito', dia: 13, rotulo: 'Está tudo certo', sobre: 'o fim da integração' },
+  'ficou uma duvida': { tipo: 'duvida', dia: 13, rotulo: 'Ficou uma dúvida', sobre: 'o fim da integração' },
 };
 
 /** Sem acento, minúsculo, pontuação vira espaço: "Não estou!" e "nao  estou" são o mesmo botão. */

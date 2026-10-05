@@ -51,7 +51,7 @@ import {
   assuntoValido,
   BOTAO_FECHA_O_PASSO,
   canonDdd8,
-  DIA_DO_BOTAO,
+  diaDoBotao as passoDoBotao,
   CATEGORIAS_COMO_CONHECEU,
   CATEGORIAS_META_PESSOAL,
   type ContextoAluno,
@@ -1219,11 +1219,20 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
     } else if (botaoDaVez?.tipo === 'entendido') {
       instrucaoAgora = 'Ele tocou em "Ok, entendido" na mensagem sobre as aulas ao vivo. Já está ' +
         'anotado. Não precisa responder (use nao_responder); se responder, uma frase curta.';
+    } else if (botaoDaVez?.tipo === 'duvida' && botaoDaVez.sobre) {
+      // Os botões de 03/10/2026 ("Não consegui acessar", "Não encontrei", "Tenho dúvida",
+      // "Preciso de ajuda", "Ficou uma dúvida"): o aluno levantou a mão, o assistente pergunta.
+      instrucaoAgora = `Ele tocou em "${botaoDaVez.rotulo}" na mensagem sobre ${botaoDaVez.sobre}. ` +
+        'Pergunte, em UMA frase, o que aconteceu ou qual é a dúvida dele. Não explique nada antes ' +
+        'de saber do que ele precisa.';
     } else if (botaoDaVez?.tipo === 'duvida') {
       // Quem ficou com dúvida NÃO concluiu nada: aqui o assistente tem de abrir a boca.
       instrucaoAgora = 'Ele tocou em "Fiquei com dúvida" na mensagem sobre as aulas ao vivo. ' +
         'Pergunte, em UMA frase, qual é a dúvida dele. Não explique nada antes de saber o que ele ' +
         'não entendeu.';
+    } else if (botaoDaVez?.tipo === 'feito') {
+      instrucaoAgora = `Ele tocou em "${botaoDaVez.rotulo}" na mensagem sobre ${botaoDaVez.sobre}. ` +
+        'Já está anotado. Não precisa responder (use nao_responder); se responder, uma frase curta.';
     } else if (botaoDaVez?.tipo === 'combinado') {
       instrucaoAgora = 'Ele tocou no botão da mensagem sobre quem cuida do suporte dele. Já está ' +
         'anotado. Não precisa responder (use nao_responder); se responder, uma frase curta.';
@@ -1255,7 +1264,7 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
       // errado. `passo_dia` é o passo em que o card está, que é a mensagem que ele acabou de
       // receber. (Achado na revisão adversarial: os tipos novos não tinham a conferência de
       // coerência que o `grupo` já tinha contra `ctx.no_grupo`.)
-      const diaDoBotao = DIA_DO_BOTAO[botaoDaVez.tipo];
+      const diaDoBotao = passoDoBotao(botaoDaVez);
       // O mesmo toque não pode contar duas vezes: enquanto o assistente não responde nada, o
       // botão continua "sem resposta" para sempre, e a oferta seguinte (depois de a primeira
       // expirar) nasceria de um toque de ontem.

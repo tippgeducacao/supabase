@@ -22,6 +22,7 @@ import {
   descreverModeloDaRegua,
   horarioLegivel,
   BOTAO_FECHA_O_PASSO,
+  diaDoBotao,
   interpretarBotao,
   mesmoTelefone,
   montarContexto,
@@ -178,10 +179,33 @@ describe('botões da régua', () => {
   });
 
   it('só os botões de CONCLUSÃO fecham o passo; dúvida e ligação não', () => {
-    expect([...BOTAO_FECHA_O_PASSO].sort()).toEqual(['combinado', 'entendido', 'grupo']);
+    expect([...BOTAO_FECHA_O_PASSO].sort()).toEqual(['combinado', 'entendido', 'feito', 'grupo']);
     // "Fiquei com dúvida" é o contrário de concluir, e o D+5 (ligação) é passo de resgate.
     expect(BOTAO_FECHA_O_PASSO.has('duvida')).toBe(false);
     expect(BOTAO_FECHA_O_PASSO.has('ligacao')).toBe(false);
+  });
+
+  // 03/10/2026: os modelos _v2 dos passos que não tinham botão. O "fiz" fecha o passo DO SEU DIA
+  // (não o do card), e o "não consegui" é dúvida, que não fecha nada.
+  it('os botões dos modelos _v2 (D+2, D+4, D+9, D+11 e D+13)', () => {
+    const casos: [string, string, number][] = [
+      ['Já acessei', 'feito', 2], ['Não consegui acessar', 'duvida', 2],
+      ['Já encontrei', 'feito', 4], ['Não encontrei', 'duvida', 4],
+      ['Já enviei', 'feito', 9], ['Tenho dúvida', 'duvida', 9],
+      ['Encontrei', 'feito', 11], ['Preciso de ajuda', 'duvida', 11],
+      ['Está tudo certo', 'feito', 13], ['Ficou uma dúvida', 'duvida', 13],
+    ];
+    for (const [titulo, tipo, dia] of casos) {
+      const b = interpretarBotao({ tipo: 'template_button', id: titulo, title: titulo });
+      expect(b, titulo).toMatchObject({ tipo, dia, rotulo: titulo });
+      expect(diaDoBotao(b!), titulo).toBe(dia);
+    }
+  });
+
+  it('o dia dos botões antigos continua vindo do tipo', () => {
+    expect(diaDoBotao({ tipo: 'entendido' })).toBe(3);
+    expect(diaDoBotao({ tipo: 'combinado' })).toBe(7);
+    expect(diaDoBotao({ tipo: 'duvida' })).toBeUndefined();
   });
 
   it('botão de outro modelo, lista, texto livre e lixo não viram nada', () => {
