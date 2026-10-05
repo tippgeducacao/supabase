@@ -430,10 +430,12 @@ async function cCobranca(input: any, ctx: Ctx) {
     recuperado_30d_mes: receb?.recuperado_30d?.mes ?? null,
     premiacao_por_atendente: (equipe.linhas || []).map((l: any) => ({
       nome: l.nome, recebido: l.recebido, indicacoes: l.indicacoes,
+      // Pontos do prêmio (05/10/2026): indicações × 1 + alunos espelhados que compraram.
+      pontos_indicacoes: l.pontos_indicacoes ?? l.indicacoes,
       premio_indicacoes: l.premio_indicacoes, premio_artilheiro: l.premio_artilheiro,
       premio_recuperacao: l.premio_recuperacao, total: l.total,
     })),
-    _nota: "Mês da cobrança = mês PPG (semanas comerciais). Inadimplência = vencido ÷ projetado; meta < 15% libera o artilheiro.",
+    _nota: "Mês da cobrança = mês PPG (semanas comerciais). Inadimplência = vencido ÷ projetado; meta < 15% libera o artilheiro. Prêmio semanal por PONTOS: indicação = 1 ponto + aluno espelhado para o Comercial que comprou (pós/módulo 10, curso 1).",
   };
 }
 
