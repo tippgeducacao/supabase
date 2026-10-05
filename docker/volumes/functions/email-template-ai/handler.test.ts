@@ -64,7 +64,7 @@ function cenario(opcoes: Opcoes = {}) {
     let unico = false;
     consultas.push(consulta);
     const resultado = (): Retorno => {
-      if (tabela === 'profiles') return { data: { ativo: opcoes.ativo ?? true }, error: null };
+      if (tabela === 'profiles') return { data: { ativo: opcoes.ativo ?? true }, error: opcoes.erroPermissao ? { message: 'falha privada' } : null };
       if (tabela === 'email_template_ia_cotas') return { data: opcoes.estadoCota === undefined ? { usos_ultimo_minuto: Array.from({ length: consumos }, () => new Date().toISOString()), dia_utc: new Date().toISOString().slice(0, 10), usos_dia: consumos } : opcoes.estadoCota, error: opcoes.erroConsultaCota ? { message: 'falha privada' } : null };
       if (tabela === 'ai_agents') {
         const agente = { id: AGENTE, name: 'Diretor de Arte', description: 'Criação visual', system_prompt: 'PROMPT_PRIVADO' };
@@ -163,7 +163,8 @@ describe('controle de acesso e catálogo de templates IA', () => {
     expect((await c.chamar()).status).toBe(401);
     expect(c.consultas).toEqual([]);
   });
-  it.each([{ cargo: 'nenhum' as const }, { ativo: false }])('exige role de edição e perfil ativo', async opcoes => {
+  // Desde 05/10/2026 qualquer perfil ativo edita template (e usa a IA): o cargo não barra mais.
+  it.each([{ ativo: false }])('exige perfil ativo', async opcoes => {
     const c = cenario(opcoes);
     expect((await c.chamar()).status).toBe(403);
     expect(c.consultas.map(v => v.tabela)).toEqual(['profiles']);
@@ -578,7 +579,7 @@ describe('gerar imagem exige escolha explícita, sessão e a mesma cota', () => 
     expect(c.consultas.some(consulta => /storage|generations|templates/.test(consulta.tabela))).toBe(false);
   });
   it.each([
-    [{ cargo: 'nenhum' as const }, 403], [{ permitido: false }, 429], [{ erroCota: true }, 503], [{ providers: ['anthropic'] }, 503],
+    [{ ativo: false }, 403], [{ permitido: false }, 429], [{ erroCota: true }, 503], [{ providers: ['anthropic'] }, 503],
   ] as const)('recusa antes do provedor quando acesso, configuração ou cota impedem', async (opcoes, status) => {
     const c = cenario({ ...opcoes, ...('providers' in opcoes ? { providers: [...opcoes.providers] } : {}) });
     const resposta = await c.chamar({ acao: 'gerar_imagem', prompt: 'Banner' });
@@ -625,7 +626,7 @@ describe('contexto real e biblioteca no endpoint autenticado', () => {
     expect(JSON.parse(body.messages[0].content.at(-1).text).imagens_biblioteca[0].url).toBe(urlArte);
   });
   it('não consulta dados nem biblioteca quando a sessão não pode editar templates', async () => {
-    const c = cenario({ dados, cargo: 'nenhum' });
+    const c = cenario({ dados, ativo: false });
     for (const acao of ['listar_contextos', 'carregar_contexto', 'listar_imagens']) expect((await c.chamar({ acao, contexto: { curso_id: cursoId } })).status).toBe(403);
     expect(c.consultas.every(consulta => consulta.tabela === 'profiles')).toBe(true);
   });
@@ -694,9 +695,9 @@ describe('registro e conferência das fontes efetivamente usadas', () => {
     const pedido = { acao: 'conferir_fontes', snapshot_fontes, usuario_esperado: USUARIO };
     const semSessao = cenario(); expect((await semSessao.chamar(pedido, null)).status).toBe(401);
     expect(semSessao.consultas).toEqual([]);
-    const semCargo = cenario({ cargo: 'nenhum' }); expect((await semCargo.chamar(pedido)).status).toBe(403);
+    const inativo = cenario({ ativo: false }); expect((await inativo.chamar(pedido)).status).toBe(403);
     const outraConta = cenario(); expect((await outraConta.chamar({ ...pedido, usuario_esperado: AGENTE })).status).toBe(409);
-    for (const c of [semCargo, outraConta]) {
+    for (const c of [inativo, outraConta]) {
       expect(c.consultas.map(v => v.tabela)).toEqual(['profiles']);
       expect(c.buscar).not.toHaveBeenCalled();
       expect(c.rpc).not.toHaveBeenCalledWith('email_template_ia_consumir_cota', expect.anything());
@@ -878,7 +879,7 @@ describe('proteção aprovada no endpoint e na recomposição do navegador', () 
 });
 
 describe('consulta da cota existente sem consumir ou chamar provedor', () => {
-  it.each(['admin', 'diretor'] as const)('consulta saldo real do %s, ignorando usuário forjado', async cargo => {
+  it.each(['admin', 'diretor', 'nenhum'] as const)('consulta saldo real do %s, ignorando usuário forjado', async cargo => {
     const c = cenario({ cargo, estadoCota: { dia_utc: new Date().toISOString().slice(0, 10), usos_dia: 23, usos_ultimo_minuto: [new Date().toISOString()] } });
     const resposta = await c.chamar({ acao: 'consultar_cota', usuario_id: AGENTE });
     expect(resposta.status).toBe(200);
@@ -888,7 +889,7 @@ describe('consulta da cota existente sem consumir ou chamar provedor', () => {
     expect(c.buscar).not.toHaveBeenCalled();
     expect(c.consultas.some(v => v.tabela === 'ai_api_keys')).toBe(false);
   });
-  it.each([{ cargo: 'nenhum' as const }, { ativo: false }])('não consulta cota sem autorização completa', async opcoes => {
+  it.each([{ ativo: false }])('não consulta cota sem autorização completa', async opcoes => {
     const c = cenario(opcoes);
     expect((await c.chamar({ acao: 'consultar_cota' })).status).toBe(403);
     expect(c.consultas.some(v => v.tabela === 'email_template_ia_cotas')).toBe(false);

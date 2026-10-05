@@ -15,13 +15,10 @@ export function criarHandlerImportarMaterialEmailIA(cliente: SupabaseClient, red
       const { data, error } = await cliente.auth.getUser(token);
       if (error || !data.user?.id || data.user.is_anonymous) throw new ErroMaterialEmailIA(401, "Sessão inválida. Entre novamente.");
       const usuarioId = data.user.id;
-      const [perfil, admin, diretor] = await Promise.all([
-        cliente.from("profiles").select("ativo").eq("id", usuarioId).maybeSingle(),
-        cliente.rpc("has_role", { user_id: usuarioId, role_name: "admin" }),
-        cliente.rpc("has_role", { user_id: usuarioId, role_name: "diretor" }),
-      ]);
-      if (perfil.error || admin.error || diretor.error) throw new ErroMaterialEmailIA(503, "Não foi possível verificar seu acesso.");
-      if (perfil.data?.ativo !== true || !(admin.data === true || diretor.data === true)) throw new ErroMaterialEmailIA(403, "Você não tem permissão para editar templates de e-mail.");
+      const perfil = await cliente.from("profiles").select("ativo").eq("id", usuarioId).maybeSingle();
+      if (perfil.error) throw new ErroMaterialEmailIA(503, "Não foi possível verificar seu acesso.");
+      // Régua de escrita de email_templates: qualquer perfil ativo (05/10/2026).
+      if (perfil.data?.ativo !== true) throw new ErroMaterialEmailIA(403, "Você não tem permissão para editar templates de e-mail.");
       const reader = req.body?.getReader(); if (!reader) throw new ErroMaterialEmailIA(400, "Informe a URL da página.");
       let corpo = ""; let total = 0; const decoder = new TextDecoder();
       try {

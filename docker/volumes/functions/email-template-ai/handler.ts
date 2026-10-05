@@ -387,15 +387,11 @@ export function criarHandlerEmailIA(deps: DependenciasEmailIA) {
       const { data: auth, error: erroAuth } = await cliente.auth.getUser(token);
       if (erroAuth || !auth.user?.id || auth.user.is_anonymous) throw new ErroEmailIA(401, "UNAUTHENTICATED", "Sessão inválida. Entre novamente.");
       const usuarioId = auth.user.id;
-      const [perfil, admin, diretor] = await Promise.all([
-        cliente.from("profiles").select("ativo").eq("id", usuarioId).maybeSingle(),
-        cliente.rpc("has_role", { user_id: usuarioId, role_name: "admin" }),
-        cliente.rpc("has_role", { user_id: usuarioId, role_name: "diretor" }),
-      ]);
-      if (perfil.error || admin.error || diretor.error) throw indisponivel();
-      // A mesma régua de escrita de email_templates; has_admin_permission seria
-      // mais amplo, pois também aceita o user_type legado que a policy não usa.
-      if (perfil.data?.ativo !== true || !(admin.data === true || diretor.data === true)) throw new ErroEmailIA(403, "FORBIDDEN", "Você não tem permissão para editar templates de e-mail.");
+      const perfil = await cliente.from("profiles").select("ativo").eq("id", usuarioId).maybeSingle();
+      if (perfil.error) throw indisponivel();
+      // A mesma régua de escrita de email_templates (`email_templates_pode_editar`):
+      // desde 05/10/2026 qualquer perfil ativo salva template, não só admin/diretor.
+      if (perfil.data?.ativo !== true) throw new ErroEmailIA(403, "FORBIDDEN", "Você não tem permissão para editar templates de e-mail.");
       usuarioCota = usuarioId;
       const corpo = await lerCorpoEmailIA(req);
       // Uploads e leituras locais podem terminar depois de um logout/login. O

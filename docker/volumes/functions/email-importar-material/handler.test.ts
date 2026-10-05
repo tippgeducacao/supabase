@@ -10,16 +10,19 @@ function fixture(opcoes: { ativo?: boolean; autorizado?: boolean; anonimo?: bool
 }
 function req(corpo: unknown = { url: "https://curso.com/", usuario_esperado: usuario }, token = "teste") { return new Request("https://local/", { method: "POST", headers: token ? { Authorization: `Bearer ${token}` } : {}, body: JSON.stringify(corpo) }); }
 describe("acesso e limites da importação de material", () => {
-  it("autentica e exige admin/diretor ativo antes de consultar DNS", async () => {
-    for (const opcoes of [{ ativo: false }, { autorizado: false }, { anonimo: true }]) { const f = fixture(opcoes); expect((await f.handler(req())).status).toBe(opcoes.anonimo ? 401 : 403); expect(f.rede.resolver).not.toHaveBeenCalled(); }
+  it("autentica e exige perfil ativo antes de consultar DNS", async () => {
+    for (const opcoes of [{ ativo: false }, { anonimo: true }]) { const f = fixture(opcoes); expect((await f.handler(req())).status).toBe(opcoes.anonimo ? 401 : 403); expect(f.rede.resolver).not.toHaveBeenCalled(); }
     const f = fixture(); expect((await f.handler(req(undefined, ""))).status).toBe(401); expect(f.cliente.auth.getUser).not.toHaveBeenCalled();
+  });
+  it("usuário comum ativo, sem admin/diretor, importa (régua de 05/10/2026)", async () => {
+    const f = fixture({ autorizado: false }); expect((await f.handler(req())).status).toBe(200);
   });
   it("recusa troca de conta ou usuário esperado ausente antes de baixar", async () => {
     for (const usuario_esperado of [undefined, "outra-conta"]) { const f = fixture(); expect((await f.handler(req({ url: "https://curso.com", usuario_esperado }))).status).toBe(409); expect(f.rede.resolver).not.toHaveBeenCalled(); }
   });
   it("retorna só material revisável, sem consumo da cota de IA", async () => {
     const f = fixture(); const res = await f.handler(req()); expect(res.status).toBe(200); expect(await res.json()).toMatchObject({ material: { tipo: "url", truncado: false } });
-    expect(f.cliente.rpc.mock.calls.every(c => c[0] === "has_role")).toBe(true);
+    expect(f.cliente.rpc).not.toHaveBeenCalled();
   });
   it("limita5 tentativas por minuto e recusa6 antes da rede", async () => {
     const f = fixture(); for (let i = 0; i < 5; i++) expect((await f.handler(req())).status).toBe(200);
