@@ -3,7 +3,6 @@
 // Fonte: revisão das 11 ferramentas (C:\tmp\framework-sdr\revisao-ferramentas-aula.md). Só a rota
 // `tools` do v9 (rotasV9.ts) aplica isto, e só para agente_aula: a produção (tools-luna.ts e
 // canalResposta.ts) não muda. Troca SÓ textos: nome, tipo, enum, required e campos ficam intactos.
-import { SINAIS_DO_PERFIL } from './carreiraPos.ts';
 
 export type DescricaoAulaV9 = { description: string; campos?: Record<string, string> };
 
@@ -88,6 +87,7 @@ export const DESCRICOES_AULA_V9: Record<string, DescricaoAulaV9> = {
       qual_pos: 'Pós que ele já tem, se disse.',
       possui_pos: 'Se já tem pós-graduação, quando ele disser.',
       area_atuacao: 'Onde atua hoje, nas palavras dele (ex.: "plantão em clínica", "não trabalha na área").',
+      vinculo: 'Vínculo de trabalho hoje, assim que ele disser: clt, autonomo, consultor, proprietario (dono do próprio negócio), servidor_publico ou sem_trabalho. Sem pista clara, vazio.',
       atua_na_area: 'sim = atua na área da pós; nao = não atua ou atua em outra.',
       tempo_formacao: 'Conclusão da graduação nas palavras dele (ex.: "formado há 2 anos", "cursando, conclui em 12/2026").',
       graduacao_concluida: 'sim = formado; cursando = ainda na faculdade (mande tempo_formacao); nao = declarou não ter graduação nem cursar.',
@@ -121,13 +121,6 @@ export const DESCRICOES_AULA_V9: Record<string, DescricaoAulaV9> = {
       tipo: 'analise = pediu tempo (dias); formatura = ainda cursa e conclui depois da data-limite (meses).',
       meses: 'Só em formatura: meses até a conclusão, pelo contexto temporal (12/2028 visto de 10/2026 = 26). O sistema limita a 12.',
       motivo: 'O que o lead disse, curto (ex.: "conclui a graduação em 2028").',
-    },
-  },
-  busca_carreira: {
-    description: 'Devolve, para a pós da aula e o perfil do lead, a pergunta de dor, a ponte do convite e as objeções desse perfil.',
-    campos: {
-      perfil: 'O perfil que combina com o que ele disse. Quem já faz o que a pós ensina é ja_atua_no_tema, mesmo tendo clínica ou emprego. '
-        + Object.entries(SINAIS_DO_PERFIL).map(([p, sinal]) => `${p}: ${sinal}`).join('; ') + '.',
     },
   },
   responder_ao_cliente: {

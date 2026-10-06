@@ -7,14 +7,12 @@ beforeAll(async () => {
   vi.stubGlobal('Deno', { env: { get: () => '' } });
   ({ comDescricoesDaAulaV9, DESCRICOES_AULA_V9 } = await import('./ferramentasAulaV9'));
   const { FERRAMENTAS, FERRAMENTAS_POR_AGENTE } = await import('./tools-luna');
-  const { TOOL_BUSCA_CARREIRA } = await import('./rotasV9');
   const { TOOL_RESPONDER_AO_CLIENTE } = await import('./canalResposta');
   // Como agente.ts carregarTools (formato openai) + o que a rota `tools` do v9 acrescenta.
   ferramentasDaAula = () => [
     ...FERRAMENTAS_POR_AGENTE.agente_aula.map((apelido) => structuredClone(FERRAMENTAS[apelido])).map((t: any) => ({
       name: t.name, description: t.description ?? '', input_schema: t.parameters, ...(t.strict === true ? { strict: true } : {}),
     })),
-    structuredClone(TOOL_BUSCA_CARREIRA),
     structuredClone(TOOL_RESPONDER_AO_CLIENTE),
   ];
 });
@@ -57,16 +55,16 @@ describe('descrições enxutas da aula no v9', () => {
     const depois = comDescricoesDaAulaV9(antes);
     for (let i = 0; i < antes.length; i++) {
       expect(depois[i].description.length).toBeLessThan(antes[i].description.length);
-      // busca_carreira já nasceu enxuta; o campo perfil lista os sinais de SINAIS_DO_PERFIL (fonte única)
-      // e pode crescer quando um sinal ganha exemplo. As outras precisam encolher.
-      if (antes[i].name !== 'busca_carreira') expect(tamanho(depois[i])).toBeLessThan(tamanho(antes[i]));
+      expect(tamanho(depois[i])).toBeLessThan(tamanho(antes[i]));
       const textos = [depois[i].description, ...Object.values(depois[i].input_schema.properties).map((p: any) => p.description ?? '')].join('\n');
       for (const p of PROIBIDAS) expect(textos).not.toContain(p);
     }
   });
 
-  it('o perfil da busca_carreira cita todos os perfis do enum', () => {
-    const perfil = comDescricoesDaAulaV9(ferramentasDaAula()).find((t) => t.name === 'busca_carreira').input_schema.properties.perfil;
+  it('o perfil da busca_carreira cita todos os perfis do enum', async () => {
+    // Desde 06/10/2026 a busca_carreira é montada pela pós (carreiraPos.toolBuscaCarreira), fora desta lista.
+    const { TOOL_BUSCA_CARREIRA } = await import('./rotasV9');
+    const perfil = TOOL_BUSCA_CARREIRA.input_schema.properties.perfil;
     for (const p of perfil.enum) expect(perfil.description).toContain(`${p}:`);
   });
 

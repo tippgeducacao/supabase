@@ -47,3 +47,51 @@ describe('objeção de tempo: reunião ou pós', () => {
     expect(sobreDaObjecaoDeTempo('sem tempo pra reunião', 'qual sua área?')).toBe('conversa');
   });
 });
+
+describe('perfis próprios da pós (06/10/2026)', () => {
+  const proprias = [
+    { perfil: 'outra_frente', nome: 'Vet de outra frente', sinais: ['nunca trabalhei com aves'], base: 'quer_entrar', ordem: 2,
+      moeda: 'territorio', pergunta_dor: null, ponte_convite: 'como entrar no mercado de ovos', observacao: null, perguntas: [] },
+    { perfil: 'produtor_granja', nome: 'Produtor de ovos', sinais: ['tenho granja'], base: 'clinica_propria', ordem: 1,
+      moeda: 'preco', pergunta_dor: 'anota a postura?', ponte_convite: 'comandar a granja por número', observacao: null,
+      perguntas: [{ pergunta: 'vc anota a postura todo dia?', lacuna: 'sem indicador', se_sim: 'e vira taxa?', se_nao: 'entendi.' }] },
+    { perfil: 'estudante', moeda: null, pergunta_dor: null, ponte_convite: null, observacao: 'ainda cursa' },
+    { perfil: 'quer_entrar', moeda: 'territorio', pergunta_dor: 'genérica', ponte_convite: 'genérica', observacao: null },
+  ];
+
+  it('a busca oferece os perfis da pós, na ordem, com as falas; estudante e outra_area sempre', async () => {
+    const { toolBuscaCarreira } = await import('./carreiraPos');
+    const perfil = toolBuscaCarreira(proprias).input_schema.properties.perfil;
+    expect(perfil.enum).toEqual(['produtor_granja', 'outra_frente', 'estudante', 'outra_area']);
+    expect(perfil.description).toContain('produtor_granja: Produtor de ovos (fala como: "tenho granja")');
+    for (const p of perfil.enum) expect(perfil.description).toContain(`${p}:`);
+  });
+
+  it('sem perfis próprios, os 9 genéricos', async () => {
+    const { toolBuscaCarreira, SINAIS_DO_PERFIL } = await import('./carreiraPos');
+    expect(toolBuscaCarreira(linhas).input_schema.properties.perfil.enum).toEqual(Object.keys(SINAIS_DO_PERFIL));
+    expect(toolBuscaCarreira(null).input_schema.required).toEqual(['perfil']);
+  });
+
+  it('perfil fora da tabela cai no próprio de quem quer entrar; estudante não cai', async () => {
+    const { linhaDoPerfil } = await import('./carreiraPos');
+    expect(linhaDoPerfil(proprias, 'produtor_granja')?.perfil).toBe('produtor_granja');
+    expect(linhaDoPerfil(proprias, 'industria_rt')?.perfil).toBe('outra_frente');
+    expect(linhaDoPerfil(proprias, 'outra_area')).toBeNull();
+    expect(linhaDoPerfil(proprias, 'estudante')?.perfil).toBe('estudante');
+    expect(linhaDoPerfil(linhas, 'contratado')).toBeNull();
+  });
+
+  it('perguntas de indagação; linha antiga vira uma pergunta só', async () => {
+    const { perguntasDaLinha } = await import('./carreiraPos');
+    expect(perguntasDaLinha(proprias[1] as any)).toHaveLength(1);
+    expect(perguntasDaLinha(proprias[1] as any)[0].se_sim).toBe('e vira taxa?');
+    expect(perguntasDaLinha(linhas[0] as any)).toEqual([{ pergunta: 'ainda precisaria do plantão?' }]);
+    expect(perguntasDaLinha(linhas[1] as any)).toEqual([]);
+  });
+
+  it('vínculos de trabalho: os 6 aprovados', async () => {
+    const { VINCULOS_TRABALHO } = await import('./carreiraPos');
+    expect(Object.keys(VINCULOS_TRABALHO)).toEqual(['clt', 'autonomo', 'consultor', 'proprietario', 'servidor_publico', 'sem_trabalho']);
+  });
+});

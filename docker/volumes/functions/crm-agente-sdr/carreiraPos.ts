@@ -6,8 +6,12 @@
 
 type Banco = { from: (t: string) => any };
 
+/** Pergunta de indagação (06/10/2026): confirma o que o lead faz hoje e deixa a lacuna aparecer sozinha. */
+export type PerguntaIndagacao = { pergunta: string; lacuna?: string; se_sim?: string; se_nao?: string };
 export type LinhaCarreira = {
   perfil: string; moeda: string | null; pergunta_dor: string | null; ponte_convite: string | null; observacao: string | null;
+  // Perfil próprio da pós (06/10/2026). Linha antiga (perfil genérico) vem sem nome e sem perguntas.
+  nome?: string | null; sinais?: string[] | null; perguntas?: PerguntaIndagacao[] | null; base?: string | null; ordem?: number | null;
 };
 export type ObjecaoCarreira = { objecao: string; resposta: string };
 
@@ -24,6 +28,76 @@ export const SINAIS_DO_PERFIL: Record<string, string> = {
   outra_area: 'formação fora das aceitas pela pós',
 };
 
+/** Vínculo de trabalho do lead (cliente_ppg_leads_sdr.vinculo_trabalho), em todas as pós. */
+export const VINCULOS_TRABALHO: Record<string, string> = {
+  clt: 'CLT, carteira assinada',
+  autonomo: 'autônomo, atende ou trabalha por conta',
+  consultor: 'consultor, presta consultoria',
+  proprietario: 'dono do próprio negócio: clínica, consultório, granja, fazenda, empresa',
+  servidor_publico: 'servidor público',
+  sem_trabalho: 'não trabalha no momento',
+};
+
+/** Perfis próprios da pós (com nome), na ordem da tabela. Vazio = a pós ainda usa os genéricos. */
+export function perfisProprios(linhas: LinhaCarreira[] | null | undefined): LinhaCarreira[] {
+  return (linhas ?? []).filter((l) => l.nome?.trim()).sort((a, b) => (a.ordem ?? 0) - (b.ordem ?? 0));
+}
+
+const PERFIS_FORA_DO_PUBLICO = ['estudante', 'outra_area'];
+
+/**
+ * A ferramenta busca_carreira da pós da aula. Com perfis próprios, a IA escolhe entre ELES (nome e
+ * falas típicas de cada um); sem eles, entre os 9 genéricos. estudante e outra_area valem sempre.
+ */
+export function toolBuscaCarreira(linhas: LinhaCarreira[] | null | undefined) {
+  const proprios = perfisProprios(linhas);
+  const opcoes: [string, string][] = proprios.length
+    ? [
+      ...proprios.map((l): [string, string] => [l.perfil,
+        `${l.nome}${l.sinais?.length ? ` (fala como: ${l.sinais.map((x) => `"${x}"`).join(', ')})` : ''}`]),
+      ...PERFIS_FORA_DO_PUBLICO.map((p): [string, string] => [p, SINAIS_DO_PERFIL[p]]),
+    ]
+    : Object.entries(SINAIS_DO_PERFIL);
+  return {
+    name: 'busca_carreira',
+    description: 'Busca, para a pós da aula e o perfil do lead, as perguntas de indagação (da mais leve à mais funda), '
+      + 'a ponte do convite e as objeções. Chame assim que souber a atuação e a formação dele. É interna: o lead não vê.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        perfil: {
+          type: 'string', enum: opcoes.map(([p]) => p),
+          description: 'O perfil que mais combina com o que ele disse; as falas são exemplos, não precisam bater palavra por palavra. '
+            + (proprios.length ? 'Se nenhum combinar, o mais próximo de quem quer entrar no tema. ' : 'Quem já faz o que a pós ensina é ja_atua_no_tema, mesmo tendo clínica ou emprego. ')
+            + opcoes.map(([p, s]) => `${p}: ${s}`).join('; ') + '.',
+        },
+      },
+      required: ['perfil'],
+      additionalProperties: false,
+    },
+  };
+}
+
+/**
+ * A linha do perfil escolhido. Perfil sem linha nesta pós (ex.: RT de frigorífico em Cannabis): os públicos
+ * são os do Ebook, e quem está fora deles é, para esta pós, quem ainda não atua no tema (base quer_entrar;
+ * perfil próprio antes do genérico). estudante e outra_area não caem no fallback.
+ */
+export function linhaDoPerfil(linhas: LinhaCarreira[] | null | undefined, perfil: string): LinhaCarreira | null {
+  const todas = linhas ?? [];
+  const exata = todas.find((l) => l.perfil === perfil);
+  if (exata) return exata;
+  if (PERFIS_FORA_DO_PUBLICO.includes(perfil)) return null;
+  return perfisProprios(todas).find((l) => l.base === 'quer_entrar')
+    ?? todas.find((l) => l.perfil === 'quer_entrar') ?? null;
+}
+
+/** As perguntas da linha: as de indagação, ou a pergunta de dor antiga como uma só. */
+export function perguntasDaLinha(l: LinhaCarreira): PerguntaIndagacao[] {
+  const lista = Array.isArray(l.perguntas) ? l.perguntas.filter((q) => q?.pergunta?.trim()) : [];
+  return lista.length ? lista : l.pergunta_dor ? [{ pergunta: l.pergunta_dor }] : [];
+}
+
 /** A aula traz o NOME da pós (cursos.nome); o id sai daqui. */
 export async function carregarCarreiraPorNome(banco: Banco, cursoNome: string | null | undefined) {
   if (!cursoNome?.trim()) return null;
@@ -37,7 +111,7 @@ export async function carregarCarreiraPorNome(banco: Banco, cursoNome: string | 
 export async function carregarCarreira(banco: Banco, cursoId: string): Promise<{ linhas: LinhaCarreira[]; objecoes: ObjecaoCarreira[] } | null> {
   try {
     const [l, o] = await Promise.all([
-      banco.from('sdr_carreira_pos').select('perfil, moeda, pergunta_dor, ponte_convite, observacao').eq('curso_id', cursoId).eq('ativo', true),
+      banco.from('sdr_carreira_pos').select('perfil, moeda, pergunta_dor, ponte_convite, observacao, nome, sinais, perguntas, base, ordem').eq('curso_id', cursoId).eq('ativo', true),
       banco.from('sdr_carreira_pos_objecoes').select('objecao, resposta').eq('curso_id', cursoId).eq('ativo', true).order('ordem'),
     ]);
     if (l.error || o.error) throw new Error((l.error ?? o.error).message);
@@ -53,7 +127,7 @@ export async function carregarCarreira(banco: Banco, cursoId: string): Promise<{
 export function blocoCarreira(c: { linhas: LinhaCarreira[]; objecoes: ObjecaoCarreira[] } | null, nomePos: string): string {
   if (!c?.linhas.length) return '';
   const linhas = c.linhas.map((l) => {
-    const partes = [`- ${l.perfil} (${SINAIS_DO_PERFIL[l.perfil] ?? l.perfil})`];
+    const partes = [`- ${l.perfil} (${l.nome ?? SINAIS_DO_PERFIL[l.perfil] ?? l.perfil})`];
     if (l.pergunta_dor) partes.push(`PERGUNTA DE DOR: "${l.pergunta_dor}"`);
     if (l.ponte_convite) partes.push(`PONTE: ${l.ponte_convite}`);
     if (l.observacao) partes.push(l.observacao);

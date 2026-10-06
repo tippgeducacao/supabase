@@ -313,6 +313,18 @@ export const FERRAMENTAS: Record<string, ToolLuna> = {
           "type": "string",
           "description": "Se o lead já possui alguma pós-graduação, com as palavras dele. Pergunte só depois de enviar o cronograma e só quando a graduação está concluída."
         },
+        "vinculo": {
+          "enum": [
+            "clt",
+            "autonomo",
+            "consultor",
+            "proprietario",
+            "servidor_publico",
+            "sem_trabalho"
+          ],
+          "type": "string",
+          "description": "Vínculo de trabalho dele hoje, assim que ele disser: clt (carteira assinada), autonomo (atende ou trabalha por conta), consultor, proprietario (dono do próprio negócio: clínica, consultório, granja, fazenda, empresa), servidor_publico, sem_trabalho (não trabalha no momento). Não deduza: sem pista clara, deixe vazio."
+        },
         "area_atuacao": {
           "type": "string",
           "description": "Área em que o lead atua HOJE, com as palavras dele (ex.: 'clínica de pequenos animais', 'venda de insumos', 'não trabalha na área'). Registre assim que ele disser."
@@ -692,6 +704,18 @@ export const FERRAMENTAS: Record<string, ToolLuna> = {
           "type": "string",
           "description": "Se o lead já possui alguma pós-graduação, com as palavras dele. Pergunte só depois de enviar o cronograma e só quando a graduação está concluída."
         },
+        "vinculo": {
+          "enum": [
+            "clt",
+            "autonomo",
+            "consultor",
+            "proprietario",
+            "servidor_publico",
+            "sem_trabalho"
+          ],
+          "type": "string",
+          "description": "Vínculo de trabalho dele hoje, assim que ele disser: clt (carteira assinada), autonomo (atende ou trabalha por conta), consultor, proprietario (dono do próprio negócio: clínica, consultório, granja, fazenda, empresa), servidor_publico, sem_trabalho (não trabalha no momento). Não deduza: sem pista clara, deixe vazio."
+        },
         "area_atuacao": {
           "type": "string",
           "description": "Área em que o lead atua HOJE, com as palavras dele (ex.: 'clínica de pequenos animais', 'venda de insumos', 'não trabalha na área'). Registre assim que ele disser."
@@ -923,6 +947,18 @@ export const FERRAMENTAS: Record<string, ToolLuna> = {
           ],
           "type": "string",
           "description": "Se o lead já possui alguma pós-graduação, com as palavras dele. Pergunte só depois de enviar o cronograma e só quando a graduação está concluída."
+        },
+        "vinculo": {
+          "enum": [
+            "clt",
+            "autonomo",
+            "consultor",
+            "proprietario",
+            "servidor_publico",
+            "sem_trabalho"
+          ],
+          "type": "string",
+          "description": "Vínculo de trabalho dele hoje, assim que ele disser: clt (carteira assinada), autonomo (atende ou trabalha por conta), consultor, proprietario (dono do próprio negócio: clínica, consultório, granja, fazenda, empresa), servidor_publico, sem_trabalho (não trabalha no momento). Não deduza: sem pista clara, deixe vazio."
         },
         "area_atuacao": {
           "type": "string",
@@ -1290,6 +1326,18 @@ export const FERRAMENTAS: Record<string, ToolLuna> = {
           ],
           "type": "string",
           "description": "Se o lead já possui alguma pós-graduação, com as palavras dele. Pergunte só depois de enviar o cronograma e só quando a graduação está concluída."
+        },
+        "vinculo": {
+          "enum": [
+            "clt",
+            "autonomo",
+            "consultor",
+            "proprietario",
+            "servidor_publico",
+            "sem_trabalho"
+          ],
+          "type": "string",
+          "description": "Vínculo de trabalho dele hoje, assim que ele disser: clt (carteira assinada), autonomo (atende ou trabalha por conta), consultor, proprietario (dono do próprio negócio: clínica, consultório, granja, fazenda, empresa), servidor_publico, sem_trabalho (não trabalha no momento). Não deduza: sem pista clara, deixe vazio."
         },
         "area_atuacao": {
           "type": "string",

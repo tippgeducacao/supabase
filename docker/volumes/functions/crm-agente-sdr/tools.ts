@@ -20,6 +20,7 @@ import {
   limiteFormaturaFormatado,
 } from './elegibilidadeFormatura.ts';
 import { atualizarLead, buscarLead } from './historico.ts';
+import { VINCULOS_TRABALHO } from './carreiraPos.ts';
 import type { Msg } from './historico.ts';
 import { avaliarEvidenciaSemGraduacao, bloqueioSemEvidenciaGraduacao } from './evidenciaFormacao.ts';
 import { chamarAnthropic } from './agente.ts';
@@ -1261,16 +1262,28 @@ async function atualizarDadosLead(supabase: any, input: any, ctx: CtxConversa, t
   // vivem na jornada — é o que a ficha mostra e o que libera o cronograma. Só a tabela da
   // OpenAI oferece esses campos; o Claude segue mandando os três de sempre.
   const areaAtuacao = String(input?.area_atuacao ?? '').trim();
-  const temCampoDaFicha = Boolean(areaAtuacao || input?.atua_na_area || input?.graduacao_concluida || input?.possui_pos || input?.qual_pos);
+  // Vínculo de trabalho (06/10/2026): CLT, autônomo, consultor, dono do negócio, servidor ou sem trabalho.
+  // Vai direto no lead (cliente_ppg_leads_sdr.vinculo_trabalho), em todas as pós, para a avaliação e o follow-up.
+  const vinculoBruto = String(input?.vinculo ?? '').trim().toLowerCase();
+  const vinculo = VINCULOS_TRABALHO[vinculoBruto] ? vinculoBruto : '';
+  const temCampoDaFicha = Boolean(areaAtuacao || vinculo || input?.atua_na_area || input?.graduacao_concluida || input?.possui_pos || input?.qual_pos);
   if (!nome && !formacao && !tempoFormacao && !temCampoDaFicha) {
-    return sair('Nada a atualizar: chame esta função só quando o lead informar o nome, a graduação, quando conclui a graduação ou a área em que atua.');
+    return sair('Nada a atualizar: chame esta função só quando o lead informar o nome, a graduação, quando conclui a graduação, a área em que atua ou o vínculo de trabalho.');
   }
   let registroFicha = '';
+  if (vinculo) {
+    try {
+      if (!ctx.modoTeste) await atualizarLead(supabase, ctx.remotejid, { vinculo_trabalho: vinculo });
+      registroFicha = ` Vínculo "${VINCULOS_TRABALHO[vinculo]}" anotado.`;
+    } catch (e) {
+      console.error(`[crm-agente-sdr] vínculo de trabalho: ${(e as Error)?.message ?? e}`);
+    }
+  }
   if (ctx.ficha && (formacao || tempoFormacao || temCampoDaFicha)) {
     try {
       await registrarNaJornada(supabase, ctx.telefone, (j) => aplicarColetaNaJornada(j, input ?? {}));
       if (areaAtuacao && !ctx.modoTeste) await atualizarLead(supabase, ctx.remotejid, { situacao_trabalho_atual: areaAtuacao });
-      if (areaAtuacao) registroFicha = ` Área de atuação "${areaAtuacao}" anotada.`;
+      if (areaAtuacao) registroFicha += ` Área de atuação "${areaAtuacao}" anotada.`;
       const possuiPos = String(input?.possui_pos ?? '').trim().toLowerCase();
       if (possuiPos === 'sim' || possuiPos === 'nao') {
         registroFicha += ` Pós-graduação: ${possuiPos}${String(input?.qual_pos ?? '').trim() ? ` (${String(input.qual_pos).trim()})` : ''}.`;
