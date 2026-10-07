@@ -850,14 +850,14 @@ async function avaliarCompatibilidade(supabase: any, input: any, ctx: CtxConvers
   // zerado — matriz presa no Claude travava TODO agendamento, porque a falha é fechada).
   // Sem o raciocínio encadeado: a memória é da rodada do agente, não desta classificação.
   // Se a Luna falhar, tenta o Claude antes de cair na falha fechada.
-  // Na Luna, esforço 'low' em vez de 'none': sem raciocínio ela não ligava o nome do catálogo
-  // ("Comportamento e Bem-Estar de Animais de Companhia e Silvestres") ao da tabela
-  // ("Comportamento e Bem-Estar Animal") e reprovou médico veterinário (07/10/2026). O
+  // Na Luna, esforço 'high' em vez de 'none' (pedido do Gustavo): sem raciocínio ela não ligava
+  // o nome do catálogo ("Comportamento e Bem-Estar de Animais de Companhia e Silvestres") ao da
+  // tabela ("Comportamento e Bem-Estar Animal") e reprovou médico veterinário (07/10/2026). O
   // raciocínio conta no limite de saída, por isso o teto sobe.
   const doLead = await selecionarProvedorDoLead(supabase, ctx.telefone ?? '');
   const provedor = doLead?.formato === 'openai'
-    ? { ...doLead, esforco: 'low', raciocinio: false, memoriaRaciocinio: undefined } : null;
-  const pedidoLuna = { ...pedido, max_tokens: 4096, thinking: undefined };
+    ? { ...doLead, esforco: 'high', raciocinio: false, memoriaRaciocinio: undefined } : null;
+  const pedidoLuna = { ...pedido, max_tokens: 16000, thinking: undefined };
   let resp: any;
   try {
     resp = await chamarAnthropic(provedor ? pedidoLuna : pedido, {}, provedor);
