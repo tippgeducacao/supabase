@@ -172,8 +172,10 @@ export function toolBuscaCarreiraMapa(mapa: MapaCarreira) {
 export function notaPerguntaQueDivide(mapa: MapaCarreira | null): string {
   const p = mapa?.perguntas.find((x) => x.etapa === 'divide')?.texto;
   if (!p) return '';
-  return `\n\nPERGUNTA DO VÍNCULO (mapa comercial desta pós): quando precisar saber como ele trabalha, pergunte assim, `
-    + `sem trocar as opções: "${p}"`;
+  // "quando precisar" deixava a IA decidir: com atuação clara ela pulava para a pergunta do conteúdo.
+  return `\n\nPERGUNTA DO VÍNCULO (mapa comercial desta pós): ele ainda não disse se é autônomo ou contratado, e é isso `
+    + `que decide as perguntas de carreira. Assim que ele contar a atuação, a sua próxima pergunta é esta, antes da pergunta `
+    + `do conteúdo e mesmo que a atuação esteja clara, do jeito que veio: "${p}"`;
 }
 
 /** O que a busca_carreira devolve numa pós com mapa. null = estudante/outra_area (o prompt tem desvio próprio). */
