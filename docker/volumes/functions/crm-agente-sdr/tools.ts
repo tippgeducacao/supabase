@@ -712,7 +712,25 @@ async function verificarCompatibilidade(supabase: any, input: any, ctx: CtxConve
       };
     }
   }
-  const avaliacao = await iniciarAvaliacao(supabase, ctx, input);
+  let avaliacao: Awaited<ReturnType<typeof iniciarAvaliacao>>;
+  try {
+    avaliacao = await iniciarAvaliacao(supabase, ctx, input);
+  } catch (e) {
+    // Nome de curso que o catálogo não reconhece ("Comportamento e Bem-estar de Cães e
+    // Gatos") NÃO é falha técnica: virava FALHA_TECNICA, a rodada perdia as ferramentas e o
+    // João dizia "não consegui concluir a verificação" a uma veterinária pronta pra agendar
+    // (07/10/2026; 52 vezes no mesmo curso em 20 dias). O modelo corrige o nome e checa de
+    // novo na mesma rodada. A aprovação antiga já foi revogada pela RPC.
+    if (/curso n[ãa]o encontrado/i.test(String((e as Error)?.message ?? ''))) {
+      return {
+        id: toolUseId, output: 'CURSO_NAO_IDENTIFICADO', compativel: null, pode_cursar: null,
+        curso_solicitado: input.curso_interesse ?? null,
+        resultado: 'O nome enviado em curso_interesse não corresponde a nenhuma pós do catálogo, então a checagem não rodou. Nada foi aprovado ou recusado.',
+        instrucao: 'Chame consulta_pos_disponiveis com o curso que o lead quer e, em seguida, chame verificar_compatibilidade_curso de novo usando exatamente o nome devolvido em curso.nome. Não diga ao lead que houve falha nem que a formação foi recusada.',
+      };
+    }
+    throw e;
+  }
   try {
     const resultado = await avaliarCompatibilidade(supabase, input, ctx, toolUseId);
     return await finalizarAvaliacao(supabase, ctx, avaliacao, resultado);
