@@ -24,6 +24,7 @@ import { VINCULOS_TRABALHO } from './carreiraPos.ts';
 import type { Msg } from './historico.ts';
 import { avaliarEvidenciaSemGraduacao, bloqueioSemEvidenciaGraduacao } from './evidenciaFormacao.ts';
 import { chamarAnthropic } from './agente.ts';
+import { selecionarProvedorDoLead } from './pilotoOpenai.ts';
 import { INSTRUCAO_FALHA_COMPATIBILIDADE } from './falhaCompatibilidade.ts';
 import { temDorFinanceira } from './objecaoFinanceira.ts';
 import { conferirHorarioDaFerramenta } from './travasDeterministicas.ts';
@@ -836,7 +837,7 @@ async function avaliarCompatibilidade(supabase: any, input: any, ctx: CtxConvers
 
   // thinking disabled EXPLÍCITO: no Sonnet 5, omitir liga o adaptativo — aqui é
   // classificação contra tabela que devolve JSON cru em 1024 tokens (thinking truncaria).
-  const resp = await chamarAnthropic({
+  const pedido = {
     model: MODELO_MATRIZ,
     max_tokens: 1024,
     thinking: { type: 'disabled' },
@@ -844,7 +845,21 @@ async function avaliarCompatibilidade(supabase: any, input: any, ctx: CtxConvers
     // cacheado e compartilhado entre todos os leads.
     system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
     messages: [{ role: 'user', content: user }],
-  });
+  };
+  // A matriz segue o provedor do lead (07/10/2026: Luna 6 para 100% e crédito da Anthropic
+  // zerado — matriz presa no Claude travava TODO agendamento, porque a falha é fechada).
+  // Sem o raciocínio encadeado: a memória é da rodada do agente, não desta classificação.
+  // Se a Luna falhar, tenta o Claude antes de cair na falha fechada.
+  const doLead = await selecionarProvedorDoLead(supabase, ctx.telefone ?? '');
+  const provedor = doLead?.formato === 'openai' ? { ...doLead, raciocinio: false, memoriaRaciocinio: undefined } : null;
+  let resp: any;
+  try {
+    resp = await chamarAnthropic(pedido, {}, provedor);
+  } catch (e) {
+    if (!provedor) throw e;
+    console.error('[crm-agente-sdr] matriz na Luna falhou, tentando o Claude:', (e as Error)?.message ?? e);
+    resp = await chamarAnthropic(pedido);
+  }
   const texto = (resp.content ?? [])
     .filter((b: any) => b.type === 'text')
     .map((b: any) => b.text)
