@@ -98,6 +98,97 @@ export function perguntasDaLinha(l: LinhaCarreira): PerguntaIndagacao[] {
   return lista.length ? lista : l.pergunta_dor ? [{ pergunta: l.pergunta_dor }] : [];
 }
 
+// ===== Mapa de carreira do Wellinton (07/10/2026) =====
+// Pós com grupo em sdr_carreira_mapa_pos trocam os perfis técnicos pelo mapa: o ramo sai do vínculo do lead
+// e as perguntas são de CARREIRA (plano de carreira, valoriza quem estuda, quanto cobra), texto literal.
+
+export type RamoMapa = {
+  ramo: string; nome: string; vinculos: string[] | null; sinais: string[] | null;
+  argumento: string | null; ponte_convite: string | null; ordem: number | null;
+};
+export type PerguntaMapa = { ramo: string; etapa: 'divide' | 'carreira' | 'ganho' | 'prioridade'; texto: string; ordem: number | null };
+export type MapaCarreira = { grupo: string; ramos: RamoMapa[]; perguntas: PerguntaMapa[] };
+
+/** Vínculo ainda não dito: a busca devolve a pergunta do mapa que divide o caminho. */
+export const RAMO_INDEFINIDO = 'indefinido';
+/** Teto de perguntas de carreira antes do convite (decisão do Gustavo, 07/10/2026). */
+export const MAX_PERGUNTAS_CARREIRA = 2;
+
+export async function carregarMapaPorNome(banco: Banco, cursoNome: string | null | undefined): Promise<MapaCarreira | null> {
+  if (!cursoNome?.trim()) return null;
+  try {
+    const { data: curso } = await banco.from('cursos').select('id').eq('nome', cursoNome.trim()).limit(1);
+    const cursoId = curso?.[0]?.id;
+    if (!cursoId) return null;
+    const { data: g } = await banco.from('sdr_carreira_mapa_pos').select('grupo').eq('curso_id', cursoId).limit(1);
+    const grupo = g?.[0]?.grupo;
+    if (!grupo) return null;
+    const [r, p] = await Promise.all([
+      banco.from('sdr_carreira_mapa_ramo').select('ramo, nome, vinculos, sinais, argumento, ponte_convite, ordem')
+        .eq('grupo', grupo).eq('ativo', true).order('ordem'),
+      banco.from('sdr_carreira_mapa_pergunta').select('ramo, etapa, texto, ordem').eq('grupo', grupo).eq('ativo', true).order('ordem'),
+    ]);
+    if (r.error || p.error) throw new Error((r.error ?? p.error).message);
+    if (!r.data?.length) return null;
+    return { grupo: String(grupo), ramos: r.data as RamoMapa[], perguntas: (p.data ?? []) as PerguntaMapa[] };
+  } catch (e) {
+    console.error('[crm-agente-sdr] mapa de carreira (segue nos perfis antigos):', (e as Error)?.message ?? e);
+    return null;
+  }
+}
+
+/** A busca_carreira de uma pós com mapa: o parâmetro segue "perfil" (o n8n repassa input.perfil), o valor é o ramo. */
+export function toolBuscaCarreiraMapa(mapa: MapaCarreira) {
+  const opcoes: [string, string][] = [
+    ...mapa.ramos.map((r): [string, string] => [r.ramo,
+      `${r.nome}${r.sinais?.length ? ` (fala como: ${r.sinais.map((x) => `"${x}"`).join(', ')})` : ''}`]),
+    [RAMO_INDEFINIDO, 'ele ainda não disse se é autônomo, contratado, servidor ou dono do negócio'],
+    ...PERFIS_FORA_DO_PUBLICO.map((p): [string, string] => [p, SINAIS_DO_PERFIL[p]]),
+  ];
+  return {
+    name: 'busca_carreira',
+    description: 'Busca, para a pós da aula e o jeito como o lead trabalha hoje, as perguntas de CARREIRA do mapa comercial '
+      + `(até ${MAX_PERGUNTAS_CARREIRA} antes do convite), a ponte do convite e as objeções. Chame assim que souber como ele trabalha. `
+      + 'É interna: o lead não vê.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        perfil: {
+          type: 'string', enum: opcoes.map(([p]) => p),
+          description: 'Como ele trabalha hoje; as falas são exemplos, não precisam bater palavra por palavra. '
+            + opcoes.map(([p, s]) => `${p}: ${s}`).join('; ') + '.',
+        },
+      },
+      required: ['perfil'],
+      additionalProperties: false,
+    },
+  };
+}
+
+/** O que a busca_carreira devolve numa pós com mapa. null = estudante/outra_area (o prompt tem desvio próprio). */
+export function respostaDoMapa(mapa: MapaCarreira, ramo: string) {
+  if (PERFIS_FORA_DO_PUBLICO.includes(ramo)) return null;
+  const divide = mapa.perguntas.filter((p) => p.etapa === 'divide').map((p) => p.texto);
+  const r = mapa.ramos.find((x) => x.ramo === ramo);
+  if (!r) {
+    return {
+      ramo: RAMO_INDEFINIDO,
+      pergunta_que_divide: divide[0] ?? null,
+      como_usar: 'Ele ainda não disse como trabalha. Faça esta pergunta do jeito que veio e, com a resposta, '
+        + 'registre o vínculo e chame a busca_carreira de novo com o ramo dele.',
+    };
+  }
+  const perguntas = mapa.perguntas
+    .filter((p) => p.etapa !== 'divide' && (p.ramo === r.ramo || p.ramo === '*'))
+    .sort((a, b) => (a.ordem ?? 0) - (b.ordem ?? 0))
+    .map((p) => ({ etapa: p.etapa, pergunta: p.texto }));
+  return {
+    ramo: r.ramo, quem_e: r.nome, perguntas, ponte_convite: r.ponte_convite, argumento: r.argumento,
+    como_usar: `Perguntas de carreira, não técnicas. Faça no máximo ${MAX_PERGUNTAS_CARREIRA}, uma por mensagem, na ordem, `
+      + 'do jeito que vieram, pulando a que ele já respondeu. Depois, o convite com a ponte. O argumento é interno: guia a conversa, não vai escrito.',
+  };
+}
+
 /** A aula traz o NOME da pós (cursos.nome); o id sai daqui. */
 export async function carregarCarreiraPorNome(banco: Banco, cursoNome: string | null | undefined) {
   if (!cursoNome?.trim()) return null;

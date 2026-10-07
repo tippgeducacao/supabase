@@ -95,3 +95,48 @@ describe('perfis próprios da pós (06/10/2026)', () => {
     expect(Object.keys(VINCULOS_TRABALHO)).toEqual(['clt', 'autonomo', 'consultor', 'proprietario', 'servidor_publico', 'sem_trabalho']);
   });
 });
+
+describe('mapa de carreira do Wellinton (07/10/2026)', () => {
+  const mapa = {
+    grupo: 'bovinos',
+    ramos: [
+      { ramo: 'autonomo', nome: 'Autônomo', vinculos: ['autonomo'], sinais: ['atendo fazendas'], argumento: 'cobrar mais', ponte_convite: 'como a pós aumenta o seu resultado', ordem: 1 },
+      { ramo: 'contratado', nome: 'Contratado', vinculos: ['clt'], sinais: [], argumento: 'cargo', ponte_convite: 'como crescer na empresa', ordem: 2 },
+    ],
+    perguntas: [
+      { ramo: '*', etapa: 'divide' as const, texto: 'autônomo ou contratado?', ordem: 1 },
+      { ramo: '*', etapa: 'prioridade' as const, texto: 'por que agora?', ordem: 101 },
+      { ramo: 'contratado', etapa: 'carreira' as const, texto: 'tem plano de carreira?', ordem: 1 },
+      { ramo: 'autonomo', etapa: 'carreira' as const, texto: 'o que faz o produtor escolher você?', ordem: 1 },
+      { ramo: 'autonomo', etapa: 'ganho' as const, texto: 'quanto cobra por visita?', ordem: 2 },
+    ],
+  };
+
+  it('a tool lista os ramos, o indefinido e os fora do público, no parâmetro perfil', async () => {
+    const { toolBuscaCarreiraMapa } = await import('./carreiraPos');
+    const t = toolBuscaCarreiraMapa(mapa);
+    expect(t.input_schema.properties.perfil.enum).toEqual(['autonomo', 'contratado', 'indefinido', 'estudante', 'outra_area']);
+    expect(t.input_schema.properties.perfil.description).toContain('"atendo fazendas"');
+  });
+
+  it('o ramo traz só as perguntas dele e as comuns, na ordem, sem a que divide', async () => {
+    const { respostaDoMapa } = await import('./carreiraPos');
+    const r: any = respostaDoMapa(mapa, 'autonomo');
+    expect(r.perguntas.map((p: any) => p.pergunta)).toEqual(['o que faz o produtor escolher você?', 'quanto cobra por visita?', 'por que agora?']);
+    expect(r.ponte_convite).toBe('como a pós aumenta o seu resultado');
+    expect(r.como_usar).toContain('no máximo 2');
+  });
+
+  it('vínculo indefinido devolve a pergunta que divide; estudante e outra área, null', async () => {
+    const { respostaDoMapa } = await import('./carreiraPos');
+    expect((respostaDoMapa(mapa, 'indefinido') as any).pergunta_que_divide).toBe('autônomo ou contratado?');
+    expect(respostaDoMapa(mapa, 'estudante')).toBeNull();
+    expect(respostaDoMapa(mapa, 'outra_area')).toBeNull();
+  });
+
+  it('falha de leitura do mapa cai nos perfis antigos (null)', async () => {
+    const { carregarMapaPorNome } = await import('./carreiraPos');
+    const quebrado = { from: () => { throw new Error('fora'); } };
+    expect(await carregarMapaPorNome(quebrado as any, 'Bovinos')).toBeNull();
+  });
+});

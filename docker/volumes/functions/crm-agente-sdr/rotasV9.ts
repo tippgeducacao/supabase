@@ -14,7 +14,8 @@ import { carregarReunioesDoLead, notaDasReunioes } from './reunioesDoLead.ts';
 import { contextoAulaPiloto } from './contextoAulaPiloto.ts';
 import { blocoElegibilidadeFormatura, limiteFormaturaFormatado } from './elegibilidadeFormatura.ts';
 import {
-  carregarCarreiraPorNome, linhaDoPerfil, objecaoDaPos, perguntasDaLinha, sobreDaObjecaoDeTempo, toolBuscaCarreira, VINCULOS_TRABALHO,
+  carregarCarreiraPorNome, carregarMapaPorNome, linhaDoPerfil, objecaoDaPos, perguntasDaLinha, respostaDoMapa, sobreDaObjecaoDeTempo,
+  toolBuscaCarreira, toolBuscaCarreiraMapa, VINCULOS_TRABALHO,
 } from './carreiraPos.ts';
 import { type AulaParaPrompt, montarVarsAula } from './prompts-aula.ts';
 import { cursoDaConversa } from './ganchoLote.ts';
@@ -196,9 +197,12 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
       const lead = await buscarLead(supabase, remotejid);
       const campanha = lead?.contexto_campanha ?? null;
       const aula = campanha?.persona === 'aula' && campanha.aula_id ? await carregarAula(supabase, campanha.aula_id) : null;
-      const carreira = await carregarCarreiraPorNome(supabase, aula?.curso_nome ?? '');
+      // Pós com mapa de carreira do Wellinton: a tool sai do mapa (ramo pelo vínculo); sem mapa, dos perfis.
+      const mapa = await carregarMapaPorNome(supabase, aula?.curso_nome ?? '');
+      const carreira = mapa ? null : await carregarCarreiraPorNome(supabase, aula?.curso_nome ?? '');
       const enxutas = comDescricoesDaAulaV9([...base, TOOL_RESPONDER_AO_CLIENTE]);
-      return ok({ agente, tools: [...enxutas.slice(0, -1), toolBuscaCarreira(carreira?.linhas), enxutas.at(-1)] });
+      const busca = mapa ? toolBuscaCarreiraMapa(mapa) : toolBuscaCarreira(carreira?.linhas);
+      return ok({ agente, tools: [...enxutas.slice(0, -1), busca, enxutas.at(-1)] });
     }
     // Anthropic Claude Sonnet 4.5 → a Luna. Entra e sai no formato do Claude.
     case 'luna': {
@@ -269,7 +273,13 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
       const campanha = lead?.contexto_campanha ?? null;
       const aula = campanha?.persona === 'aula' && campanha.aula_id ? await carregarAula(supabase, campanha.aula_id) : null;
       const nomePos = aula?.curso_nome ?? '';
-      const c = await carregarCarreiraPorNome(supabase, nomePos);
+      const [mapa, c] = await Promise.all([carregarMapaPorNome(supabase, nomePos), carregarCarreiraPorNome(supabase, nomePos)]);
+      if (mapa) {
+        // Mapa do Wellinton: perguntas de carreira do ramo; as objeções da pós continuam vindo da tabela antiga.
+        const r = respostaDoMapa(mapa, perfil);
+        if (!r) return ok({ encontrado: false, perfil, pos: nomePos, resultado: 'Fora do público desta pós: siga o desvio de estudante ou de outra área.' });
+        return ok({ encontrado: true, pos: nomePos, ...r, objecoes: c?.objecoes ?? [] });
+      }
       // Perfil sem linha nesta pós: cai em quem ainda não atua no tema (linhaDoPerfil, carreiraPos.ts).
       const linha = linhaDoPerfil(c?.linhas, perfil);
       if (!linha) return ok({ encontrado: false, perfil, pos: nomePos || null, resultado: 'Sem pergunta cadastrada para este perfil nesta pós.' });
