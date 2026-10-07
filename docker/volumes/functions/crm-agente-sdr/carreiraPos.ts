@@ -165,6 +165,17 @@ export function toolBuscaCarreiraMapa(mapa: MapaCarreira) {
   };
 }
 
+/**
+ * A pergunta do vínculo no contexto, desde a 1ª mensagem (07/10/2026): sem ela a IA improvisava
+ * ("por conta, como contratado ou tem negócio próprio?", com duas opções iguais). '' sem mapa.
+ */
+export function notaPerguntaQueDivide(mapa: MapaCarreira | null): string {
+  const p = mapa?.perguntas.find((x) => x.etapa === 'divide')?.texto;
+  if (!p) return '';
+  return `\n\nPERGUNTA DO VÍNCULO (mapa comercial desta pós): quando precisar saber como ele trabalha, pergunte assim, `
+    + `sem trocar as opções: "${p}"`;
+}
+
 /** O que a busca_carreira devolve numa pós com mapa. null = estudante/outra_area (o prompt tem desvio próprio). */
 export function respostaDoMapa(mapa: MapaCarreira, ramo: string) {
   if (PERFIS_FORA_DO_PUBLICO.includes(ramo)) return null;

@@ -140,3 +140,12 @@ describe('mapa de carreira do Wellinton (07/10/2026)', () => {
     expect(await carregarMapaPorNome(quebrado as any, 'Bovinos')).toBeNull();
   });
 });
+
+describe('pergunta do vínculo no contexto', () => {
+  it('vem literal do mapa; sem mapa, nada', async () => {
+    const { notaPerguntaQueDivide } = await import('./carreiraPos');
+    const mapa = { grupo: 'bovinos', ramos: [], perguntas: [{ ramo: '*', etapa: 'divide' as const, texto: 'autônomo ou contratado?', ordem: 1 }] };
+    expect(notaPerguntaQueDivide(mapa)).toContain('"autônomo ou contratado?"');
+    expect(notaPerguntaQueDivide(null)).toBe('');
+  });
+});

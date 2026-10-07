@@ -14,7 +14,8 @@ import { carregarReunioesDoLead, notaDasReunioes } from './reunioesDoLead.ts';
 import { contextoAulaPiloto } from './contextoAulaPiloto.ts';
 import { blocoElegibilidadeFormatura, limiteFormaturaFormatado } from './elegibilidadeFormatura.ts';
 import {
-  carregarCarreiraPorNome, carregarMapaPorNome, linhaDoPerfil, objecaoDaPos, perguntasDaLinha, respostaDoMapa, sobreDaObjecaoDeTempo,
+  carregarCarreiraPorNome, carregarMapaPorNome, linhaDoPerfil, notaPerguntaQueDivide, objecaoDaPos, perguntasDaLinha, respostaDoMapa,
+  sobreDaObjecaoDeTempo,
   toolBuscaCarreira, toolBuscaCarreiraMapa, VINCULOS_TRABALHO,
 } from './carreiraPos.ts';
 import { type AulaParaPrompt, montarVarsAula } from './prompts-aula.ts';
@@ -182,6 +183,8 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
       if (aula) {
         contexto += contextoAulaPiloto(aula, agora, { semFichaAntiga: true });
         // As perguntas da pós chegam pela busca_carreira, só a linha do perfil dele (ideia do Wellinton).
+        // Pós com mapa: a pergunta do vínculo vem do mapa desde a 1ª mensagem (sem ela a IA improvisava).
+        if (!lead?.vinculo_trabalho) contexto += notaPerguntaQueDivide(await carregarMapaPorNome(supabase, aula.curso_nome ?? ''));
       }
       // As variáveis vão também soltas: o prompt no n8n as lê como {{ $json.nome }}.
       return ok({ ...vars, persona, agente_atual: lead?.agente_atual ?? null, vars, contexto, aula });
