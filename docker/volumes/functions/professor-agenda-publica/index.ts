@@ -23,6 +23,12 @@ import { ocupadosNoGoogle, vagaOcupada, type Intervalo } from '../_shared/google
  * marcar, a vaga é conferida AO VIVO no Google (FreeBusy) — compromisso que a secretaria
  * pôs direto no Google tira a vaga. Se o Google não responde, o link NÃO oferece vaga
  * (`agenda_google`): marcar às cegas por cima de um compromisso dela é pior que esperar.
+ *
+ * CONVITE COM CONFIRMAÇÃO (08/10/2026, noite) — `acao: 'convite' | 'confirmar'`: o SDR
+ * escolheu o horário no atendimento e mandou `/confirmar-professor/<token>`; o professor
+ * responde Lattes/LinkedIn + experiência e confirma. Só então a reunião vira `agendada` e
+ * o evento com Meet vai para a agenda Google da secretaria. A confirmação SEMPRE reconfere
+ * o Google (vaga fixa ou personalizado); Google sem resposta ⇒ não confirma.
  */
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
@@ -91,6 +97,71 @@ function horaBR(iso: string): string {
   }).format(new Date(iso));
 }
 
+const EMAIL_OK = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * Evento com Meet na agenda Google da secretaria e o link anotado na reunião
+ * (melhor-esforço: a reunião já está gravada; falhar aqui só deixa sem Meet).
+ */
+async function criarEventoGoogle(
+  // deno-lint-ignore no-explicit-any
+  admin: any,
+  a: {
+    reuniaoId: string; integrationId: string | null; inicio: string; fim: string;
+    nome: string; telefone: string; email: string; rodape: string;
+    respostas: Array<{ pergunta: string; resposta: string }>; observacoes?: string | null;
+  },
+): Promise<{ link: string | null; conviteEmail: boolean }> {
+  if (!a.integrationId) return { link: null, conviteEmail: false };
+  try {
+    const email = EMAIL_OK.test(a.email) ? a.email : '';
+    const descricao = [
+      `Professor(a): ${a.nome}`,
+      a.telefone ? `WhatsApp: ${a.telefone}` : '',
+      email ? `E-mail: ${email}` : '',
+      '',
+      ...a.respostas.map((x) => `${x.pergunta}\n→ ${x.resposta}`),
+      a.observacoes ? `\nObservações do SDR: ${a.observacoes}` : '',
+      '',
+      a.rodape,
+    ].filter((l, i, arr) => l !== '' || (arr[i - 1] ?? '') !== '').join('\n');
+
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/google-calendar-create-event`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${SERVICE_ROLE}` },
+      body: JSON.stringify({
+        integration_id: a.integrationId,
+        title: `Reunião com professor — ${a.nome}`,
+        description: descricao,
+        starts_at: a.inicio,
+        ends_at: a.fim,
+        attendees: email ? [email] : [],
+        create_meet: true,
+        reminders: [
+          { method: 'popup', minutes: 30 },
+          { method: 'email', minutes: 60 * 24 },
+        ],
+      }),
+    });
+    const j = await res.json().catch(() => null);
+    if (!j?.success) {
+      console.error('[professor-agenda-publica] Google recusou o evento', j?.error);
+      return { link: null, conviteEmail: false };
+    }
+    const bruto = j?.event?.meetLink;
+    const link = typeof bruto === 'string' && bruto.trim() ? bruto.trim() : null;
+    const { error: erroAnotar } = await admin
+      .from('reunioes_professor')
+      .update({ link, google_event_cache_id: j?.event?.cache_id ?? null })
+      .eq('id', a.reuniaoId);
+    if (erroAnotar) console.error('[professor-agenda-publica] Meet não anotado na reunião', erroAnotar);
+    return { link, conviteEmail: !!email };
+  } catch (e) {
+    console.error('[professor-agenda-publica] evento no Google falhou', e);
+    return { link: null, conviteEmail: false };
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
 
@@ -123,6 +194,66 @@ Deno.serve(async (req) => {
       return json(await carregarConferido());
     }
 
+    // ── Convite do SDR: o professor só confirma o horário combinado ───────────
+    if (acao === 'convite') {
+      const { data, error } = await admin.rpc('reuniao_professor_convite_carregar', { p_token: token });
+      if (error) throw error;
+      return json(data);
+    }
+
+    if (acao === 'confirmar') {
+      if (!podeMarcar(ipDe(req))) return json({ ok: false, motivo: 'muitas_tentativas' });
+
+      const { data: c, error: erroC } = await admin.rpc('reuniao_professor_convite_carregar', { p_token: token });
+      if (erroC) throw erroC;
+      if (!c?.ok) return json(c);
+      if (c.situacao === 'cancelada' || c.situacao === 'expirada') return json({ ok: false, motivo: c.situacao });
+
+      // SEMPRE confere a agenda Google da secretaria antes de virar reunião (pedido do
+      // usuário: "tem que verificar isso sempre antes de agendar") — vale também para o
+      // horário personalizado. Entre o convite e a confirmação ela pode ter marcado outra
+      // coisa. Google sem resposta ⇒ não confirma (o professor tenta de novo depois).
+      if (c.situacao === 'pendente') {
+        const { data: cfg } = await admin
+          .from('reuniao_professor_config').select('calendar_integration_id').eq('id', true).maybeSingle();
+        const google = await ocupadosNoGoogle(admin, cfg?.calendar_integration_id ?? null, c.inicio, c.fim);
+        if (!google.ok) {
+          console.error('[professor-agenda-publica] Google indisponível ao confirmar convite:', google.erro);
+          return json({ ok: false, motivo: 'agenda_google' });
+        }
+        if (vagaOcupada({ inicio: c.inicio, fim: c.fim }, google.ocupados)) {
+          return json({ ok: false, motivo: 'horario_indisponivel' });
+        }
+      }
+
+      const { data: r, error } = await admin.rpc('reuniao_professor_convite_confirmar', {
+        p_token: token,
+        p_lattes: texto(body?.lattes, 500),
+        p_experiencia: texto(body?.experiencia, 2000),
+      });
+      if (error) throw error;
+      if (!r?.ok) return json({ ok: false, motivo: r?.motivo ?? 'falhou' });
+      if (r.ja_confirmada) {
+        return json({ ok: true, reuniao: { inicio: r.inicio, fim: r.fim, link: r.link ?? null, convite_email: false } });
+      }
+
+      const g = await criarEventoGoogle(admin, {
+        reuniaoId: r.reuniao_id,
+        integrationId: r.integration_id ?? null,
+        inicio: r.inicio,
+        fim: r.fim,
+        nome: texto(r.professor_nome, 120),
+        telefone: texto(r.professor_telefone, 25),
+        email: texto(r.professor_email, 160),
+        respostas: (r.respostas ?? []) as Array<{ pergunta: string; resposta: string }>,
+        observacoes: r.observacoes ?? null,
+        rodape: `Convite de ${r.sdr_nome ?? 'SDR'} pelo atendimento — horário combinado com o professor`
+          + (r.personalizado ? ' (horário PERSONALIZADO, combinado com o Pedagógico).' : '.'),
+      });
+      console.log(`[professor-agenda-publica] convite ${r.reuniao_id} confirmado para ${horaBR(r.inicio)} (de ${r.sdr_nome})`);
+      return json({ ok: true, reuniao: { inicio: r.inicio, fim: r.fim, link: g.link, convite_email: g.conviteEmail } });
+    }
+
     if (acao !== 'marcar') return json({ ok: false, motivo: 'acao_invalida' }, 400);
 
     if (!podeMarcar(ipDe(req))) return json({ ok: false, motivo: 'muitas_tentativas' });
@@ -149,56 +280,19 @@ Deno.serve(async (req) => {
     if (!r?.ok) return json({ ok: false, motivo: r?.motivo ?? 'falhou' });
 
     // ── Evento com Meet na agenda Google da secretaria (melhor-esforço) ─────────
-    let link: string | null = null;
-    let conviteEmail = false;
-    if (r.integration_id) {
-      try {
-        const email = texto(body?.email, 160);
-        const respostas = (r.respostas ?? []) as Array<{ pergunta: string; resposta: string }>;
-        const descricao = [
-          `Professor(a): ${texto(body?.nome, 120)}`,
-          `WhatsApp: ${texto(body?.telefone, 25)}`,
-          `E-mail: ${email}`,
-          '',
-          ...respostas.map((x) => `${x.pergunta}\n→ ${x.resposta}`),
-          '',
-          `Convite enviado por ${r.sdr_nome ?? 'SDR'} (link de prospecção). Horário escolhido pelo próprio professor.`,
-        ].join('\n');
-
-        const res = await fetch(`${SUPABASE_URL}/functions/v1/google-calendar-create-event`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${SERVICE_ROLE}` },
-          body: JSON.stringify({
-            integration_id: r.integration_id,
-            title: `Reunião com professor — ${texto(body?.nome, 120)}`,
-            description: descricao,
-            starts_at: r.inicio,
-            ends_at: r.fim,
-            attendees: email ? [email] : [],
-            create_meet: true,
-            reminders: [
-              { method: 'popup', minutes: 30 },
-              { method: 'email', minutes: 60 * 24 },
-            ],
-          }),
-        });
-        const j = await res.json().catch(() => null);
-        if (j?.success) {
-          const bruto = j?.event?.meetLink;
-          link = typeof bruto === 'string' && bruto.trim() ? bruto.trim() : null;
-          conviteEmail = !!email;
-          const { error: erroAnotar } = await admin
-            .from('reunioes_professor')
-            .update({ link, google_event_cache_id: j?.event?.cache_id ?? null })
-            .eq('id', r.reuniao_id);
-          if (erroAnotar) console.error('[professor-agenda-publica] Meet não anotado na reunião', erroAnotar);
-        } else {
-          console.error('[professor-agenda-publica] Google recusou o evento', j?.error);
-        }
-      } catch (e) {
-        console.error('[professor-agenda-publica] evento no Google falhou', e);
-      }
-    }
+    const g = await criarEventoGoogle(admin, {
+      reuniaoId: r.reuniao_id,
+      integrationId: r.integration_id ?? null,
+      inicio: r.inicio,
+      fim: r.fim,
+      nome: texto(body?.nome, 120),
+      telefone: texto(body?.telefone, 25),
+      email: texto(body?.email, 160),
+      respostas: (r.respostas ?? []) as Array<{ pergunta: string; resposta: string }>,
+      rodape: `Convite enviado por ${r.sdr_nome ?? 'SDR'} (link de prospecção). Horário escolhido pelo próprio professor.`,
+    });
+    const link = g.link;
+    const conviteEmail = g.conviteEmail;
 
     console.log(`[professor-agenda-publica] reunião ${r.reuniao_id} marcada para ${horaBR(r.inicio)} (link de ${r.sdr_nome})`);
     return json({
