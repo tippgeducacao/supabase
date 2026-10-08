@@ -76,6 +76,7 @@ import { aguardarAudiosDoHistorico, contarAudiosPendentes } from './sincronizaca
 import { conversaTexto, enviarResposta, horariosInventados, humanizarTexto, removerRaciocinioVazado } from './saida.ts';
 import { configurarVoz } from './envioVoz.ts';
 import { selecionarProvedorDoLead } from './pilotoOpenai.ts';
+import { cursoDoCardSeFaltar } from './cursoDoCard.ts';
 import { contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from './contextoAulaPiloto.ts';
 import { ehAcaoV9, rotaV9 } from './rotasV9.ts';
 import { PRAZO_MODELO_PILOTO_MS, RESPOSTA_MODELO_INDISPONIVEL } from './prazoModelo.ts';
@@ -389,6 +390,18 @@ async function prepararAntesDoRouter(remotejid: string, itensDoLote: any[], tel:
   if (!lead) {
     await criarLead(supabase, remotejid);
     lead = await buscarLead(supabase, remotejid);
+  }
+  // ▸ Cadastro sem curso: usa o curso do título do card aberto (cursoDoCard.ts, 07/10/2026) e
+  //   grava no cadastro, para as ferramentas também o enxergarem.
+  const cursoDoCard = await cursoDoCardSeFaltar(supabase, telefone, lead);
+  if (cursoDoCard && lead) {
+    lead = { ...lead, curso_interesse_original: cursoDoCard };
+    tel.registrar('curso_do_card', { curso: cursoDoCard });
+    try {
+      await atualizarLead(supabase, remotejid, { curso_interesse_original: cursoDoCard });
+    } catch (e) {
+      tel.registrar('erro', { onde: 'curso_do_card' }, undefined, String((e as Error)?.message ?? e));
+    }
   }
   // Ficha (canário): o clique em "Receber Cronograma" (936 em 30 dias) ou o pedido em texto fica
   // anotado na jornada ANTES de o modelo falar — é o que a ficha usa para cobrar a coleta.

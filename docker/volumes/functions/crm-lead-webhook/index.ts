@@ -1291,6 +1291,9 @@ Deno.serve(async (req) => {
     return { id: null, logId: null };
   }
 
+  // Títulos dos cards desta captação: viram o curso do agente quando o formulário não manda
+  // campo de curso (ver o seed 10a).
+  const titulosDosCards: string[] = [];
   // (9b) ACAO 'criar_oportunidade' — cria card(s) no pipeline SOMENTE quando configurada.
   // Resolve titulo/valor (tokens {webhook=Campo}), aplica funil/etapa/status, distribui o
   // responsavel e respeita "nao criar oportunidades repetidas". O INSERT na etapa escolhida
@@ -1304,6 +1307,7 @@ Deno.serve(async (req) => {
 
         const tituloResolved =
           resolveWebhookVar(p.titulo, dados).trim() || cursoInteresse || integration.nome || "Oportunidade";
+        titulosDosCards.push(tituloResolved);
         const nowIso = new Date().toISOString();
         const acaoId = typeof a.id === "string" && a.id ? a.id : null;
 
@@ -1789,6 +1793,18 @@ Deno.serve(async (req) => {
     // só se ainda não existir; a conversa depois atualiza o estado.
     try {
       const remoteJid = `${telCanon}@s.whatsapp.net`;
+      // 07/10/2026: formulário sem campo de curso deixava o agente sem curso (155 de 570 leads
+      // recentes), embora o card tivesse o curso no título. Sem curso o João inventou um nome e
+      // não agendou. Reserva: o título do card, só se o catálogo o reconhecer sem semelhança fuzzy.
+      let cursoAgenteSeed = cursoParaAgente;
+      for (const titulo of cursoAgenteSeed ? [] : titulosDosCards) {
+        try {
+          const { data: rc } = await admin.rpc("fn_sdr_api_resolver_pos_graduacao", { p_valor: titulo });
+          if (rc && (rc as any).id && (rc as any).via !== "fuzzy") { cursoAgenteSeed = String((rc as any).nome); break; }
+        } catch (e: any) {
+          console.error("[crm-lead-webhook] resolver título do card falhou:", e?.message);
+        }
+      }
       const { data: leadSdr } = await admin
         .from("cliente_ppg_leads_sdr")
         .select("id, nome, curso_interesse_original, formacao_academica")
@@ -1801,7 +1817,7 @@ Deno.serve(async (req) => {
           nome: inNome ?? criacaoDefaults.nome ?? null,
           numero_formatado: whatsappLead,
           email: emailLead,
-          curso_interesse_original: cursoParaAgente ?? null,
+          curso_interesse_original: cursoAgenteSeed ?? null,
           formacao_academica: novaForm ?? null,
           fonte: "sprinthub",
           pausa_ia: false,
@@ -1817,7 +1833,7 @@ Deno.serve(async (req) => {
         const ls = leadSdr as any;
         const vazio = (s: any) => !s || !String(s).trim() || String(s).trim().toLowerCase() === "sem nome";
         const patch: Record<string, unknown> = {};
-        if (vazio(ls.curso_interesse_original) && cursoParaAgente) patch.curso_interesse_original = cursoParaAgente;
+        if (vazio(ls.curso_interesse_original) && cursoAgenteSeed) patch.curso_interesse_original = cursoAgenteSeed;
         if (vazio(ls.nome) && nome) patch.nome = nome;
         if (vazio(ls.formacao_academica) && novaForm) patch.formacao_academica = novaForm;
         if (acaoAtivarIa) patch.iniciar_atendimento = true; // responde quando reagir ao template
