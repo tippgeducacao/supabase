@@ -171,7 +171,9 @@ Deno.serve(async (req) => {
       ? new Date(`${gJson.end.date}T00:00:00`).toISOString()
       : new Date(gJson.end.dateTime).toISOString();
 
-    await admin.from('calendar_events_cache').upsert({
+    // `cache_id` volta na resposta: é a chave que `google-calendar-update-event` pede para
+    // reagendar/apagar o evento depois (ex.: reunião com professor na agenda da secretaria).
+    const { data: cacheRow } = await admin.from('calendar_events_cache').upsert({
       integration_id: integ.id,
       external_event_id: gJson.id,
       title: gJson.summary || '(sem título)',
@@ -183,7 +185,7 @@ Deno.serve(async (req) => {
       attendees: gJson.attendees ?? null,
       meeting_link: gJson.hangoutLink || gJson.conferenceData?.entryPoints?.[0]?.uri || null,
       raw: gJson,
-    }, { onConflict: 'integration_id,external_event_id' });
+    }, { onConflict: 'integration_id,external_event_id' }).select('id').maybeSingle();
 
     return new Response(JSON.stringify({
       success: true,
@@ -191,6 +193,7 @@ Deno.serve(async (req) => {
         id: gJson.id,
         htmlLink: gJson.htmlLink,
         meetLink: gJson.hangoutLink || gJson.conferenceData?.entryPoints?.[0]?.uri || null,
+        cache_id: cacheRow?.id ?? null,
       },
     }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
   } catch (e) {
