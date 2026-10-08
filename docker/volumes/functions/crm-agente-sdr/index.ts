@@ -77,6 +77,7 @@ import { conversaTexto, enviarResposta, horariosInventados, humanizarTexto, remo
 import { configurarVoz } from './envioVoz.ts';
 import { selecionarProvedorDoLead } from './pilotoOpenai.ts';
 import { cursoDoCardSeFaltar } from './cursoDoCard.ts';
+import { corrigirLinksConhecidos } from './linksConhecidos.ts';
 import { contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from './contextoAulaPiloto.ts';
 import { ehAcaoV9, rotaV9 } from './rotasV9.ts';
 import { PRAZO_MODELO_PILOTO_MS, RESPOSTA_MODELO_INDISPONIVEL } from './prazoModelo.ts';
@@ -1272,8 +1273,13 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
         if (comLink.anexou) tel.registrar('link_escola_reenviado', { pedido: resumir(conteudo, 200) });
         // Certificado só depois da aula (28/09/2026): 2ª camada — o link não sai antes do fim,
         // mesmo que o modelo o tenha tirado do histórico (prompts-aula.ts, semCertificadoAntesDoFim).
-        const semCertificado = semCertificadoAntesDoFim(comLink.texto, aulaDaCampanha);
-        if (semCertificado.removido) tel.registrar('certificado_retido', { motivo: 'aula_nao_terminou' });
+        const semCertificadoBruto = semCertificadoAntesDoFim(comLink.texto, aulaDaCampanha);
+        if (semCertificadoBruto.removido) tel.registrar('certificado_retido', { motivo: 'aula_nao_terminou' });
+        // Link da aula sai com a grafia cadastrada: o modelo já trocou a caixa do id do YouTube.
+        const linksCertos = corrigirLinksConhecidos(semCertificadoBruto.texto,
+          [aulaDaCampanha?.link, aulaDaCampanha?.certificado_link]);
+        if (linksCertos.corrigidos.length) tel.registrar('link_corrigido', { de: linksCertos.corrigidos });
+        const semCertificado = { ...semCertificadoBruto, texto: linksCertos.texto };
         // Canário (26/09/2026): o cumprimento do lead é retribuído, garantido em código (saudacao.ts).
         const fala = ctx.ficha && !aberturaControlada
           ? garantirSaudacao(humanizarTexto(semCertificado.texto), conteudo)
