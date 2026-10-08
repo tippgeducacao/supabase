@@ -1,5 +1,6 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { corsHeaders } from '../_shared/cors.ts';
+import { ocupadosNoGoogle, vagaOcupada, type Intervalo } from '../_shared/googleOcupados.ts';
 
 /**
  * LINK DE PROSPECÇÃO DE PROFESSOR — o lado do professor, sem login.
@@ -17,6 +18,11 @@ import { corsHeaders } from '../_shared/cors.ts';
  * O Google é SECUNDÁRIO de propósito (mesmo princípio de `rh-agenda-publica`): a reunião
  * já está gravada quando ele é chamado. Se falhar, o professor vê a confirmação sem o link
  * e a secretaria recria o evento salvando a reunião na agenda do sistema.
+ *
+ * CONFLITO COM A AGENDA GOOGLE DA SECRETARIA (08/10/2026): antes de oferecer e antes de
+ * marcar, a vaga é conferida AO VIVO no Google (FreeBusy) — compromisso que a secretaria
+ * pôs direto no Google tira a vaga. Se o Google não responde, o link NÃO oferece vaga
+ * (`agenda_google`): marcar às cegas por cima de um compromisso dela é pior que esperar.
  */
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
@@ -96,10 +102,25 @@ Deno.serve(async (req) => {
 
     const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
 
-    if (acao === 'carregar') {
+    // Vagas que o banco oferece, já sem as que batem com compromisso no Google da secretaria.
+    async function carregarConferido(): Promise<any> {
       const { data, error } = await admin.rpc('reuniao_professor_publico_carregar', { p_token: token });
       if (error) throw error;
-      return json(data);
+      if (!data?.ok) return data;
+      const vagas = (data.vagas ?? []) as Intervalo[];
+      if (vagas.length === 0) return data;
+      const { data: cfg } = await admin
+        .from('reuniao_professor_config').select('calendar_integration_id').eq('id', true).maybeSingle();
+      const google = await ocupadosNoGoogle(admin, cfg?.calendar_integration_id ?? null, vagas[0].inicio, vagas[vagas.length - 1].fim);
+      if (!google.ok) {
+        console.error('[professor-agenda-publica] agenda Google da secretaria indisponível:', google.erro);
+        return { ok: false, motivo: 'agenda_google' };
+      }
+      return { ...data, vagas: vagas.filter((v) => !vagaOcupada(v, google.ocupados)) };
+    }
+
+    if (acao === 'carregar') {
+      return json(await carregarConferido());
     }
 
     if (acao !== 'marcar') return json({ ok: false, motivo: 'acao_invalida' }, 400);
@@ -108,6 +129,13 @@ Deno.serve(async (req) => {
 
     const inicio = String(body?.inicio ?? '');
     if (Number.isNaN(Date.parse(inicio))) return json({ ok: false, motivo: 'horario_indisponivel' });
+
+    // Confere de novo, AGORA, no banco e no Google: entre abrir a página e confirmar, a
+    // secretaria pode ter posto um compromisso nesse horário.
+    const conferido = await carregarConferido();
+    if (!conferido?.ok) return json(conferido);
+    const aindaLivre = (conferido.vagas as Intervalo[]).some((v) => Date.parse(v.inicio) === Date.parse(inicio));
+    if (!aindaLivre) return json({ ok: false, motivo: 'horario_indisponivel' });
 
     const { data: r, error } = await admin.rpc('reuniao_professor_publico_marcar', {
       p_token: token,
