@@ -627,7 +627,7 @@ async function definirAgente(pre: PreRouter, provedor: ProvedorIA | null, tel: T
   if (ctx.ficha && !aulaPiloto) contextoEfetivo = `${contextoEfetivo}\n\n${blocoConviteAgenda()}`;
   if (aulaPiloto) contextoEfetivo += contextoAulaPiloto(aulaDaCampanha);
   if (persona === 'aula' && campanha?.origem === 'convite_base') {
-    contextoEfetivo += '\n\nORIGEM DA CAMPANHA: convite enviado à base. Receber esse convite não comprova inscrição. Não diga que ele se inscreveu nem pergunte por que se cadastrou sem ele confirmar. A pergunta de conexão é: "o que te chamou a atenção nessa aula e você já conhece a PPGVET?"';
+    contextoEfetivo += '\n\nORIGEM DA CAMPANHA: convite enviado à base. Receber esse convite não comprova inscrição. Não diga que ele se inscreveu nem pergunte por que se cadastrou sem ele confirmar. A pergunta de conexão é: "e me conta, com o que vc trabalha hoje e qual a sua formação?"';
   }
   let agenteEfetivo: string;
 

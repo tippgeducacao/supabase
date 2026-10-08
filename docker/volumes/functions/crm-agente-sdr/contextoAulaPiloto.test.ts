@@ -35,7 +35,9 @@ describe('campanha da aula chega à conversa e à retomada', () => {
 describe('pergunta de conexão no piloto da Luna (26/09/2026)', () => {
   it('a orientação do piloto usa a mesma pergunta do roteiro', async () => {
     const { INSTRUCAO_AULA_PILOTO } = await import('./contextoAulaPiloto');
-    expect(INSTRUCAO_AULA_PILOTO).toContain('o que te chamou a atenção nessa aula e você já conhece a PPGVET?');
+    // 08/10/2026 (Gustavo): a conexão é trabalho + formação, para levar à reunião.
+    expect(INSTRUCAO_AULA_PILOTO).toContain('e me conta, com o que vc trabalha hoje e qual a sua formação?');
+    expect(INSTRUCAO_AULA_PILOTO).toContain('confirme na mesma mensagem com o horário e o link da aula');
     expect(INSTRUCAO_AULA_PILOTO).not.toContain('despertou');
   });
 });
