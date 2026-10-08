@@ -37,6 +37,7 @@ import {
 } from "../_shared/igWhatsapp.ts";
 import { type EtapaFluxo, type Passo, primeiroNomeConfiavel, TEXTOS } from "./fluxo.ts";
 import { atrasoEntreBaloesMs, inicioDaJanela, type LinhaIg } from "./historico.ts";
+import { pausaIgVigente } from "./pausa.ts";
 import { type EstadoRoteiro, pensarRodada, type PlanoWhatsapp, separarNovas } from "./rodada.ts";
 
 declare const EdgeRuntime: { waitUntil?: (p: Promise<unknown>) => void } | undefined;
@@ -163,10 +164,12 @@ function enviarDireto(c: Conversa, texto: string, origem: "ia" | "sistema") {
   });
 }
 
+// Pausa com prazo (pausada_ate, botão do SAC desde 08/10/2026): vencida = IA de volta,
+// sem esperar o cron ig-pausa-ia-expirar.
 async function estaPausada(c: Conversa): Promise<boolean> {
-  const { data } = await supabase.from("ig_conversa_ia").select("pausada")
+  const { data } = await supabase.from("ig_conversa_ia").select("pausada, pausada_ate")
     .eq("conta_id", c.contaId).eq("igsid", c.igsid).maybeSingle();
-  return data?.pausada === true;
+  return pausaIgVigente(data);
 }
 
 // ── /reset: recomeça o teste do zero (espelho do /excluirdados do WhatsApp) ────
@@ -179,6 +182,7 @@ async function zerarConversa(c: Conversa) {
     pausada: false,
     pausa_motivo: null,
     pausada_em: null,
+    pausada_ate: null,
     historico_desde: agora,
     respondido_ate: agora,
     reserva_token: null,
@@ -506,13 +510,16 @@ async function tratarEco(contaId: string, igsid: string, mid: string) {
   const { data: msg } = await supabase.from("ig_mensagens").select("metadata").eq("mid", mid).maybeSingle();
   const origem = String(msg?.metadata?.origem ?? "");
   if (origem === "ia" || origem === "sistema") return;
-  // Não foi a IA: alguém do time respondeu pelo app. A IA sai da conversa até o /reset
-  // (no teste) — nunca fala por cima de um humano.
+  // Não foi a IA: alguém do time respondeu pelo app. A IA sai da conversa até alguém
+  // reativar no SAC (ou o /reset no teste) — nunca fala por cima de um humano.
+  // Pausa COM PRAZO ainda valendo (botão do SAC, 08/10/2026) fica como está: quem pausou
+  // por 10 min/1 h escolheu que a Flávia volte depois. Pausa vencida vira permanente.
+  const agora = new Date().toISOString();
   const { data } = await supabase.from("ig_conversa_ia")
-    .update({ pausada: true, pausa_motivo: "humano_respondeu", pausada_em: new Date().toISOString(), updated_at: new Date().toISOString() })
+    .update({ pausada: true, pausa_motivo: "humano_respondeu", pausada_em: agora, pausada_ate: null, updated_at: agora })
     .eq("conta_id", contaId)
     .eq("igsid", igsid)
-    .eq("pausada", false)
+    .or(`pausada.eq.false,pausada_ate.lte.${agora}`)
     .select("igsid");
   if (data?.length) log("humano respondeu pelo app — IA pausada nesta conversa", igsid);
 }

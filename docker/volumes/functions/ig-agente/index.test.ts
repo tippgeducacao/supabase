@@ -44,6 +44,12 @@ function builder(tabela: string) {
     if (q.op === 'update') {
       if (tabela === 'ig_conversa_ia' && e.conversa) {
         const bate = Object.entries(q.filtros).every(([k, v]) => {
+          // `.or()` só aparece no eco: "pausada.eq.false,pausada_ate.lte.<iso>".
+          if (k === 'or') {
+            const ate = /pausada_ate\.lte\.(.+)$/.exec(String(v))?.[1] ?? '';
+            const c = e.conversa!;
+            return c.pausada === false || (!!c.pausada_ate && Date.parse(c.pausada_ate) <= Date.parse(ate));
+          }
           const campo = k.replace(/^eq:/, '');
           return !(campo in e.conversa!) || e.conversa![campo] === v;
         });
@@ -82,6 +88,7 @@ function builder(tabela: string) {
     select: () => q,
     eq: (c: string, v: unknown) => { q.filtros[`eq:${c}`] = v; return q; },
     neq: (c: string, v: unknown) => { q.filtros[`neq:${c}`] = v; return q; },
+    or: (f: string) => { q.filtros.or = f; return q; },
     gte: () => q, lte: () => q, order: () => q, limit: () => q,
     upsert: (p: any) => registrar('upsert', p),
     insert: (p: any) => registrar('insert', p),
@@ -475,6 +482,22 @@ describe('ig-agente: eco (mensagem nossa)', () => {
     mocks.estado.mensagens.push({ mid: 'e1', direcao: 'outbound', metadata: { origem: 'humano', is_echo: true } });
     await eco();
     expect(mocks.estado.conversa).toMatchObject({ pausada: true, pausa_motivo: 'humano_respondeu' });
+  });
+
+  it('eco de humano durante pausa COM PRAZO (botão do SAC) não a torna permanente', async () => {
+    const ate = new Date(Date.now() + 10 * 60_000).toISOString();
+    Object.assign(mocks.estado.conversa!, { pausada: true, pausa_motivo: 'pausada_no_sac', pausada_ate: ate });
+    mocks.estado.mensagens.push({ mid: 'e1', direcao: 'outbound', metadata: { origem: 'humano', is_echo: true } });
+    await eco();
+    expect(mocks.estado.conversa).toMatchObject({ pausada: true, pausa_motivo: 'pausada_no_sac', pausada_ate: ate });
+  });
+
+  it('eco de humano depois que o prazo venceu vira pausa permanente', async () => {
+    const ate = new Date(Date.now() - 60_000).toISOString();
+    Object.assign(mocks.estado.conversa!, { pausada: true, pausa_motivo: 'pausada_no_sac', pausada_ate: ate });
+    mocks.estado.mensagens.push({ mid: 'e1', direcao: 'outbound', metadata: { origem: 'humano', is_echo: true } });
+    await eco();
+    expect(mocks.estado.conversa).toMatchObject({ pausada: true, pausa_motivo: 'humano_respondeu', pausada_ate: null });
   });
 
   it.each(['ia', 'sistema'])('eco do que a própria IA mandou (%s) não pausa', async (origem) => {
