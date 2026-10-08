@@ -48,6 +48,20 @@ function podeMarcar(ip: string): boolean {
 
 const TOKEN_OK = /^[A-Za-z0-9_-]{12,64}$/;
 
+// IP do cliente SEM confiar no que o cliente manda (mesma régua do `crm-webchat`): o
+// PRIMEIRO valor do x-forwarded-for é forjável; varre da direita (o que os NOSSOS proxies
+// apuseram) e pega o primeiro IP público.
+const IP_PRIVADO_RE = /^(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|::1$|f[cd][0-9a-f]{2}:)/i;
+function ipDe(req: Request): string {
+  const cf = req.headers.get('cf-connecting-ip');
+  if (cf) return cf.trim();
+  const partes = (req.headers.get('x-forwarded-for') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  for (let i = partes.length - 1; i >= 0; i--) {
+    if (!IP_PRIVADO_RE.test(partes[i])) return partes[i];
+  }
+  return partes[partes.length - 1] || 'desconhecido';
+}
+
 function texto(v: unknown, max: number): string {
   return String(v ?? '').trim().slice(0, max);
 }
@@ -90,8 +104,7 @@ Deno.serve(async (req) => {
 
     if (acao !== 'marcar') return json({ ok: false, motivo: 'acao_invalida' }, 400);
 
-    const ip = (req.headers.get('x-forwarded-for') ?? '').split(',')[0].trim() || 'sem-ip';
-    if (!podeMarcar(ip)) return json({ ok: false, motivo: 'muitas_tentativas' });
+    if (!podeMarcar(ipDe(req))) return json({ ok: false, motivo: 'muitas_tentativas' });
 
     const inicio = String(body?.inicio ?? '');
     if (Number.isNaN(Date.parse(inicio))) return json({ ok: false, motivo: 'horario_indisponivel' });
