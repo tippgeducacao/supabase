@@ -36,7 +36,9 @@ describe('prompt da Luna: o que o código procura dentro do texto', () => {
     // marcarPerguntasDaFicha (fichaAtendimento.ts) reconhece a pergunta feita por estas frases.
     // Mudou a frase aqui? Mude também SCRIPT_ANTES_DO_CRONOGRAMA / SCRIPT_PERGUNTA_POS.
     expect(LUNA_FICHA).toContain(SCRIPT_ANTES_DO_CRONOGRAMA);
-    expect(LUNA_FICHA).toContain(SCRIPT_PERGUNTA_POS);
+    // 09/10/2026: depois do cronograma a Luna oferece horário; a pergunta da pós saiu.
+    expect(LUNA_FICHA).not.toContain(SCRIPT_PERGUNTA_POS);
+    expect(LUNA_FICHA).toContain('ofereça até três horários reais');
   });
 
   it('canal de resposta cita a ferramenta que o código exige', () => {

@@ -362,7 +362,8 @@ export function variantesConviteAgenda(agora: { dia: number; hora: number; minut
 
 export function blocoConviteAgenda(agora?: { dia: number; hora: number; minuto: number }): string {
   const frases = variantesConviteAgenda(agora).map((f) => `"${f}"`).join(' · ');
-  return `**CONVITE DE AGENDA (feche qualquer convite de reunião com UMA destas frases, sem mudar o dia; nunca repita a que você já usou nesta conversa): ${frases}**`;
+  return `**CONVITE DE AGENDA (feche qualquer convite de reunião com UMA destas frases, sem mudar o dia; nunca repita a que você já usou nesta conversa): ${frases}. `
+    + `Com a compatibilidade APROVADA nesta conversa, não use a frase: chame consulta_disponibilidade nesse período e ofereça até três horários reais.**`;
 }
 
 // ── pergunta_formacao + render de placeholders dos prompts ──────────────────

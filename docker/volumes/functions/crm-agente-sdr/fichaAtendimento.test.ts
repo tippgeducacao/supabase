@@ -181,10 +181,11 @@ describe('perguntou uma vez e o lead insistiu', () => {
 
 describe('a pergunta da pós depois do cronograma', () => {
   const enviado = (coleta: Jornada['coleta']): Jornada => registrarEnvioNaJornada({ cronograma: { pedido_em: '2026-09-19T13:00:00.000Z', pedido_por: 'botao' }, coleta }, new Date('2026-09-19T13:01:00Z'));
-  it('graduação concluída + cronograma enviado + pós desconhecida: pergunta junto com o "chegou?"', () => {
+  it('graduação concluída + cronograma enviado: o próximo passo é oferecer horário, não perguntar da pós (09/10/2026)', () => {
     const a = avaliarFicha({ cadastro: 'Sou formado em outra área', jornada: enviado({ graduacao: 'Agronomia', area_atuacao: 'insumos', graduacao_concluida: 'sim' }) });
     expect(a.perguntarPos).toBe(true);
-    expect(a.proximoPasso).toContain(SCRIPT_PERGUNTA_POS);
+    expect(a.proximoPasso).not.toContain(SCRIPT_PERGUNTA_POS);
+    expect(a.proximoPasso).toContain('consulta_disponibilidade');
   });
   it('ainda cursando: não pergunta se tem pós', () => {
     const a = avaliarFicha({ cadastro: 'Estudante da área', jornada: enviado({ tempo_formacao: 'conclui em 12/2027', graduacao_concluida: 'cursando' }) });

@@ -146,11 +146,13 @@ export function avaliarFicha(e: EntradaFicha): AvaliacaoFicha {
   const proximoPasso = semGraduacao
     ? 'Não envie o cronograma: ele disse que não tem graduação. Siga o encerramento previsto para esse caso.'
     : perguntarPos
-      ? `O cronograma foi enviado: pergunte "${SCRIPT_PERGUNTA_POS}" e registre a resposta com atualizar_dados_lead (possui_pos e qual_pos). `
-        + 'A resposta não muda nada: em seguida reconduza para a reunião com a 2ª abordagem e a frase CONVITE DE AGENDA.'
+      // 09/10/2026: a pergunta "já possui pós?" depois do cronograma encerrava a conversa
+      // (Luna: 22 aprovados e 1 agendamento em 08/10). Agora o envio já vem com horários.
+      ? 'O cronograma foi enviado: na mesma mensagem, se a compatibilidade está APROVADA, chame consulta_disponibilidade '
+        + 'e ofereça até três horários reais pra conversa com o monitor; sem APROVADO, pergunte se chegou e abriu.'
       : falta.length === 0
         ? enviadoDepoisDoPedido
-          ? 'Cronograma já enviado. Quando ele confirmar que abriu, reconduza para a reunião com a 2ª abordagem e a frase CONVITE DE AGENDA.'
+          ? 'Cronograma já enviado. Se ainda não ofereceu horários e a compatibilidade está APROVADA, chame consulta_disponibilidade e ofereça até três horários reais.'
           : 'Nada falta: se ele pedir o cronograma, chame envia_informacoes.'
         : !pedidoPendente
           ? 'Sem pedido de material: siga a conversa normal (abordagem e convite). '
