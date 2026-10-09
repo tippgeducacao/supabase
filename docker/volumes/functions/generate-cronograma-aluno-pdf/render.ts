@@ -4,7 +4,7 @@
  * ⚠️ PORTE de src/services/pedagogico/cronogramaAlunoPdf.ts, a engine do navegador usada na aba
  * Cronograma do aluno do Pedagógico e no botão "Baixar cronograma do aluno" do comercial. O
  * layout é o MESMO: logo, faixa rosa "CRONOGRAMA DE AULAS", cards de início das aulas ao vivo e
- * de duração, aviso amarelo, tabela por mês (AULA / DATA-DIA / HORÁRIO / EMENTA, sem professor)
+ * de duração, bloco verde "já disponível na plataforma desde a matrícula", aviso amarelo, tabela por mês (AULA / DATA-DIA / HORÁRIO / EMENTA, sem professor)
  * e, no fim, a tabela "MÓDULOS PRÁTICOS PRESENCIAIS" com a tarja de semipresencial. Inclui o
  * destaque DOURADO das semanas com mais de uma aula ao vivo (semanaIntensiva.ts). Mudou o
  * modelo lá (decisões do diretor de 09/07 e 31/08 já mexeram nele)? Mude aqui na mesma tarefa.
@@ -22,6 +22,11 @@
  *  - Sem travessão nos textos fixos (placeholder, rodapé, tarja do EAD): é texto que o aluno lê.
  *    Texto que vem do banco (título, ementa) sai como o Pedagógico cadastrou.
  *  - Devolve os BYTES em vez de `doc.save()`.
+ *  - "Hoje" entra por parâmetro (`entrada.hoje`), para o teste não depender do relógio.
+ *
+ * Aula ao vivo que JÁ ACONTECEU sai como "Disponível na plataforma" / "Gravada", sem a data
+ * (diretor, 09/10/2026): o aluno que entra com a turma andando lia as datas de agosto como se
+ * ainda fosse ter aquelas noites. Ver `aulaJaNaPlataforma`.
  *
  * Só dado da TURMA entra no PDF: nada do aluno (nome, CPF, telefone). O mesmo arquivo serve a
  * todos os alunos da turma, e o link é público (a Meta baixa sem autenticação).
@@ -77,6 +82,8 @@ export interface EntradaCronograma {
    * o teste desliga para conseguir ler o texto dentro do PDF.
    */
   comprimir?: boolean;
+  /** Hoje em Ampére ("AAAA-MM-DD"); ausente, usa o relógio. Aula antes dele sai "Disponível na plataforma". */
+  hoje?: string;
 }
 
 export interface PdfGerado {
@@ -176,6 +183,35 @@ export function nomeArquivoAscii(nome: string): string {
     .replace(/\s+/g, " ")
     .trim();
   return ascii && ascii !== ".pdf" ? ascii : "cronograma.pdf";
+}
+
+/**
+ * Bloco "já disponível na plataforma", entre os cards e o aviso: o que o aluno tem desde a
+ * liberação do acesso na matrícula, antes da tabela das aulas ao vivo (diretor, 09/10/2026).
+ * Sem travessão: é texto que o aluno lê.
+ */
+export const BLOCO_PLATAFORMA = {
+  titulo: "JÁ DISPONÍVEL NA PLATAFORMA DESDE A MATRÍCULA",
+  intro: "Desde a liberação do seu acesso, na matrícula do curso, você já tem na plataforma os materiais e as aulas assíncronas. Entre eles:",
+  itens: ["Biblioteca virtual", "Aulas já gravadas e disponíveis", "Aulas complementares"],
+  fecho: "Abaixo, o cronograma das aulas ao vivo.",
+} as const;
+
+/** Hoje no calendário de Ampére (America/Sao_Paulo), "AAAA-MM-DD". Mesmo cálculo de `hojeEmAmpere` (dados.ts). */
+function hojeAgora(): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo" }).format(new Date());
+}
+
+/** O que sai na coluna DATA / DIA da aula ao vivo que já aconteceu. */
+export const DISPONIVEL_NA_PLATAFORMA = "Disponível na plataforma";
+
+/**
+ * A aula ao vivo já aconteceu e a gravação está na plataforma: data ANTES de hoje (mesma régua
+ * do "aulas já realizadas" do card de turma do comercial). A aula de hoje ainda não: é à noite.
+ * Módulo gravado fica fora, porque ele já sai como liberação do mês ("No mês").
+ */
+export function aulaJaNaPlataforma(a: CronogramaAlunoAula, hoje: string): boolean {
+  return !!a.data && a.tipo_aula !== "gravado" && a.data.slice(0, 10) < hoje;
 }
 
 export function renderCronogramaAlunoPdf(deps: DepsPdf, entrada: EntradaCronograma): PdfGerado {
@@ -282,6 +318,40 @@ export function renderCronogramaAlunoPdf(deps: DepsPdf, entrada: EntradaCronogra
 
   cursorY += cardH + 14;
 
+  // -------- Já disponível na plataforma (verde) --------
+  // O que o aluno tem desde a matrícula, ANTES do cronograma: quem abria o PDF só via as aulas
+  // ao vivo e não sabia que a biblioteca e as gravações já estavam liberadas (diretor,
+  // 09/10/2026). Fecha apontando para a tabela, que é só das aulas ao vivo.
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(8);
+  const plataformaIntro: string[] = doc.splitTextToSize(BLOCO_PLATAFORMA.intro, contentW - 24);
+  const plataformaH = 30 + plataformaIntro.length * 10 + 4 + BLOCO_PLATAFORMA.itens.length * 10 + 4 + 10 + 4;
+  doc.setFillColor(...TEAL_BG);
+  doc.rect(marginX, cursorY, contentW, plataformaH, "F");
+  // Barra lateral
+  doc.setFillColor(...TEAL);
+  doc.rect(marginX, cursorY, 4, plataformaH, "F");
+
+  doc.setTextColor(...TEAL);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(9);
+  doc.text(BLOCO_PLATAFORMA.titulo, marginX + 14, cursorY + 14);
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(8);
+  doc.setTextColor(40, 40, 40);
+  let plY = cursorY + 30;
+  doc.text(plataformaIntro, marginX + 14, plY);
+  plY += plataformaIntro.length * 10 + 4;
+  BLOCO_PLATAFORMA.itens.forEach((item) => {
+    doc.text(`\u2022  ${item}`, marginX + 20, plY);
+    plY += 10;
+  });
+  plY += 4;
+  doc.setFont("helvetica", "bold");
+  doc.text(BLOCO_PLATAFORMA.fecho, marginX + 14, plY);
+
+  cursorY += plataformaH + 12;
+
   // -------- Aviso importante (amarelo) --------
   const avisoH = 88;
   doc.setFillColor(...YELLOW_BG);
@@ -349,19 +419,30 @@ export function renderCronogramaAlunoPdf(deps: DepsPdf, entrada: EntradaCronogra
   };
   // Semanas com mais de uma aula ao vivo (mesma regra do navegador, ver semanaIntensiva.ts).
   const intensivas = datasEmSemanaIntensiva(aulas);
+  const hoje = entrada.hoje ?? hojeAgora();
+  // Semana que já passou não leva dourado: o aviso é para as noites que o aluno ainda vai ter.
+  const emDourado = (a: CronogramaAlunoAula) => !!a.data && intensivas.has(a.data) && !aulaJaNaPlataforma(a, hoje);
   const renderAulaRow = (a: CronogramaAlunoAula, dataStr: string) => {
+    if (aulaJaNaPlataforma(a, hoje)) {
+      return [
+        a.titulo ?? "-",
+        { content: DISPONIVEL_NA_PLATAFORMA, styles: { textColor: TEAL, fontStyle: "bold" } },
+        "Gravada",
+        a.ementa ?? "",
+      ];
+    }
     const horario = a.horario
       ? fmtHorario(String(a.horario))
       : `${turma.horario_inicio?.slice(0, 5) ?? "-"} - ${turma.horario_fim?.slice(0, 5) ?? "-"}`;
     // A data é a célula destacada: é ali que o aluno lê "tenho aula de novo nesta semana".
-    const dataCell = a.data && intensivas.has(a.data)
+    const dataCell = emDourado(a)
       ? { content: `${dataStr}\n${SELO_SEMANA_INTENSIVA}`, styles: { fillColor: GOLD_BG, textColor: GOLD_TXT, fontStyle: "bold" } }
       : dataStr;
     return [a.titulo ?? "-", dataCell, horario, a.ementa ?? ""];
   };
 
-  // Legenda do dourado, só quando a turma TEM semana com duas aulas.
-  if (intensivas.size > 0) {
+  // Legenda do dourado, só quando alguma data AINDA VAI SAIR em dourado.
+  if (aulas.some(emDourado)) {
     rows.push([{
       content: "SEMANA INTENSIVA: nas datas marcadas em dourado a turma tem mais de uma aula ao vivo na mesma semana.",
       colSpan: 4,

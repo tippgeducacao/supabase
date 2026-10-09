@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import * as jspdfMod from "jspdf";
 import { autoTable } from "jspdf-autotable";
 import {
+  aulaJaNaPlataforma,
   eadComoAulas,
   listaDeAulasDoModulo,
   marcaDoCurso,
@@ -67,7 +68,10 @@ function textoDasPaginas(pdf: string): string {
   return partes.join("\n");
 }
 
-function entrada(opts: { marca?: string | null; aulas?: CronogramaAlunoAula[] } = {}) {
+/** Hoje dos testes: antes de todas as aulas, a turma toda ainda pela frente (salvo quando o teste muda). */
+const ANTES_DE_TUDO = "2026-08-01";
+
+function entrada(opts: { marca?: string | null; aulas?: CronogramaAlunoAula[]; hoje?: string } = {}) {
   return {
     turma,
     aulas: opts.aulas ?? [
@@ -76,10 +80,11 @@ function entrada(opts: { marca?: string | null; aulas?: CronogramaAlunoAula[] } 
     ],
     praticos: normalizarPraticos(praticosRows, { somenteAPartirDoInicioDaTurma: true }),
     marca: opts.marca === undefined ? "ppgvet" : opts.marca,
+    hoje: opts.hoje ?? ANTES_DE_TUDO,
   };
 }
 
-function gerar(opts: { marca?: string | null; aulas?: CronogramaAlunoAula[] } = {}) {
+function gerar(opts: { marca?: string | null; aulas?: CronogramaAlunoAula[]; hoje?: string } = {}) {
   const pdf = renderCronogramaAlunoPdf(deps, { ...entrada(opts), comprimir: false });
   const bruto = comoTexto(pdf.bytes);
   return { pdf, bruto, texto: textoDasPaginas(bruto) };
@@ -110,6 +115,19 @@ describe("renderCronogramaAlunoPdf (edge)", () => {
     // horário normalizado, nunca truncado
     expect(texto).toContain("19:00 - 22:00");
     expect(texto).not.toContain("19:00 às 22:00");
+  });
+
+  it("antes do cronograma, o bloco do que já está na plataforma desde a matrícula", () => {
+    const { texto } = gerar();
+    expect(texto).toContain("JÁ DISPONÍVEL NA PLATAFORMA DESDE A MATRÍCULA");
+    expect(texto).toContain("materiais e as aulas assíncronas");
+    expect(texto).toContain("Biblioteca virtual");
+    expect(texto).toContain("Aulas já gravadas e disponíveis");
+    expect(texto).toContain("Aulas complementares");
+    expect(texto).toContain("Abaixo, o cronograma das aulas ao vivo.");
+    // vem antes do aviso e da tabela das aulas ao vivo
+    expect(texto.indexOf("Biblioteca virtual")).toBeLessThan(texto.indexOf("AVISO IMPORTANTE"));
+    expect(texto.indexOf("AVISO IMPORTANTE")).toBeLessThan(texto.indexOf("MÓDULO AGOSTO 2026"));
   });
 
   it("módulo gravado (EAD) sai no mês, sem dia, com as aulas uma por linha", () => {
@@ -194,6 +212,49 @@ describe("renderCronogramaAlunoPdf (edge)", () => {
     expect([...texto.matchAll(/INTENSIVA/g)].length).toBe(3);
     expect(texto).toContain("11/08/2026");
     expect(texto).toContain("12/08/2026");
+  });
+
+  it("aula que já aconteceu sai como 'Disponível na plataforma', sem data nem horário", () => {
+    // Turma do print do diretor (Reprodução, Nutrição e Gestão de Bovinos 02/26 #01), PDF de 09/10.
+    const aulas: CronogramaAlunoAula[] = [
+      { data: "2026-08-17", horario: "19:00", titulo: "Encontro inicial", ementa: "Alinhamento com a turma", tipo_aula: "Curricular" },
+      { data: "2026-08-25", horario: "19:00 - 22:00", titulo: "Anatomia e Fisiologia do Macho", ementa: EMENTA, tipo_aula: "Curricular" },
+      { data: "2026-10-09", horario: "19:00 - 22:00", titulo: "Aula de hoje", ementa: EMENTA, tipo_aula: "Curricular" },
+      { data: "2026-10-20", horario: "19:00 - 22:00", titulo: "Aula futura", ementa: EMENTA, tipo_aula: "Curricular" },
+    ];
+    const { texto } = gerar({ aulas, hoje: "2026-10-09" });
+    // as duas de agosto: sem a data, com o selo da plataforma e "Gravada" no horário
+    expect(texto).not.toContain("17/08/2026");
+    expect(texto).not.toContain("25/08/2026");
+    expect([...texto.matchAll(/Gravada/g)].length).toBe(2);
+    // a célula quebra em duas linhas ("Disponível na" / "plataforma")
+    expect([...texto.matchAll(/Disponível na/g)].length).toBe(2);
+    // título, ementa e banda do mês continuam: o aluno sabe o que já tem para assistir
+    expect(texto).toContain("Anatomia e Fisiologia do Macho");
+    expect(texto).toContain("MÓDULO AGOSTO 2026");
+    // a de HOJE ainda vai acontecer (é à noite) e a futura também: data e horário normais
+    expect(texto).toContain("09/10/2026");
+    expect(texto).toContain("20/10/2026");
+  });
+
+  it("semana intensiva que já passou não leva dourado nem legenda", () => {
+    const aulas: CronogramaAlunoAula[] = [
+      { data: "2026-08-11", horario: "19:00 - 22:00", titulo: "Aula 1", ementa: EMENTA, tipo_aula: "Curricular" },
+      { data: "2026-08-12", horario: "19:00 - 22:00", titulo: "Aula 2", ementa: EMENTA, tipo_aula: "Curricular" },
+      { data: "2026-10-20", horario: "19:00 - 22:00", titulo: "Aula 3", ementa: EMENTA, tipo_aula: "Curricular" },
+    ];
+    const { texto } = gerar({ aulas, hoje: "2026-10-09" });
+    expect(texto).not.toContain("INTENSIVA");
+  });
+
+  it("aulaJaNaPlataforma: só ao vivo com data antes de hoje; gravado e sem data ficam fora", () => {
+    const hoje = "2026-10-09";
+    const aula = (data: string | null, tipo_aula = "Curricular") => ({ data, horario: null, titulo: null, ementa: null, tipo_aula });
+    expect(aulaJaNaPlataforma(aula("2026-10-08"), hoje)).toBe(true);
+    expect(aulaJaNaPlataforma(aula("2026-10-09"), hoje)).toBe(false);
+    expect(aulaJaNaPlataforma(aula("2026-10-10"), hoje)).toBe(false);
+    expect(aulaJaNaPlataforma(aula(null), hoje)).toBe(false);
+    expect(aulaJaNaPlataforma(aula("2026-09-10", "gravado"), hoje)).toBe(false);
   });
 
   it("compressão ligada por padrão encolhe o arquivo", () => {
