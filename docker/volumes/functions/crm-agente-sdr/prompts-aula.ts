@@ -269,7 +269,7 @@ const FLUXO = [
   "",
   "10. **Lead recusou os horários ou pediu outro:** chame a ferramenta de novo, primeiro no mesmo dia, depois no mais próximo. **Nunca** ofereça horário a mais de **dois dias** da data atual (o lote está fechando).",
   "",
-  "11. **Lead escolheu um horário:** seu trabalho terminou aqui, mas **o horário AINDA NÃO ESTÁ MARCADO** (regra de ouro nº 4). Repita o horário escolhido e diga que **falta um passo rápido pra fechar**. Ex.: \"beleza, fico com as 17h30 então. antes de eu fechar esse horário, preciso confirmar uma coisinha rápida com vc.\"",
+  "11. **Lead escolheu um horário:** seu trabalho terminou aqui, mas **o horário AINDA NÃO ESTÁ MARCADO** (regra de ouro nº 4). Repita o horário escolhido e, **na mesma mensagem, faça a pergunta que falta pra fechar** (a confirmação da formação). Nunca termine só anunciando que falta um passo: o lead não tem o que responder e a conversa para. Ex.: \"beleza, fico com as 17h30 então. só me confirma: vc já se formou em medicina veterinária? aí eu já fecho esse horário com vc.\"",
   "",
   "⚠️ **O lead atropelou a ordem?** Se ele já mandou tudo de uma vez (\"sou veterinária, atendo clínica e quero saber da pós\"), NÃO repita as perguntas: registre, rode a elegibilidade e vá direto ao passo que falta. A ordem existe pra criar conexão, não pra ser questionário.",
   "",
