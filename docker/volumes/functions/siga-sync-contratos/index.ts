@@ -153,7 +153,41 @@ function toRows(c: ParsedContrato): { aluno: AlunoRow; contrato: ContratoRow } {
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ⚠️ APOSENTADO EM 09/10/2026. Substituido por: siga-sync (API oficial do SIGA).
+//
+// Decisao do Rafael: extinguir o n8n das integracoes e usar so as APIs oficiais do SIGA
+// e do EDUQ. Esta edge NAO grava mais nada — responde 410 e devolve o que recebeu, para
+// que uma chamada residual do n8n apareca no log em vez de escrever dado velho por cima
+// do que a API ja trouxe.
+//
+// Prova medida antes de desligar: a ultima rodada com dado foi em 28/05/2026; de la para ca o siga-sync cobre contratos, alunos, titulos e turmas.
+//
+// ⚠️ O arquivo FICA no repositorio de proposito. Apagar a pasta faria a function sumir do
+//    espelho de deploy, e o historico de "por que isto existiu" sumiria junto. Pior: o
+//    botao Deploy do Dokploy apaga o que nao esta no espelho — e isso ja derrubou
+//    functions aqui uma vez (regra de ouro 2 do CLAUDE.md).
+const APOSENTADA_EM = "2026-10-09";
+const SUBSTITUTA = "siga-sync (API oficial do SIGA)";
+
 Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  // Tudo que chegar daqui para a frente e' ruido do n8n. Registramos e recusamos.
+  let corpo: unknown = null;
+  try { corpo = await req.clone().json(); } catch { /* corpo nao-JSON: tanto faz */ }
+  console.warn(`[siga-sync-contratos] APOSENTADA — chamada recusada`, JSON.stringify({
+    aposentada_em: APOSENTADA_EM, substituta: SUBSTITUTA,
+    recebeu: corpo && typeof corpo === "object" ? Object.keys(corpo as object) : null,
+  }));
+  return new Response(JSON.stringify({
+    ok: false, aposentada: true, aposentada_em: APOSENTADA_EM, substituta: SUBSTITUTA,
+    mensagem: "Esta integracao foi aposentada. Os dados agora vem da API oficial.",
+  }), { status: 410, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Implementacao original, mantida para consulta e para um retorno rapido se preciso.
+const _implementacaoOriginal = (async (req: Request) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
   if (req.method !== "POST") {
     return new Response(JSON.stringify({ error: "Method not allowed" }), {
@@ -276,3 +310,5 @@ Deno.serve(async (req) => {
     });
   }
 });
+
+void _implementacaoOriginal;

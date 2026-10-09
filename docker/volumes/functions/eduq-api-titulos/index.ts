@@ -165,8 +165,25 @@ Deno.serve(async (req) => {
       gravadas += Math.min(LOTE, linhas.length - i);
     }
 
+    // ── Fantasmas ────────────────────────────────────────────────────────────
+    // Título que ESTAVA na nossa base, está dentro da janela que acabamos de pedir e
+    // NÃO voltou: foi apagado na EDUQ. Em 09/10/2026 havia 7 assim, todos "Em Aberto",
+    // somando R$ 13.418,32 e colocando 5 pessoas na fila de cobrança por dívida que não
+    // existe mais. Como pedimos TODAS as cinco situações, ausência aqui é ausência lá.
+    //
+    // Marcamos em vez de apagar: `situacao = 'Ausente na EDUQ'` sai da conta pelo
+    // predicado e deixa rastro de que a linha existiu — apagar esconderia o motivo.
+    const { data: sumidos } = await supabase
+      .from("eduq_titulos_receber")
+      .update({ situacao: "Ausente na EDUQ", synced_at: new Date().toISOString() })
+      .gte("vencimento", ini).lte("vencimento", fim)
+      .lt("synced_at", new Date(t0).toISOString())
+      .neq("situacao", "Ausente na EDUQ")
+      .select("eduq_fatura_id");
+
     return new Response(JSON.stringify({
       ok: true, janela: { inicio: ini, fim: fim },
+      ausentes_na_eduq: (sumidos ?? []).length,
       recebidos: titulos.length, gravados: gravadas,
       descartados: titulos.length - linhas.length,
       com_melhor_desconto: linhas.filter((l) => l.valor_melhor_desconto != null).length,
