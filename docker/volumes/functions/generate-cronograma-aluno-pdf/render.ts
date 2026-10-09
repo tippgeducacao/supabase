@@ -193,7 +193,7 @@ export function nomeArquivoAscii(nome: string): string {
 export const BLOCO_PLATAFORMA = {
   titulo: "JÁ DISPONÍVEL NA PLATAFORMA DESDE A MATRÍCULA",
   intro: "Desde a liberação do seu acesso, na matrícula do curso, você já tem na plataforma os materiais e as aulas assíncronas. Entre eles:",
-  itens: ["Biblioteca virtual", "Aulas já gravadas e disponíveis", "Aulas complementares"],
+  itens: ["Biblioteca virtual", "Aulas já gravadas e disponíveis", "Trilha de aprendizado", "Aulas complementares"],
   fecho: "Abaixo, o cronograma das aulas ao vivo.",
 } as const;
 

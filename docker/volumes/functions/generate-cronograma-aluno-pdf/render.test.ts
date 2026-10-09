@@ -123,6 +123,7 @@ describe("renderCronogramaAlunoPdf (edge)", () => {
     expect(texto).toContain("materiais e as aulas assíncronas");
     expect(texto).toContain("Biblioteca virtual");
     expect(texto).toContain("Aulas já gravadas e disponíveis");
+    expect(texto).toContain("Trilha de aprendizado");
     expect(texto).toContain("Aulas complementares");
     expect(texto).toContain("Abaixo, o cronograma das aulas ao vivo.");
     // vem antes do aviso e da tabela das aulas ao vivo
