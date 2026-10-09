@@ -56,11 +56,16 @@ async function calendariosDaSecretaria(admin: any, integrationId: string): Promi
     .eq('account_email', integ.account_email)
     .not('external_calendar_id', 'is', null);
   const vistos = new Set<string>([principal]);
+  // Mesmo NOME = mesma agenda para quem olha: "Feriados no Brasil" está ligada duas vezes
+  // (pt e pt-br do Google) e mostraria cada feriado em dobro.
+  const nomesVistos = new Set<string>();
   const calendarios: Calendario[] = [{ id: principal, nome: 'Agenda da secretaria', principal: true }];
   for (const c of (outras ?? []) as Array<{ external_calendar_id: string; display_name: string | null }>) {
-    if (vistos.has(c.external_calendar_id)) continue;
+    const nome = (c.display_name ?? c.external_calendar_id).trim();
+    if (vistos.has(c.external_calendar_id) || nomesVistos.has(nome.toLowerCase())) continue;
     vistos.add(c.external_calendar_id);
-    calendarios.push({ id: c.external_calendar_id, nome: (c.display_name ?? c.external_calendar_id).trim(), principal: false });
+    nomesVistos.add(nome.toLowerCase());
+    calendarios.push({ id: c.external_calendar_id, nome, principal: false });
   }
   return { integ, calendarios };
 }
