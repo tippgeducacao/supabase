@@ -142,7 +142,7 @@ export function toolBuscaCarreiraMapa(mapa: MapaCarreira) {
   const opcoes: [string, string][] = [
     ...mapa.ramos.map((r): [string, string] => [r.ramo,
       `${r.nome}${r.sinais?.length ? ` (fala como: ${r.sinais.map((x) => `"${x}"`).join(', ')})` : ''}`]),
-    [RAMO_INDEFINIDO, 'ele ainda não disse se é autônomo, contratado, servidor ou dono do negócio'],
+    [RAMO_INDEFINIDO, 'ele ainda não disse como trabalha hoje (o que decide o ramo)'],
     ...PERFIS_FORA_DO_PUBLICO.map((p): [string, string] => [p, SINAIS_DO_PERFIL[p]]),
   ];
   return {
@@ -173,7 +173,8 @@ export function notaPerguntaQueDivide(mapa: MapaCarreira | null): string {
   const p = mapa?.perguntas.find((x) => x.etapa === 'divide')?.texto;
   if (!p) return '';
   // "quando precisar" deixava a IA decidir: com atuação clara ela pulava para a pergunta do conteúdo.
-  return `\n\nPERGUNTA DO VÍNCULO (mapa comercial desta pós): ele ainda não disse se é autônomo ou contratado, e é isso `
+  // O texto não cita "autônomo ou contratado": em Qualidade é servidor/RT/privado, em Comportamento é a área.
+  return `\n\nPERGUNTA DO VÍNCULO (mapa comercial desta pós): ele ainda não disse como trabalha hoje, e é isso `
     + `que decide as perguntas de carreira. Assim que ele contar a atuação, a sua próxima pergunta é esta, antes da pergunta `
     + `do conteúdo e mesmo que a atuação esteja clara, do jeito que veio: "${p}"`;
 }
