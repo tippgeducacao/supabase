@@ -23,7 +23,8 @@ export type ResultadoOcupados =
   | { ok: true; ocupados: Intervalo[] }
   | { ok: false; erro: string };
 
-async function tokenDeAcesso(admin: any, integ: any): Promise<string> {
+/** Token de acesso válido da integração (renova pelo refresh token quando está para vencer). */
+export async function tokenDeAcesso(admin: any, integ: any): Promise<string> {
   const expira = integ.oauth_token_expires_at ? new Date(integ.oauth_token_expires_at).getTime() : 0;
   if (integ.oauth_access_token && expira - Date.now() > 60_000) return integ.oauth_access_token;
   if (!integ.oauth_refresh_token) throw new Error('integracao_sem_token');
