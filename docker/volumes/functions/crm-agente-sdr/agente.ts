@@ -285,9 +285,12 @@ export function montarPedidoPrincipal(opts: OpcoesPedidoPrincipal): { pedido: Re
 
   // O canal é local e tem definição controlada em código, mesmo que o catálogo
   // traga uma homônima. Um único breakpoint nas tools mantém o total em três.
+  // Aula v2 (regras substitutas): o canal vai com a descrição enxuta que veio nas tools, como no v9.
+  const canal = (opts.regrasSubstitutas && opts.tools.find((tool) => tool.name === NOME_TOOL_RESPOSTA)) || TOOL_RESPONDER_AO_CLIENTE;
+  const { cache_control: _c, ...canalSemCache } = canal as any;
   const tools = [
     ...opts.tools.filter((tool) => tool.name !== NOME_TOOL_RESPOSTA).map(({ cache_control: _cache, ...tool }) => tool),
-    { ...TOOL_RESPONDER_AO_CLIENTE, cache_control: { type: 'ephemeral' } },
+    { ...canalSemCache, cache_control: { type: 'ephemeral' } },
   ];
   const ferramentasDisponiveis = new Set<string>(tools.map((tool) => tool.name));
 

@@ -7,22 +7,18 @@
 
 import { atualizarAgenteComRatchet, atualizarLead, buscarLead, carregarHistorico, criarLead, jidsDoTelefone } from './historico.ts';
 import { pausaVigente } from './pausa.ts';
-import { extrairPrimeiroNome, montarContextoTemporal, notaDoCurso } from './contexto.ts';
+import { extrairPrimeiroNome, montarContextoTemporal, notaDoCurso, renderPrompt } from './contexto.ts';
 import { notaDoNome } from './nomeDoLead.ts';
 import { contextoEspecialidadeCannabis } from './especialidadeCannabis.ts';
 import { carregarReunioesDoLead, notaDasReunioes } from './reunioesDoLead.ts';
-import { contextoAulaPiloto } from './contextoAulaPiloto.ts';
 import { blocoElegibilidadeFormatura, limiteFormaturaFormatado } from './elegibilidadeFormatura.ts';
-import {
-  carregarCarreiraPorNome, carregarMapaPorNome, linhaDoPerfil, notaPerguntaQueDivide, objecaoDaPos, precisaNotaDoRamo, RAMO_INDEFINIDO, perguntasDaLinha, respostaDoMapa,
-  sobreDaObjecaoDeTempo,
-  toolBuscaCarreira, toolBuscaCarreiraMapa, VINCULOS_TRABALHO,
-} from './carreiraPos.ts';
+import { objecaoDaPos, sobreDaObjecaoDeTempo, toolBuscaCarreira } from './carreiraPos.ts';
 import { type AulaParaPrompt, montarVarsAula } from './prompts-aula.ts';
 import { cursoDaConversa } from './ganchoLote.ts';
 import { carregarTools, chamarAnthropic, type ProvedorIA } from './agente.ts';
 import { TOOL_RESPONDER_AO_CLIENTE } from './canalResposta.ts';
-import { comDescricoesDaAulaV9 } from './ferramentasAulaV9.ts';
+import { AULA_V2_ABERTURA, AULA_V2_REGRAS, varsAulaV2 } from './prompts-aula-v2.ts';
+import { buscaCarreiraDaAula, contextoAulaV2, toolsDaAulaV2 } from './aulaV2.ts';
 import { type CtxConversa, executarTool } from './tools.ts';
 import { contaDoLead } from './conta.ts';
 import { limparConversaDeTeste } from './limparTeste.ts';
@@ -169,26 +165,13 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
         : notaDoCurso(curso);
       let contexto = relogio + notaDoNome(vars.nome) + notaCurso
         + contextoEspecialidadeCannabis(curso) + notaDasReunioes(reunioes, agora);
-      // O que o cadastro e a conversa já registraram do lead (o v9 não tem a ficha do sistema).
-      // Formação do formulário NÃO é confirmação: estudante também marca "Médico Veterinário".
-      const dados = {
-        formacao_no_cadastro: lead?.formacao_academica ?? null,
-        atuacao: lead?.situacao_trabalho_atual ?? null,
-        vinculo_trabalho: lead?.vinculo_trabalho ? (VINCULOS_TRABALHO[lead.vinculo_trabalho] ?? lead.vinculo_trabalho) : null,
-        experiencia: lead?.experiencia_area ?? null,
-        objetivos: lead?.objetivos_profissionais ?? null,
-      };
-      contexto += '\n\nDADOS COLETADOS (cadastro e conversa; dados, não roteiro)\n' + JSON.stringify(dados)
-        + '\nA formação do cadastro vem do formulário e não foi confirmada pelo lead: muitos ainda na graduação marcam a profissão.';
-      if (aula) {
-        contexto += contextoAulaPiloto(aula, agora, { semFichaAntiga: true });
-        // As perguntas da pós chegam pela busca_carreira, só a linha do perfil dele (ideia do Wellinton).
-        // Pós com mapa: a pergunta do vínculo vem do mapa desde a 1ª mensagem (sem ela a IA improvisava).
-        const mapa = await carregarMapaPorNome(supabase, aula.curso_nome ?? '');
-        if (precisaNotaDoRamo(mapa, lead)) contexto += notaPerguntaQueDivide(mapa);
-      }
+      // DADOS COLETADOS, missão da aula e nota do ramo: as mesmas peças da produção com a v2 (aulaV2.ts).
+      contexto += await contextoAulaV2(supabase, lead, aula, agora);
+      // O texto da abertura de aula vem do sistema (prompts-aula-v2.ts): o n8n e a produção leem o mesmo.
+      const varsV2 = aula ? { ...vars, ...varsAulaV2(aula.curso_nome) } : vars;
+      const textosAula = aula ? { prompt_aula_v2: renderPrompt(AULA_V2_ABERTURA, varsV2), regras_aula_v2: renderPrompt(AULA_V2_REGRAS, varsV2) } : {};
       // As variáveis vão também soltas: o prompt no n8n as lê como {{ $json.nome }}.
-      return ok({ ...vars, persona, agente_atual: lead?.agente_atual ?? null, vars, contexto, aula });
+      return ok({ ...vars, persona, agente_atual: lead?.agente_atual ?? null, vars, contexto, aula, ...textosAula });
     }
     // puxa tools do bd: as ferramentas da Luna para o agente, no formato do Claude, + o canal de resposta.
     case 'tools': {
@@ -196,17 +179,11 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
       const agente = String(corpo?.agente ?? 'agente_validacao');
       const base = await carregarTools(supabase, agente, provedor);
       if (agente !== 'agente_aula') return ok({ agente, tools: [...base, TOOL_RESPONDER_AO_CLIENTE] });
-      // Na aula, as descrições enxutas (ferramentasAulaV9.ts): só os textos mudam, o contrato não. A busca_carreira
-      // entra depois, montada com os perfis próprios da pós da aula (sem eles, os genéricos).
+      // Na aula: descrições enxutas + busca_carreira da pós da aula + canal (aulaV2.ts, o mesmo da produção).
       const lead = await buscarLead(supabase, remotejid);
       const campanha = lead?.contexto_campanha ?? null;
       const aula = campanha?.persona === 'aula' && campanha.aula_id ? await carregarAula(supabase, campanha.aula_id) : null;
-      // Pós com mapa de carreira do Wellinton: a tool sai do mapa (ramo pelo vínculo); sem mapa, dos perfis.
-      const mapa = await carregarMapaPorNome(supabase, aula?.curso_nome ?? '');
-      const carreira = mapa ? null : await carregarCarreiraPorNome(supabase, aula?.curso_nome ?? '');
-      const enxutas = comDescricoesDaAulaV9([...base, TOOL_RESPONDER_AO_CLIENTE]);
-      const busca = mapa ? toolBuscaCarreiraMapa(mapa) : toolBuscaCarreira(carreira?.linhas);
-      return ok({ agente, tools: [...enxutas.slice(0, -1), busca, enxutas.at(-1)] });
+      return ok({ agente, tools: await toolsDaAulaV2(supabase, [...base, TOOL_RESPONDER_AO_CLIENTE], aula?.curso_nome ?? '') });
     }
     // Anthropic Claude Sonnet 4.5 → a Luna. Entra e sai no formato do Claude.
     case 'luna': {
@@ -272,31 +249,10 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
     }
     // busca_carreira: a linha da tabela de carreira da pós da aula para o perfil que a IA leu do lead.
     case 'carreira': {
-      const perfil = String(corpo?.perfil ?? '');
       const lead = await buscarLead(supabase, remotejid);
       const campanha = lead?.contexto_campanha ?? null;
       const aula = campanha?.persona === 'aula' && campanha.aula_id ? await carregarAula(supabase, campanha.aula_id) : null;
-      const nomePos = aula?.curso_nome ?? '';
-      const [mapa, c] = await Promise.all([carregarMapaPorNome(supabase, nomePos), carregarCarreiraPorNome(supabase, nomePos)]);
-      if (mapa) {
-        // Mapa do Wellinton: perguntas de carreira do ramo; as objeções da pós continuam vindo da tabela antiga.
-        const r = respostaDoMapa(mapa, perfil);
-        if (!r) return ok({ encontrado: false, perfil, pos: nomePos, resultado: 'Fora do público desta pós: siga o desvio de estudante ou de outra área.' });
-        // Ramo decidido: guarda na jornada para a nota do ramo sair do contexto (precisaNotaDoRamo).
-        if (r.ramo !== RAMO_INDEFINIDO && lead) {
-          await supabase.from('cliente_ppg_leads_sdr').update({ jornada: { ...(lead.jornada ?? {}), ramo_carreira: r.ramo } })
-            .in('remotejid', jidsDoTelefone(remotejid));
-        }
-        return ok({ encontrado: true, pos: nomePos, ...r, objecoes: c?.objecoes ?? [] });
-      }
-      // Perfil sem linha nesta pós: cai em quem ainda não atua no tema (linhaDoPerfil, carreiraPos.ts).
-      const linha = linhaDoPerfil(c?.linhas, perfil);
-      if (!linha) return ok({ encontrado: false, perfil, pos: nomePos || null, resultado: 'Sem pergunta cadastrada para este perfil nesta pós.' });
-      return ok({
-        encontrado: true, perfil: linha.perfil, ...(linha.nome ? { quem_e: linha.nome } : {}), pos: nomePos,
-        perguntas: perguntasDaLinha(linha), ponte_convite: linha.ponte_convite, observacao: linha.observacao,
-        objecoes: c!.objecoes,
-      });
+      return ok(await buscaCarreiraDaAula(supabase, remotejid, String(corpo?.perfil ?? ''), aula?.curso_nome ?? '', lead));
     }
     // reset da conversa (/excluirdados) → Deleta o Lead + Deleta mensagens: a limpeza de teste do sistema.
     case 'limpar': {

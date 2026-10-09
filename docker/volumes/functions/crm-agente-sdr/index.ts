@@ -39,6 +39,8 @@ import { blocosDoPrompt, type ConjuntoPrompt } from './conjuntoPrompt.ts';
 import { AGENTE_RECONTATO, montarDossieRecontato } from './prompts-recontato.ts';
 import { AGENTE_CAMPANHA_DIRETA } from './prompts-campanha-direta.ts';
 import { AGENTE_AULA, type AulaParaPrompt, montarVarsAula, semCertificadoAntesDoFim } from './prompts-aula.ts';
+import { AULA_V2_ABERTURA, AULA_V2_REGRAS, varsAulaV2 } from './prompts-aula-v2.ts';
+import { aulaV2Ligada, contextoAulaV2, toolsDaAulaV2 } from './aulaV2.ts';
 import { comBlocoDaEscola, comLinkPedido, comPresenteNaDespedida, jaTemOPresente, LINK_ESCOLA_GRATUITA } from './escolaGratuita.ts';
 import { respostaDoEncerramento, toolConcluida, type Encerramento } from './encerramento.ts';
 import { confirmacaoDoResultado, falaEntregaConfirmacao, textoConfirmacaoAgendamento, type ConfirmacaoAgendamento } from './confirmacaoAgendamento.ts';
@@ -497,6 +499,11 @@ async function prepararAntesDoRouter(remotejid: string, itensDoLote: any[], tel:
   }
   // Na aula, a pós do lead é a pós VINCULADA à aula (vazia quando a aula não tem pós).
   if (aulaDaCampanha) Object.assign(vars, montarVarsAula(aulaDaCampanha));
+  // IA de aula v2 (09/10/2026, aulaV2.ts): o prompt, as ferramentas e o contexto testados no v9 do n8n.
+  // Só com a chave ligada para o telefone (aula_v2_telefones / aula_v2_percentual) e aula com pós.
+  const chaveAulaV2 = aulaDaCampanha?.curso_nome && !lead?.modo_recontato ? await aulaV2Ligada(supabase, telefone) : { ligada: false };
+  const aulaV2 = chaveAulaV2.ligada;
+  if (aulaV2) tel.registrar('aula_v2', { origem: chaveAulaV2.origem, pos: aulaDaCampanha?.curso_nome ?? null });
   // Aula MVP (sem pós relacionada): o material é o portfólio, e o próximo passo depois da
   // formação é o envio dele, não a checagem de compatibilidade (portfolio.ts).
   ctx.aulaSemPos = Boolean(aulaDaCampanha && !aulaDaCampanha.curso_nome);
@@ -583,7 +590,7 @@ async function prepararAntesDoRouter(remotejid: string, itensDoLote: any[], tel:
     // JSON puro (nada de função/promessa): o agente no n8n guarda isto entre os passos.
     pre: {
       remotejid, telefone, inicioRodada, conteudo, itens, registrarFalaAposEnvio, conjuntoPrompt, ctx, lead,
-      pedidoPorPalavraChave, modoTroca, aberturaControlada, desdeLimpeza, sinalTroca, vars, campanha, aulaPiloto,
+      pedidoPorPalavraChave, modoTroca, aberturaControlada, desdeLimpeza, sinalTroca, vars, campanha, aulaPiloto, aulaV2,
       aulaDaCampanha, contextoTemporal, persona, ehCampanha, aplicarTroca, agenteAnterior, notaTroca, naListaDoCanario,
       configJev, configLeitura, coletaFeita, precisaRouter, reuniaoMarcadaNaAgenda: marcadaNaAgendaAgora, notaReunioes,
     },
@@ -613,22 +620,30 @@ async function rotearNoSistema(pre: PreRouter, provedor: ProvedorIA | null, regi
 
 // ═══ DEPOIS DO ROUTER — persona, prompt e ferramentas ═══════════════════════════
 // Recebe a decisão pronta (do sistema ou do n8n) e aplica o ratchet, o prompt da persona e os acabamentos.
-async function definirAgente(pre: PreRouter, provedor: ProvedorIA | null, tel: Telemetria, decisao: DecisaoRouter | null) {
+async function definirAgente(pre: PreRouter, provedor: ProvedorIA | null, tel: Telemetria, decisao: DecisaoRouter | null, permitirAulaV2 = false) {
   const { remotejid, ctx, lead, vars, campanha, aulaPiloto, aulaDaCampanha, contextoTemporal, persona, ehCampanha,
     agenteAnterior, notaTroca, aberturaControlada, sinalTroca } = pre;
   const textosDoPrompt = blocosDoPrompt(pre.conjuntoPrompt);
   const extrasDaDecisao = { ...(decisao?.jev ? { jev: decisao.jev } : {}), ...(decisao?.fonte ? { fonte: decisao.fonte } : {}) };
   let promptAgente: string;
   let tools: any[];
+  // Regras no lugar dos blocos fixos (memória humana, fatos, disponibilidade, eventos, ficha, voz, canal):
+  // só a abertura da aula v2, como no v9 (prompt + regras). undefined = montagem de sempre.
+  let regrasSubstitutas: string | undefined;
+  const usarAulaV2 = permitirAulaV2 && pre.aulaV2 === true;
   // A nota vai no bloco de contexto temporal: relido a cada volta, fora do prefixo cacheado.
   let contextoEfetivo = comNotaNoContexto(contextoTemporal, notaTroca);
   if (aberturaControlada) contextoEfetivo += '\n\n' + NOTA_ABERTURA_CONTROLADA;
   // Canário (19/09/2026): o fecho do convite ("ainda hoje" × "amanhã cedo") vem do relógio, não do
   // modelo — vai junto do contexto temporal, fora do cache, relido a cada volta.
   if (ctx.ficha && !aulaPiloto) contextoEfetivo = `${contextoEfetivo}\n\n${blocoConviteAgenda()}`;
-  if (aulaPiloto) contextoEfetivo += contextoAulaPiloto(aulaDaCampanha);
+  // Na v2 a missão da aula vem do contextoAulaV2 (sem a ficha antiga da pós), montado mais abaixo.
+  if (aulaPiloto && !usarAulaV2) contextoEfetivo += contextoAulaPiloto(aulaDaCampanha);
   if (persona === 'aula' && campanha?.origem === 'convite_base') {
-    contextoEfetivo += '\n\nORIGEM DA CAMPANHA: convite enviado à base. Receber esse convite não comprova inscrição. Não diga que ele se inscreveu nem pergunte por que se cadastrou sem ele confirmar. A pergunta de conexão é: "e me conta, com o que vc trabalha hoje e qual a sua formação?"';
+    // Na v2 a ordem das perguntas é do prompt (atuação, depois formação): fica só o aviso da inscrição.
+    contextoEfetivo += usarAulaV2
+      ? '\n\nORIGEM DA CAMPANHA: convite enviado à base. Receber esse convite não comprova inscrição. Não diga que ele se inscreveu nem pergunte por que se cadastrou sem ele confirmar.'
+      : '\n\nORIGEM DA CAMPANHA: convite enviado à base. Receber esse convite não comprova inscrição. Não diga que ele se inscreveu nem pergunte por que se cadastrou sem ele confirmar. A pergunta de conexão é: "e me conta, com o que vc trabalha hoje e qual a sua formação?"';
   }
   let agenteEfetivo: string;
 
@@ -704,11 +719,22 @@ async function definirAgente(pre: PreRouter, provedor: ProvedorIA | null, tel: T
     // Persona aula: a abertura é o prompt da aula com as tools de `agente_aula` (as mesmas
     // 9 da validação); o fechamento é o qualificador de sempre.
     const abrirComAula = persona === 'aula' && agenteAtual !== 'agente_qualificador';
-    promptAgente = renderPrompt(
-      agenteAtual === 'agente_qualificador' ? textosDoPrompt.qualificador : abrirComAula ? AGENTE_AULA : textosDoPrompt.validacao,
-      vars,
-    );
-    tools = await carregarTools(supabase, abrirComAula ? 'agente_aula' : agenteAtual, provedor);
+    if (abrirComAula && usarAulaV2) {
+      // IA de aula v2: o mesmo prompt, as mesmas regras, as mesmas ferramentas e o mesmo contexto do v9.
+      const varsV2 = { ...vars, ...varsAulaV2(aulaDaCampanha?.curso_nome) };
+      promptAgente = renderPrompt(AULA_V2_ABERTURA, varsV2);
+      regrasSubstitutas = renderPrompt(AULA_V2_REGRAS, varsV2);
+      tools = await toolsDaAulaV2(supabase, await carregarTools(supabase, 'agente_aula', provedor), aulaDaCampanha?.curso_nome);
+      ctx.soInformar = true;
+      ctx.cursoDaAula = aulaDaCampanha?.curso_nome ?? null;
+      contextoEfetivo += await contextoAulaV2(supabase, lead, aulaDaCampanha, new Date());
+    } else {
+      promptAgente = renderPrompt(
+        agenteAtual === 'agente_qualificador' ? textosDoPrompt.qualificador : abrirComAula ? AGENTE_AULA : textosDoPrompt.validacao,
+        vars,
+      );
+      tools = await carregarTools(supabase, abrirComAula ? 'agente_aula' : agenteAtual, provedor);
+    }
   }
   // ▸ Acabamentos do prompt (valem para todas as personas): presente da Escola gratuita, aviso de
   //   que a conversa veio do chat do site e, no canário, o gancho do "primeiro lote".
@@ -729,18 +755,18 @@ async function definirAgente(pre: PreRouter, provedor: ProvedorIA | null, tel: T
   } catch (e) {
     tel.registrar('erro', { onde: 'crm_esta_na_escola' }, undefined, String((e as Error)?.message ?? e));
   }
-  promptAgente = comBlocoDaEscola(promptAgente, estaNaEscola);
+  if (!regrasSubstitutas) promptAgente = comBlocoDaEscola(promptAgente, estaNaEscola);
   // Conversa que veio do CHAT DO SITE: o agente precisa saber que o canal mudou, senão
   // fala como se ainda estivesse lá ("já te mandei pelo whats", dito NO whats).
   promptAgente = comContinuidadeWebchat(promptAgente, lead?.veio_do_webchat_em);
   // Canário (19/09/2026): gancho do "primeiro lote promocional" no lugar da "secretaria", a 2ª
   // abordagem com o nome e o CONVITE DE AGENDA (ganchoLote.ts). Produção segue com o texto antigo.
-  if (ctx.ficha && !aulaPiloto) {
+  if (ctx.ficha && !aulaPiloto && !regrasSubstitutas) {
     const gancho = comGanchoDoLote(promptAgente, { nome: vars.nome, curso: vars.curso_interesse_original });
     promptAgente = gancho.prompt;
     tel.registrar('gancho_lote', gancho.trocas);
   }
-  return { promptAgente, tools, contextoEfetivo, agenteEfetivo, estaNaEscola };
+  return { promptAgente, tools, contextoEfetivo, agenteEfetivo, estaNaEscola, regrasSubstitutas };
 }
 
 // Preparo completo da PRODUÇÃO: as duas metades com o router do sistema no meio (o agente no n8n
@@ -772,7 +798,7 @@ async function prepararRodada(remotejid: string, itensDoLote: any[], tel: Teleme
       .catch(() => null)
     : Promise.resolve(null);
   const decisao = pre.precisaRouter ? await rotearNoSistema(pre, provedor, registrarUsoRouter) : null;
-  const depois = await definirAgente(pre, provedor, tel, decisao);
+  const depois = await definirAgente(pre, provedor, tel, decisao, true);
   const doUltimoCom = (campo: string): any =>
     [...pre.itens].reverse().find((i: any) => i?.[campo] != null)?.[campo] ?? null;
   return { ...pre, doUltimoCom, provedor, leituraPromessa, ...depois };
@@ -791,7 +817,7 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
   const preparo = await prepararRodada(remotejid, itensDoLote, tel);
   if (!preparo) return;
   // `let`: o loop reatribui parte delas (provedor no fallback, lead, contexto…), como antes.
-  let { inicioRodada, conteudo, doUltimoCom, telefone, provedor, registrarFalaAposEnvio, conjuntoPrompt, ctx, lead, pedidoPorPalavraChave, aberturaControlada, desdeLimpeza, sinalTroca, aulaPiloto, aulaDaCampanha, aplicarTroca, configLeitura, leituraPromessa, promptAgente, tools, contextoEfetivo, agenteEfetivo, estaNaEscola, reuniaoMarcadaNaAgenda: marcadaNaAgenda, notaReunioes } = preparo;
+  let { inicioRodada, conteudo, doUltimoCom, telefone, provedor, registrarFalaAposEnvio, conjuntoPrompt, ctx, lead, pedidoPorPalavraChave, aberturaControlada, desdeLimpeza, sinalTroca, aulaPiloto, aulaDaCampanha, aplicarTroca, configLeitura, leituraPromessa, promptAgente, tools, contextoEfetivo, agenteEfetivo, estaNaEscola, reuniaoMarcadaNaAgenda: marcadaNaAgenda, notaReunioes, regrasSubstitutas } = preparo;
   // Reunião criada ou remarcada NESTA rodada: a agenda lida no preparo ainda não a conhece.
   let agendouNestaRodada = false;
   // Agente no n8n: a Luna é chamada pelo webhook do n8n (o router, feito no preparo, não).
@@ -989,7 +1015,8 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
     const inicioLlm = Date.now();
     tel.registrar('llm_inicio', { volta: rodada + 1, provedor: provedor?.nome ?? 'anthropic' });
     // ▸ Monta o PEDIDO para a IA: prompt da persona + contexto (relógio, ficha, avisos) + histórico + ferramentas.
-    const baseFicha = aulaPiloto ? `DADOS COLETADOS (não são um roteiro): ${JSON.stringify(ficha?.entrada ?? {})}` : ficha?.texto;
+    // Aula v2: os DADOS COLETADOS já vão no contexto (contextoAulaV2), como no v9; sem ficha no pedido.
+    const baseFicha = regrasSubstitutas ? undefined : aulaPiloto ? `DADOS COLETADOS (não são um roteiro): ${JSON.stringify(ficha?.entrada ?? {})}` : ficha?.texto;
     const pedidoPrincipal = {
       promptAgente,
       contextoEntregaMateriais,
@@ -999,8 +1026,9 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
         ? [baseFicha, blocoDaLeitura(avisosDaLeitura), blocoPerguntasRecentes(messages), alertaFatoSemFonte(falasDoLead(messages).at(-1)), alertaSaudacao(conteudo)]
           .filter(Boolean).join('\n\n')
         : undefined,
-      comFicha: Boolean(ficha) || aulaPiloto,
-      ...(aulaPiloto ? { instrucaoFicha: INSTRUCAO_AULA_PILOTO } : {}),
+      comFicha: !regrasSubstitutas && (Boolean(ficha) || aulaPiloto),
+      ...(aulaPiloto && !regrasSubstitutas ? { instrucaoFicha: INSTRUCAO_AULA_PILOTO } : {}),
+      ...(regrasSubstitutas ? { regrasSubstitutas } : {}),
       conjunto: conjuntoPrompt,
       // Encerramento vence reação: a despedida é o que importa nessa volta.
       contextoTemporal: encerrouPorTool

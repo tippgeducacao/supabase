@@ -84,6 +84,8 @@ export type CtxConversa = ContextoElegibilidade & {
    * barram inventar preço, horário ou reunião continuam. Produção (vendas) não liga isto.
    */
   soInformar?: boolean;
+  /** IA de aula v2 na produção: a pós da aula, para a busca_carreira (aulaV2.ts). */
+  cursoDaAula?: string | null;
   /** Leitura do lead pelo Jev nesta rodada (leituraJev.ts, canário): só soma às palavras-chave. */
   leituraJev?: { dorFinanceira?: boolean };
 };
@@ -1465,6 +1467,14 @@ export async function executarTool(
       }
       case 'consulta_pos_disponiveis': return await consultaPosDisponiveis(supabase, input, ctx, id);
       case 'atualizar_dados_lead': return await atualizarDadosLead(supabase, input, ctx, id);
+      // IA de aula v2 na produção (09/10/2026): a mesma busca do v9 (aulaV2.ts). Import dinâmico: aulaV2
+      // puxa pilotoOpenai → agente.ts, e o import estático fecharia um ciclo com este arquivo.
+      case 'busca_carreira': {
+        const { buscaCarreiraDaAula } = await import('./aulaV2.ts');
+        const { buscarLead } = await import('./historico.ts');
+        const lead = await buscarLead(supabase, ctx.remotejid);
+        return { id, ...(await buscaCarreiraDaAula(supabase, ctx.remotejid, String(input?.perfil ?? ''), ctx.cursoDaAula ?? '', lead)) };
+      }
       default: return { resultado: `Tool desconhecida: ${name}`, id };
     }
   } catch (e) {
