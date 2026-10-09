@@ -124,7 +124,8 @@ describe('mapa de carreira do Wellinton (07/10/2026)', () => {
     const r: any = respostaDoMapa(mapa, 'autonomo');
     expect(r.perguntas.map((p: any) => p.pergunta)).toEqual(['o que faz o produtor escolher você?', 'quanto cobra por visita?', 'por que agora?']);
     expect(r.ponte_convite).toBe('como a pós aumenta o seu resultado');
-    expect(r.como_usar).toContain('no máximo 2');
+    expect(r.como_usar).toContain('Faça as 2 primeiras');
+    expect(r.como_usar).toContain('1 de prioridade');
   });
 
   it('vínculo indefinido devolve a pergunta que divide; estudante e outra área, null', async () => {
@@ -146,6 +147,19 @@ describe('pergunta do vínculo no contexto', () => {
     const { notaPerguntaQueDivide } = await import('./carreiraPos');
     const mapa = { grupo: 'bovinos', ramos: [], perguntas: [{ ramo: '*', etapa: 'divide' as const, texto: 'autônomo ou contratado?', ordem: 1 }] };
     expect(notaPerguntaQueDivide(mapa)).toContain('"autônomo ou contratado?"');
+    expect(notaPerguntaQueDivide(mapa)).toContain('sem perguntar');
     expect(notaPerguntaQueDivide(null)).toBe('');
+  });
+  it('sai do contexto quando o ramo já está decidido', async () => {
+    const { precisaNotaDoRamo } = await import('./carreiraPos');
+    const mapa = { grupo: 'bovinos', perguntas: [], ramos: [
+      { ramo: 'autonomo', nome: 'Autônomo', vinculos: ['autonomo'], sinais: [], argumento: null, ponte_convite: null, ordem: 1 },
+      { ramo: 'clinico', nome: 'Clínico', vinculos: [], sinais: [], argumento: null, ponte_convite: null, ordem: 2 },
+    ] };
+    expect(precisaNotaDoRamo(mapa, { vinculo_trabalho: null, jornada: {} })).toBe(true);
+    expect(precisaNotaDoRamo(mapa, { vinculo_trabalho: 'autonomo', jornada: {} })).toBe(false);
+    expect(precisaNotaDoRamo(mapa, { vinculo_trabalho: 'clt', jornada: {} })).toBe(true);
+    expect(precisaNotaDoRamo(mapa, { vinculo_trabalho: null, jornada: { ramo_carreira: 'clinico' } })).toBe(false);
+    expect(precisaNotaDoRamo(null, null)).toBe(false);
   });
 });

@@ -111,7 +111,7 @@ export type MapaCarreira = { grupo: string; ramos: RamoMapa[]; perguntas: Pergun
 
 /** Vínculo ainda não dito: a busca devolve a pergunta do mapa que divide o caminho. */
 export const RAMO_INDEFINIDO = 'indefinido';
-/** Teto de perguntas de carreira antes do convite (decisão do Gustavo, 07/10/2026). */
+/** Perguntas de carreira antes da de prioridade e do convite (07/10/2026; desde 09/10 são feitas mesmo com "não"). */
 export const MAX_PERGUNTAS_CARREIRA = 2;
 
 export async function carregarMapaPorNome(banco: Banco, cursoNome: string | null | undefined): Promise<MapaCarreira | null> {
@@ -171,12 +171,26 @@ export function toolBuscaCarreiraMapa(mapa: MapaCarreira) {
  */
 export function notaPerguntaQueDivide(mapa: MapaCarreira | null): string {
   const p = mapa?.perguntas.find((x) => x.etapa === 'divide')?.texto;
-  if (!p) return '';
-  // "quando precisar" deixava a IA decidir: com atuação clara ela pulava para a pergunta do conteúdo.
-  // O texto não cita "autônomo ou contratado": em Qualidade é servidor/RT/privado, em Comportamento é a área.
-  return `\n\nPERGUNTA DO VÍNCULO (mapa comercial desta pós): ele ainda não disse como trabalha hoje, e é isso `
-    + `que decide as perguntas de carreira. Assim que ele contar a atuação, a sua próxima pergunta é esta, antes da pergunta `
-    + `do conteúdo e mesmo que a atuação esteja clara, do jeito que veio: "${p}"`;
+  if (!p || !mapa) return '';
+  // 09/10/2026: a nota mandava fazer a pergunta "mesmo que a atuação esteja clara" e a IA perguntava o
+  // que o lead já tinha dito ("trabalho no Sicoob" → "cooperativa ou banco?"). Agora vai o OBJETIVO (em
+  // qual ramo ele está); a pergunta do mapa é o jeito de descobrir quando a fala dele não mostra.
+  const ramos = mapa.ramos.map((r) => r.nome).join('; ');
+  return `\n\nO QUE VOCÊ PRECISA SABER ANTES DAS PERGUNTAS DE CARREIRA (mapa comercial desta pós): em qual destes `
+    + `ramos ele está: ${ramos}. Se o que ele já contou mostra o ramo (onde trabalha, o cargo, se o negócio é dele), `
+    + `registre e chame a busca_carreira com o ramo, sem perguntar. Só quando a fala dele servir para mais de um ramo, `
+    + `pergunte, do jeito que veio: "${p}"`;
+}
+
+/**
+ * A nota do ramo só entra enquanto o ramo não está decidido: some depois que a busca_carreira devolveu um
+ * ramo (jornada.ramo_carreira) ou quando o vínculo registrado já cai num ramo do mapa.
+ */
+export function precisaNotaDoRamo(mapa: MapaCarreira | null, lead: { vinculo_trabalho?: string | null; jornada?: any } | null): boolean {
+  if (!mapa) return false;
+  if (lead?.jornada?.ramo_carreira) return false;
+  const v = lead?.vinculo_trabalho;
+  return !(v && mapa.ramos.some((r) => r.vinculos?.includes(v)));
 }
 
 /** O que a busca_carreira devolve numa pós com mapa. null = estudante/outra_area (o prompt tem desvio próprio). */
@@ -198,8 +212,11 @@ export function respostaDoMapa(mapa: MapaCarreira, ramo: string) {
     .map((p) => ({ etapa: p.etapa, pergunta: p.texto }));
   return {
     ramo: r.ramo, quem_e: r.nome, perguntas, ponte_convite: r.ponte_convite, argumento: r.argumento,
-    como_usar: `Perguntas de carreira, não técnicas. Faça no máximo ${MAX_PERGUNTAS_CARREIRA}, uma por mensagem, na ordem, `
-      + 'do jeito que vieram, pulando a que ele já respondeu. Depois, o convite com a ponte. O argumento é interno: guia a conversa, não vai escrito.',
+    // 09/10/2026: com "não"/"não sei" a IA convidava depois de 1 pergunta e a prioridade nunca saía.
+    como_usar: `Perguntas de carreira, não técnicas. Faça as ${MAX_PERGUNTAS_CARREIRA} primeiras (etapa carreira ou ganho) e depois `
+      + '1 de prioridade, uma por mensagem, na ordem e do jeito que vieram, pulando a que ele já respondeu. "Não" ou "não sei" '
+      + 'também é resposta: siga para a próxima pergunta, sem convidar antes. Depois das três, o convite com a ponte. '
+      + 'O argumento é interno: guia a conversa, não vai escrito.',
   };
 }
 

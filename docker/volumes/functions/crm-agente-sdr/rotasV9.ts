@@ -14,7 +14,7 @@ import { carregarReunioesDoLead, notaDasReunioes } from './reunioesDoLead.ts';
 import { contextoAulaPiloto } from './contextoAulaPiloto.ts';
 import { blocoElegibilidadeFormatura, limiteFormaturaFormatado } from './elegibilidadeFormatura.ts';
 import {
-  carregarCarreiraPorNome, carregarMapaPorNome, linhaDoPerfil, notaPerguntaQueDivide, objecaoDaPos, perguntasDaLinha, respostaDoMapa,
+  carregarCarreiraPorNome, carregarMapaPorNome, linhaDoPerfil, notaPerguntaQueDivide, objecaoDaPos, precisaNotaDoRamo, RAMO_INDEFINIDO, perguntasDaLinha, respostaDoMapa,
   sobreDaObjecaoDeTempo,
   toolBuscaCarreira, toolBuscaCarreiraMapa, VINCULOS_TRABALHO,
 } from './carreiraPos.ts';
@@ -184,7 +184,8 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
         contexto += contextoAulaPiloto(aula, agora, { semFichaAntiga: true });
         // As perguntas da pós chegam pela busca_carreira, só a linha do perfil dele (ideia do Wellinton).
         // Pós com mapa: a pergunta do vínculo vem do mapa desde a 1ª mensagem (sem ela a IA improvisava).
-        if (!lead?.vinculo_trabalho) contexto += notaPerguntaQueDivide(await carregarMapaPorNome(supabase, aula.curso_nome ?? ''));
+        const mapa = await carregarMapaPorNome(supabase, aula.curso_nome ?? '');
+        if (precisaNotaDoRamo(mapa, lead)) contexto += notaPerguntaQueDivide(mapa);
       }
       // As variáveis vão também soltas: o prompt no n8n as lê como {{ $json.nome }}.
       return ok({ ...vars, persona, agente_atual: lead?.agente_atual ?? null, vars, contexto, aula });
@@ -281,6 +282,11 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
         // Mapa do Wellinton: perguntas de carreira do ramo; as objeções da pós continuam vindo da tabela antiga.
         const r = respostaDoMapa(mapa, perfil);
         if (!r) return ok({ encontrado: false, perfil, pos: nomePos, resultado: 'Fora do público desta pós: siga o desvio de estudante ou de outra área.' });
+        // Ramo decidido: guarda na jornada para a nota do ramo sair do contexto (precisaNotaDoRamo).
+        if (r.ramo !== RAMO_INDEFINIDO && lead) {
+          await supabase.from('cliente_ppg_leads_sdr').update({ jornada: { ...(lead.jornada ?? {}), ramo_carreira: r.ramo } })
+            .in('remotejid', jidsDoTelefone(remotejid));
+        }
         return ok({ encontrado: true, pos: nomePos, ...r, objecoes: c?.objecoes ?? [] });
       }
       // Perfil sem linha nesta pós: cai em quem ainda não atua no tema (linhaDoPerfil, carreiraPos.ts).
