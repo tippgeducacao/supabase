@@ -31,7 +31,10 @@ beforeEach(() => {
   vi.stubGlobal("fetch", fetcher);
   ambiente.criarCliente.mockReturnValue({
     auth: { getUser: async () => ({ data: { user: usuarioValido ? { id: "usuario-1" } : null } }) },
-    rpc: async (_nome: string, args: { role_name: string }) => ({ data: args.role_name === cargoUsuario, error: null }),
+    // `email_marketing_pode_gerir` (banco) = perfil ativo E admin/diretor/liberado nominalmente.
+    rpc: async (nome: string, args: { role_name?: string; p_usuario?: string }) => nome === "email_marketing_pode_gerir"
+      ? { data: usuarioAtivo && args.p_usuario === "usuario-1" && ["admin", "diretor"].includes(cargoUsuario), error: null }
+      : { data: args.role_name === cargoUsuario, error: null },
     from: (tabela: string) => {
       tabelas.push(tabela);
       let acao = "select";

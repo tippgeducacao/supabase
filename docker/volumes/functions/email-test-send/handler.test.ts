@@ -6,7 +6,7 @@ const USUARIO = "11111111-1111-4111-8111-111111111111", TEMPLATE = "22222222-222
 const PEDIDO = { template_id: TEMPLATE, destinatario_email: "teste@example.invalid", usuario_esperado: USUARIO };
 function ambiente(opcoes: { invalido?: boolean; ativo?: boolean; cargo?: string; resposta?: Record<string, unknown>; status?: number; falhaRede?: boolean; falhaRemetente?: boolean } = {}) {
   const consultas: string[] = [], getUser = vi.fn().mockResolvedValue({ data: { user: opcoes.invalido ? null : { id: USUARIO } }, error: null });
-  const cliente = { auth: { getUser }, rpc: vi.fn().mockImplementation((_n, a) => Promise.resolve({ data: a.role_name === (opcoes.cargo ?? "admin"), error: null })), from(tabela: string) {
+  const cliente = { auth: { getUser }, rpc: vi.fn().mockImplementation((n, a) => Promise.resolve({ data: n === "email_marketing_pode_gerir" && a.p_usuario === USUARIO && opcoes.ativo !== false && ["admin", "diretor", "gestor_email_mkt"].includes(opcoes.cargo ?? "admin"), error: null })), from(tabela: string) {
     consultas.push(tabela); const q = { select: () => q, eq: () => q, order: () => q, limit: () => q, maybeSingle: async () => ({ data: tabela === "profiles" ? { ativo: opcoes.ativo !== false } : { id: REMETENTE }, error: tabela === "email_remetentes" && opcoes.falhaRemetente ? { message: "privado" } : null }) }; return q;
   } } as unknown as SupabaseClient;
   const buscar = vi.fn().mockImplementation(async () => { if (opcoes.falhaRede) throw new Error("chave privada"); return Response.json(opcoes.resposta ?? { ok: true, log_id: "log", provider_message_id: "provedor" }, { status: opcoes.status ?? 200 }); });
@@ -34,6 +34,9 @@ describe("teste de e-mail autenticado, sem envio real", () => {
     const a = ambiente(); const r = await a.chamar(); expect(r.status).toBe(200); expect(await r.json()).toMatchObject({ ok: true, success: true, log_id: "log" });
     const [url, opcoes] = a.buscar.mock.calls[0]; expect(url).toBe("https://backend.invalid/functions/v1/email-send");
     expect(opcoes.headers.Authorization).toBe("Bearer token-usuario"); expect(JSON.parse(opcoes.body)).toMatchObject({ usuario_esperado: USUARIO, template_id: TEMPLATE, contexto_tipo: "teste" });
+  });
+  it("quem foi liberado no E-mail Marketing (sem ser admin/diretor) envia teste — caso do Marco, 09/10/2026", async () => {
+    const a = ambiente({ cargo: "gestor_email_mkt" }); expect((await a.chamar()).status).toBe(200); expect(a.buscar).toHaveBeenCalledTimes(1);
   });
   it("avulso preserva conteúdo atual sem sobrescrever pelo template", async () => {
     const a = ambiente({ cargo: "diretor" });

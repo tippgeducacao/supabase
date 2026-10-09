@@ -20,13 +20,11 @@ export async function autorizarEnvioEmail(cliente: SupabaseClient, authorization
     throw new ErroAcessoEnvioEmail(503, "ACCESS_UNAVAILABLE", "Não foi possível verificar sua sessão. Tente novamente.");
   }
   try {
-    const [perfil, admin, diretor] = await Promise.all([
-      cliente.from("profiles").select("ativo").eq("id", usuarioId).maybeSingle(),
-      cliente.rpc("has_role", { user_id: usuarioId, role_name: "admin" }),
-      cliente.rpc("has_role", { user_id: usuarioId, role_name: "diretor" }),
-    ]);
-    if (perfil.error || admin.error || diretor.error) throw new ErroAcessoEnvioEmail(503, "ACCESS_UNAVAILABLE", "Não foi possível verificar sua permissão de envio. Tente novamente.");
-    if (perfil.data?.ativo !== true || !(admin.data === true || diretor.data === true)) throw new ErroAcessoEnvioEmail(403, "FORBIDDEN", "Você não tem permissão para enviar modelos ou testes de e-mail.");
+    // Mesma régua do resto do E-mail Marketing: perfil ativo e admin, diretor ou liberado
+    // nominalmente em `email_marketing_gestores` (09/10/2026 — o Marco, do Marketing).
+    const { data: pode, error } = await cliente.rpc("email_marketing_pode_gerir", { p_usuario: usuarioId });
+    if (error) throw new ErroAcessoEnvioEmail(503, "ACCESS_UNAVAILABLE", "Não foi possível verificar sua permissão de envio. Tente novamente.");
+    if (pode !== true) throw new ErroAcessoEnvioEmail(403, "FORBIDDEN", "Você não tem permissão para enviar modelos ou testes de e-mail.");
   } catch (e) {
     if (e instanceof ErroAcessoEnvioEmail) throw e;
     throw new ErroAcessoEnvioEmail(503, "ACCESS_UNAVAILABLE", "Não foi possível verificar sua permissão de envio. Tente novamente.");

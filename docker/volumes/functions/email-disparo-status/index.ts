@@ -10,7 +10,7 @@
 //   - remetente SES  → confere credencial AWS + identidades verificadas;
 //   - remetente Resend → domínios dos remetentes ativos + assinatura do webhook;
 //
-// Gate: admin/diretor (expõe estado de configuração da conta).
+// Gate: email_marketing_pode_gerir (expõe estado de configuração da conta).
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { listarIdentidadesSes, temCredenciaisSes } from "../_shared/emailProviders/ses.ts";
 import { baseStatusDisparo, verificarStatusResend, type StatusDisparo } from "./statusResend.ts";
@@ -40,11 +40,9 @@ Deno.serve(async (req) => {
     );
     if (!user) return json({ error: "não autenticado" }, 401);
 
-    const [{ data: ehAdmin }, { data: ehDiretor }] = await Promise.all([
-      supabase.rpc("has_role", { user_id: user.id, role_name: "admin" }),
-      supabase.rpc("has_role", { user_id: user.id, role_name: "diretor" }),
-    ]);
-    if (!ehAdmin && !ehDiretor) return json({ error: "sem permissão" }, 403);
+    // Mesma régua do resto do E-mail Marketing (admin, diretor ou liberado nominalmente).
+    const { data: pode } = await supabase.rpc("email_marketing_pode_gerir", { p_usuario: user.id });
+    if (pode !== true) return json({ error: "sem permissão" }, 403);
 
     const pedido = req.method === "POST" ? await req.json().catch(() => ({})) : {};
     const escolhido = pedido?.provider;
