@@ -35,7 +35,9 @@ export const MODELO_AGENTE = Deno.env.get('AGENTE_SDR_MODEL') ?? 'claude-sonnet-
 //  · formato 'openai' = o pedido é TRADUZIDO para a Responses API (provedorOpenai.ts) e a
 //    resposta volta no formato da Anthropic; quem chama não percebe a diferença.
 export type ProvedorIA =
-  | { nome: string; formato: 'anthropic'; base: string; chave: string }
+  | { nome: string; formato: 'anthropic'; base: string; chave: string;
+    /** Só o simulador (duelo de modelos): troca o `model` do pedido e põe `output_config.effort`. */
+    modelo?: string; esforco?: string }
   | { nome: string; formato: 'openai'; base: string; chave: string; modelo: string; esforco: string;
     /** Devolve o raciocínio cifrado junto com o resultado das tools (provedorOpenai.ts). */
     raciocinio?: boolean;
@@ -48,6 +50,12 @@ export type ProvedorIA =
 export function provedorDeepseek(): ProvedorIA | null {
   const chave = Deno.env.get('AGENTE_SDR_DEEPSEEK_KEY') ?? '';
   return chave ? { nome: 'deepseek', formato: 'anthropic', base: 'https://api.deepseek.com/anthropic', chave } : null;
+}
+// Outro modelo da própria Anthropic (09/10/2026, duelo Haiku 5.5 × Luna × Sonnet): mesmo caminho
+// do João de produção (prompt e tools do Claude), só o modelo e o esforço mudam. A produção não usa.
+export function provedorAnthropicModelo(modelo: string, esforco?: string | null): ProvedorIA {
+  return { nome: 'anthropic', formato: 'anthropic', base: 'https://api.anthropic.com', chave: ANTHROPIC_KEY, modelo,
+    ...(esforco ? { esforco } : {}) };
 }
 // Esforço 'high' por padrão: é o nível em que a Luna empata com o Sonnet 5 (high) no
 // índice da Artificial Analysis; o padrão da OpenAI ('medium') fica abaixo.
@@ -79,6 +87,11 @@ export async function chamarAnthropic(
     : body, openai) : null;
   const raciociniosReenviados = memoria && Array.isArray(pedidoOpenai?.input)
     ? pedidoOpenai.input.filter((item: any) => item?.type === 'reasoning').length : 0;
+  const outroModelo = alternativo?.formato === 'anthropic' && alternativo.modelo ? alternativo : null;
+  const corpoAnthropic = outroModelo ? {
+    ...body, model: outroModelo.modelo,
+    ...(outroModelo.esforco ? { output_config: { ...(body.output_config as object ?? {}), effort: outroModelo.esforco } } : {}),
+  } : body;
   const executar = async (sinal?: AbortSignal) => {
   // retryOnFail do n8n: até 5 tentativas, dentro do mesmo prazo no piloto.
   let ultimoErro = '';
@@ -98,7 +111,7 @@ export async function chamarAnthropic(
           'content-type': 'application/json',
           ...extraHeaders,
         },
-        body: JSON.stringify(semRaciocinioOpenai(body)),
+        body: JSON.stringify(semRaciocinioOpenai(corpoAnthropic)),
       });
     sinal?.throwIfAborted();
     if (res.ok) {

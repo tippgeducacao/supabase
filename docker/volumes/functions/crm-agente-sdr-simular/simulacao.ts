@@ -16,6 +16,7 @@ import { AVISO_CONSULTA_REPETIDA, MemoriaDeConsultas } from '../crm-agente-sdr/c
 
 export const MAX_TURNOS_SIMULACAO = 100;
 export const MAX_CARACTERES_SIMULACAO = 200_000;
+export const MODELOS_ANTHROPIC_SIMULACAO = ['claude-haiku-5-5', 'claude-sonnet-5', 'claude-sonnet-5-5'];
 import type { AulaParaPrompt } from '../crm-agente-sdr/prompts-aula.ts';
 
 // 16/09/2026: 'aula' = persona da aula gratuita (PRD — Persona por disparo). No harness
@@ -58,6 +59,8 @@ export type EntradaSimulacao = {
   esforco: string | null;
   /** Substituição exclusiva deste ensaio, sem alterar o piloto nem o ambiente. */
   modelo_openai: string | null;
+  /** Duelo de 09/10/2026: outro modelo da Anthropic no caminho de produção do João (esforco = effort). */
+  modelo_anthropic: string | null;
   /** A/B de 24/09/2026: devolve o raciocínio cifrado da Luna junto com o resultado das tools. */
   raciocinio_encadeado: boolean;
   /** Liga a ficha do atendimento (canário): bloco + instrução + trava do cronograma no mock. */
@@ -115,8 +118,14 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
   if (modeloOpenai !== null && (provedor !== 'openai' || !modeloOpenaiPermitido(modeloOpenai))) {
     throw new Error('modelo_openai só aceita gpt-5.6-luna ou gpt-6-luna com provedor openai');
   }
-  if (esforco !== null && (provedor !== 'openai' || !['none', 'low', 'medium', 'high', 'xhigh', 'max'].includes(esforco as string))) {
-    throw new Error('esforco só vale com provedor openai: none, low, medium, high, xhigh ou max');
+  const modeloAnthropic = body.modelo_anthropic ?? null;
+  if (modeloAnthropic !== null && (provedor !== 'anthropic' || !MODELOS_ANTHROPIC_SIMULACAO.includes(modeloAnthropic as string))) {
+    throw new Error(`modelo_anthropic só aceita ${MODELOS_ANTHROPIC_SIMULACAO.join(', ')} com provedor anthropic`);
+  }
+  if (esforco !== null && provedor === 'anthropic' && modeloAnthropic !== null) {
+    if (!['low', 'medium', 'high'].includes(esforco as string)) throw new Error('esforco com modelo_anthropic: low, medium ou high');
+  } else if (esforco !== null && (provedor !== 'openai' || !['none', 'low', 'medium', 'high', 'xhigh', 'max'].includes(esforco as string))) {
+    throw new Error('esforco só vale com provedor openai (none, low, medium, high, xhigh ou max) ou com modelo_anthropic');
   }
   if (body.raciocinio_encadeado !== undefined && (typeof body.raciocinio_encadeado !== 'boolean' || (body.raciocinio_encadeado && provedor !== 'openai'))) {
     throw new Error('raciocinio_encadeado deve ser booleano e só vale com provedor openai');
@@ -226,6 +235,7 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
     provedor,
     esforco: esforco as string | null,
     modelo_openai: modeloOpenai as string | null,
+    modelo_anthropic: modeloAnthropic as string | null,
     raciocinio_encadeado: body.raciocinio_encadeado === true,
     ficha: body.ficha === true,
     router_jev: routerJev,

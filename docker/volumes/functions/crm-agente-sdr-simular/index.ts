@@ -19,7 +19,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3';
 import { blocosDoPrompt } from '../crm-agente-sdr/conjuntoPrompt.ts';
 import { AGENTE_CAMPANHA_DIRETA } from '../crm-agente-sdr/prompts-campanha-direta.ts';
 import { AGENTE_AULA, montarVarsAula } from '../crm-agente-sdr/prompts-aula.ts';
-import { carregarTools, chamarAgentePrincipal, chamarRouter, MODELO_AGENTE, provedorDeepseek, provedorOpenai } from '../crm-agente-sdr/agente.ts';
+import { carregarTools, chamarAgentePrincipal, chamarRouter, MODELO_AGENTE, provedorAnthropicModelo, provedorDeepseek, provedorOpenai } from '../crm-agente-sdr/agente.ts';
 import { type LeituraJev, rotearComJev } from '../crm-agente-sdr/routerJev.ts';
 import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoCurso, notaDoNome, renderPrompt } from '../crm-agente-sdr/contexto.ts';
 import { comBlocoDaEscola, comPresenteEscola } from '../crm-agente-sdr/escolaGratuita.ts';
@@ -326,7 +326,8 @@ Deno.serve(async (req) => {
   // Provedor desta simulação: vai como ARGUMENTO de cada chamada (nada de estado global, então
   // duas simulações com provedores diferentes podem rodar ao mesmo tempo sem se misturar).
   let provedorAlternativo = entrada.provedor === 'deepseek' ? provedorDeepseek()
-    : entrada.provedor === 'openai' ? provedorOpenai() : null;
+    : entrada.provedor === 'openai' ? provedorOpenai()
+    : entrada.modelo_anthropic ? provedorAnthropicModelo(entrada.modelo_anthropic, entrada.esforco) : null;
   if (provedorAlternativo?.formato === 'openai' && entrada.esforco) provedorAlternativo = { ...provedorAlternativo, esforco: entrada.esforco };
   if (provedorAlternativo?.formato === 'openai' && entrada.modelo_openai) provedorAlternativo = { ...provedorAlternativo, modelo: entrada.modelo_openai };
   if (provedorAlternativo?.formato === 'openai' && entrada.raciocinio_encadeado) provedorAlternativo = { ...provedorAlternativo, raciocinio: true, memoriaRaciocinio: new Map() };
@@ -585,7 +586,7 @@ Deno.serve(async (req) => {
       },
     });
     return json({
-      ...resultado, modelo: resultado.chamadas.at(-1)?.modelo ?? (provedorAlternativo?.formato === 'openai' ? provedorAlternativo.modelo : MODELO_AGENTE), provedor: entrada.provedor, esforco: provedorAlternativo?.formato === 'openai' ? provedorAlternativo.esforco : null,
+      ...resultado, modelo: resultado.chamadas.at(-1)?.modelo ?? provedorAlternativo?.modelo ?? MODELO_AGENTE, provedor: entrada.provedor, esforco: provedorAlternativo?.esforco ?? null,
       raciocinio_encadeado: provedorAlternativo?.formato === 'openai' && provedorAlternativo.raciocinio === true,
       usar_router: entrada.usar_router, routers, memoria_versao: VERSAO_MEMORIA_HUMANA,
       ferramentas_reais: entrada.ferramentas_reais ? [...TOOLS_REAIS_NO_TESTE] : [],

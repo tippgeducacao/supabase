@@ -387,3 +387,18 @@ describe('contrato de autoria e continuidade no system', () => {
     expect(INSTRUCAO_MEMORIA_HUMANA).toContain('não autorizam reabrir atendimento pausado nem ignorar recusa');
   });
 });
+
+describe('outro modelo da Anthropic no simulador (duelo 09/10/2026)', () => {
+  it('troca model e põe output_config.effort só quando o provedor pede; produção intocada', async () => {
+    const { provedorAnthropicModelo } = await import('./agente');
+    const base = { promptAgente: 'Validação', contextoTemporal: 'agora', messages: [{ role: 'user', content: 'oi' }] as Msg[], tools: [] };
+    await chamarAgentePrincipal({ ...base, provedor: provedorAnthropicModelo('claude-haiku-5-5', 'high') });
+    const pedido = ultimoPedido() as Pedido & { model: string; output_config?: { effort: string } };
+    expect(pedido.model).toBe('claude-haiku-5-5');
+    expect(pedido.output_config).toEqual({ effort: 'high' });
+    await chamarAgentePrincipal(base);
+    const producao = ultimoPedido() as Pedido & { model: string; output_config?: unknown };
+    expect(producao.model).toBe('modelo-sintetico');
+    expect(producao.output_config).toBeUndefined();
+  });
+});

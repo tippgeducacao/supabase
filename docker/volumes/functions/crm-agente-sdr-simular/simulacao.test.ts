@@ -28,6 +28,17 @@ describe('contrato textual de simulação com histórico', () => {
   ])('rejeita modelo fora da comparação: %j', (patch) => {
     expect(() => validarEntradaSimulacao({ mensagens: ['Olá'], ...patch })).toThrow('modelo_openai');
   });
+  it('modelo_anthropic: Haiku 5.5 com esforço no caminho do Claude; nada fora da lista', () => {
+    const entrada = validarEntradaSimulacao({ mensagens: ['Olá'], modelo_anthropic: 'claude-haiku-5-5', esforco: 'medium' });
+    expect(entrada.modelo_anthropic).toBe('claude-haiku-5-5');
+    expect(entrada.esforco).toBe('medium');
+    expect(validarEntradaSimulacao({ mensagens: ['Olá'] }).modelo_anthropic).toBeNull();
+    expect(() => validarEntradaSimulacao({ mensagens: ['Olá'], modelo_anthropic: 'claude-opus-5-5' })).toThrow('modelo_anthropic');
+    expect(() => validarEntradaSimulacao({ mensagens: ['Olá'], provedor: 'openai', modelo_anthropic: 'claude-haiku-5-5' })).toThrow('modelo_anthropic');
+    expect(() => validarEntradaSimulacao({ mensagens: ['Olá'], modelo_anthropic: 'claude-haiku-5-5', esforco: 'max' })).toThrow('esforco');
+    // Sem modelo_anthropic, o esforço segue exclusivo da OpenAI.
+    expect(() => validarEntradaSimulacao({ mensagens: ['Olá'], esforco: 'high' })).toThrow('esforco');
+  });
   it('preserva defaults do endpoint e aceita roteiro legado', () => {
     const entrada = validarEntradaSimulacao({ mensagens: ['Olá'] });
     expect(entrada.persona).toBe('campanha_direta');
