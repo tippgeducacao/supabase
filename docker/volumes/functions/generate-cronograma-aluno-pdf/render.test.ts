@@ -106,6 +106,8 @@ describe("renderCronogramaAlunoPdf (edge)", () => {
     expect(texto).toContain("INÍCIO DAS AULAS AO VIVO");
     expect(texto).toContain("04/08/2026");
     expect(texto).toContain("18 meses a partir da matrícula");
+    // aula extra pode cair em qualquer dia útil até quinta, inclusive segunda (diretor, 09/10/2026)
+    expect(texto).toContain("Poderá haver inclusão de aulas na segunda, terça, quarta ou quinta-feira.");
     expect(texto).toContain("EMENTA");
     expect(texto).toContain("MÓDULO AGOSTO 2026");
     expect(texto).toContain("PRÉ-ABERTURA (a confirmar)");

@@ -382,7 +382,7 @@ export function renderCronogramaAlunoPdf(deps: DepsPdf, entrada: EntradaCronogra
   doc.setFont("helvetica", "bold");
   doc.setFontSize(8);
   doc.text(
-    "Poderá haver inclusão de aulas na terça, quarta ou quinta-feira. Nossa prioridade é garantir a entrega dos conteúdos.",
+    "Poderá haver inclusão de aulas na segunda, terça, quarta ou quinta-feira. Nossa prioridade é garantir a entrega dos conteúdos.",
     marginX + 14,
     avY,
     { maxWidth: contentW - 24 },
