@@ -106,6 +106,8 @@ describe('mapa de carreira do Wellinton (07/10/2026)', () => {
     perguntas: [
       { ramo: '*', etapa: 'divide' as const, texto: 'autônomo ou contratado?', ordem: 1 },
       { ramo: '*', etapa: 'prioridade' as const, texto: 'por que agora?', ordem: 101 },
+      { ramo: '*', etapa: 'prioridade' as const, texto: 'é prioridade?', ordem: 102 },
+      { ramo: 'autonomo', etapa: 'carreira' as const, texto: 'mostra resultado com números?', ordem: 3 },
       { ramo: 'contratado', etapa: 'carreira' as const, texto: 'tem plano de carreira?', ordem: 1 },
       { ramo: 'autonomo', etapa: 'carreira' as const, texto: 'o que faz o produtor escolher você?', ordem: 1 },
       { ramo: 'autonomo', etapa: 'ganho' as const, texto: 'quanto cobra por visita?', ordem: 2 },
@@ -124,8 +126,8 @@ describe('mapa de carreira do Wellinton (07/10/2026)', () => {
     const r: any = respostaDoMapa(mapa, 'autonomo');
     expect(r.perguntas.map((p: any) => p.pergunta)).toEqual(['o que faz o produtor escolher você?', 'quanto cobra por visita?', 'por que agora?']);
     expect(r.ponte_convite).toBe('como a pós aumenta o seu resultado');
-    expect(r.como_usar).toContain('Faça as 2 primeiras');
-    expect(r.como_usar).toContain('1 de prioridade');
+    expect(r.reserva.map((p: any) => p.pergunta)).toEqual(['mostra resultado com números?', 'é prioridade?']);
+    expect(r.como_usar).toContain('não faça mais nenhuma');
   });
 
   it('vínculo indefinido devolve a pergunta que divide; estudante e outra área, null', async () => {

@@ -206,16 +206,22 @@ export function respostaDoMapa(mapa: MapaCarreira, ramo: string) {
         + 'registre o vínculo e chame a busca_carreira de novo com o ramo dele.',
     };
   }
-  const perguntas = mapa.perguntas
+  const doRamo = mapa.perguntas
     .filter((p) => p.etapa !== 'divide' && (p.ramo === r.ramo || p.ramo === '*'))
-    .sort((a, b) => (a.ordem ?? 0) - (b.ordem ?? 0))
-    .map((p) => ({ etapa: p.etapa, pergunta: p.texto }));
+    .sort((a, b) => (a.ordem ?? 0) - (b.ordem ?? 0));
+  // 09/10/2026: com a lista inteira (até 4 de prioridade) a IA fazia 6 perguntas seguidas a quem só dizia
+  // "não sei". Agora vão só as 3 que ela faz (2 de carreira/ganho + 1 de prioridade); o resto é reserva.
+  const carreira = doRamo.filter((p) => p.etapa !== 'prioridade');
+  const prioridade = doRamo.filter((p) => p.etapa === 'prioridade');
+  const fazer = [...carreira.slice(0, MAX_PERGUNTAS_CARREIRA), ...prioridade.slice(0, 1)];
+  const reserva = doRamo.filter((p) => !fazer.includes(p));
+  const fmt = (p: PerguntaMapa) => ({ etapa: p.etapa, pergunta: p.texto });
   return {
-    ramo: r.ramo, quem_e: r.nome, perguntas, ponte_convite: r.ponte_convite, argumento: r.argumento,
-    // 09/10/2026: com "não"/"não sei" a IA convidava depois de 1 pergunta e a prioridade nunca saía.
-    como_usar: `Perguntas de carreira, não técnicas. Faça as ${MAX_PERGUNTAS_CARREIRA} primeiras (etapa carreira ou ganho) e depois `
-      + '1 de prioridade, uma por mensagem, na ordem e do jeito que vieram, pulando a que ele já respondeu. "Não" ou "não sei" '
-      + 'também é resposta: siga para a próxima pergunta, sem convidar antes. Depois das três, o convite com a ponte. '
+    ramo: r.ramo, quem_e: r.nome, perguntas: fazer.map(fmt), reserva: reserva.map(fmt),
+    ponte_convite: r.ponte_convite, argumento: r.argumento,
+    como_usar: 'Perguntas de carreira, não técnicas. Faça as de "perguntas", uma por mensagem, na ordem e do jeito que vieram. '
+      + '"Não" ou "não sei" também é resposta: siga para a próxima, sem convidar antes. Se ele já tiver respondido uma delas, '
+      + 'troque pela primeira da "reserva" da mesma etapa. Feitas as de "perguntas", o convite com a ponte: não faça mais nenhuma. '
       + 'O argumento é interno: guia a conversa, não vai escrito.',
   };
 }
