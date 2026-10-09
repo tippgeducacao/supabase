@@ -59,8 +59,11 @@ export function instrucaoResultadoMaterial(status: StatusMaterial, reenvioAgenda
     // 19/09/2026 (decisão do usuário, vale para todos): "te enviei o cronograma", não "solicitei o
     // envio". "Enviei" é verdade (o WhatsApp aceitou); a entrega continua sem confirmação, por isso
     // a pergunta "chegou?" fica, e "entregue"/"está acima" seguem proibidos.
-    case 'aceito': return 'O WhatsApp aceitou o envio do cronograma, mas a entrega ainda NÃO está confirmada. Diga "te enviei o cronograma por aqui" e pergunte se chegou e abriu. Não diga que foi entregue nem que está acima. Aguarde a confirmação de acesso antes de retomar a agenda.';
-    case 'entregue': case 'lido': return 'O WhatsApp registrou a entrega desta mensagem. Isso NÃO comprova abertura do PDF. Diga "te enviei o cronograma por aqui" e pergunte se ele conseguiu abrir; se ele disser que não recebeu ou pedir novamente, reenvie pela ferramenta, sem contradizê-lo. Aguarde a confirmação de acesso antes de retomar a agenda.';
+    // 09/10/2026: "aguarde a confirmação de acesso antes de retomar a agenda" segurava o convite e
+    // a conversa morria no "chegou?" (Luna: 22 aprovados, 1 agendamento em 08/10). Com a
+    // compatibilidade aprovada, o envio já leva os horários.
+    case 'aceito': return 'O WhatsApp aceitou o envio do cronograma, mas a entrega ainda NÃO está confirmada. Diga "te enviei o cronograma por aqui". Se a compatibilidade já está APROVADA nesta conversa, na mesma mensagem chame consulta_disponibilidade e ofereça até três horários reais pra conversa com o monitor, sem esperar ele confirmar que abriu; sem APROVADO, pergunte se chegou e abriu. Não diga que foi entregue nem que está acima.';
+    case 'entregue': case 'lido': return 'O WhatsApp registrou a entrega desta mensagem. Isso NÃO comprova abertura do PDF. Diga "te enviei o cronograma por aqui". Se a compatibilidade já está APROVADA nesta conversa, na mesma mensagem chame consulta_disponibilidade e ofereça até três horários reais pra conversa com o monitor; sem APROVADO, pergunte se ele conseguiu abrir. Se ele disser que não recebeu ou pedir novamente, reenvie pela ferramenta, sem contradizê-lo.';
     case 'falhou': return 'O cronograma NÃO foi enviado nesta tentativa. Não diga que enviou ou que está acima. '
       + (reenvioAgendado
         ? 'Uma nova tentativa ficou registrada. Diga de forma natural: "O envio do cronograma pelo WhatsApp não está funcionando agora. Assim que normalizar, tento enviar novamente pra você." Não dê prazo nem garanta entrega; a fila tenta novamente enquanto a janela permitir.'
