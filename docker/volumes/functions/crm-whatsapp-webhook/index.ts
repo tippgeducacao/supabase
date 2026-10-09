@@ -980,8 +980,15 @@ Deno.serve(async (req) => {
 
           // ── Baixa mídia inbound da Meta e grava no Storage ──────────────
           // Em QUALQUER erro: console.log + segue, inserindo a mensagem sem anexos.
+          // ⚠️ Até 3 tentativas: falha transitória (Graph/lookaside/Storage) era tentativa
+          // única e o áudio virava "[áudio]" mudo no SAC — 08/10/2026: 6 áudios + 2 docs em
+          // 3 números. Se ainda assim falhar, o media_id vai pro metadata (`midia_pendente`):
+          // a Meta guarda a mídia ~30 dias e, sem o id, o arquivo era irrecuperável.
           let anexos: any[] = [];
+          let midiaFalha: string | null = null;
           if (mediaInbound?.id && accountAccessToken) {
+           for (let tentativa = 1; tentativa <= 3 && anexos.length === 0; tentativa++) {
+            if (tentativa > 1) await new Promise((r) => setTimeout(r, tentativa === 2 ? 400 : 1200));
             try {
               // a) get media URL
               const metaUrlRes = await fetch(`https://graph.facebook.com/v21.0/${mediaInbound.id}`, {
@@ -992,12 +999,20 @@ Deno.serve(async (req) => {
               const mime: string = metaUrlJson?.mime_type || mediaInbound.mime_type || "application/octet-stream";
               if (mediaUrl && !isMetaMediaHost(mediaUrl)) {
                 console.warn("[crm-whatsapp-webhook] mediaUrl com host não permitido, ignorando (anti-SSRF):", mediaUrl);
+                midiaFalha = "host_nao_permitido";
+                break;
               } else if (mediaUrl) {
                 // b) download bytes (com token)
                 const binRes = await fetch(mediaUrl, {
                   headers: { Authorization: `Bearer ${accountAccessToken}` },
                 });
+                if (!binRes.ok) {
+                  // Sem isso o corpo de erro da Meta subia pro Storage como se fosse o áudio.
+                  await binRes.body?.cancel().catch(() => {});
+                  throw new Error(`download HTTP ${binRes.status}`);
+                }
                 const bin = new Uint8Array(await binRes.arrayBuffer());
+                if (bin.length === 0) throw new Error("download vazio");
                 // c) upload to storage
                 const ext = (mime.includes("ogg") ? "ogg" :
                   mime.includes("mpeg") && mime.includes("audio") ? "mp3" :
@@ -1012,7 +1027,7 @@ Deno.serve(async (req) => {
                   contentType: mime, upsert: false,
                 });
                 if (stErr) {
-                  console.log("[crm-whatsapp-webhook] storage upload inbound fail:", stErr.message);
+                  throw new Error(`storage upload: ${stErr.message}`);
                 } else {
                   const pub = admin.storage.from("whatsapp-anexos").getPublicUrl(path).data.publicUrl;
                   anexos = [{
@@ -1025,14 +1040,29 @@ Deno.serve(async (req) => {
                   }];
                 }
               } else {
-                console.log("[crm-whatsapp-webhook] inbound media sem URL:", JSON.stringify(metaUrlJson));
+                throw new Error(`sem URL (HTTP ${metaUrlRes.status}): ${JSON.stringify(metaUrlJson).slice(0, 200)}`);
               }
             } catch (mediaErr: any) {
-              console.log("[crm-whatsapp-webhook] erro download mídia inbound:", mediaErr?.message);
+              midiaFalha = mediaErr?.message ?? String(mediaErr);
+              console.log(
+                `[crm-whatsapp-webhook] erro download mídia inbound (tentativa ${tentativa}/3, ${mediaInbound.id}):`,
+                midiaFalha,
+              );
             }
+           }
           } else if (mediaInbound?.id && !accountAccessToken) {
+            midiaFalha = "sem_access_token";
             console.log("[crm-whatsapp-webhook] mídia inbound sem access_token, inserindo sem anexos:", mediaInbound.id);
           }
+          const midiaPendente = mediaInbound?.id && anexos.length === 0
+            ? {
+                id: mediaInbound.id,
+                tipo: mediaInbound.tipo,
+                mime_type: mediaInbound.mime_type ?? null,
+                filename: mediaInbound.filename ?? null,
+                motivo: midiaFalha,
+              }
+            : null;
 
           // ── Reply/citação (WhatsApp "responder marcando a mensagem") ─────
           // A Meta manda o wamid da mensagem CITADA em msg.context.id, mas o texto do
@@ -1141,6 +1171,7 @@ Deno.serve(async (req) => {
               original_type: msgType,
               timestamp: msg?.timestamp,
               ...(carimbo.reentrega ? { chegou_em: carimbo.chegouEm, atraso_s: carimbo.atrasoS } : {}),
+              ...(midiaPendente ? { midia_pendente: midiaPendente } : {}),
               // CLIQUE-PARA-WHATSAPP: o anúncio que abriu a conversa. Guardar o
               // bloco cru aqui é o backup — a atribuição de verdade é a linha em
               // `crm_whatsapp_referral`, gravada logo abaixo.
