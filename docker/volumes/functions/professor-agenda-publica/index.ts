@@ -29,6 +29,14 @@ import { ocupadosNoGoogle, vagaOcupada, type Intervalo } from '../_shared/google
  * responde Lattes/LinkedIn + experiência e confirma. Só então a reunião vira `agendada` e
  * o evento com Meet vai para a agenda Google da secretaria. A confirmação SEMPRE reconfere
  * o Google (vaga fixa ou personalizado); Google sem resposta ⇒ não confirma.
+ *
+ * EXCEÇÃO — horário marcado POR CIMA (10/10/2026): no personalizado o SDR pode forçar um
+ * horário que encavala (a tela mostra o que é antes). Aí `forcado = true` e a confirmação
+ * NÃO reconfere o Google: recusar com "horário indisponível" desfaria o que foi decidido.
+ * O evento nasce em cima do outro e a descrição avisa a secretaria.
+ *
+ * VENCIMENTO (10/10/2026): o convite vale 24 h (ou até o horário combinado). Quem decide é
+ * o banco (`reuniao_professor_convite_carregar/_confirmar` → `expirada`); aqui só se repassa.
  */
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
@@ -213,7 +221,7 @@ Deno.serve(async (req) => {
       // usuário: "tem que verificar isso sempre antes de agendar") — vale também para o
       // horário personalizado. Entre o convite e a confirmação ela pode ter marcado outra
       // coisa. Google sem resposta ⇒ não confirma (o professor tenta de novo depois).
-      if (c.situacao === 'pendente') {
+      if (c.situacao === 'pendente' && c.forcado !== true) {
         const { data: cfg } = await admin
           .from('reuniao_professor_config').select('calendar_integration_id').eq('id', true).maybeSingle();
         const google = await ocupadosNoGoogle(admin, cfg?.calendar_integration_id ?? null, c.inicio, c.fim);
@@ -248,7 +256,8 @@ Deno.serve(async (req) => {
         respostas: (r.respostas ?? []) as Array<{ pergunta: string; resposta: string }>,
         observacoes: r.observacoes ?? null,
         rodape: `Convite de ${r.sdr_nome ?? 'SDR'} pelo atendimento — horário combinado com o professor`
-          + (r.personalizado ? ' (horário PERSONALIZADO, combinado com o Pedagógico).' : '.'),
+          + (r.personalizado ? ' (horário PERSONALIZADO, combinado com o Pedagógico).' : '.')
+          + (r.forcado === true ? '\n⚠️ Marcada POR CIMA de outro compromisso deste horário — quem marcou viu o que encavalava e confirmou assim mesmo.' : ''),
       });
       console.log(`[professor-agenda-publica] convite ${r.reuniao_id} confirmado para ${horaBR(r.inicio)} (de ${r.sdr_nome})`);
       return json({ ok: true, reuniao: { inicio: r.inicio, fim: r.fim, link: g.link, convite_email: g.conviteEmail } });
