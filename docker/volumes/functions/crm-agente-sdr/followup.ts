@@ -155,8 +155,8 @@ export async function selecionarCandidatos(supabase: any): Promise<any[]> {
   const agora = Date.now();
   const maisNovoQue = new Date(agora - JANELA_ABERTA_MIN * 60_000).toISOString();   // < 24h
   const maisVelhoQue = new Date(agora - CADENCIA_MIN[0] * 60_000).toISOString();    // >= 15min
-  // O consumidor já respeita o CRM V2. A mesma exclusão precisa acontecer
-  // antes do limite, senão dez contatos bloqueados monopolizam a varredura.
+  // 10/10/2026: a RPC deixou de excluir contato com oportunidade em funil V2 (a regra
+  // segurava 83% dos leads). O V2 segue valendo só para a esteira de template.
   const { data, error } = await supabase.rpc('crm_sdr_followup_candidatos', {
     p_mais_novo_que: maisNovoQue, p_mais_velho_que: maisVelhoQue, p_limite: 300,
   });
