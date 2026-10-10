@@ -704,7 +704,7 @@ export async function enviar(
     return saida(Boolean(texto));
   }
   if (RE_RETENCAO.test(texto)) {
-    await atualizarLead(supabase, e.remotejid, { followup_ativado: false });
+    await atualizarLead(supabase, e.remotejid, { followup_ativado: false, followup_desligado_motivo: 'retencao_pendente' });
     tel.registrar('esteiras_suspensas', { motivo: 'retencao_pendente' });
   }
   const comPresente = comPresenteNaDespedida(texto, e.encerramento, conversaTexto(messages), e.estaNaEscola);

@@ -897,7 +897,7 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
   // próxima turma" e um regex frouxo desligaria a esteira de lead normal.
   const suspenderEsteirasSeRetencao = async (texto: string) => {
     if (!RE_RETENCAO.test(texto)) return;
-    await atualizarLead(supabase, remotejid, { followup_ativado: false });
+    await atualizarLead(supabase, remotejid, { followup_ativado: false, followup_desligado_motivo: 'retencao_pendente' });
     tel.registrar('esteiras_suspensas', { motivo: 'retencao_pendente' });
   };
 

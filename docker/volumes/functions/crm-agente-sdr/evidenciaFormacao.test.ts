@@ -176,7 +176,7 @@ describe('pausa_ia no executor real, com banco e rede isolados', () => {
     const resultado = await executarTool(banco, pedido(), contexto([lead('Nunca cursei faculdade.')]));
     expect(resultado).toMatchObject({ status: 'pausado', motivo_saida: 'sem_graduacao', arquivado: true });
     expect(banco.rpc.mock.calls.map(([nome]) => nome)).toEqual(['crm_set_pausa_ia', 'crm_agente_arquivar_desinteresse']);
-    expect(banco.atualizar).toHaveBeenCalledWith({ followup_ativado: false });
+    expect(banco.atualizar).toHaveBeenCalledWith({ followup_ativado: false, followup_desligado_motivo: 'pausa_ia' });
     expect(banco.escrita).toHaveBeenCalledTimes(1);
   });
 

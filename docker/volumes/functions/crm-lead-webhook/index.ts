@@ -1825,6 +1825,8 @@ Deno.serve(async (req) => {
           // Só liga o agente quando a ação 'Enviar template WhatsApp' pediu (ativar_ia).
           iniciar_atendimento: acaoAtivarIa,
           followup_ativado: acaoAtivarIa,
+          // Sem a ação de ativar a IA o lead nasce fora da cadência; o gatilho guarda o porquê.
+          ...(acaoAtivarIa ? {} : { followup_desligado_motivo: "criado_sem_ativar_ia" }),
         });
       } else {
         // Lead JÁ EXISTIA: preenche os campos VAZIOS do registro do agente (fill-if-empty,

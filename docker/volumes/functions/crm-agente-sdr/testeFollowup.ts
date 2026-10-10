@@ -107,7 +107,7 @@ export async function executarTesteFollowup(supabase: any, body: unknown) {
     return { ok: true, teste_id: testeId, resultados };
   } finally {
     try {
-      if (restaurar) await atualizarLead(supabase, remotejid, { followup_ativado: false });
+      if (restaurar) await atualizarLead(supabase, remotejid, { followup_ativado: false, followup_desligado_motivo: 'ensaio_followup' });
     } finally {
       await supabase.from('crm_agente_sdr_lock').delete().eq('remotejid', remotejid);
     }

@@ -461,7 +461,7 @@ export async function processarFollowupLead(supabase: any, leadSel: any, stageSe
     // momento é o pior movimento possível.
     const history = await carregarHistorico(supabase, remotejid);
     if (retencaoPendente(history)) {
-      await atualizarLead(supabase, remotejid, { followup_ativado: false });
+      await atualizarLead(supabase, remotejid, { followup_ativado: false, followup_desligado_motivo: 'retencao_pendente' });
       tel.registrar('followup_pulado', { motivo: 'retencao_pendente', stage, esteiras: 'desligadas' });
       return false;
     }

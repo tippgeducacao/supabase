@@ -1280,7 +1280,7 @@ async function pausaIa(supabase: any, input: any, ctx: CtxConversa, toolUseId: s
   });
   if (error) throw new Error(`crm_set_pausa_ia: ${error.message}`);
   // n8n também desligava o follow-up automático ao pausar.
-  try { await atualizarLead(supabase, ctx.remotejid, { followup_ativado: false }); } catch { /* não bloqueia */ }
+  try { await atualizarLead(supabase, ctx.remotejid, { followup_ativado: false, followup_desligado_motivo: 'pausa_ia' }); } catch { /* não bloqueia */ }
 
   // Opt-out de verdade: arquiva (resolve as conversas do SAC junto) + marca
   // nao_perturbe. Best-effort — falha aqui nunca desfaz a pausa que já valeu.
@@ -1398,7 +1398,7 @@ async function temporizadorProximaTurma(supabase: any, input: any, ctx: CtxConve
     p_motivo: input.motivo ?? 'Lead pediu recontato na próxima turma',
   });
   if (ePausa) console.error(`[crm-agente-sdr] pausa pós-timer falhou: ${ePausa.message}`);
-  try { await atualizarLead(supabase, ctx.remotejid, { followup_ativado: false }); } catch { /* não bloqueia */ }
+  try { await atualizarLead(supabase, ctx.remotejid, { followup_ativado: false, followup_desligado_motivo: 'timer_proxima_turma' }); } catch { /* não bloqueia */ }
 
   const d = (data ?? {}) as Record<string, any>;
   if (d.ok === false) {
