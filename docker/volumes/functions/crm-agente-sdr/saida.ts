@@ -492,6 +492,30 @@ async function enviarChunk(ctx: CtxConversa, conteudo: string, confirmarAceite =
   return { ok: true, status: res.status };
 }
 
+// Figurinha avulsa (toque de 37 min do follow-up, followupFigurinha.ts): mesmo
+// crm-whatsapp-send do texto, que sobe o webp na Meta e manda por media_id.
+export async function enviarFigurinha(ctx: CtxConversa, url: string): Promise<{ ok: boolean; erro?: string }> {
+  const res = await fetch(SEND_URL, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${SERVICE_ROLE}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      telefone: ctx.telefone,
+      tipo: 'sticker',
+      origem: 'ia',
+      anexo_url: url,
+      mime_type: 'image/webp',
+      filename: 'figurinha.webp',
+      wa_account_id: ctx.waAccountId,
+      lead_id: ctx.leadId,
+      oportunidade_id: ctx.oportunidadeId,
+    }),
+  });
+  if (res.ok) return { ok: true };
+  const corpo = await res.text();
+  console.error(`[crm-agente-sdr] figurinha: crm-whatsapp-send HTTP ${res.status}: ${corpo}`);
+  return { ok: false, erro: `HTTP ${res.status}: ${corpo.slice(0, 500)}` };
+}
+
 // Envia a resposta completa: fraciona, espera o "tempo de digitação" e manda.
 // `pausada` (opcional): rechecagem FRESCA da pausa da IA — os chunks pingam ao longo
 // de 2-12s CADA, então entre um balão e outro o atendente pode ter pausado a IA. Antes

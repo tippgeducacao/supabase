@@ -52,11 +52,12 @@ import {
   MARCADOR_FOLLOWUP,
   type Msg,
 } from './historico.ts';
-import { enviarResposta } from './saida.ts';
+import { enviarFigurinha, enviarResposta } from './saida.ts';
 import type { CtxConversa } from './tools.ts';
 import { criarTelemetria, resumir, type Telemetria } from './eventos.ts';
 import { contaDoLead, dadosDaConta } from './conta.ts';
-import { chaveJanelaAberta, enfileirarFollowups } from './fila.ts';
+import { chaveFigurinha, chaveJanelaAberta, enfileirarFollowups } from './fila.ts';
+import { FIGURINHA_FOLLOWUP_URL, figurinhaNaJanela, motivoSemFigurinha } from './followupFigurinha.ts';
 
 // Cadência da JANELA ABERTA — 7 toques, em minutos desde a última msg do lead.
 const CADENCIA_MIN = [15, 60, 120, 240, 420, 720, 1380];
@@ -631,6 +632,22 @@ export async function rodarEsteiraFollowup(
   }
 
   if (opcoes?.enfileirar) {
+    // Figurinha dos 37 min: fila própria de candidatos, fora do teto dos toques de texto.
+    // A chave única faz cada silêncio do lead entrar uma vez só; o consumidor decide.
+    const figurinhas = await enfileirarFollowups(supabase, candidatos
+      .filter((lead) => {
+        const ts = Date.parse(lead.timestamp_mensagem ?? '');
+        return Number.isFinite(ts) && figurinhaNaJanela((agora - ts) / 60_000, stageDoFollowUp(lead.follow_up));
+      })
+      .map((lead) => ({
+        tipo: 'janela_aberta' as const,
+        remotejid: String(lead.remotejid),
+        toque: 0,
+        referencia_em: new Date(Date.parse(lead.timestamp_mensagem)).toISOString(),
+        dedupe_key: chaveFigurinha(lead.remotejid, lead.timestamp_mensagem),
+        payload: { figurinha: true },
+        prioridade: 10,
+      })));
     const enfileirados = await enfileirarFollowups(supabase, devidos.map(({ lead, stage }) => ({
       tipo: 'janela_aberta' as const,
       remotejid: String(lead.remotejid),
@@ -645,6 +662,7 @@ export async function rodarEsteiraFollowup(
       candidatos: candidatos.length,
       devidos: devidos.length,
       enfileirados,
+      figurinhas,
       modo: 'fila',
     }, Date.now() - inicio);
     return { candidatos: candidatos.length, devidos: devidos.length, enviados: 0, enfileirados };
@@ -673,4 +691,66 @@ export async function processarFollowupEnfileirado(
   stage: number,
 ): Promise<boolean> {
   return processarFollowupLead(supabase, { remotejid }, stage);
+}
+
+// ── figurinha dos 37 min (followupFigurinha.ts) ─────────────────────────────
+// Consumidor do job `payload.figurinha`. Relê o lead sob o mesmo lock do inbound e do
+// follow-up de texto. 'retry' só quando o lead está ocupado; todo o resto é definitivo
+// e fica registrado, para nenhuma saída ser muda.
+export async function processarFigurinhaFollowup(
+  supabase: any,
+  remotejid: string,
+  referenciaEm: string,
+): Promise<'enviado' | 'pulado' | 'retry'> {
+  if (!(await lockClaim(supabase, remotejid))) return 'retry';
+  const tel = criarTelemetria(supabase, remotejid);
+  const pular = (motivo: string): 'pulado' => {
+    tel.registrar('followup_figurinha_pulada', { motivo });
+    return 'pulado';
+  };
+  try {
+    if (dentroDaPausaNoturna()) return pular('pausa_noturna');
+    if (await bufferTemMensagem(supabase, remotejid)) return pular('buffer_inbound_ativo');
+    const lead = await buscarLead(supabase, remotejid);
+    if (!lead) return pular('lead_ausente');
+    const ts = Date.parse(lead.timestamp_mensagem ?? '');
+    const referencia = Date.parse(referenciaEm);
+    // O lead respondeu depois que o job nasceu: a figurinha era do silêncio anterior.
+    if (!Number.isFinite(ts) || !Number.isFinite(referencia) || Math.abs(ts - referencia) > 1000) return pular('lead_respondeu');
+    const history = await carregarHistorico(supabase, remotejid);
+    const motivo = motivoSemFigurinha({
+      lead,
+      elapsedMin: (Date.now() - ts) / 60_000,
+      toquesFeitos: stageDoFollowUp(lead.follow_up),
+      enviadosNoCiclo: contarTentativasDoCiclo(history),
+    });
+    if (motivo) return pular(motivo);
+
+    const telefone = String(remotejid).split('@')[0];
+    // Mesma regra do texto livre: sai pelo número onde a janela de 24h do lead está aberta.
+    const contaLead = await contaDoLead(supabase, telefone, { direcao: 'inbound' });
+    if (!contaLead) return pular('sem_conta_do_inbound');
+
+    // Marca ANTES de enviar: no pior caso o lead fica sem figurinha, nunca com duas.
+    const marcada = await registrarNaJornada(supabase, telefone, j => ({
+      ...j, figurinha_followup: { enviado_em: new Date().toISOString(), referencia: new Date(ts).toISOString() },
+    }));
+    if (!marcada) return pular('jornada_ausente');
+    const envio = await enviarFigurinha(
+      { remotejid, telefone, waAccountId: contaLead, leadId: null, oportunidadeId: null },
+      FIGURINHA_FOLLOWUP_URL,
+    );
+    if (!envio.ok) {
+      tel.registrar('followup_figurinha_falhou', { conta: contaLead }, undefined, envio.erro);
+      return 'pulado';
+    }
+    tel.registrar('followup_figurinha_enviada', { conta: contaLead });
+    return 'enviado';
+  } catch (e) {
+    tel.registrar('erro', { onde: 'processarFigurinhaFollowup', remotejid }, undefined, (e as Error).message);
+    console.error(`[crm-agente-sdr][followup] figurinha ${remotejid}:`, e);
+    return 'pulado';
+  } finally {
+    await lockSoltar(supabase, remotejid);
+  }
 }

@@ -6,7 +6,7 @@
 
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3';
-import { processarFollowupEnfileirado } from '../crm-agente-sdr/followup.ts';
+import { processarFigurinhaFollowup, processarFollowupEnfileirado } from '../crm-agente-sdr/followup.ts';
 import { processarFollowupTemplateEnfileirado } from '../crm-agente-sdr/followup-template.ts';
 import {
   concorrenciaWorker,
@@ -141,6 +141,17 @@ async function falhar(job: JobFilaFollowup, workerId: string, erro: string) {
 async function processar(job: JobFilaFollowup, workerId: string): Promise<'enviado' | 'pulado' | 'retry'> {
   try {
     const payload = job.payload ?? {};
+    // Figurinha dos 37 min: toque à parte (toque 0), com desfecho próprio. Não passa por
+    // jobFicouObsoleto, que compara o estágio do lead com o toque do job.
+    if (job.tipo === 'janela_aberta' && payload.figurinha === true) {
+      const desfecho = await processarFigurinhaFollowup(supabase, job.remotejid, job.referencia_em);
+      if (desfecho === 'retry') {
+        await falhar(job, workerId, 'Lead ocupado; a figurinha será reavaliada no próximo retry.');
+        return 'retry';
+      }
+      await concluir(job, workerId, { resultado: desfecho === 'enviado' ? 'figurinha_enviada' : 'figurinha_pulada' });
+      return desfecho;
+    }
     const ok = job.tipo === 'janela_aberta'
       ? await processarFollowupEnfileirado(supabase, job.remotejid, Number(payload.stage ?? job.toque))
       : await processarFollowupTemplateEnfileirado(supabase, {

@@ -42,6 +42,8 @@ export type Jornada = {
   /** Perguntas de carreira efetivamente enviadas no piloto, por curso. Não conta geração falha. */
   // Nome preservado: registra também os IDs retomada:* de agenda/perguntas gerais.
   followup_carreira?: { escopo: string; pergunta_id: string; enviado_em: string }[];
+  /** Última figurinha do toque de 37 min (followupFigurinha.ts). Trava a repetição por 7 dias. */
+  figurinha_followup?: { enviado_em: string; referencia: string };
   cronograma?: {
     pedido_em?: string;
     pedido_por?: 'botao' | 'texto';

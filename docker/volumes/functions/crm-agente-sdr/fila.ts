@@ -36,6 +36,11 @@ export function chaveJanelaAberta(remotejid: string, stage: number, referencia: 
   return `janela_aberta:${remotejid}:${stage}:${referenciaNormalizada(referencia)}`;
 }
 
+// Uma figurinha por silêncio do lead: a referência é a última mensagem dele.
+export function chaveFigurinha(remotejid: string, referencia: unknown): string {
+  return `figurinha:${remotejid}:${referenciaNormalizada(referencia)}`;
+}
+
 export function chaveTemplate(remotejid: string, toque: number, referencia: unknown): string {
   return `template:${remotejid}:${toque}:${referenciaNormalizada(referencia)}`;
 }
