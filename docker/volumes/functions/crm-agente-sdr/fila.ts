@@ -84,3 +84,18 @@ export async function enfileirarFollowups(supabase: any, itens: ItemFilaFollowup
   if (error) throw new Error(`enfileirar follow-ups: ${error.message}`);
   return data?.length ?? 0;
 }
+
+// O teto conta o que ENTROU na fila, não o que foi oferecido. Item que já está lá (chave
+// repetida) não gasta vaga. Com o teto antes da deduplicação, 15 leads de teste que nunca
+// consumiam o toque ocuparam as 10 vagas de todo tick e a esteira de janela aberta ficou
+// sem enfileirar ninguém (09 e 10/10/2026). Mantém a ordem recebida.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function enfileirarAteTeto(supabase: any, itens: ItemFilaFollowup[], teto: number): Promise<number> {
+  let novos = 0;
+  for (let i = 0; i < itens.length && novos < teto;) {
+    const fatia = itens.slice(i, i + (teto - novos));
+    novos += await enfileirarFollowups(supabase, fatia);
+    i += fatia.length;
+  }
+  return novos;
+}

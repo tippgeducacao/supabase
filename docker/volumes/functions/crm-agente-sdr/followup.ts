@@ -56,7 +56,7 @@ import { enviarFigurinha, enviarResposta } from './saida.ts';
 import type { CtxConversa } from './tools.ts';
 import { criarTelemetria, resumir, type Telemetria } from './eventos.ts';
 import { contaDoLead, dadosDaConta } from './conta.ts';
-import { chaveFigurinha, chaveJanelaAberta, enfileirarFollowups } from './fila.ts';
+import { chaveFigurinha, chaveJanelaAberta, enfileirarAteTeto, enfileirarFollowups } from './fila.ts';
 import { FIGURINHA_FOLLOWUP_URL, figurinhaNaJanela, motivoSemFigurinha } from './followupFigurinha.ts';
 
 // Cadência da JANELA ABERTA — 7 toques, em minutos desde a última msg do lead.
@@ -481,8 +481,11 @@ export async function processarFollowupLead(supabase: any, leadSel: any, stageSe
     if (provedor) {
       // A conta escolhida continua sendo a do inbound; não abrir janela nem trocar
       // número para conseguir enviar um follow-up. Ausência da conta cancela o piloto.
-      if (!contaLead) return false;
-      contextoPiloto = '\n\nDADOS JÁ COLETADOS (não perguntar de novo): ' + JSON.stringify(lead.jornada?.coleta ?? {});
+      if (!contaLead) {
+        tel.registrar('followup_pulado', { motivo: 'sem_conta_do_inbound', stage });
+        return false;
+      }
+      contextoPiloto ='\n\nDADOS JÁ COLETADOS (não perguntar de novo): ' + JSON.stringify(lead.jornada?.coleta ?? {});
       if (lead.contexto_campanha?.persona === 'aula') {
         const aula = await carregarAulaParaFollowup(supabase, lead);
         if (!aula) { tel.registrar('followup_pulado', { motivo: 'aula_sem_contexto' }); return false; }
@@ -628,7 +631,9 @@ export async function rodarEsteiraFollowup(
     const elapsedMin = (agora - ts) / 60_000;
     const stage = proximoToqueDevido(elapsedMin, stageDoFollowUp(lead.follow_up));
     if (stage !== null) devidos.push({ lead, stage });
-    if (devidos.length >= cap) break;
+    // Na fila o teto vale para os jobs NOVOS (enfileirarAteTeto), não para os devidos:
+    // quem já está enfileirado e não consome o toque não pode gastar as vagas do tick.
+    if (!opcoes?.enfileirar && devidos.length >= cap) break;
   }
 
   if (opcoes?.enfileirar) {
@@ -648,7 +653,7 @@ export async function rodarEsteiraFollowup(
         payload: { figurinha: true },
         prioridade: 10,
       })));
-    const enfileirados = await enfileirarFollowups(supabase, devidos.map(({ lead, stage }) => ({
+    const enfileirados = await enfileirarAteTeto(supabase, devidos.map(({ lead, stage }) => ({
       tipo: 'janela_aberta' as const,
       remotejid: String(lead.remotejid),
       toque: stage,
@@ -657,7 +662,7 @@ export async function rodarEsteiraFollowup(
       payload: { stage },
       // A janela aberta expira em 24h; ela tem precedência sobre templates no consumo.
       prioridade: 10,
-    })));
+    })), cap);
     telSweep.registrar('followup_tick', {
       candidatos: candidatos.length,
       devidos: devidos.length,
