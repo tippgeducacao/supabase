@@ -7,6 +7,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { extrairReferral } from "../_shared/waProviders.ts";
 import { carimboInbound } from "./carimbo.ts";
 import { prepararPortfolioInstagram } from "./portfolioInstagram.ts";
+import { alertaDeFalhaDeConta, statusProvaEntrega, TIPO_ALERTA_ENTREGA, type AlertaEntrega } from "./alertaEntrega.ts";
 import { CABECALHO_SEGREDO_N8N, carregarDesvioN8n, vaiParaN8n } from "../_shared/desvioN8n.ts";
 
 declare const EdgeRuntime: { waitUntil?: (p: Promise<unknown>) => void } | undefined;
@@ -1401,10 +1402,18 @@ Deno.serve(async (req) => {
 
         // ── Status updates (delivered, read, failed) ─────────────────────
         const statuses = value?.statuses ?? [];
+        let falhaDeConta: AlertaEntrega | null = null;
+        let errosDaFalha: unknown = null;
+        let entregou = false;
         for (const st of statuses) {
           const waMsgId = st?.id;
           const statusName = st?.status;
           if (!waMsgId || !statusName) continue;
+          if (statusName === "failed" && !falhaDeConta) {
+            falhaDeConta = alertaDeFalhaDeConta(st?.errors);
+            if (falhaDeConta) errosDaFalha = st.errors;
+          }
+          if (statusProvaEntrega(statusName)) entregou = true;
 
           const statusMap: Record<string, string> = {
             sent: "sent",
@@ -1430,6 +1439,36 @@ Deno.serve(async (req) => {
           } else {
             processedStatuses++;
           }
+        }
+
+        // Entrega bloqueada na CONTA (131042 pagamento, 131031/368 bloqueio): acende o alerta
+        // crítico que vira a faixa vermelha do CRM. A Meta aceita o envio e só recusa aqui,
+        // então sem isso o disparo parece ter saído (ver alertaEntrega.ts). Uma entrega
+        // depois disso prova que a conta voltou e fecha o alerta sozinho.
+        try {
+          if (falhaDeConta) {
+            const { error } = await admin.rpc("crm_whatsapp_alerta_registrar", {
+              p_wa_account_id: accountId,
+              p_tipo: TIPO_ALERTA_ENTREGA,
+              p_severidade: "critico",
+              p_titulo: falhaDeConta.titulo,
+              p_descricao: falhaDeConta.descricao,
+              p_evento: falhaDeConta.codigo,
+              p_referencia: falhaDeConta.codigo,
+              p_dados: { errors: errosDaFalha },
+            });
+            if (error) console.error("[crm-whatsapp-webhook] alerta de entrega erro:", error.message);
+            else processedAlertas++;
+          } else if (entregou) {
+            await admin
+              .from("crm_whatsapp_alertas")
+              .update({ resolvido: true, resolvido_em: new Date().toISOString() })
+              .eq("wa_account_id", accountId)
+              .eq("tipo", TIPO_ALERTA_ENTREGA)
+              .eq("resolvido", false);
+          }
+        } catch (e) {
+          console.error("[crm-whatsapp-webhook] alerta de entrega erro:", e instanceof Error ? e.message : String(e));
         }
 
         // Só agora o pipeline do pedagógico — com a mensagem já gravada aqui (ver o
