@@ -49,7 +49,7 @@ import { AVISO_CONSULTA_REPETIDA, MemoriaDeConsultas } from './consultaRepetida.
 import { alertaFatoSemFonte } from './fatoSemFonte.ts';
 import { alertaSaudacao, garantirSaudacao } from './saudacao.ts';
 import { comContinuidadeWebchat } from './continuidadeWebchat.ts';
-import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoCurso, notaDoNome, renderPrompt } from './contexto.ts';
+import { carregarDiasSemAtendimento, encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoCurso, notaDoNome, renderPrompt } from './contexto.ts';
 import { atualizarAgenteComRatchet, atualizarLead, avaliarFimDoHistorico, buscarLead, carregarHistorico, comEntradaPendente, criarLead, excluirDadosLead, gravarMensagem, limparParaRouter, sanitizarHistorico } from './historico.ts';
 import { carregarTools, chamarAgentePrincipal, chamarRouter, provedorOpenai, type MetadadosRespostaRouter, type ProvedorIA } from './agente.ts';
 import { type CtxConversa, executarTool, montarToolResults } from './tools.ts';
@@ -514,7 +514,7 @@ async function prepararAntesDoRouter(remotejid: string, itensDoLote: any[], tel:
   const reunioesDoLead = await carregarReunioesDoLead(supabase, telefone, ctx.leadId);
   const marcadaNaAgendaAgora = reuniaoMarcadaNaAgenda(reunioesDoLead, agoraDaRodada);
   const notaReunioes = notaDasReunioes(reunioesDoLead, agoraDaRodada);
-  const contextoTemporal = montarContextoTemporal() + notaDoNome(vars.nome) + notaDoCurso(vars.curso_interesse_original)
+  const contextoTemporal = montarContextoTemporal(await carregarDiasSemAtendimento(supabase)) + notaDoNome(vars.nome) + notaDoCurso(vars.curso_interesse_original)
     + (provedor?.nome === 'openai' ? contextoEspecialidadeCannabis(vars.curso_interesse_original) : '')
     + notaReunioes;
 
@@ -636,7 +636,7 @@ async function definirAgente(pre: PreRouter, provedor: ProvedorIA | null, tel: T
   if (aberturaControlada) contextoEfetivo += '\n\n' + NOTA_ABERTURA_CONTROLADA;
   // Canário (19/09/2026): o fecho do convite ("ainda hoje" × "amanhã cedo") vem do relógio, não do
   // modelo — vai junto do contexto temporal, fora do cache, relido a cada volta.
-  if (ctx.ficha && !aulaPiloto) contextoEfetivo = `${contextoEfetivo}\n\n${blocoConviteAgenda()}`;
+  if (ctx.ficha && !aulaPiloto) contextoEfetivo = `${contextoEfetivo}\n\n${blocoConviteAgenda(undefined, await carregarDiasSemAtendimento(supabase))}`;
   // Na v2 a missão da aula vem do contextoAulaV2 (sem a ficha antiga da pós), montado mais abaixo.
   if (aulaPiloto && !usarAulaV2) contextoEfetivo += contextoAulaPiloto(aulaDaCampanha);
   if (persona === 'aula' && campanha?.origem === 'convite_base') {

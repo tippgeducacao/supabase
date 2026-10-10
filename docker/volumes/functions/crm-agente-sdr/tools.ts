@@ -13,7 +13,7 @@
 
 // deno-lint-ignore-file no-explicit-any
 import { MATRIZ_SYSTEM, MATRIZ_USER_TEMPLATE } from './prompts.ts';
-import { extrairPrimeiroNome, renderPrompt } from './contexto.ts';
+import { carregarDiasSemAtendimento, extrairPrimeiroNome, isoMaisDias, renderPrompt } from './contexto.ts';
 import {
   decidirPrazoEstudante,
   instrucaoPerguntarConclusao,
@@ -158,6 +158,21 @@ function hojeBrasilia() {
 // TEXTO que a Luna lê. A produção junta as duas aqui, sem mudança. O agente no n8n recebe os dados
 // (executarTool com `comDados`) e monta o texto num nó dele, à vista e editável (05 Ferramentas).
 export type SituacaoDisponibilidade = 'ok' | 'sem_horario' | 'data_passada' | 'erro_tecnico';
+/**
+ * O dia (ou o período) pedido não tinha vaga e a consulta avançou sozinha até o próximo horário
+ * (10/10/2026, caso Beatriz: segunda era feriado, a ferramenta devolveu "nenhum horário" e a IA pediu
+ * para a lead "me chamar na segunda pra conferir os horários de terça"). Os horários devolvidos já são
+ * os do avanço; este campo diz o que mudou em relação ao pedido.
+ */
+export type AvancoDisponibilidade = {
+  /** outro_periodo = mesmo dia, fora do período/horário pedido; outro_dia = primeiro dia seguinte com vaga. */
+  tipo: 'outro_periodo' | 'outro_dia';
+  /** Data pedida (YYYY-MM-DD) ou '' quando a consulta veio sem data. */
+  data_pedida: string;
+  dia_semana_pedido: string;
+  /** Motivo do dia sem atendimento (feriado etc.), quando o dia pedido está fechado. */
+  fechado_por: string | null;
+};
 export type DadosDisponibilidade = {
   situacao: SituacaoDisponibilidade;
   hoje: { iso: string; display: string };
@@ -165,42 +180,144 @@ export type DadosDisponibilidade = {
   horarios: { data: string; dia_semana: string; horario: string; display: string; vendedor_id: unknown; vendedor_nome: unknown }[];
   /** false = o lead ainda não tem a graduação registrada (a oferta é opção, não combinado). */
   formacao_checada: boolean;
+  avanco?: AvancoDisponibilidade;
+  /** O avanço não pôde ser conferido (a consulta dos dias seguintes falhou): "sem horário" vale só para o pedido. */
+  avanco_falhou?: boolean;
   erro?: string;
 };
+
+const ISO_DATA = /^\d{4}-\d{2}-\d{2}$/;
+/** Quantos dias à frente a consulta avança quando o dia pedido não tem vaga. */
+const DIAS_DE_AVANCO = 7;
+const diaSemanaDoIso = (iso: string) => {
+  const [a, m, d] = iso.split('-').map(Number);
+  return DIA_SEMANA_BR[new Date(Date.UTC(a, m - 1, d)).getUTCDay()];
+};
+
+/** O recorte que o lead pediu, em minutos do dia (Brasília): horário de início ou período. null = dia inteiro. */
+function janelaPedida(input: any): [number, number] | null {
+  const hora = /^(\d{1,2}):(\d{2})/.exec(String(input?.horario_inicio_desejado ?? '').trim());
+  if (hora) return [Number(hora[1]) * 60 + Number(hora[2]), 24 * 60];
+  const periodo = String(input?.periodo_desejado ?? '').trim().toLowerCase();
+  if (periodo === 'manhã' || periodo === 'manha') return [0, 12 * 60];
+  if (periodo === 'tarde') return [12 * 60, 19 * 60];
+  if (periodo === 'noite') return [19 * 60, 24 * 60];
+  return null;
+}
+
+/** Os `n` horários mais próximos do recorte pedido, devolvidos em ordem de hora (a agenda manda os mais cedo). */
+function horariosMaisProximos(slots: any[], janela: [number, number], n = 6): any[] {
+  const minutos = (s: any) => { const [h, m] = toBrasilia(s.inicio).horario.split(':').map(Number); return h * 60 + m; };
+  const distancia = (t: number) => (t < janela[0] ? janela[0] - t : t >= janela[1] ? t - janela[1] + 1 : 0);
+  return slots.map((s) => ({ s, t: minutos(s) }))
+    .sort((a, b) => distancia(a.t) - distancia(b.t) || a.t - b.t)
+    .slice(0, n)
+    .sort((a, b) => a.t - b.t)
+    .map((x) => x.s);
+}
 
 async function dadosDisponibilidade(supabase: any, input: any, ctx: CtxConversa): Promise<DadosDisponibilidade> {
   const hoje = hojeBrasilia();
   const base = { hoje: { iso: hoje.iso, display: hoje.display }, data_pedida: String(input.data_desejada ?? '').trim(), horarios: [], formacao_checada: true };
 
   // Data PASSADA nunca chega à agenda: devolve correção explícita com o HOJE real.
-  if (/^\d{4}-\d{2}-\d{2}$/.test(base.data_pedida) && base.data_pedida < hoje.iso) return { ...base, situacao: 'data_passada' };
+  if (ISO_DATA.test(base.data_pedida) && base.data_pedida < hoje.iso) return { ...base, situacao: 'data_passada' };
 
-  const qs = new URLSearchParams({ pos: input.curso_escolhido ?? '', limite: '6' });
-  if (ctx.telefone && ctx.canal !== 'webchat') qs.set('telefone', ctx.telefone);
-  if (input.data_desejada) qs.set('data', input.data_desejada);
-  if (input.periodo_desejado) qs.set('periodo', input.periodo_desejado);
-  if (input.horario_inicio_desejado) qs.set('horario_inicio', input.horario_inicio_desejado);
+  // O telefone faz a agenda oferecer primeiro a do DONO do contato (só no WhatsApp).
+  const temDono = Boolean(ctx.telefone) && ctx.canal !== 'webchat';
+  const novaConsulta = (limite = '6', comTelefone = true) => {
+    const q = new URLSearchParams({ pos: input.curso_escolhido ?? '', limite });
+    if (comTelefone && temDono) q.set('telefone', ctx.telefone);
+    return q;
+  };
 
   // Consulta com 1 retry. A sdr-api às vezes falha/cold-start; SEM distinguir erro de
   // agenda vazia, a ferramenta retornava [] e o agente dizia "sem horário" (mentira)
   // ao lead, mesmo com a agenda cheia. Agora: erro técnico ≠ ausência de horário.
-  let res: Response | null = null;
-  let resultado: any = {};
-  let erroTecnico: string | null = null;
-  for (let tentativa = 1; tentativa <= 2; tentativa++) {
-    try {
-      res = await sdrApi(`disponibilidade?${qs.toString()}`);
-      resultado = await res.json().catch(() => ({}));
-      if (res.ok && resultado?.success !== false) { erroTecnico = null; break; }
-      erroTecnico = `HTTP ${res.status}${resultado?.error ? ` — ${resultado.error}` : ''}`;
-    } catch (e) {
-      erroTecnico = (e as Error).message;
+  const consultar = async (q: URLSearchParams, tentativas = 2): Promise<{ slots: any[]; erro: string | null }> => {
+    let erroTecnico: string | null = null;
+    for (let tentativa = 1; tentativa <= tentativas; tentativa++) {
+      try {
+        const res = await sdrApi(`disponibilidade?${q.toString()}`);
+        const resultado: any = await res.json().catch(() => ({}));
+        if (res.ok && resultado?.success !== false) return { slots: resultado.data?.slots || resultado.slots || [], erro: null };
+        erroTecnico = `HTTP ${res.status}${resultado?.error ? ` — ${resultado.error}` : ''}`;
+      } catch (e) {
+        erroTecnico = (e as Error).message;
+      }
+      if (tentativa < tentativas) await new Promise((r) => setTimeout(r, 600));
     }
-    if (tentativa < 2) await new Promise((r) => setTimeout(r, 600));
-  }
-  if (erroTecnico) return { ...base, situacao: 'erro_tecnico', erro: erroTecnico };
+    return { slots: [], erro: erroTecnico };
+  };
 
-  const slots: any[] = resultado.data?.slots || resultado.slots || [];
+  const qs = novaConsulta();
+  if (input.data_desejada) qs.set('data', input.data_desejada);
+  if (input.periodo_desejado) qs.set('periodo', input.periodo_desejado);
+  if (input.horario_inicio_desejado) qs.set('horario_inicio', input.horario_inicio_desejado);
+  const pedida = await consultar(qs);
+  if (pedida.erro) return { ...base, situacao: 'erro_tecnico', erro: pedida.erro };
+
+  // Dia/período pedido sem vaga: a consulta AVANÇA sozinha (mesmo dia fora do recorte pedido; depois, o
+  // primeiro dos próximos dias com horário). Sem isto, feriado virava "nenhum horário" e a IA mandava
+  // o lead chamar de novo outro dia. Falha no avanço não vira erro técnico, mas fica marcada: sem ela
+  // o texto afirmaria que os dias seguintes foram conferidos (erro técnico ≠ ausência de horário).
+  let slots = pedida.slots;
+  let avanco: AvancoDisponibilidade | undefined;
+  let avancoFalhou = false;
+  if (!slots.length) {
+    const dataValida = ISO_DATA.test(base.data_pedida);
+    const janela = janelaPedida(input);
+    try {
+      if (dataValida && janela) {
+        // O dia inteiro (limite alto: a agenda devolve os mais cedo) e, dele, os mais próximos do pedido.
+        const q = novaConsulta('40');
+        q.set('data', base.data_pedida);
+        const r = await consultar(q);
+        if (r.erro) avancoFalhou = true;
+        else if (r.slots.length) {
+          slots = horariosMaisProximos(r.slots, janela);
+          avanco = { tipo: 'outro_periodo', data_pedida: base.data_pedida, dia_semana_pedido: diaSemanaDoIso(base.data_pedida), fechado_por: null };
+        }
+      }
+      if (!slots.length) {
+        // Sem data, a agenda já olhou de agora até 3 dias à frente: o avanço começa depois disso.
+        const inicio = dataValida ? isoMaisDias(base.data_pedida, 1) : isoMaisDias(hoje.iso, 3);
+        // SEM o telefone: com ele a agenda só sai do dono para os outros vendedores quando o dono não
+        // tem NENHUM horário na janela inteira, e numa janela de vários dias ele quase sempre tem algum.
+        // O "primeiro dia" seria o primeiro dia DELE, pulando dias em que a equipe tem vaga.
+        const q = novaConsulta('12', false);
+        q.set('de', `${inicio}T00:00:00-03:00`);
+        q.set('ate', `${isoMaisDias(inicio, DIAS_DE_AVANCO)}T23:59:59-03:00`);
+        const r = await consultar(q);
+        if (r.erro) avancoFalhou = true;
+        else if (r.slots.length) {
+          // Só o primeiro dia com vaga: oferecer dois dias de uma vez confunde a escolha.
+          const primeiroDia = toBrasilia(r.slots[0].inicio).data;
+          let doDia = r.slots.filter((s: any) => toBrasilia(s.inicio).data === primeiroDia).slice(0, 6);
+          if (temDono) {
+            // Nesse dia, a consulta normal: a preferência pelo dono do contato volta a valer por dia.
+            const qd = novaConsulta();
+            qd.set('data', primeiroDia);
+            const rd = await consultar(qd);
+            if (!rd.erro && rd.slots.length) doDia = rd.slots;
+          }
+          slots = doDia;
+          avancoFalhou = false;
+          const fechados = dataValida ? await carregarDiasSemAtendimento(supabase) : [];
+          avanco = {
+            tipo: 'outro_dia',
+            data_pedida: dataValida ? base.data_pedida : '',
+            dia_semana_pedido: dataValida ? diaSemanaDoIso(base.data_pedida) : '',
+            fechado_por: fechados.find((f) => f.data === base.data_pedida)?.motivo ?? null,
+          };
+        }
+      }
+    } catch (e) {
+      avancoFalhou = true;
+      console.log(`[crm-agente-sdr] avanço da disponibilidade falhou (segue sem horário): ${(e as Error).message}`);
+    }
+  }
+
   const horarios = slots.map((s) => {
     const brt = toBrasilia(s.inicio);
     return { data: brt.data, dia_semana: brt.diaSemana, horario: brt.horario, display: brt.display, vendedor_id: s.vendedor_id, vendedor_nome: s.vendedor_nome };
@@ -220,7 +337,24 @@ async function dadosDisponibilidade(supabase: any, input: any, ctx: CtxConversa)
   } catch (e) {
     console.log(`[crm-agente-sdr] aviso de formação na disponibilidade falhou (segue): ${(e as Error).message}`);
   }
-  return { ...base, situacao: horarios.length ? 'ok' : 'sem_horario', horarios, formacao_checada: formacaoChecada };
+  return {
+    ...base, situacao: horarios.length ? 'ok' : 'sem_horario', horarios, formacao_checada: formacaoChecada,
+    ...(avanco && horarios.length ? { avanco } : {}),
+    ...(avancoFalhou && !horarios.length ? { avanco_falhou: true } : {}),
+  };
+}
+
+/** O fato do avanço, em uma frase: o que o lead pediu não tinha vaga e onde está o próximo horário. '' sem avanço. */
+export function fatoDoAvanco(d: DadosDisponibilidade): string {
+  const a = d.avanco;
+  const primeiro = d.horarios[0];
+  if (!a || !primeiro) return '';
+  if (a.tipo === 'outro_periodo') {
+    return `No período pedido de ${a.dia_semana_pedido}, dia ${a.data_pedida}, não há horário livre; os horários abaixo são os mais próximos do MESMO dia.`;
+  }
+  const pedido = a.data_pedida ? `Em ${a.dia_semana_pedido}, dia ${a.data_pedida},` : 'Nos próximos dias consultados';
+  const motivo = a.fechado_por ? ` porque não temos atendimento nesse dia (${a.fechado_por})` : '';
+  return `${pedido} não há horário para a conversa com o monitor${motivo}. O próximo dia com horário é ${primeiro.dia_semana}, dia ${primeiro.data}; os horários abaixo são desse dia.`;
 }
 
 /** O texto que a Luna/o João lê para cada situação da agenda (o mesmo de sempre). */
@@ -230,10 +364,12 @@ export function textoDisponibilidadeSoFatos(d: DadosDisponibilidade): string {
   if (d.situacao === 'data_passada') return `A data consultada (${d.data_pedida}) já passou. Hoje é ${d.hoje.display} (${d.hoje.iso}).`;
   if (d.situacao === 'erro_tecnico') return 'Falha técnica ao consultar a agenda: não é falta de horário.';
   if (d.situacao === 'sem_horario') {
-    return `Nenhum horário livre para a conversa com o monitor no período pedido. Hoje é ${d.hoje.display} (${d.hoje.iso}).${formacao}`;
+    const alcance = d.avanco_falhou ? ' Os dias seguintes não foram conferidos (a consulta falhou).' : ` Também não há nos ${DIAS_DE_AVANCO + 1} dias seguintes.`;
+    return `Nenhum horário livre para a conversa com o monitor no período pedido.${alcance} Hoje é ${d.hoje.display} (${d.hoje.iso}).${formacao}`;
   }
   const linhas = d.horarios.map((h) => `- ${h.display} de ${h.dia_semana}, dia ${h.data} (vendedor_id: ${h.vendedor_id}, nome: ${h.vendedor_nome})`);
-  return `Horários livres para a conversa com o monitor (Brasília; o dia da semana já está calculado):\n${linhas.join('\n')}${formacao}`;
+  const avanco = fatoDoAvanco(d);
+  return `${avanco ? `${avanco}\n` : ''}Horários livres para a conversa com o monitor (Brasília; o dia da semana já está calculado):\n${linhas.join('\n')}${formacao}`;
 }
 
 export function textoDisponibilidade(d: DadosDisponibilidade): string {
@@ -250,12 +386,26 @@ export function textoDisponibilidade(d: DadosDisponibilidade): string {
   let conteudo: string;
   if (d.situacao === 'sem_horario') {
     // Âncora do HOJE junto: "sem horário" nunca pode reforçar uma data errada do modelo.
-    conteudo = `Nenhum horário disponível para a conversa com o monitor no período solicitado. Isso não informa nem altera o horário de aula ou evento. (Referência: HOJE é ${d.hoje.display}, ${d.hoje.iso}.)`;
+    conteudo = `Nenhum horário disponível para a conversa com o monitor no período solicitado. Isso não informa nem altera o horário de aula ou evento. (Referência: HOJE é ${d.hoje.display}, ${d.hoje.iso}.)\n` +
+      (d.avanco_falhou
+        // O avanço falhou: afirmar "sem horário nos dias seguintes" seria mentira (a agenda pode estar cheia).
+        ? 'Os dias seguintes NÃO foram conferidos (a consulta deles falhou). Consulte agora o próximo dia com atendimento. Não peça ao lead para te chamar outro dia para conferir a agenda.'
+        : `Os ${DIAS_DE_AVANCO + 1} dias seguintes também foram conferidos e não têm horário. Não peça ao lead para te chamar outro dia para conferir a agenda. Pergunte qual outro dia ou período fica bom para ele e consulte de novo agora.`);
   } else {
     const formatted = d.horarios.map((h) => `- ${h.display} de ${h.dia_semana}, dia ${h.data} (vendedor_id: ${h.vendedor_id}, nome: ${h.vendedor_nome})`);
-    conteudo = `Horários disponíveis para a conversa com o monitor (Brasília):\n${formatted.join('\n')}\n` +
+    const avanco = fatoDoAvanco(d);
+    conteudo = (avanco ? `${avanco}\n` : '') +
+      `Horários disponíveis para a conversa com o monitor (Brasília):\n${formatted.join('\n')}\n` +
       `(O dia da semana informado acima é o correto — use-o exatamente, não recalcule.)\n` +
       `Ao apresentar as opções, diga que são para a conversa com o monitor. Não são horários de aula ou evento e não alteram a programação do convite. Só ofereça após aceite específico para essa conversa.`;
+    if (avanco) {
+      conteudo += d.avanco?.tipo === 'outro_dia'
+        ? '\nOfereça estes horários AGORA, na mesma resposta: em uma frase curta diga que no dia pedido não tem horário' +
+          (d.avanco.fechado_por ? ' (se o motivo for feriado, pode dizer que é feriado)' : '') +
+          ' e já apresente as opções do dia acima. Este dia veio da agenda: pode oferecer mesmo que passe do limite de dias. Nunca peça ao lead para te chamar outro dia para conferir a agenda: ela já foi consultada.'
+        // Outro período: o lead pode ter dito que SÓ pode no período pedido ("só depois das 20h").
+        : '\nSe estes horários servem ao que o lead disse, ofereça agora, dizendo em uma frase curta que no período pedido não tem vaga. Se ele só pode no período pedido, consulte agora o próximo dia nesse mesmo período. Nunca peça ao lead para te chamar depois para conferir a agenda.';
+    }
   }
   if (!d.formacao_checada) {
     conteudo += '\n⚠️ A graduação deste lead ainda NÃO foi verificada. Se ele já propôs ou escolheu '

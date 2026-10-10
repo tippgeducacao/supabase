@@ -7,7 +7,7 @@
 
 import { atualizarAgenteComRatchet, atualizarLead, buscarLead, carregarHistorico, criarLead, jidsDoTelefone } from './historico.ts';
 import { pausaVigente } from './pausa.ts';
-import { extrairPrimeiroNome, montarContextoTemporal, notaDoCurso, renderPrompt } from './contexto.ts';
+import { carregarDiasSemAtendimento, extrairPrimeiroNome, montarContextoTemporal, notaDoCurso, renderPrompt } from './contexto.ts';
 import { notaDoNome } from './nomeDoLead.ts';
 import { contextoEspecialidadeCannabis } from './especialidadeCannabis.ts';
 import { carregarReunioesDoLead, notaDasReunioes } from './reunioesDoLead.ts';
@@ -155,9 +155,9 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
       // antes de decidir qualquer coisa") vira um dado só. Com ele, "me formei em janeiro" virou a
       // pergunta do ano (teste do Gustavo, 01/10/2026). A trava de verdade é a do verificar_compatibilidade.
       const relogio = aula
-        ? montarContextoTemporal().replace(blocoElegibilidadeFormatura(),
+        ? montarContextoTemporal(await carregarDiasSemAtendimento(supabase)).replace(blocoElegibilidadeFormatura(),
           `DATA-LIMITE PARA QUEM AINDA CURSA A GRADUAÇÃO (interna, não cite): conclui até ${limiteFormaturaFormatado()}, segue; depois, retorno perto da formatura.`)
-        : montarContextoTemporal();
+        : montarContextoTemporal(await carregarDiasSemAtendimento(supabase));
       // Com aula, a pós é a da aula e já está no catálogo: a nota do cadastro (que manda revalidar no
       // catálogo e chama o curso de "dado do cadastro") confundia a IA com o curso do formulário.
       const notaCurso = aula

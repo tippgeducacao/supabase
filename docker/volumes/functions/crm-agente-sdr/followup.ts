@@ -38,7 +38,7 @@ import { type AulaParaPrompt, semCertificadoAntesDoFim } from './prompts-aula.ts
 import { carregarModoTrocaNumero, carregarSinalTrocaDeNumero, notaTrocaDeNumero, resumoDoSinal, type SinalTrocaDeNumero } from './trocaDeNumero.ts';
 import { enviarComAberturaNumero, NOTA_ABERTURA_CONTROLADA } from './aberturaTrocaNumero.ts';
 import { PRAZO_MODELO_PILOTO_MS } from './prazoModelo.ts';
-import { extrairPrimeiroNome, montarContextoTemporal } from './contexto.ts';
+import { carregarDiasSemAtendimento, extrairPrimeiroNome, montarContextoTemporal } from './contexto.ts';
 import { INSTRUCAO_MEMORIA_HUMANA } from './memoriaHumana.ts';
 import { carregarStatusMateriais } from './envioMateriais.ts';
 import {
@@ -353,7 +353,7 @@ export async function gerarFollowup(
   const nomeCtx = nome || '(ausente no cadastro; use apenas autoidentificação explícita do lead no histórico)';
   const cursoCtx = curso || '(ausente no cadastro; use apenas curso explicitamente escolhido pelo lead no histórico)';
   const planoCarreira = opcoes ? planejarFollowupCarreira(curso, lead.jornada?.followup_carreira) : null;
-  const contextoTemporal = montarContextoTemporal() + contextoMateriais + (opcoes?.contexto ?? '')
+  const contextoTemporal = montarContextoTemporal(await carregarDiasSemAtendimento(supabase)) + contextoMateriais + (opcoes?.contexto ?? '')
     + (planoCarreira ? contextoFollowupCarreira(planoCarreira, tentativaAtual) : '');
   const messages = montarMensagensFollowup(history, tentativaAtual, nomeCtx, cursoCtx, Boolean(opcoes));
 

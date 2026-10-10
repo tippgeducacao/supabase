@@ -21,7 +21,7 @@ import { AGENTE_CAMPANHA_DIRETA } from '../crm-agente-sdr/prompts-campanha-diret
 import { AGENTE_AULA, montarVarsAula } from '../crm-agente-sdr/prompts-aula.ts';
 import { carregarTools, chamarAgentePrincipal, chamarRouter, MODELO_AGENTE, provedorAnthropicModelo, provedorDeepseek, provedorOpenai } from '../crm-agente-sdr/agente.ts';
 import { type LeituraJev, rotearComJev } from '../crm-agente-sdr/routerJev.ts';
-import { encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoCurso, notaDoNome, renderPrompt } from '../crm-agente-sdr/contexto.ts';
+import { carregarDiasSemAtendimento, encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoCurso, notaDoNome, renderPrompt } from '../crm-agente-sdr/contexto.ts';
 import { comBlocoDaEscola, comPresenteEscola } from '../crm-agente-sdr/escolaGratuita.ts';
 import {
   decidirPrazoEstudante,
@@ -507,14 +507,17 @@ Deno.serve(async (req) => {
         }
         // Canário: gancho do primeiro lote + CONVITE DE AGENDA, como em crm-agente-sdr/index.ts.
         const promptFinal = fichaSim && !aulaPiloto ? comGanchoDoLote(promptAgente, { nome: vars.nome, curso: vars.curso_interesse_original }).prompt : promptAgente;
-        const contextoBase = comNotaNoContexto(montarContextoTemporal() + notaDoNome(vars.nome) + notaDoCurso(vars.curso_interesse_original)
+        // Dias fechados só com as ferramentas REAIS: a agenda simulada (simulacao.ts) não os conhece e
+        // ofereceria horário num dia que o contexto diz estar sem atendimento.
+        const diasFechados = ctxReal ? await carregarDiasSemAtendimento(supabase) : [];
+        const contextoBase = comNotaNoContexto(montarContextoTemporal(diasFechados) + notaDoNome(vars.nome) + notaDoCurso(vars.curso_interesse_original)
           + (provedorAlternativo?.nome === 'openai' ? contextoEspecialidadeCannabis(vars.curso_interesse_original) : '')
           + (aberturaControlada ? '\n\n' + NOTA_ABERTURA_CONTROLADA : ''), notaTroca);
         // Agentes V2: o conhecimento da pós chega como dado (bloco CARREIRA, tabela sdr_carreira_pos).
         const carreira = entrada.v2 && entrada.aula?.curso_nome
           ? blocoCarreira(await carregarCarreiraPorNome(supabase, entrada.aula.curso_nome), entrada.aula.curso_nome) : '';
         const contextoFinal = aulaPiloto ? contextoBase + contextoAulaPiloto(entrada.aula, new Date(), { semFichaAntiga: Boolean(entrada.v2) }) + carreira
-          : fichaSim ? `${contextoBase}\n\n${blocoConviteAgenda()}` : contextoBase;
+          : fichaSim ? `${contextoBase}\n\n${blocoConviteAgenda(undefined, diasFechados)}` : contextoBase;
         return { agente: agenteTools, promptAgente: promptFinal, contextoTemporal: contextoFinal, tools, comFicha: Boolean(fichaSim),
           ...(aulaPiloto ? { instrucaoFicha: INSTRUCAO_AULA_PILOTO } : {}) };
       },

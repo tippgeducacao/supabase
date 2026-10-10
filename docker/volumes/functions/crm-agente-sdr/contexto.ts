@@ -195,25 +195,87 @@ const NOME_DIA: Record<number, string> = {
   4: 'quinta-feira', 5: 'sexta-feira', 6: 'sábado',
 };
 
-// Próximo dia COM atendimento a partir de amanhã (pula domingo/qualquer dia sem janela em
-// HORARIOS). Evita o "amanhã" fixo apontar pra um dia fechado (ex.: sábado pós-horário → domingo).
-function proximoDiaAtendimento(diaSemana: number): string {
-  for (let i = 1; i <= 7; i++) {
-    const d = (diaSemana + i) % 7;
-    const janelas = HORARIOS[d];
-    if (janelas && janelas.length) {
-      const ini = fmt(janelas[0].inicio.h, janelas[0].inicio.m);
-      return i === 1
-        ? `amanhã (${NOME_DIA[d]}) a partir das ${ini}`
-        : `${NOME_DIA[d]} a partir das ${ini}`;
-    }
+// ── Dias sem atendimento fora da grade (feriado etc.) ───────────────────────
+// Caso Beatriz (10/10/2026, sábado): segunda 12/10 era feriado, cadastrado em eventos_especiais. A agenda
+// devolvia zero horário na segunda, mas este contexto dizia "próximo atendimento: segunda-feira" e a IA
+// pediu para a lead "me chamar na segunda pra conferir os horários de terça". Os dias fechados vêm do
+// banco (fn_sdr_api_dias_sem_atendimento, a MESMA regra da agenda) e entram no calendário, no "próximo
+// atendimento" e na frase do convite. Sem a lista (ou com ela vazia), tudo segue como antes.
+export type DiaSemAtendimento = { data: string; motivo: string | null };
+type Agora = { dia: number; hora: number; minuto: number; iso?: string };
+
+const pad2 = (n: number) => String(n).padStart(2, '0');
+const isoDe = (d: Date) => `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+const hojeIsoBrasilia = () => isoDe(new Date(Date.now() - 3 * 60 * 60 * 1000));
+const dataDoIso = (iso: string) => { const [a, m, d] = iso.split('-').map(Number); return new Date(Date.UTC(a, m - 1, d)); };
+export const isoMaisDias = (iso: string, n: number) => { const d = dataDoIso(iso); d.setUTCDate(d.getUTCDate() + n); return isoDe(d); };
+const ddmmaaaa = (iso: string) => { const [a, m, d] = iso.split('-'); return `${d}/${m}/${a}`; };
+const rotuloMotivo = (motivo: string | null | undefined) => String(motivo ?? '').replace(/\s+/g, ' ').trim().slice(0, 40) || 'sem atendimento';
+const diaFechado = (fechados: DiaSemAtendimento[], iso: string) => fechados.find((f) => f.data === iso) ?? null;
+
+/** Até onde a lista de dias fechados e a busca do próximo atendimento enxergam (têm de ser iguais). */
+const DIAS_DE_ALCANCE = 14;
+
+let cacheDiasSemAtendimento: { em: number; dias: DiaSemAtendimento[] } | null = null;
+const VALIDADE_CACHE_DIAS_MS = 5 * 60 * 1000;
+
+/**
+ * Dias sem atendimento nos próximos 14 dias (o alcance de proximoDia). Cache de 5 minutos por instância;
+ * falha de leitura não derruba a conversa: devolve a última lista boa ou nada (segue como antes).
+ */
+export async function carregarDiasSemAtendimento(
+  supabase: { rpc: (nome: string, params: Record<string, unknown>) => PromiseLike<{ data: unknown; error: { message?: string } | null }> },
+  agoraMs: number = Date.now(),
+): Promise<DiaSemAtendimento[]> {
+  if (cacheDiasSemAtendimento && agoraMs - cacheDiasSemAtendimento.em < VALIDADE_CACHE_DIAS_MS) return cacheDiasSemAtendimento.dias;
+  try {
+    const { data, error } = await supabase.rpc('fn_sdr_api_dias_sem_atendimento', { p_dias: DIAS_DE_ALCANCE });
+    if (error) throw new Error(error.message ?? 'erro');
+    const dias = (Array.isArray(data) ? data : [])
+      .filter((x: any) => /^\d{4}-\d{2}-\d{2}$/.test(String(x?.data ?? '')))
+      .map((x: any) => ({ data: String(x.data), motivo: typeof x.motivo === 'string' && x.motivo.trim() ? x.motivo.trim() : null }));
+    cacheDiasSemAtendimento = { em: agoraMs, dias };
+    return dias;
+  } catch (e) {
+    console.error('[crm-agente-sdr] dias sem atendimento (segue sem eles):', (e as Error)?.message ?? e);
+    return cacheDiasSemAtendimento?.dias ?? [];
   }
-  return 'no próximo dia útil';
 }
 
-function verificarDisponibilidade(diaSemana: number, hora: number, minuto: number) {
+/** Só para teste: esvazia o cache dos dias sem atendimento. */
+export function limparCacheDiasSemAtendimento(): void { cacheDiasSemAtendimento = null; }
+
+// Próximo dia COM atendimento a partir de amanhã: pula domingo, qualquer dia sem janela em HORARIOS
+// e os dias fechados da lista (feriado). Evita o "amanhã" fixo apontar pra um dia fechado.
+function proximoDia(diaSemana: number, fechados: DiaSemAtendimento[], hojeIso: string): { i: number; d: number; iso: string } | null {
+  for (let i = 1; i <= DIAS_DE_ALCANCE; i++) {
+    const d = (diaSemana + i) % 7;
+    const janelas = HORARIOS[d];
+    if (!janelas || !janelas.length) continue;
+    const iso = isoMaisDias(hojeIso, i);
+    if (diaFechado(fechados, iso)) continue;
+    return { i, d, iso };
+  }
+  return null;
+}
+
+function proximoDiaAtendimento(diaSemana: number, fechados: DiaSemAtendimento[] = [], hojeIso: string = hojeIsoBrasilia()): string {
+  const p = proximoDia(diaSemana, fechados, hojeIso);
+  if (!p) return 'no próximo dia útil';
+  const janelas = HORARIOS[p.d]!;
+  const ini = fmt(janelas[0].inicio.h, janelas[0].inicio.m);
+  if (p.i === 1) return `amanhã (${NOME_DIA[p.d]}) a partir das ${ini}`;
+  // Uma semana ou mais à frente, só o nome do dia confunde com o da semana corrente.
+  return p.i >= 7 ? `${NOME_DIA[p.d]}, dia ${ddmmaaaa(p.iso).slice(0, 5)}, a partir das ${ini}` : `${NOME_DIA[p.d]} a partir das ${ini}`;
+}
+
+function verificarDisponibilidade(diaSemana: number, hora: number, minuto: number, fechados: DiaSemAtendimento[] = [], hojeIso: string = hojeIsoBrasilia()) {
   if (diaSemana === 0) {
-    return { disponivel: false, mensagem: `⚠️ HOJE É DOMINGO - Não atendemos aos domingos. Próximo atendimento: ${proximoDiaAtendimento(diaSemana)}.` };
+    return { disponivel: false, mensagem: `⚠️ HOJE É DOMINGO - Não atendemos aos domingos. Próximo atendimento: ${proximoDiaAtendimento(diaSemana, fechados, hojeIso)}.` };
+  }
+  const hojeFechado = diaFechado(fechados, hojeIso);
+  if (hojeFechado) {
+    return { disponivel: false, mensagem: `⚠️ HOJE NÃO TEM ATENDIMENTO (${rotuloMotivo(hojeFechado.motivo)}). Próximo atendimento: ${proximoDiaAtendimento(diaSemana, fechados, hojeIso)}.` };
   }
   const periodos = HORARIOS[diaSemana]!;
   const minutoAtual = hora * 60 + minuto;
@@ -248,14 +310,14 @@ function verificarDisponibilidade(diaSemana: number, hora: number, minuto: numbe
   const ultimo = periodos[periodos.length - 1];
   return {
     disponivel: false,
-    mensagem: `⚠️ ATENÇÃO: Já passou do último horário de hoje (${fmt(ultimo.fim.h, ultimo.fim.m)}). Próximo disponível: ${proximoDiaAtendimento(diaSemana)}.`,
+    mensagem: `⚠️ ATENÇÃO: Já passou do último horário de hoje (${fmt(ultimo.fim.h, ultimo.fim.m)}). Próximo disponível: ${proximoDiaAtendimento(diaSemana, fechados, hojeIso)}.`,
   };
 }
 
-// Períodos ofertáveis hoje a partir de agora (noite só seg/ter, idem n8n).
-function periodosDisponiveisHoje(diaSemana: number, hora: number, minuto: number) {
+// Períodos ofertáveis hoje a partir de agora (noite só seg/ter, idem n8n). Dia fechado: nenhum.
+function periodosDisponiveisHoje(diaSemana: number, hora: number, minuto: number, hojeFechado = false) {
   const min = hora * 60 + minuto;
-  const blocks = HORARIOS[diaSemana] ?? [];
+  const blocks = hojeFechado ? [] : HORARIOS[diaSemana] ?? [];
   const set = new Set<string>();
   for (const b of blocks) {
     const ini = b.inicio.h * 60 + b.inicio.m;
@@ -274,7 +336,7 @@ function periodosDisponiveisHoje(diaSemana: number, hora: number, minuto: number
   return { lista, frase };
 }
 
-function agoraBrasilia(): { dia: number; hora: number; minuto: number; dataFormatada: string } {
+function agoraBrasilia(): { dia: number; hora: number; minuto: number; dataFormatada: string; iso: string } {
   // Brasília = UTC-3 fixo (sem horário de verão desde 2019).
   const br = new Date(Date.now() - 3 * 60 * 60 * 1000);
   const pad = (n: number) => String(n).padStart(2, '0');
@@ -283,6 +345,7 @@ function agoraBrasilia(): { dia: number; hora: number; minuto: number; dataForma
     hora: br.getUTCHours(),
     minuto: br.getUTCMinutes(),
     dataFormatada: `${pad(br.getUTCDate())}/${pad(br.getUTCMonth() + 1)}/${br.getUTCFullYear()}`,
+    iso: isoDe(br),
   };
 }
 
@@ -290,29 +353,55 @@ function agoraBrasilia(): { dia: number; hora: number; minuto: number; dataForma
 // calendário (caso real 2026-07-04: achou que 07/07 era segunda, sendo terça, e
 // confirmou a reunião com o dia da semana errado pro lead). Com o mapa pronto no
 // contexto, o modelo nunca precisa derivar data↔dia-da-semana sozinho.
-function calendarioProximosDias(): string {
-  const pad2 = (n: number) => String(n).padStart(2, '0');
+function calendarioProximosDias(fechados: DiaSemAtendimento[] = []): string {
   const linhas: string[] = [];
   for (let i = 1; i <= 7; i++) {
     const d = new Date(Date.now() - 3 * 60 * 60 * 1000 + i * 24 * 60 * 60 * 1000);
     const data = `${pad2(d.getUTCDate())}/${pad2(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}`;
-    const iso = `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
-    linhas.push(`• ${data} (${iso}) = ${DIAS_SEMANA[d.getUTCDay()]}`);
+    const iso = isoDe(d);
+    const fechado = diaFechado(fechados, iso);
+    linhas.push(`• ${data} (${iso}) = ${DIAS_SEMANA[d.getUTCDay()]}${fechado ? ` — SEM ATENDIMENTO (${rotuloMotivo(fechado.motivo)})` : ''}`);
   }
   return linhas.join('\n');
 }
 
-export function montarContextoTemporal(): string {
-  const { dia, hora, minuto, dataFormatada } = agoraBrasilia();
-  const status = verificarDisponibilidade(dia, hora, minuto);
-  const periodos = periodosDisponiveisHoje(dia, hora, minuto);
+/** O aviso dos dias fechados desta semana, logo depois da grade (a grade diz "segunda: 09:30…"). '' sem nenhum. */
+function blocoDiasSemAtendimento(fechados: DiaSemAtendimento[], diaSemana: number, hojeIso: string): string {
+  const proximos = fechados.filter((f) => f.data >= hojeIso && f.data <= isoMaisDias(hojeIso, 7));
+  if (!proximos.length) return '';
+  const nomes = proximos.map((f) => `${NOME_DIA[dataDoIso(f.data).getUTCDay()]}, ${ddmmaaaa(f.data)} (${rotuloMotivo(f.motivo)})`).join('; ');
+  const prox = proximoDia(diaSemana, fechados, hojeIso);
+  return `\n\n**DIAS SEM ATENDIMENTO (exceção à grade acima): ${nomes}. Nesses dias não existe conversa com o monitor: não ofereça horário neles.`
+    + (prox ? ` O próximo dia com atendimento depois de hoje é ${NOME_DIA[prox.d]}, ${ddmmaaaa(prox.iso)}.` : '')
+    + ' Se o lead pedir um desses dias, diga que nesse dia não tem atendimento (cite o motivo só se for feriado) e ofereça os horários do próximo dia com atendimento, consultando a agenda.**';
+}
+
+/**
+ * Até que dia a IA pode oferecer a conversa: o 2º dia COM atendimento depois de hoje. O prompt diz "nunca
+ * mais de dois dias à frente" e a IA contava dias corridos: no sábado 10/10/2026 a lead pediu terça, que
+ * era o 3º dia corrido (domingo fechado, segunda feriado), a IA consultou a segunda e pediu para a lead
+ * "me chamar na segunda". Outro lead do mesmo dia nem teve a agenda consultada. A data vem pronta daqui.
+ */
+function blocoLimiteDeAgenda(fechados: DiaSemAtendimento[], diaSemana: number, hojeIso: string): string {
+  const primeiro = proximoDia(diaSemana, fechados, hojeIso);
+  const limite = primeiro ? proximoDia(primeiro.d, fechados, primeiro.iso) ?? primeiro : null;
+  if (!limite) return '';
+  return `\n\n**ATÉ QUANDO OFERECER A CONVERSA: até ${NOME_DIA[limite.d]}, ${ddmmaaaa(limite.iso)} (${limite.iso}). `
+    + 'O limite de dois dias à frente conta só dias COM atendimento: domingo e dia sem atendimento não entram na conta. '
+    + 'Se o lead pedir um dia dentro desse limite, consulte esse dia na agenda. Nunca peça ao lead para te chamar outro dia para conferir a agenda.**';
+}
+
+export function montarContextoTemporal(fechados: DiaSemAtendimento[] = []): string {
+  const { dia, hora, minuto, dataFormatada, iso } = agoraBrasilia();
+  const status = verificarDisponibilidade(dia, hora, minuto, fechados, iso);
+  const periodos = periodosDisponiveisHoje(dia, hora, minuto, Boolean(diaFechado(fechados, iso)));
 
   return `**AGORA: ${dataFormatada} às ${fmt(hora, minuto)}**
 **DIA DA SEMANA: ${DIAS_SEMANA[dia]}**
 ${status.mensagem}
 
 **PRÓXIMOS DIAS (data = dia da semana — use ESTA tabela, NUNCA calcule de cabeça):**
-${calendarioProximosDias()}
+${calendarioProximosDias(fechados)}
 
 **HORÁRIOS DE ATENDIMENTO PARA CONVERSA COM O MONITOR (NÃO SÃO HORÁRIOS DE AULAS):**
 • Segunda-feira: 09:30-11:30 e 14:30-20:30
@@ -321,7 +410,7 @@ ${calendarioProximosDias()}
 • Quinta-feira: 09:30-11:30 e 14:30-18:30
 • Sexta-feira: 09:30-11:30 e 13:30-17:30
 • Sábado: 08:30-11:30
-• Domingo: Não atendemos
+• Domingo: Não atendemos${blocoDiasSemAtendimento(fechados, dia, iso)}${blocoLimiteDeAgenda(fechados, dia, iso)}
 
 **PERÍODOS DE ATENDIMENTO HOJE, SOMENTE PARA A CONVERSA COM O MONITOR: ${periodos.frase || 'nenhum — consulte o próximo dia útil após o aceite da conversa'}**
 Essas janelas não são disponibilidade confirmada nem programação de aula ou evento. Confirmação de participação em aula não autoriza consultar ou oferecer reunião. Para a conversa individual, primeiro obtenha o aceite específico do lead e consulte a agenda; ao apresentar opções reais, diga que são para a conversa com o monitor.
@@ -331,22 +420,29 @@ ${blocoElegibilidadeFormatura()}`;
 
 // ── Convite de agenda (19/09/2026, canário) ─────────────────────────────────
 // "procuro um encaixe pra ainda hoje?" só quando ainda dá hoje. Depois do último horário do
-// dia (ou no domingo), o convite aponta para o próximo dia com atendimento. Calculado em
-// código porque o modelo copiava "ainda hoje" dos exemplos do prompt, inclusive às 21h.
-export function fraseConviteAgenda(agora: { dia: number; hora: number; minuto: number } = agoraBrasilia()): string {
-  const status = verificarDisponibilidade(agora.dia, agora.hora, agora.minuto);
+// dia (ou no domingo, ou em dia fechado), o convite aponta para o próximo dia com atendimento.
+// Calculado em código porque o modelo copiava "ainda hoje" dos exemplos do prompt, inclusive às 21h.
+const CONVITE_SEM_DIA = 'procuro um encaixe pro nosso próximo dia de atendimento?';
+export function fraseConviteAgenda(agora: Agora = agoraBrasilia(), fechados: DiaSemAtendimento[] = []): string {
+  const hojeIso = agora.iso ?? hojeIsoBrasilia();
+  const status = verificarDisponibilidade(agora.dia, agora.hora, agora.minuto, fechados, hojeIso);
   // Intervalo do almoço ainda é "hoje": a tarde vem depois.
   if (status.disponivel || status.mensagem.startsWith('⏰')) return 'procuro um encaixe pra ainda hoje?';
-  const proximo = proximoDiaAtendimento(agora.dia);
+  const proximo = proximoDiaAtendimento(agora.dia, fechados, hojeIso);
+  // Nenhum dia aberto dentro do alcance (recesso longo): sem dia para nomear.
+  if (proximo === 'no próximo dia útil') return CONVITE_SEM_DIA;
   if (proximo.startsWith('amanhã')) return 'procuro um encaixe pra amanhã cedo, no primeiro horário?';
-  return `procuro um encaixe pra ${proximo.split(' a partir')[0]} cedo, no primeiro horário?`;
+  return `procuro um encaixe pra ${proximo.split(' a partir')[0].replace(/,\s*$/, '')} cedo, no primeiro horário?`;
 }
 
 // Três jeitos de dizer o MESMO convite (o dia é do relógio; só a forma varia): a persona proíbe
 // repetir a mesma pergunta, e com uma frase só o João dizia "procuro um encaixe pra ainda hoje?"
 // quatro vezes seguidas (harness, 21/09/2026).
-export function variantesConviteAgenda(agora: { dia: number; hora: number; minuto: number } = agoraBrasilia()): string[] {
-  const base = fraseConviteAgenda(agora);
+export function variantesConviteAgenda(agora: Agora = agoraBrasilia(), fechados: DiaSemAtendimento[] = []): string[] {
+  const base = fraseConviteAgenda(agora, fechados);
+  if (base === CONVITE_SEM_DIA) {
+    return [base, 'consegue conversar no nosso próximo dia de atendimento?', 'vejo um horário pra vc no próximo dia de atendimento, pode ser?'];
+  }
   if (base.includes('ainda hoje')) {
     const nomes: Record<string, string> = { 'manhã': 'de manhã', tarde: 'à tarde', noite: 'à noite' };
     const periodos = periodosDisponiveisHoje(agora.dia, agora.hora, agora.minuto).lista.map((p) => nomes[p]);
@@ -360,10 +456,10 @@ export function variantesConviteAgenda(agora: { dia: number; hora: number; minut
   return [base, `${quando} cedo fica bom pra vc?`, `consegue conversar ${quando}, logo no primeiro horário?`];
 }
 
-export function blocoConviteAgenda(agora?: { dia: number; hora: number; minuto: number }): string {
-  const frases = variantesConviteAgenda(agora).map((f) => `"${f}"`).join(' · ');
+export function blocoConviteAgenda(agora?: Agora, fechados: DiaSemAtendimento[] = []): string {
+  const frases = variantesConviteAgenda(agora, fechados).map((f) => `"${f}"`).join(' · ');
   return `**CONVITE DE AGENDA (feche qualquer convite de reunião com UMA destas frases, sem mudar o dia; nunca repita a que você já usou nesta conversa): ${frases}. `
-    + `Com a compatibilidade APROVADA nesta conversa, não use a frase: chame consulta_disponibilidade nesse período e ofereça até três horários reais.**`;
+    + `Com a compatibilidade APROVADA nesta conversa, não use a frase: chame consulta_disponibilidade nesse período (ou no dia que o lead pediu) e ofereça até três horários reais.**`;
 }
 
 // ── pergunta_formacao + render de placeholders dos prompts ──────────────────

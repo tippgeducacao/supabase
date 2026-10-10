@@ -14,7 +14,7 @@
 // WhatsApp do lead (ele deu o número). Fluxo/tools = os mesmos do João de WhatsApp.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { WEBCHAT_QUALIFICADOR, WEBCHAT_VALIDACAO } from "./prompts-webchat.ts";
-import { montarContextoTemporal, renderPrompt } from "../crm-agente-sdr/contexto.ts";
+import { carregarDiasSemAtendimento, montarContextoTemporal, renderPrompt } from "../crm-agente-sdr/contexto.ts";
 import { INSTRUCAO_MEMORIA_HUMANA } from "../crm-agente-sdr/memoriaHumana.ts";
 import { comPresenteEscola, LINK_ESCOLA_GRATUITA } from "../crm-agente-sdr/escolaGratuita.ts";
 import { carregarTools, chamarAgentePrincipal, chamarRouter } from "../crm-agente-sdr/agente.ts";
@@ -470,7 +470,7 @@ export async function aberturaWebchat(nome: string, curso: string | null, produt
         system: [
           { type: "text", text: promptDoEstagio(nome, curso, "validacao", produto) },
           { type: "text", text: INSTRUCAO_MEMORIA_HUMANA },
-          { type: "text", text: montarContextoTemporal() },
+          { type: "text", text: montarContextoTemporal(await carregarDiasSemAtendimento(supabase)) },
           { type: "text", text: INSTRUCAO_CANAL_RESPOSTA },
         ],
         tools: [TOOL_RESPONDER_AO_CLIENTE],
@@ -564,7 +564,7 @@ export async function responderWebchat(
   // O nome vai JUNTO do contexto temporal porque este bloco é reinjetado a cada turno, no
   // fim do contexto. No topo do prompt ele fica a dezenas de mensagens de distância, e foi
   // assim que a Flávia virou "vitória" numa conversa de 28 mensagens (21/08/2026).
-  const contextoTemporal = montarContextoTemporal() + notaDoNome(nome) + (modoTeste
+  const contextoTemporal = montarContextoTemporal(await carregarDiasSemAtendimento(supabase)) + notaDoNome(nome) + (modoTeste
     ? '\n\nAMBIENTE DE TESTE: elegibilidade_simulada=true com elegibilidade_status=aprovado equivale à decisão registrada apenas nesta simulação. Pode seguir para a confirmação simulada do mesmo curso. Não refaça a análise só porque elegibilidade_registrada=false. Pendência e reprovação continuam impedindo agendar. Não cite este ambiente ao visitante.'
     : '');
   const ctx = ctxDe(telefone, leadId, nome || null);
