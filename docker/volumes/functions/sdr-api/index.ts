@@ -60,15 +60,42 @@ function statusForCode(code?: string): number {
   switch (code) {
     case 'conflito_agenda':
     case 'conflito_evento':
+    case 'vendedor_indisponivel': // trava do 3C, escopo e2a: o vendedor escolhido está com a agenda fechada
       return 409
     case 'sem_permissao':
       return 403
     case 'nao_encontrado':
     case 'lead_nao_encontrado':
       return 404
+    case 'trava_3c': // trava do 3C: quem marca (o dono da chave) está com a marcação travada
+      return 423
     default:
       return 422
   }
+}
+
+// Erro de RPC → resposta. A recusa do trigger da trava do 3C (a_trava_3c_agendamento,
+// SQLSTATE PT423) vira 423 com o motivo e os números do `hint` (JSON), em vez do 500
+// genérico. No destino (escopo e2a, DETAIL trava_3c_destino) o code é o neutro
+// 'vendedor_indisponivel' e o status é 409 — o MESMO de statusForCode, para o integrador
+// receber um status só por code, venha a recusa da RPC ou do trigger. Qualquer outro erro
+// continua 500.
+function erroRpc(error: { message?: string; code?: string; details?: string | null; hint?: string | null }): Response {
+  if (error?.code !== 'PT423') return json(500, { error: error?.message })
+  let trava: Record<string, unknown> | undefined
+  try {
+    const obj = error.hint ? JSON.parse(error.hint) : null
+    if (obj && typeof obj === 'object' && !Array.isArray(obj) && Object.keys(obj).length > 0) trava = obj
+  } catch {
+    // hint fora do formato: a recusa segue sem os números
+  }
+  const code = error.details === 'trava_3c_destino' ? 'vendedor_indisponivel' : 'trava_3c'
+  return json(statusForCode(code), {
+    error: error.message || 'Marcação travada pela regra do 3C',
+    code,
+    detail: error.details || undefined,
+    ...(trava ? { trava } : {}),
+  })
 }
 
 function rpcResult(res: any): Response {
@@ -286,12 +313,13 @@ async function handleAgendar(sdrId: string, body: any, viaAgente = false): Promi
     p_observacoes: body.observacoes ?? null,
     ...prova,
   })
-  if (error) return json(500, { error: error.message })
+  if (error) return erroRpc(error)
   // injeta lead_criado no resultado de sucesso (mantém o padrão do rpcResult)
   if (data && data.success === true) {
     return json(200, { data: data.agendamento ?? data, distribuicao: data.distribuicao ?? undefined, lead_criado: r.criado ?? false })
   }
-  return json(statusForCode(data?.code), { error: data?.error || 'Erro ao processar', code: data?.code })
+  // code 'trava_3c' (423) traz os números da trava em `trava`
+  return json(statusForCode(data?.code), { error: data?.error || 'Erro ao processar', code: data?.code, ...(data?.trava ? { trava: data.trava } : {}) })
 }
 
 // Brasília é UTC-3 fixo (sem horário de verão desde 2019).
@@ -398,7 +426,7 @@ async function handleReagendar(sdrId: string, id: string, body: any): Promise<Re
     p_observacoes: body.observacoes ?? null,
     p_principal_dor_objetivo: body.principal_dor_objetivo ?? null,
   })
-  if (error) return json(500, { error: error.message })
+  if (error) return erroRpc(error)
   return rpcResult(data)
 }
 
@@ -410,7 +438,7 @@ async function handleResultado(sdrId: string, id: string, body: any): Promise<Re
     p_resultado: body.resultado,
     p_observacoes: body.observacoes ?? null,
   })
-  if (error) return json(500, { error: error.message })
+  if (error) return erroRpc(error)
   return rpcResult(data)
 }
 
@@ -420,7 +448,7 @@ async function handleCancelar(sdrId: string, id: string, body: any): Promise<Res
     p_agendamento_id: id,
     p_observacoes: body?.observacoes ?? null,
   })
-  if (error) return json(500, { error: error.message })
+  if (error) return erroRpc(error)
   return rpcResult(data)
 }
 

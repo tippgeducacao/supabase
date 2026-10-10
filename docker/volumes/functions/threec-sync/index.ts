@@ -20,6 +20,9 @@
 // raw_json guarda a resposta crua pra auditoria.
 //
 // ⚠️ O endpoint é PAGINADO (15 por página) — ver a nota em syncPerformance().
+//
+// BATIMENTO (trava do 3C, 10/2026): toda rodada grava 1 linha em threec_sync_batimentos
+// pela RPC threec_sync_registrar_batimento — ver registrarBatimento().
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0'
 
@@ -108,6 +111,11 @@ function str(obj: AnyRec, keys: string[]): string | null {
 interface SyncResult {
   count: number
   error?: string
+  // Para o batimento (threec_sync_batimentos):
+  paginas: number // páginas buscadas na rodada
+  paginasComErro: number // quantas falharam (a 1ª incluída)
+  httpStatus: number | null // status HTTP da 1ª página (null = nem houve resposta)
+  erroPagina?: string // 1º erro da página 2 em diante — não derruba a rodada
 }
 
 // Teto de segurança: se a API mudar e devolver um total_pages absurdo, não
@@ -128,11 +136,12 @@ function listaDoEnvelope(parsed: AnyRec): AnyRec[] {
   return []
 }
 
-// Busca UMA página do endpoint. Devolve a lista + quantas páginas existem.
+// Busca UMA página do endpoint. Devolve a lista + quantas páginas existem
+// (+ o status HTTP, para o batimento).
 async function buscarPagina(
   dateStr: string,
   page?: number,
-): Promise<{ list: AnyRec[]; totalPages: number; error?: string }> {
+): Promise<{ list: AnyRec[]; totalPages: number; status: number | null; error?: string }> {
   const url = new URL(`${THREEC_BASE_URL}/agents/status/metrics/total`)
   url.searchParams.set('start_date', dateStr)
   url.searchParams.set('end_date', dateStr)
@@ -143,24 +152,24 @@ async function buscarPagina(
   try {
     resp = await fetch(url.toString(), { method: 'GET', headers: { Accept: 'application/json' } })
   } catch (err) {
-    return { list: [], totalPages: 1, error: `fetch failed: ${String(err)}` }
+    return { list: [], totalPages: 1, status: null, error: `fetch failed: ${String(err)}` }
   }
 
   const text = await resp.text()
   if (!resp.ok) {
-    return { list: [], totalPages: 1, error: `3C ${resp.status}: ${text.slice(0, 300)}` }
+    return { list: [], totalPages: 1, status: resp.status, error: `3C ${resp.status}: ${text.slice(0, 300)}` }
   }
 
   let parsed: AnyRec
   try {
     parsed = JSON.parse(text) as AnyRec
   } catch {
-    return { list: [], totalPages: 1, error: 'invalid JSON from 3C' }
+    return { list: [], totalPages: 1, status: resp.status, error: 'invalid JSON from 3C' }
   }
 
   const pag = (parsed.meta as AnyRec | undefined)?.pagination as AnyRec | undefined
   const totalPages = Math.max(1, Number(pag?.total_pages ?? 1) || 1)
-  return { list: listaDoEnvelope(parsed), totalPages }
+  return { list: listaDoEnvelope(parsed), totalPages, status: resp.status }
 }
 
 // Busca AgentStatusMetrics do dia e faz upsert em threec_daily_performance.
@@ -177,9 +186,14 @@ async function buscarPagina(
 // Ana Ligia ficou com o dado parado por mais de 2 horas aparecendo como 0.
 async function syncPerformance(dateStr: string): Promise<SyncResult> {
   const primeira = await buscarPagina(dateStr)
-  if (primeira.error) return { count: 0, error: primeira.error }
+  if (primeira.error) {
+    return { count: 0, error: primeira.error, paginas: 1, paginasComErro: 1, httpStatus: primeira.status }
+  }
 
   const list: AnyRec[] = [...primeira.list]
+  let paginasLidas = 1
+  let paginasComErro = 0
+  let erroPagina: string | undefined
 
   if (primeira.totalPages > 1) {
     const paginas = Array.from(
@@ -190,13 +204,21 @@ async function syncPerformance(dateStr: string): Promise<SyncResult> {
     // cada 60s. Com 2–3 páginas o custo é irrelevante e evita rajada.
     for (const page of paginas) {
       const r = await buscarPagina(dateStr, page)
+      paginasLidas++
       // Falha numa página não pode derrubar as que já vieram — melhor gravar
       // parcial (e manter o resto congelado por 1 min) do que perder tudo.
+      // Mas deixa rastro no batimento (antes sumia calada).
       if (!r.error) list.push(...r.list)
+      else {
+        paginasComErro++
+        if (!erroPagina) erroPagina = `página ${page}: ${r.error}`
+      }
     }
   }
 
-  if (list.length === 0) return { count: 0 }
+  const rodada = { paginas: paginasLidas, paginasComErro, httpStatus: primeira.status, erroPagina }
+
+  if (list.length === 0) return { count: 0, ...rodada }
 
   const rows = list.map((a) => {
     const m = (a.metrics ?? {}) as AnyRec
@@ -229,8 +251,50 @@ async function syncPerformance(dateStr: string): Promise<SyncResult> {
     .from('threec_daily_performance')
     .upsert(rows, { onConflict: 'report_date,threec_agent_id' })
 
-  if (error) return { count: 0, error: `upsert failed: ${error.message}` }
-  return { count: rows.length }
+  if (error) return { count: 0, error: `upsert failed: ${error.message}`, ...rodada }
+  return { count: rows.length, ...rodada }
+}
+
+// BATIMENTO — 1 linha por rodada em threec_sync_batimentos (migration 20261010133750).
+// É o sinal de vida da coleta: sem batimento OK há mais de N min, a trava do 3C se solta
+// sozinha para todos (estado suspensa_dado) — se a falha é nossa, ninguém fica travado.
+//   ok      = a 1ª página veio sem erro E o upsert gravou (erro da página 2 em diante NÃO
+//             derruba o ok: vai para paginas_com_erro);
+//   agentes = agentes gravados. 0 = o 3C devolveu a lista vazia: a rodada NÃO conta como sinal
+//             de vida (o disjuntor da trava pede ok E agentes > 0 — o 3C lista todo agente ativo,
+//             logado ou não). E, com a coleta viva, quem ficou numa página que falhou tem a trava
+//             solta só para si (a linha dele fica para trás do batimento).
+// NUNCA derruba o sync: qualquer falha aqui só vai para o log da função.
+interface Batimento {
+  ok: boolean
+  agentes: number
+  paginas: number
+  paginasComErro: number
+  httpStatus: number | null
+  erro: string | null
+}
+
+// Texto curto e SEM o api_token: o erro do fetch traz a URL inteira, com o token na query.
+function resumirErro(msg: string): string {
+  let s = msg.replace(/api_token=[^&\s"')]*/gi, 'api_token=***')
+  if (THREEC_TOKEN) s = s.split(THREEC_TOKEN).join('***')
+  return s.slice(0, 300)
+}
+
+async function registrarBatimento(b: Batimento): Promise<void> {
+  try {
+    const { error } = await supabase.rpc('threec_sync_registrar_batimento', {
+      p_ok: b.ok,
+      p_agentes: b.agentes,
+      p_paginas: b.paginas,
+      p_paginas_com_erro: b.paginasComErro,
+      p_http_status: b.httpStatus,
+      p_erro: b.erro ? resumirErro(b.erro) : null,
+    })
+    if (error) console.error('[threec-sync] batimento não gravado:', error.message)
+  } catch (err) {
+    console.error('[threec-sync] batimento não gravado:', String(err))
+  }
 }
 
 Deno.serve(async (req) => {
@@ -239,6 +303,10 @@ Deno.serve(async (req) => {
   }
 
   if (!THREEC_TOKEN) {
+    await registrarBatimento({
+      ok: false, agentes: 0, paginas: 0, paginasComErro: 0, httpStatus: null,
+      erro: '3C_TOKEN_API not configured on server',
+    })
     return new Response(
       JSON.stringify({ error: '3C_TOKEN_API not configured on server' }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
@@ -254,7 +322,26 @@ Deno.serve(async (req) => {
   }
 
   const dateStr = todayStr()
-  const result = await syncPerformance(dateStr)
+  let result: SyncResult
+  try {
+    result = await syncPerformance(dateStr)
+  } catch (err) {
+    // Exceção inesperada: deixa o rastro e segue como antes (o Deno.serve responde 500).
+    await registrarBatimento({
+      ok: false, agentes: 0, paginas: 0, paginasComErro: 0, httpStatus: null,
+      erro: `exceção: ${String(err)}`,
+    })
+    throw err
+  }
+
+  await registrarBatimento({
+    ok: !result.error, // página 1 sem erro E upsert gravado
+    agentes: result.count,
+    paginas: result.paginas,
+    paginasComErro: result.paginasComErro,
+    httpStatus: result.httpStatus,
+    erro: result.error ?? result.erroPagina ?? null,
+  })
 
   const payload = {
     mode,
