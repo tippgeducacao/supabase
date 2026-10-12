@@ -149,6 +149,49 @@ export async function trocarCodigoPorToken(
   return json;
 }
 
+export interface PerfilConectado {
+  open_id: string;
+  username: string;
+  display_name: string;
+  avatar_url: string;
+  follower_count: number;
+}
+
+/**
+ * Lê QUEM é o perfil que acabou de autorizar.
+ *
+ * ⚠️ Isto não é enfeite: a resposta do token NÃO traz nome nenhum, e sem nome a página de
+ * sucesso dizia só "o perfil já pode receber os posts". Em 12/10/2026 a autorização pegou a
+ * conta vazia que é dona do app no portal (0 seguidores) em vez de @ppgvet_oficial, e a tela
+ * comemorou igual — o erro só apareceu quando eu fui conferir o banco. Quem autoriza está
+ * logado em ALGUMA conta no navegador, e é essa que vai; então a tela tem de dizer o `@` e o
+ * número de seguidores, porque é o único jeito de a pessoa ver na hora que foi a conta errada.
+ *
+ * Host de propósito diferente do resto do arquivo: `user.info.*` responde em
+ * `open.tiktokapis.com` com `Bearer` (conferido em 12/10/2026 com o token real).
+ */
+export async function buscarPerfil(token: string): Promise<PerfilConectado | null> {
+  const campos = "open_id,union_id,display_name,username,avatar_url,follower_count";
+  try {
+    const resp = await fetch(`https://open.tiktokapis.com/v2/user/info/?fields=${encodeURIComponent(campos)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const json = await resp.json().catch(() => ({}));
+    const u = json?.data?.user;
+    if (!u) return null;
+    return {
+      open_id: String(u.open_id ?? ""),
+      username: String(u.username ?? ""),
+      display_name: String(u.display_name ?? ""),
+      avatar_url: String(u.avatar_url ?? ""),
+      follower_count: Number(u.follower_count ?? 0),
+    };
+  } catch {
+    // Perder o nome não pode derrubar a conexão — o token já é válido a esta altura.
+    return null;
+  }
+}
+
 export interface PublicacaoIniciada {
   /** Protocolo do TikTok. Receber isto NÃO é "publicado" — a publicação é ASSÍNCRONA. */
   publish_id: string;

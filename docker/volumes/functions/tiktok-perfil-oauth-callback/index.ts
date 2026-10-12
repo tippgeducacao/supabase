@@ -10,7 +10,7 @@
 // **TikTok account holder redirect URL** (não no de advertiser). Divergir daqui devolve
 // "Redirect Url Not Match" na hora de autorizar.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
-import { erroDe, trocarCodigoPorToken } from "../_shared/tiktokAccountsApi.ts";
+import { buscarPerfil, erroDe, trocarCodigoPorToken } from "../_shared/tiktokAccountsApi.ts";
 import { getSegredo } from "../_shared/segredos.ts";
 
 const REDIRECT_URI = "https://api.ppgeducacao.site/functions/v1/tiktok-perfil-oauth-callback";
@@ -23,7 +23,9 @@ function pagina(titulo: string, msg: string, ok: boolean): Response {
 <style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#0b0b0c;color:#fff;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
 .card{max-width:440px;text-align:center;background:#161618;border:1px solid #2a2a2e;border-radius:20px;padding:36px}
 .dot{width:56px;height:56px;border-radius:16px;background:${cor};margin:0 auto 18px;display:flex;align-items:center;justify-content:center;font-size:28px}
-h1{font-size:20px;margin:0 0 8px}p{color:#a1a1aa;font-size:14px;line-height:1.5;margin:0}</style></head>
+h1{font-size:20px;margin:0 0 8px}p{color:#a1a1aa;font-size:14px;line-height:1.5;margin:0}
+.quem{display:block;margin:14px 0;font-size:17px;color:#fff;font-weight:600}
+.alerta{display:block;margin-top:16px;padding:12px;border-radius:12px;background:#2a1a0b;border:1px solid #7c4a0f;color:#fbbf24;font-size:13px;text-align:left;line-height:1.5}</style></head>
 <body><div class="card"><div class="dot">${ok ? "✓" : "✕"}</div><h1>${titulo}</h1><p>${msg}</p></div></body></html>`;
   return new Response(html, { status: ok ? 200 : 400, headers: { "Content-Type": "text/html; charset=utf-8" } });
 }
@@ -54,12 +56,15 @@ Deno.serve(async (req) => {
       return pagina("Quase lá", "O TikTok autorizou, mas não devolveu o identificador da conta. Avise a TI.", false);
     }
 
+    // Quem autorizou? A resposta do token não diz — tem de perguntar. Ver `buscarPerfil`.
+    const perfil = await buscarPerfil(t.access_token as string);
+
     const agora = Date.now();
     const { error: upErr } = await supabase.from("tiktok_business_accounts").upsert({
       business_id: businessId,
-      username: (t.username as string) ?? null,
-      display_name: (t.display_name as string) ?? null,
-      avatar_url: (t.profile_image as string) ?? (t.avatar_url as string) ?? null,
+      username: perfil?.username || (t.username as string) || null,
+      display_name: perfil?.display_name || (t.display_name as string) || null,
+      avatar_url: perfil?.avatar_url || (t.profile_image as string) || (t.avatar_url as string) || null,
       access_token: t.access_token as string,
       refresh_token: (t.refresh_token as string) ?? null,
       token_expires_at: t.expires_in ? new Date(agora + Number(t.expires_in) * 1000).toISOString() : null,
@@ -74,8 +79,24 @@ Deno.serve(async (req) => {
       return pagina("Quase lá", "Autorizou no TikTok, mas não consegui salvar o perfil. Avise a TI.", false);
     }
 
-    const nome = t.username ? `@${t.username}` : (t.display_name as string) || "o perfil";
-    return pagina("Perfil conectado! 🎉", `${nome} já pode receber os posts agendados no Planner. Pode fechar esta aba.`, true);
+    // ⚠️ A tela TEM de dizer QUEM conectou. Ver o comentário de `buscarPerfil`: sem o `@` e
+    // sem o número de seguidores, conectar a conta errada é indistinguível de acertar.
+    const arroba = perfil?.username ? `@${perfil.username}` : perfil?.display_name || "(sem nome)";
+    const seguidores = perfil
+      ? `${perfil.follower_count.toLocaleString("pt-BR")} seguidor${perfil.follower_count === 1 ? "" : "es"}`
+      : "não consegui ler os seguidores";
+    const suspeito = !perfil || perfil.follower_count === 0;
+    const aviso = suspeito
+      ? '<span class="alerta"><strong>Confira se é o perfil certo.</strong> Vale a conta que estava ' +
+        "logada neste navegador, não a dona do app. Se não for essa, abra o tiktok.com, troque " +
+        "para o perfil que você quer e abra o link de autorização de novo.</span>"
+      : "";
+    return pagina(
+      "Perfil conectado!",
+      `<span class="quem">${arroba} · ${seguidores}</span>` +
+      "Os posts agendados no Planner vão para este perfil. Pode fechar esta aba." + aviso,
+      true,
+    );
   } catch (e) {
     console.error("[tiktok-perfil-oauth-callback]", e);
     const msg = erroDe(e);
