@@ -78,6 +78,21 @@ Deno.serve(async (req) => {
     return pagina("Perfil conectado! 🎉", `${nome} já pode receber os posts agendados no Planner. Pode fechar esta aba.`, true);
   } catch (e) {
     console.error("[tiktok-perfil-oauth-callback]", e);
-    return pagina("Erro ao conectar", `Algo deu errado: ${erroDe(e)}`, false);
+    const msg = erroDe(e);
+    // ⚠️ 40131 é o erro mais provável deste fluxo e o mais fácil de interpretar errado como
+    // "a integração está quebrada". O código do PERFIL vale 10 MINUTOS e é de uso único —
+    // metade do prazo do lado de anúncios, que é 1 hora. Confirmação por e-mail no meio do
+    // caminho come esse tempo fácil. Visto em 12/10/2026, na primeira tentativa.
+    if (/40131|expired/i.test(msg)) {
+      return pagina(
+        "O código expirou",
+        "O código de autorização do perfil vale só 10 minutos e serve uma única vez. " +
+        "Abra o link de autorização de novo e conclua sem pausa — se houver confirmação por " +
+        "e-mail, deixe a caixa aberta antes de começar. Não recarregue esta página: isso " +
+        "reenvia o mesmo código, que já foi gasto.",
+        false,
+      );
+    }
+    return pagina("Erro ao conectar", `Algo deu errado: ${msg}`, false);
   }
 });
