@@ -121,8 +121,11 @@ export async function trocarCodigoPorToken(
       client_id: appId,
       client_secret: secret,
       grant_type: "authorization_code",
+      // ⚠️ SÓ `auth_code`. Eu mandava `code` junto "porque os exemplos divergem", e isso é
+      // uma variável a mais num fluxo que já falhou duas vezes com 40131 — se o TikTok ler o
+      // campo errado, o erro que volta é "código inválido/expirado", que manda investigar o
+      // relógio em vez da requisição. A doc da Accounts API pede auth_code.
       auth_code: authCode,
-      code: authCode,          // os exemplos do TikTok divergem no nome; mandar os dois é inofensivo
       redirect_uri: redirectUri,
     }),
   });
