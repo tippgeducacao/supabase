@@ -15,7 +15,7 @@ const HORA_LIMITE_RESUMO = 12;
 const MIN_AVISO = 30;
 const DIAS = ["domingo", "segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado"];
 
-interface DonoAgenda { canon: string; nome: string | null; apelido: string | null }
+export interface DonoAgenda { canon: string; nome: string | null; apelido: string | null }
 interface Entrevista {
   id: string;
   candidato: string;
@@ -85,8 +85,9 @@ function textoAviso(dono: DonoAgenda, e: Entrevista, agora: number): string {
 /**
  * Envia 1 vez por chave. A trava é a PK de assistente_avisos (grava ANTES de enviar), não uma
  * consulta "já mandei?". Envio falhou → apaga a chave e o próximo minuto tenta de novo.
+ * Também usada pelo roteiro de conteúdo (roteiroConteudoTick.ts).
  */
-async function avisarUmaVez(
+export async function avisarUmaVez(
   admin: any, linha: LinhaWa, dono: DonoAgenda, chave: string, tipo: string, texto: string,
 ): Promise<boolean> {
   const { error } = await admin.from("assistente_avisos").insert({ chave, canon: dono.canon, tipo });
