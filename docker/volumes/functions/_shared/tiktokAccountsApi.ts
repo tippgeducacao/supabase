@@ -100,13 +100,26 @@ export async function renovarToken(
   return dados;
 }
 
+/** Token do TITULAR DO PERFIL — host e formato diferentes do resto deste arquivo. */
+const OAUTH_PERFIL = "https://open.tiktokapis.com/v2/oauth/token/";
+
 /**
  * Troca o código da autorização do DONO DO PERFIL por token.
  *
- * ⚠️ É outro fluxo do de anúncios: lá o anunciante autoriza uma conta de ADS e o endpoint é
- * `/oauth2/access_token/` (sem `grant_type`); aqui quem autoriza é o titular do PERFIL e o
- * endpoint é `/tt_user/oauth2/token/`, que SEGUE o padrão OAuth com `grant_type`. Misturar
- * os dois é o erro natural — os nomes são quase iguais e os contratos, não.
+ * ⚠️ ESTE FLUXO NÃO É O DA MARKETING API, e eu errei isso por dois dias. A URL que o portal
+ * gera para o titular do perfil é `www.tiktok.com/v2/auth/authorize?client_key=…` com escopos
+ * `video.publish`/`user.info.basic` — ou seja, é o fluxo do Login Kit, e o token sai de
+ * `open.tiktokapis.com/v2/oauth/token/`, em **form-urlencoded**, com `client_key` e `code`.
+ * Eu mandava para `business-api…/tt_user/oauth2/token/` em JSON com `auth_code`.
+ *
+ * ⚠️ E o erro que isso devolvia era **`40131 Authorization code is expired`** — medido em
+ * 12/10/2026 enviando um código PROPOSITALMENTE INVÁLIDO: aquele endpoint responde "expirado"
+ * para qualquer código que não reconhece. Eu li a mensagem ao pé da letra, culpei o relógio e
+ * mandei o diretor correr contra um prazo de 10 minutos que não tinha nada a ver. Mensagem de
+ * erro de terceiro não é diagnóstico: o teste com entrada inválida é.
+ *
+ * É o MESMO host do callback antigo do perfil orgânico (`tiktok-oauth-callback`), que já fazia
+ * assim desde 15/06. A resposta vem com os campos no topo, sem envelope `data`.
  */
 export async function trocarCodigoPorToken(
   appId: string,
@@ -114,27 +127,26 @@ export async function trocarCodigoPorToken(
   authCode: string,
   redirectUri: string,
 ): Promise<Record<string, string | number | string[]>> {
-  const resp = await fetch(`${API}${ROTAS.token}`, {
+  const resp = await fetch(OAUTH_PERFIL, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      client_id: appId,
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Cache-Control": "no-cache",
+    },
+    body: new URLSearchParams({
+      client_key: appId,
       client_secret: secret,
+      code: authCode,
       grant_type: "authorization_code",
-      // ⚠️ SÓ `auth_code`. Eu mandava `code` junto "porque os exemplos divergem", e isso é
-      // uma variável a mais num fluxo que já falhou duas vezes com 40131 — se o TikTok ler o
-      // campo errado, o erro que volta é "código inválido/expirado", que manda investigar o
-      // relógio em vez da requisição. A doc da Accounts API pede auth_code.
-      auth_code: authCode,
       redirect_uri: redirectUri,
     }),
   });
   const json = await resp.json().catch(() => ({}));
-  const dados = json?.data ?? json;
-  if (json?.code !== 0 && !dados?.access_token) {
-    throw new Error(`O TikTok recusou a troca do código (code ${json?.code ?? "?"}): ${json?.message || "sem mensagem"}`);
+  if (!json?.access_token) {
+    const motivo = json?.error_description || json?.error || json?.message || `HTTP ${resp.status}`;
+    throw new Error(`O TikTok recusou a troca do código: ${motivo}`);
   }
-  return dados;
+  return json;
 }
 
 export interface PublicacaoIniciada {

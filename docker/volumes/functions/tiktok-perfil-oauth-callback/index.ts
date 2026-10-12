@@ -79,17 +79,18 @@ Deno.serve(async (req) => {
   } catch (e) {
     console.error("[tiktok-perfil-oauth-callback]", e);
     const msg = erroDe(e);
-    // ⚠️ 40131 é o erro mais provável deste fluxo e o mais fácil de interpretar errado como
-    // "a integração está quebrada". O código do PERFIL vale 10 MINUTOS e é de uso único —
-    // metade do prazo do lado de anúncios, que é 1 hora. Confirmação por e-mail no meio do
-    // caminho come esse tempo fácil. Visto em 12/10/2026, na primeira tentativa.
-    if (/40131|expired/i.test(msg)) {
+    // ⚠️ NÃO repetir o erro de 12/10/2026: eu tinha uma página aqui dizendo "o código
+    // expirou, corra contra os 10 minutos" porque o TikTok devolvia `40131 Authorization code
+    // is expired`. Aquela mensagem era GENÉRICA do endpoint ERRADO — medido mandando um código
+    // propositalmente inválido, ele responde "expirado" para qualquer coisa que não reconhece.
+    // A causa era o host/formato da troca, não o relógio. Então aqui só se fala de prazo
+    // quando o PRÓPRIO endpoint certo disser que o código já foi usado ou venceu.
+    if (/invalid_grant|already been used|code.*(expired|invalid)/i.test(msg)) {
       return pagina(
-        "O código expirou",
-        "O código de autorização do perfil vale só 10 minutos e serve uma única vez. " +
-        "Abra o link de autorização de novo e conclua sem pausa — se houver confirmação por " +
-        "e-mail, deixe a caixa aberta antes de começar. Não recarregue esta página: isso " +
-        "reenvia o mesmo código, que já foi gasto.",
+        "O código não vale mais",
+        "O código de autorização serve uma única vez. Se você recarregou esta página, ela " +
+        "reenviou o mesmo código — abra o link de autorização de novo, do começo. " +
+        "Se foi a primeira vez que você abriu, me avise: aí o problema não é o código.",
         false,
       );
     }
