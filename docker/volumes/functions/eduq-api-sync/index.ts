@@ -123,14 +123,43 @@ Deno.serve(async (req) => {
   const authHeader = req.headers.get("Authorization") ?? "";
   if (!authHeader) return json({ success: false, error: "Não autenticado." }, 401);
 
-  const supabase = createClient(
-    Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_ANON_KEY")!,
-    { global: { headers: { Authorization: authHeader } } },
-  );
+  // ── Chamada do cron × chamada de gente ───────────────────────────────────────
+  // Até 12/10/2026 esta edge só rodava no clique do botão "Sincronizar EDUQ", e por isso
+  // a fila de aprovação do financeiro só enchia quando alguém lembrava: eram 6.822
+  // recebimentos pendentes. Agora o cron chama sozinho de 30 em 30 minutos.
+  //
+  // O cron não tem usuário, e a `eduq_api_sync_upsert` exige `is_financial_user()` ou
+  // `is_management_user()`. Em vez de afrouxar esse gate, a edge se identifica como
+  // SERVIÇO quando o disparo é do cron — e a função passou a aceitar
+  // `auth.role() = 'service_role'`, que é o padrão já usado no resto do banco
+  // (ver calendar_b2b_pode_consultar).
+  //
+  // ⚠️ O gatilho é o header `x-trigger: cron`, que só existe dentro da VPS: a edge não
+  //    está exposta sem o bearer, e o cron usa o kong interno. Não é um bypass aberto.
+  const doCron = (req.headers.get("x-trigger") ?? "").toLowerCase() === "cron";
+  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+  if (doCron && !serviceKey) {
+    return json({ success: false, error: "SUPABASE_SERVICE_ROLE_KEY não configurada." }, 500);
+  }
+  const supabase = doCron
+    ? createClient(Deno.env.get("SUPABASE_URL")!, serviceKey)
+    : createClient(
+        Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_ANON_KEY")!,
+        { global: { headers: { Authorization: authHeader } } },
+      );
 
   try {
     const body = await req.json().catch(() => ({}));
-    const inicio: string = body.inicio, fim: string = body.fim;
+    // A janela padrão só vale para o cron. No clique de gente continua obrigatória, para
+    // ninguém sincronizar um período sem querer achando que escolheu.
+    const hoje = new Date();
+    const desloca = (n: number) => {
+      const d = new Date(hoje);
+      d.setUTCDate(d.getUTCDate() + n);
+      return d.toISOString().slice(0, 10);
+    };
+    const inicio: string = body.inicio ?? (doCron ? desloca(-45) : undefined);
+    const fim: string = body.fim ?? (doCron ? desloca(1) : undefined);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(inicio ?? "") || !/^\d{4}-\d{2}-\d{2}$/.test(fim ?? "")) {
       return json({ success: false, error: "Informe 'inicio' e 'fim' em ISO (YYYY-MM-DD)." }, 400);
     }
