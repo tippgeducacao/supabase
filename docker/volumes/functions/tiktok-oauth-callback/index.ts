@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { escaparHtml } from "../_shared/escaparHtml.ts";
 
 // Callback do OAuth do TikTok. O perfil autoriza o app e o TikTok redireciona pra cá
 // com ?code=...  Trocamos o code por access/refresh token, buscamos o perfil e salvamos
@@ -18,7 +19,7 @@ function page(titulo: string, msg: string, ok: boolean): Response {
 .card{max-width:440px;text-align:center;background:#161618;border:1px solid #2a2a2e;border-radius:20px;padding:36px}
 .dot{width:56px;height:56px;border-radius:16px;background:${cor};margin:0 auto 18px;display:flex;align-items:center;justify-content:center;font-size:28px}
 h1{font-size:20px;margin:0 0 8px}p{color:#a1a1aa;font-size:14px;line-height:1.5;margin:0}</style></head>
-<body><div class="card"><div class="dot">${ok ? "✓" : "✕"}</div><h1>${titulo}</h1><p>${msg}</p></div></body></html>`;
+<body><div class="card"><div class="dot">${ok ? "✓" : "✕"}</div><h1>${escaparHtml(titulo)}</h1><p>${escaparHtml(msg)}</p></div></body></html>`;
   return new Response(html, { status: ok ? 200 : 400, headers: { "Content-Type": "text/html; charset=utf-8" } });
 }
 

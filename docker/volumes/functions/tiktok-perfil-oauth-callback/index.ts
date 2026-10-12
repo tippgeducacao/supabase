@@ -12,10 +12,18 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { buscarPerfil, erroDe, trocarCodigoPorToken } from "../_shared/tiktokAccountsApi.ts";
 import { getSegredo } from "../_shared/segredos.ts";
+import { escaparHtml } from "../_shared/escaparHtml.ts";
 
 const REDIRECT_URI = "https://api.ppgeducacao.site/functions/v1/tiktok-perfil-oauth-callback";
 
-function pagina(titulo: string, msg: string, ok: boolean): Response {
+/**
+ * ⚠️ `titulo` é TEXTO e é escapado aqui. `msg` é HTML NOSSO de propósito (o `<span>` com o
+ * perfil), então NÃO é escapado no molde — quem monta a msg escapa cada pedaço que vem de
+ * fora, com `escaparHtml`. Ver o comentário de `_shared/escaparHtml.ts`: esta página é
+ * pública e já refletiu injeção.
+ */
+function pagina(tituloCru: string, msg: string, ok: boolean): Response {
+  const titulo = escaparHtml(tituloCru);
   const cor = ok ? "#36AE9C" : "#dc2626";
   const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -34,7 +42,7 @@ Deno.serve(async (req) => {
   try {
     const url = new URL(req.url);
     const erro = url.searchParams.get("error") || url.searchParams.get("error_description");
-    if (erro) return pagina("Autorização cancelada", `O TikTok retornou: ${erro}. Pode fechar e tentar de novo.`, false);
+    if (erro) return pagina("Autorização cancelada", `O TikTok retornou: ${escaparHtml(erro)}. Pode fechar e tentar de novo.`, false);
 
     const authCode = url.searchParams.get("auth_code") || url.searchParams.get("code");
     if (!authCode) return pagina("Link inválido", "Faltou o código de autorização do TikTok. Abra o link de conexão de novo.", false);
@@ -81,7 +89,7 @@ Deno.serve(async (req) => {
 
     // ⚠️ A tela TEM de dizer QUEM conectou. Ver o comentário de `buscarPerfil`: sem o `@` e
     // sem o número de seguidores, conectar a conta errada é indistinguível de acertar.
-    const arroba = perfil?.username ? `@${perfil.username}` : perfil?.display_name || "(sem nome)";
+    const arroba = escaparHtml(perfil?.username ? `@${perfil.username}` : perfil?.display_name || "(sem nome)");
     const seguidores = perfil
       ? `${perfil.follower_count.toLocaleString("pt-BR")} seguidor${perfil.follower_count === 1 ? "" : "es"}`
       : "não consegui ler os seguidores";
@@ -115,6 +123,6 @@ Deno.serve(async (req) => {
         false,
       );
     }
-    return pagina("Erro ao conectar", `Algo deu errado: ${msg}`, false);
+    return pagina("Erro ao conectar", `Algo deu errado: ${escaparHtml(msg)}`, false);
   }
 });

@@ -13,6 +13,12 @@
 const API = "https://business-api.tiktok.com/open_api/v1.3";
 
 /**
+ * Token do TITULAR DO PERFIL — host e formato diferentes do `API` acima, e é o host que
+ * vale TANTO para a troca do código QUANTO para a renovação (as duas já foram erradas aqui).
+ */
+const OAUTH_PERFIL = "https://open.tiktokapis.com/v2/oauth/token/";
+
+/**
  * Caminhos CONFERIDOS em 25/09/2026 contra a lista de endpoints que o próprio portal mostra
  * no escopo "TikTok accounts" (tela de criação do app) — não são mais suposição.
  * ⚠️ `statusPublicacao` era o meu palpite `/business/video/publish/status/` e está ERRADO:
@@ -27,7 +33,11 @@ export const ROTAS = {
   statusPublicacao: "/business/publish/status/",
   infoConta: "/business/get/",
   listaVideos: "/business/video/list/",
-  token: "/tt_user/oauth2/token/",
+  // ⚠️ NÃO existe aqui uma rota de token: o token do titular do perfil (troca E renovação)
+  // mora em `OAUTH_PERFIL`, em outro host. Havia um `token: "/tt_user/oauth2/token/"` nesta
+  // lista, e é justamente o endpoint que este arquivo prova duas vezes que NÃO serve — ele
+  // ignora o grant_type e pede `auth_code`. Ninguém o usava; ficava só esperando alguém
+  // confiar nele e perder outro dia.
 } as const;
 
 export interface RespostaTikTok<T> {
@@ -76,32 +86,41 @@ async function chamar<T>(
  * ⚠️ O token da conta vive ~1 DIA (o refresh, ~1 ano). Por isso a renovação acontece no
  * momento do DISPARO, nunca no do agendamento: post marcado para daqui a duas semanas
  * teria token vencido muito antes de a hora chegar.
+ *
+ * ⚠️ MESMO host errado da troca do código, pela terceira vez — medido em 12/10/2026 com um
+ * refresh token PROPOSITALMENTE INVÁLIDO. O que estava aqui (`business-api…/tt_user/oauth2/token/`
+ * em JSON, com `client_id`) nem olha o `grant_type`: responde
+ * `40002 auth_code: Missing data for required field` — é endpoint de TROCA de código, não de
+ * renovação, e jamais renovaria nada. O host certo é o mesmo de onde o token saiu e entendeu o
+ * pedido na hora: `invalid_grant · Refresh token is invalid or expired`.
+ * Como o token vive 1 dia, isso derrubaria a publicação 24 h depois de conectar o perfil —
+ * silenciosamente, já com posts agendados na fila.
  */
 export async function renovarToken(
   appId: string,
   secret: string,
   refreshToken: string,
 ): Promise<{ access_token: string; refresh_token?: string; expires_in?: number; refresh_expires_in?: number }> {
-  const resp = await fetch(`${API}${ROTAS.token}`, {
+  const resp = await fetch(OAUTH_PERFIL, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      client_id: appId,
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Cache-Control": "no-cache",
+    },
+    body: new URLSearchParams({
+      client_key: appId,
       client_secret: secret,
       grant_type: "refresh_token",
       refresh_token: refreshToken,
     }),
   });
   const json = await resp.json().catch(() => ({}));
-  const dados = json?.data ?? json;
-  if (json?.code !== 0 && !dados?.access_token) {
-    throw new Error(`Falha ao renovar o token da conta (code ${json?.code ?? "?"}): ${json?.message || "sem mensagem"}`);
+  if (!json?.access_token) {
+    const motivo = json?.error_description || json?.error || json?.message || `HTTP ${resp.status}`;
+    throw new Error(`Falha ao renovar o token da conta: ${motivo}`);
   }
-  return dados;
+  return json;
 }
-
-/** Token do TITULAR DO PERFIL — host e formato diferentes do resto deste arquivo. */
-const OAUTH_PERFIL = "https://open.tiktokapis.com/v2/oauth/token/";
 
 /**
  * Troca o código da autorização do DONO DO PERFIL por token.
@@ -211,7 +230,18 @@ export async function publicarVideo(
   const dados = await chamar<Record<string, string>>(ROTAS.publicarVideo, token, {
     business_id: businessId,
     video_url: videoUrl,
-    post_info: { caption: legenda ?? "" },
+    // ⚠️ Os dois booleanos são OBRIGATÓRIOS — descobertos em 12/10/2026 iterando nos
+    // `40002 … Missing data for required field` do próprio endpoint. Sem eles o post nem sai.
+    // São as declarações de conteúdo comercial do TikTok, e o que elas significam:
+    //   • is_brand_organic  → o post promove a SUA marca (põe o selo "conteúdo promocional").
+    //   • is_branded_content → parceria PAGA com terceiro (não é o nosso caso).
+    // Ficam `false` porque é assim que o time publica na mão hoje; virar `true` muda o que o
+    // seguidor vê. Se um dia o post for de parceria paga, isto tem de vir do card.
+    post_info: {
+      caption: legenda ?? "",
+      is_brand_organic: false,
+      is_branded_content: false,
+    },
   });
   const id = dados.publish_id || dados.share_id || dados.id;
   if (!id) throw new Error("O TikTok aceitou mas não devolveu protocolo de publicação.");
@@ -226,7 +256,22 @@ export interface StatusPublicacao {
   motivo?: string;
 }
 
-/** Consulta o desfecho de um protocolo. É isto — e não o 200 do publicar — que autoriza marcar "publicado". */
+/**
+ * Consulta o desfecho de um protocolo. É isto — e não o 200 do publicar — que autoriza marcar
+ * "publicado".
+ *
+ * ⚠️ MEDIDO em 12/10/2026: com um `publish_id` INVENTADO este endpoint devolve
+ * **`code: 0` com `data: {}`** — sucesso vazio, não erro. Ou seja, "não conheço esse
+ * protocolo" e "ainda estou processando" chegam aqui IDÊNTICOS, e por isso o fallback é
+ * `processando` e quem tira post preso da fila é o watchdog do worker, nunca esta função.
+ * (O caminho `/business/video/publish/status/`, com "video", dá 404 — o certo é sem.)
+ *
+ * ⚠️ Os NOMES DOS CAMPOS de um status real seguem desconhecidos: `data` só vem preenchido
+ * depois de uma publicação que o TikTok aceitou, e isso ainda não aconteceu (falta verificar
+ * o domínio da URL do vídeo). Por isso aceitamos vários nomes candidatos E registramos o
+ * payload cru quando ele não casa com nenhum: o primeiro post de verdade vira a fonte, em vez
+ * de continuar palpite. Não troque esse log por silêncio antes de ele ter respondido uma vez.
+ */
 export async function consultarStatus(
   token: string,
   businessId: string,
@@ -242,6 +287,12 @@ export async function consultarStatus(
   }
   if (["FAILED", "PUBLISH_FAILED", "ERROR"].includes(bruto)) {
     return { situacao: "falhou", motivo: dados.fail_reason || dados.error_message || bruto };
+  }
+  if (Object.keys(dados).length > 0) {
+    console.log(
+      `[tiktok] FORMATO DO STATUS ainda não mapeado — publish_id=${publishId} payload=` +
+      JSON.stringify(dados).slice(0, 500),
+    );
   }
   return { situacao: "processando" };
 }
