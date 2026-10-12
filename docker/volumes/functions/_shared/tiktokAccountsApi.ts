@@ -369,6 +369,50 @@ export async function consultarStatus(
 }
 
 /**
+ * Confere o `/robots.txt` do host que serve o vídeo.
+ *
+ * ⚠️ ISTO CUSTOU UMA TARDE EM 12/10/2026, e o sintoma não aponta para a causa em nada.
+ * O `api.ppgeducacao.site` (Kong do Supabase) devolvia **401 em `/robots.txt`**, e pela
+ * norma de robots (RFC 9309) um crawler que recebe 401/403 no robots deve tratar o host
+ * INTEIRO como proibido. Resultado: o TikTok aceitava o publicar, devolvia protocolo, e
+ * depois ficava eternamente em `PROCESSING_DOWNLOAD` — **sem nunca buscar o arquivo**. Nada
+ * aparecia como bloqueio no Cloudflare (ele nem pedia o vídeo), o arquivo estava perfeito
+ * (1080x1350, 30 fps, H.264) e a URL respondia 200. Provado por experimento controlado: o
+ * MESMO vídeo servido por um host com robots permissivo publicou em 75 s.
+ *
+ * A cura foi uma Redirect Rule na Cloudflare mandando `api.ppgeducacao.site/robots.txt` para
+ * o robots do site (que é `User-agent: * / Allow: /`). Esta função existe para o dia em que
+ * alguém apagar essa regra: em vez de 70 minutos de post pendurado e um "Publicação
+ * interrompida" sem explicação, o erro aparece ANTES do envio e diz o que fazer.
+ *
+ * Falha de rede aqui NÃO bloqueia: o robots ser inalcançável por timeout não é o mesmo que
+ * ser proibido, e um falso negativo pararia publicação que funciona.
+ */
+async function conferirRobotsDoHost(urlDoVideo: string): Promise<void> {
+  let host: string;
+  try {
+    host = new URL(urlDoVideo).origin;
+  } catch {
+    throw new Error(`URL de vídeo inválida: ${urlDoVideo.slice(0, 120)}`);
+  }
+  let status: number;
+  try {
+    const r = await fetch(`${host}/robots.txt`, { redirect: "follow" });
+    status = r.status;
+  } catch {
+    return; // inalcançável ≠ proibido
+  }
+  if (status === 401 || status === 403) {
+    throw new Error(
+      `O /robots.txt de ${host} responde ${status}, e por isso o TikTok trata o host inteiro ` +
+      "como proibido: ele aceita o envio e nunca baixa o vídeo (fica preso em " +
+      "PROCESSING_DOWNLOAD). Conserto: a Redirect Rule da Cloudflare que manda " +
+      "/robots.txt para o robots do site foi removida ou parou de casar — recrie-a.",
+    );
+  }
+}
+
+/**
  * Preflight ESTRITO da URL do vídeo.
  * ⚠️ O `assertMediaReachable` do `ig-publish` NÃO serve aqui: ele aceita qualquer `res.ok`
  * e o fetch do Deno segue redirecionamento em silêncio — e o TikTok recusa 3xx. URL
@@ -378,6 +422,8 @@ export async function consultarStatus(
 export async function conferirUrlDoVideo(url: string): Promise<void> {
   if (!url) throw new Error("Post sem vídeo (URL vazia) — reanexe o arquivo.");
   if (!url.startsWith("https://")) throw new Error("A URL do vídeo precisa ser https — o TikTok recusa http.");
+
+  await conferirRobotsDoHost(url);
 
   let resp: Response;
   try {
