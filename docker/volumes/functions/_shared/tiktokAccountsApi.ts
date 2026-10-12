@@ -2,9 +2,19 @@
 // perfil. Isolado de propósito: quando a primeira chamada real acontecer, o conserto mora
 // AQUI e o worker não muda.
 //
-// Os CAMINHOS foram conferidos em 25/09/2026 na lista de endpoints que o portal mostra no
-// escopo "TikTok accounts". O FORMATO do corpo e da resposta segue sem confirmação — a
-// documentação é SPA e volta vazia no fetch, e os proxies de leitura devolvem só o menu.
+// ✅ CONTRATO CONFIRMADO em 12/10/2026 por uma publicação REAL (privada) no @ppgvet_oficial,
+// com a URL de teste que o TikTok libera sem verificação de domínio. O ciclo inteiro, medido:
+//   publicar  → {code:0, data:{share_id:"v_pub_url~v2.769585…"}}
+//   status    → {code:0, data:{status:"PROCESSING_DOWNLOAD"}}  …e ~30 s depois…
+//   status    → {code:0, data:{status:"PUBLISH_COMPLETE"}}     (sem id do post)
+// Nada aqui é mais palpite. Se um campo mudar, foi o TikTok que mudou.
+//
+// ⚠️ Para vídeo NOSSO falta a propriedade da URL estar verificada — e NÃO é um widget de
+// tela: no portal de Business isso é API (`ROTAS_PROPRIEDADE`, mais abaixo). Enquanto
+// `ppgeducacao.site` não estiver com property_status 1, publicar devolve erro de ownership.
+//
+// ⚠️ O endpoint de publicar tem limite de taxa curto: uma dúzia de chamadas seguidas devolve
+// `40000 The API rate limit exceeded`. O worker publica no máximo 3 por rodada.
 //
 // ⚠️ NÃO confundir com as outras duas APIs de TikTok da casa:
 //   • Marketing API (mesmo domínio, header Access-Token por ADVERTISER) = gasto de campanha.
@@ -38,6 +48,34 @@ export const ROTAS = {
   // lista, e é justamente o endpoint que este arquivo prova duas vezes que NÃO serve — ele
   // ignora o grant_type e pede `auth_code`. Ninguém o usava; ficava só esperando alguém
   // confiar nele e perder outro dia.
+} as const;
+
+/**
+ * VERIFICAÇÃO DE PROPRIEDADE DA URL — e aqui mora a parte que mais custou achar.
+ *
+ * O TikTok só baixa vídeo de domínio/prefixo verificado (`url_ownership_unverified`). No
+ * portal ANTIGO (developers.tiktok.com) isso é um widget "URL properties" na tela. No portal
+ * de BUSINESS (business-api.tiktok.com), onde vive o nosso app de publicação, **não existe
+ * widget nenhum** — a verificação virou API. Procurar na tela é perder a tarde: as seções do
+ * app lá são só Basic Information, Authorization, Sandbox Ad Account e Allowlist Management
+ * (conferido clicando, em 12/10/2026).
+ *
+ * ⚠️ A credencial destas rotas é a DO APP (`app_id` + `secret` no corpo/query), NÃO o
+ * `Access-Token` da conta e nem `advertiser_id`. Por isso elas não passam pelo `chamar()`
+ * acima. Secret errado devolve `40101`; app de outro portal devolve `40113`.
+ *
+ * `add` devolve a `signature` para pôr no DNS (property_type 1 = domínio) e `property_status`
+ * 0=pendente, 1=verificado, 2=falhou. Domínio verificado vale para os SUBDOMÍNIOS também, e a
+ * prova é por DNS — não passa por HTTP, logo não depende de nada da Cloudflare.
+ *
+ * Corpo do `add` (descoberto iterando nos 40002): o domínio vai ANINHADO em
+ * `url_property_meta: { property_type: 1, url: "ppgeducacao.site" }`.
+ */
+export const ROTAS_PROPRIEDADE = {
+  listar: "/business/property/list/",     // GET  ?app_id=&secret=
+  adicionar: "/business/property/add/",   // POST { app_id, secret, url_property_meta }
+  verificar: "/business/property/verify/",
+  remover: "/business/property/delete/",
 } as const;
 
 export interface RespostaTikTok<T> {
@@ -211,13 +249,31 @@ export async function buscarPerfil(token: string): Promise<PerfilConectado | nul
   }
 }
 
+/**
+ * Quem pode ver o post. ⚠️ MANDAR ISTO É OBRIGATÓRIO NA PRÁTICA: a função publicava sem
+ * `privacy_level` e ficava à mercê do padrão do TikTok, que não está documentado — num perfil
+ * de 18 mil seguidores, "descobrir o padrão na prática" é publicar errado para todos eles.
+ * Confirmado em 12/10/2026 por A/B: `privacy_level: "XPTO"` é recusado com "The request post
+ * info is empty or incorrect", e `SELF_ONLY` passa — ou seja, o campo existe e é validado.
+ */
+export type Privacidade = "PUBLIC_TO_EVERYONE" | "MUTUAL_FOLLOW_FRIENDS" | "SELF_ONLY";
+
 export interface PublicacaoIniciada {
-  /** Protocolo do TikTok. Receber isto NÃO é "publicado" — a publicação é ASSÍNCRONA. */
+  /**
+   * Protocolo do TikTok. Receber isto NÃO é "publicado" — a publicação é ASSÍNCRONA.
+   * Na resposta real ele chega como `share_id`; aqui dentro o nome é `publish_id` porque é
+   * assim que o endpoint de status o pede.
+   */
   publish_id: string;
 }
 
 /**
  * Manda publicar. Devolve o PROTOCOLO, não a confirmação.
+ *
+ * ✅ CONFIRMADO em 12/10/2026 com uma publicação real (privada, `privacy_level: "SELF_ONLY"`,
+ * usando a URL de teste que o TikTok libera sem verificação de domínio): a resposta vem
+ * `{code:0, data:{ share_id: "v_pub_url~v2.<números>" }}` — o campo é **`share_id`**, NÃO
+ * `publish_id`. Por isso os três nomes continuam aceitos abaixo; tirar `share_id` quebra tudo.
  * ⚠️ `video_url` tem de ser https, pública, sem redirecionamento e de domínio VERIFICADO
  * no portal — o preflight do worker cobre os três primeiros; o quarto é configuração.
  */
@@ -226,6 +282,7 @@ export async function publicarVideo(
   businessId: string,
   videoUrl: string,
   legenda: string,
+  privacidade: Privacidade = "PUBLIC_TO_EVERYONE",
 ): Promise<PublicacaoIniciada> {
   const dados = await chamar<Record<string, string>>(ROTAS.publicarVideo, token, {
     business_id: businessId,
@@ -241,6 +298,9 @@ export async function publicarVideo(
       caption: legenda ?? "",
       is_brand_organic: false,
       is_branded_content: false,
+      // Explícito de propósito — ver o comentário de `Privacidade`. O padrão da função é
+      // público porque é o que o Planner quer; teste de fumaça passa "SELF_ONLY".
+      privacy_level: privacidade,
     },
   });
   const id = dados.publish_id || dados.share_id || dados.id;
@@ -249,6 +309,11 @@ export async function publicarVideo(
 }
 
 export type SituacaoPublicacao = "processando" | "publicado" | "falhou";
+
+/** Estados intermediários conhecidos. `PROCESSING_DOWNLOAD` foi visto numa publicação real. */
+const PROCESSANDO = [
+  "PROCESSING_DOWNLOAD", "PROCESSING_UPLOAD", "PROCESSING", "PENDING", "DOWNLOADING",
+];
 
 export interface StatusPublicacao {
   situacao: SituacaoPublicacao;
@@ -283,11 +348,17 @@ export async function consultarStatus(
   });
   const bruto = String(dados.status ?? dados.publish_status ?? "").toUpperCase();
   if (["PUBLISH_COMPLETE", "PUBLISHED", "SUCCESS"].includes(bruto)) {
+    // ⚠️ O desfecho real NÃO traz id do post (medido: `data` só tem `status`). Então não
+    // existe link para o post publicado — não prometa isso na tela.
     return { situacao: "publicado", post_id: dados.post_id || dados.item_id || undefined };
   }
   if (["FAILED", "PUBLISH_FAILED", "ERROR"].includes(bruto)) {
     return { situacao: "falhou", motivo: dados.fail_reason || dados.error_message || bruto };
   }
+  // Valores de "ainda andando" JÁ VISTOS numa publicação real: PROCESSING_DOWNLOAD (o TikTok
+  // está baixando o vídeo da nossa URL). Ficam aqui para o log abaixo só gritar com formato
+  // de verdade desconhecido, em vez de gritar a cada rodada normal.
+  if (PROCESSANDO.includes(bruto)) return { situacao: "processando" };
   if (Object.keys(dados).length > 0) {
     console.log(
       `[tiktok] FORMATO DO STATUS ainda não mapeado — publish_id=${publishId} payload=` +
