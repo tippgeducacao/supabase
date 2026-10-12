@@ -11,6 +11,7 @@
 // "Redirect Url Not Match" na hora de autorizar.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { erroDe, trocarCodigoPorToken } from "../_shared/tiktokAccountsApi.ts";
+import { getSegredo } from "../_shared/segredos.ts";
 
 const REDIRECT_URI = "https://api.ppgeducacao.site/functions/v1/tiktok-perfil-oauth-callback";
 
@@ -36,10 +37,11 @@ Deno.serve(async (req) => {
     const authCode = url.searchParams.get("auth_code") || url.searchParams.get("code");
     if (!authCode) return pagina("Link inválido", "Faltou o código de autorização do TikTok. Abra o link de conexão de novo.", false);
 
-    const appId = Deno.env.get("TIKTOK_PERFIL_APP_ID");
-    const secret = Deno.env.get("TIKTOK_PERFIL_SECRET");
+    const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+    const appId = await getSegredo(supabase, "TIKTOK_PERFIL_APP_ID");
+    const secret = await getSegredo(supabase, "TIKTOK_PERFIL_SECRET");
     if (!appId || !secret) {
-      return pagina("Configuração ausente", "Faltam TIKTOK_PERFIL_APP_ID / TIKTOK_PERFIL_SECRET no servidor.", false);
+      return pagina("Configuração ausente", "As credenciais do app de publicação não estão configuradas no servidor.", false);
     }
 
     const t = await trocarCodigoPorToken(appId, secret, authCode, REDIRECT_URI);
@@ -53,7 +55,6 @@ Deno.serve(async (req) => {
     }
 
     const agora = Date.now();
-    const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
     const { error: upErr } = await supabase.from("tiktok_business_accounts").upsert({
       business_id: businessId,
       username: (t.username as string) ?? null,

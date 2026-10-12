@@ -10,6 +10,7 @@
 // ⚠️ verify_jwt = false (o GET é um clique de navegador, sem header). Por isso o POST
 // confere o JWT e o cargo NA MÃO — sem isso qualquer um plantaria um token aqui dentro.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { getSegredo } from "../_shared/segredos.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -23,10 +24,7 @@ const err = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const API = "https://business-api.tiktok.com/open_api/v1.3";
 const REDIRECT_URI = "https://api.ppgeducacao.site/functions/v1/tiktok-ads-oauth-callback";
 
-async function getConfig(supabase: ReturnType<typeof createClient>, chave: string): Promise<string | null> {
-  const { data } = await supabase.from("ped_configuracoes").select("valor").eq("chave", chave).maybeSingle();
-  return (data?.valor as string) || Deno.env.get(chave) || null;
-}
+
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
@@ -36,7 +34,7 @@ Deno.serve(async (req) => {
   // ── GET: manda o navegador pro portal de autorização ───────────────────────────
   if (req.method === "GET") {
     try {
-      const appId = await getConfig(admin, "TIKTOK_ADS_APP_ID");
+      const appId = await getSegredo(admin, "TIKTOK_ADS_APP_ID");
       if (!appId) {
         return new Response(
           "TikTok Ads: falta o TIKTOK_ADS_APP_ID no servidor. Use o botão \"Colar token\" na tela, ou peça à TI para cadastrar o app.",

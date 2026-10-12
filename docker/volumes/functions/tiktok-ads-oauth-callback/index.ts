@@ -5,6 +5,7 @@
 // ⚠️ Não confundir com `tiktok-oauth-callback` (sem "-ads-"), que é o do PERFIL ORGÂNICO:
 // outro app, outro domínio de API e outro formato de token.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { getSegredo } from "../_shared/segredos.ts";
 
 const API = "https://business-api.tiktok.com/open_api/v1.3";
 
@@ -21,10 +22,7 @@ h1{font-size:20px;margin:0 0 8px}p{color:#a1a1aa;font-size:14px;line-height:1.5;
   return new Response(html, { status: ok ? 200 : 400, headers: { "Content-Type": "text/html; charset=utf-8" } });
 }
 
-async function getConfig(supabase: ReturnType<typeof createClient>, chave: string): Promise<string | null> {
-  const { data } = await supabase.from("ped_configuracoes").select("valor").eq("chave", chave).maybeSingle();
-  return (data?.valor as string) || Deno.env.get(chave) || null;
-}
+
 
 /**
  * Troca o auth_code por token.
@@ -69,8 +67,8 @@ Deno.serve(async (req) => {
     if (!authCode) return page("Link inválido", "Faltou o código de autorização do TikTok. Abra o link de conexão de novo.", false);
 
     const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
-    const appId = await getConfig(admin, "TIKTOK_ADS_APP_ID");
-    const secret = await getConfig(admin, "TIKTOK_ADS_SECRET");
+    const appId = await getSegredo(admin, "TIKTOK_ADS_APP_ID");
+    const secret = await getSegredo(admin, "TIKTOK_ADS_SECRET");
     if (!appId || !secret) return page("Configuração ausente", "O app do TikTok Ads não está cadastrado no servidor (TIKTOK_ADS_APP_ID / TIKTOK_ADS_SECRET).", false);
 
     const token = await trocarCodigo(appId, secret, authCode);

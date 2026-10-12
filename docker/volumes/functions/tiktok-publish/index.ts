@@ -2,15 +2,17 @@
 // já publica no Instagram (`ig-publish`): claim atômico, orçamento de tempo por rodada,
 // devolução do excedente à fila e vigia de post preso.
 //
-// ⚠️ CREDENCIAL DO APP: só por ENV do edge-runtime (Dokploy) —
-//   TIKTOK_PERFIL_APP_ID / TIKTOK_PERFIL_SECRET
-// De propósito NÃO vai para `ped_configuracoes`, como fizeram as credenciais do app antigo:
-// aquela tabela tem policy de leitura `USING(true)` e todo colaborador logado enxerga o que
-// está nela. O token de cada CONTA fica em `tiktok_business_accounts`, service-role-only.
+// ⚠️ CREDENCIAL DO APP: em `app_secrets` (service-role-only), chaves
+//   TIKTOK_PERFIL_APP_ID / TIKTOK_PERFIL_SECRET — ver `_shared/segredos.ts`.
+// De propósito NÃO vai para `ped_configuracoes`, como fizeram as credenciais do app antigo
+// (aquela tabela tem leitura `USING(true)`, todo logado enxerga), e nem só para env: trocar
+// env no Dokploy pede redeploy do serviço, e redeploy do stack do Supabase APAGA edge
+// function. O token de cada CONTA fica em `tiktok_business_accounts`, também service-role-only.
 //
 // ⚠️ Esta função é INERTE até existir conta conectada: sem linha ativa em
 // `tiktok_business_accounts` ela retorna no primeiro passo, sem tocar em nada.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { getSegredo } from "../_shared/segredos.ts";
 import {
   conferirUrlDoVideo,
   consultarStatus,
@@ -37,10 +39,10 @@ async function tokenValido(supabase: any, conta: any): Promise<string> {
   const expira = conta.token_expires_at ? new Date(conta.token_expires_at).getTime() : 0;
   if (conta.access_token && expira - Date.now() > 10 * 60 * 1000) return conta.access_token;
 
-  const appId = Deno.env.get("TIKTOK_PERFIL_APP_ID");
-  const secret = Deno.env.get("TIKTOK_PERFIL_SECRET");
+  const appId = await getSegredo(supabase, "TIKTOK_PERFIL_APP_ID");
+  const secret = await getSegredo(supabase, "TIKTOK_PERFIL_SECRET");
   if (!appId || !secret) {
-    throw new Error("Faltam TIKTOK_PERFIL_APP_ID / TIKTOK_PERFIL_SECRET no edge-runtime.");
+    throw new Error("Credenciais do app de publicação não configuradas (app_secrets).");
   }
   if (!conta.refresh_token) {
     throw new Error("Conta sem refresh_token — reconecte o perfil.");
