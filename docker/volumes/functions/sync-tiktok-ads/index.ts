@@ -27,6 +27,11 @@ const API = "https://business-api.tiktok.com/open_api/v1.3";
 const METRICAS = [
   "spend", "impressions", "clicks", "ctr", "cpc", "cpm", "reach",
   "conversion", "cost_per_conversion", "video_play_actions",
+  // ⚠️ ENGAJAMENTO. Campanha de objetivo ENGAGEMENT entrega 0 clique e 0 conversão por
+  // natureza — sem estas, a tela mostrava verba de marca com tudo zerado, como se fosse
+  // desperdício. Medido em 12/10: a "Interação com a comunidade" trouxe 2.102 seguidores
+  // por R$ 654,67 (R$ 0,31 cada), e nada disso aparecia.
+  "follows", "profile_visits", "likes", "comments", "shares", "engagements",
   "campaign_name", "objective_type",
 ];
 const METRICAS_CORE = ["spend", "impressions", "clicks", "campaign_name"];
@@ -238,6 +243,12 @@ async function sincronizarConta(
         conversions: num(m.conversion),
         cost_per_conversion: m.cost_per_conversion === undefined ? null : num(m.cost_per_conversion),
         video_views: m.video_play_actions === undefined ? null : inteiro(m.video_play_actions),
+        follows: m.follows === undefined ? null : inteiro(m.follows),
+        profile_visits: m.profile_visits === undefined ? null : inteiro(m.profile_visits),
+        likes: m.likes === undefined ? null : inteiro(m.likes),
+        comments: m.comments === undefined ? null : inteiro(m.comments),
+        shares: m.shares === undefined ? null : inteiro(m.shares),
+        engagements: m.engagements === undefined ? null : inteiro(m.engagements),
         fetched_at: new Date().toISOString(),
       });
     }
