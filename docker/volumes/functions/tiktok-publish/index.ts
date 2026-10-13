@@ -224,29 +224,32 @@ Deno.serve(async (req) => {
 
     // ⚠️ `verify_jwt = false` no config.toml (o cron do Postgres não tem JWT de usuário), e
     // por isso o portão é MANUAL. Sem ele qualquer pessoa na internet dispara a fila à
-    // vontade — e o limite de taxa do TikTok é curto. Vale o cron (service role) ou gente
-    // logada no sistema (o botão "Publicar Agora").
+    // vontade — e o limite de taxa do TikTok é curto.
     //
-    // ⚠️ NÃO comparar com `SUPABASE_SERVICE_ROLE_KEY` do env. Foi o que eu fiz em 13/10/2026 e
-    // DERRUBOU a publicação inteira: a chave de service role que o BANCO usa no cron
-    // (`_get_service_role_key()`) NÃO é a mesma que a edge tem no env — incidente já conhecido
-    // da casa. O cron passou a levar 401 e a fila parou, calada, por horas.
+    // ⚠️ NÃO autentique o cron por chave de service role. Tentei duas vezes em 13/10/2026 e
+    // as duas DERRUBARAM a fila:
+    //   1º comparando com `SUPABASE_SERVICE_ROLE_KEY` do env — a chave que o BANCO usa no
+    //      cron não é a mesma que a edge tem;
+    //   2º usando o token do cron para ler uma tabela service-role-only — e aí descobri o
+    //      fundo do poço: `public._get_service_role_key()` devolve chave **INVÁLIDA** nesta
+    //      instância (o PostgREST responde 401; o JWT está assinado para o projeto antigo,
+    //      `ref: lrpyxyhhqfzozrkklxwu`, emitido em julho/2025). Os outros crons que a usam só
+    //      funcionam porque não conferem nada.
     //
-    // O teste certo não é comparar texto, é USAR o token: quem é service role de verdade
-    // consegue ler a tabela de contas (que é service-role-only, RLS ligada e zero policy).
-    // Token forjado não passa pela validação de assinatura do PostgREST, e JWT de usuário
-    // comum não lê essa tabela — esse cai no caminho de baixo, que aceita gente logada.
+    // Então o cron se identifica por SEGREDO COMPARTILHADO em `app_secrets` (service-role-only):
+    // o cron lê do banco, a edge lê por `getSegredo`. Não depende de chave de JWT nenhuma.
+    // Ver a migration 20261013060000.
     const bearer = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "");
+    const tokenDoCron = req.headers.get("X-Cron-Token") || "";
     let autorizado = false;
-    if (bearer) {
-      const comOToken = createClient(Deno.env.get("SUPABASE_URL")!, bearer);
-      const { error: semAcesso } = await comOToken
-        .from("tiktok_business_accounts").select("id").limit(1);
-      if (!semAcesso) autorizado = true;
-      else {
-        const { data: quem } = await supabase.auth.getUser(bearer);
-        autorizado = !!quem?.user;
-      }
+    if (tokenDoCron) {
+      const esperado = await getSegredo(supabase, "TIKTOK_PUBLISH_CRON_TOKEN");
+      autorizado = !!esperado && tokenDoCron === esperado;
+    }
+    if (!autorizado && bearer) {
+      // Gente logada no sistema (o botão "Publicar Agora" manda o JWT do usuário).
+      const { data: quem } = await supabase.auth.getUser(bearer);
+      autorizado = !!quem?.user;
     }
     if (!autorizado) return json({ error: "Não autorizado." }, 401);
 
