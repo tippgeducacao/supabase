@@ -31,7 +31,11 @@ import { FOLLOWUP_SYSTEM } from './prompts-followup.ts';
 import { chamarAnthropic, MODELO_AGENTE, type ProvedorIA } from './agente.ts';
 import { selecionarProvedorDoLead } from './pilotoOpenai.ts';
 import { FOLLOWUP_PILOTO_SYSTEM } from './followupPiloto.ts';
-import { contextoFollowupCarreira, corrigirPremissaDeCarreira, planejarFollowupCarreira, validarFollowupCarreira } from './followupCarreira.ts';
+import { contextoFollowupCarreira, corrigirPremissaDeCarreira, perguntaRepetida, planejarFollowupCarreira, validarFollowupCarreira } from './followupCarreira.ts';
+import {
+  dadosDoToque, escopoDoMapa, falaDoToque, FOLLOWUP_MAPA_SYSTEM, followupMapaLigado, mapaDoLead, soRetomadasConcretas, toqueDoMapa, usadosDoMapa,
+} from './followupMapa.ts';
+import { cursoDaConversa } from './ganchoLote.ts';
 import { registrarNaJornada } from './fichaAtendimento.ts';
 import { carregarAulaParaFollowup, contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from './contextoAulaPiloto.ts';
 import { type AulaParaPrompt, semCertificadoAntesDoFim } from './prompts-aula.ts';
@@ -179,7 +183,7 @@ function blocosParaTexto(content: string | any[]): string {
 // Funde turnos consecutivos do mesmo role, garante 1ª msg user e injeta as
 // INFORMAÇÕES DA TENTATIVA na última msg user (mantém os marcadores no histórico
 // pro modelo contar tentativas e detectar o último estilo).
-export function montarMensagensFollowup(history: Msg[], tentativaAtual: number, nomeCtx: string, cursoCtx: string, piloto = false): Msg[] {
+export function montarMensagensFollowup(history: Msg[], tentativaAtual: number, nomeCtx: string, cursoCtx: string, piloto = false, dadosDoMapa = ''): Msg[] {
   // Só o FIM da conversa importa pro follow (checkpoint + último estilo estão nos
   // turnos recentes); o nº da tentativa é contado FORA, no histórico COMPLETO, e
   // injetado abaixo. ⚠️ Cap de 16 (medido 2026-07-27): o cap de 40 NÃO mordia —
@@ -210,7 +214,8 @@ export function montarMensagensFollowup(history: Msg[], tentativaAtual: number, 
     '\n\nINFORMAÇÕES DA TENTATIVA DE FOLLOW-UP:\n' +
     `- Esta é a ${tentativaAtual}ª tentativa de follow-up.\n` +
     `- Dados do lead: nome = ${nomeCtx}, curso de interesse = ${cursoCtx}.\n` +
-    (piloto
+    (dadosDoMapa ? `- ${dadosDoMapa}`
+      : piloto
       ? '- Leia o que a pessoa já contou. Priorize impedimentos e pendências reais; nos demais casos, combine perguntas da pós, retomadas de agenda e perguntas gerais disponíveis, considerando a preferência desta tentativa e sem repetir assunto respondido. Gere o JSON pedido.'
       : '- Analise o histórico, identifique o checkpoint e o último estilo usado, escolha um estilo diferente e gere a mensagem no formato JSON pedido.');
 
@@ -340,7 +345,7 @@ export async function gerarFollowup(
   tel: Telemetria,
   history: Msg[],
   contextoMateriais = '',
-  opcoes?: { provedor: ProvedorIA; contexto: string },
+  opcoes?: { provedor: ProvedorIA; contexto: string; mapa?: boolean },
 ): Promise<{ message: string; final_answer: string; provedorResposta: 'openai' | 'anthropic'; perguntaCarreira?: { escopo: string; pergunta_id: string } }> {
   const remotejid = lead.remotejid;
   const tentativaAtual = (opcoes ? contarTentativasDoCiclo(history) : contarTentativas(history)) + 1;
@@ -352,10 +357,20 @@ export async function gerarFollowup(
   // vão no bloco INFORMAÇÕES DA TENTATIVA (última mensagem) — o system fica ESTÁTICO.
   const nomeCtx = nome || '(ausente no cadastro; use apenas autoidentificação explícita do lead no histórico)';
   const cursoCtx = curso || '(ausente no cadastro; use apenas curso explicitamente escolhido pelo lead no histórico)';
-  const planoCarreira = opcoes ? planejarFollowupCarreira(curso, lead.jornada?.followup_carreira) : null;
+  let planoCarreira = opcoes ? planejarFollowupCarreira(curso, lead.jornada?.followup_carreira) : null;
+  // ▸ Follow-up pelo mapa de carreira do Wellinton (followupMapa.ts, 13/10/2026). Só no piloto OpenAI,
+  //   fora da persona aula, e com a chave ligada (ou forçada pelo ensaio). O código escolhe a pergunta
+  //   do toque; o modelo só escreve a frase de contexto antes dela.
+  const comMapa = opcoes && planoCarreira && lead.contexto_campanha?.persona !== 'aula'
+    && (opcoes.mapa ?? await followupMapaLigado(supabase, lead.numero_formatado ?? remotejid))
+    ? await mapaDoLead(supabase, curso) : null;
+  const toque = comMapa ? toqueDoMapa(comMapa.mapa, lead, tentativaAtual, usadosDoMapa(lead.jornada, comMapa.mapa.grupo)) : null;
+  if (comMapa && planoCarreira && !toque) planoCarreira = soRetomadasConcretas(planoCarreira);
+  const posFalada = comMapa ? cursoDaConversa(comMapa.pos).replace(/^d/, '') : '';
   const contextoTemporal = montarContextoTemporal(await carregarDiasSemAtendimento(supabase)) + contextoMateriais + (opcoes?.contexto ?? '')
-    + (planoCarreira ? contextoFollowupCarreira(planoCarreira, tentativaAtual) : '');
-  const messages = montarMensagensFollowup(history, tentativaAtual, nomeCtx, cursoCtx, Boolean(opcoes));
+    + (planoCarreira && !toque ? contextoFollowupCarreira(planoCarreira, tentativaAtual) : '');
+  const messages = montarMensagensFollowup(history, tentativaAtual, nomeCtx, cursoCtx, Boolean(opcoes),
+    toque ? dadosDoToque(toque, nome, posFalada, lead.jornada?.coleta) : '');
 
   const inicio = Date.now();
   // thinking disabled EXPLÍCITO: no Sonnet 5, omitir liga o adaptativo — o follow-up
@@ -369,7 +384,7 @@ export async function gerarFollowup(
     // mantém o TTL de 5 min sempre quente, então quase toda chamada lê a 0,1x.
     // O temporal (muda a cada minuto) fica FORA do prefixo, depois do breakpoint.
     system: [
-      { type: 'text', text: opcoes ? FOLLOWUP_PILOTO_SYSTEM : FOLLOWUP_SYSTEM },
+      { type: 'text', text: toque ? FOLLOWUP_MAPA_SYSTEM : opcoes ? FOLLOWUP_PILOTO_SYSTEM : FOLLOWUP_SYSTEM },
       { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA, cache_control: { type: 'ephemeral' } },
       { type: 'text', text: contextoTemporal },
     ],
@@ -386,7 +401,16 @@ export async function gerarFollowup(
   }
   let out = ['max_tokens', 'refusal'].includes(resp?.stop_reason)
     ? { message: '', final_answer: 'resposta_incompleta', pergunta_id: '' } : parseResposta(resp);
-  if (planoCarreira) {
+  if (toque && comMapa) {
+    // A pergunta sai como o Wellinton escreveu: se o modelo a mudou, vai a literal. Pergunta já feita
+    // na conversa não se repete (silêncio), e o silêncio do modelo é respeitado.
+    const { fala, literalReposto } = falaDoToque(out.message, toque, nome, posFalada);
+    const repetida = Boolean(fala) && perguntaRepetida(fala, history);
+    tel.registrar('followup_mapa', { id: toque.id, etapa: toque.etapa, ramo: toque.ramo, grupo: comMapa.mapa.grupo,
+      literal_reposto: literalReposto, repetida, silencio: !fala });
+    out = repetida ? { message: '', final_answer: 'pergunta_repetida', pergunta_id: '' }
+      : { message: fala, final_answer: out.final_answer || toque.etapa, pergunta_id: fala ? toque.id : '' };
+  } else if (planoCarreira) {
     const corrigida = corrigirPremissaDeCarreira(out.message, out.pergunta_id, planoCarreira, history);
     if (corrigida !== out.message) {
       tel.registrar('followup_premissa_corrigida', { pergunta_id: out.pergunta_id });
@@ -414,7 +438,8 @@ export async function gerarFollowup(
     cache_escrito: resp?.usage?.cache_creation_input_tokens ?? null,
   }, Date.now() - inicio);
   return { message: out.message, final_answer: out.final_answer, provedorResposta: provedor?.nome === 'openai' ? 'openai' : 'anthropic',
-    ...(planoCarreira && out.message && out.pergunta_id !== 'pendencia'
+    ...(toque && comMapa && out.message ? { perguntaCarreira: { escopo: escopoDoMapa(comMapa.mapa.grupo), pergunta_id: toque.id } }
+      : planoCarreira && out.message && out.pergunta_id !== 'pendencia'
       ? { perguntaCarreira: { escopo: planoCarreira.escopo, pergunta_id: out.pergunta_id } } : {}),
   };
 }

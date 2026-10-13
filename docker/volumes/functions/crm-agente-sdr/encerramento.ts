@@ -49,8 +49,38 @@ export function despedidaDe(e: Encerramento | null): string | null {
   return motivo ? DESPEDIDAS[motivo] : null;
 }
 
-/** Só usar DEPOIS de confirmar que a ferramenta concluiu, nunca pela intenção do modelo. */
-export function respostaDoEncerramento(e: Encerramento | null): string | null {
+/**
+ * A pós EXCLUSIVA de médico veterinário que reprovou este lead, lida do resultado mais recente da
+ * conferência de compatibilidade no histórico. null = a última conferência não foi esse caso.
+ */
+export function posExclusivaDaConversa(historico: readonly { role?: string; content?: unknown }[] | null | undefined): string | null {
+  for (let i = (historico?.length ?? 0) - 1; i >= 0; i--) {
+    const conteudo = historico![i]?.content;
+    if (!Array.isArray(conteudo)) continue;
+    for (let j = conteudo.length - 1; j >= 0; j--) {
+      const bloco = conteudo[j] as { type?: string; content?: unknown } | null;
+      if (bloco?.type !== 'tool_result' || typeof bloco.content !== 'string') continue;
+      let r: Record<string, unknown> | null = null;
+      try { r = JSON.parse(bloco.content); } catch { continue; }
+      if (!r || typeof r !== 'object' || !('curso_exclusivo_veterinario' in r)) continue;
+      const nome = String(r.curso_solicitado ?? '').replace(/^\s*(?:P[ÓO]S|MBA)\s*\|\s*/i, '').trim();
+      return r.curso_exclusivo_veterinario === true && r.pode_cursar === false && nome ? nome : null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Só usar DEPOIS de confirmar que a ferramenta concluiu, nunca pela intenção do modelo.
+ * `posExclusiva` (13/10/2026, caso Regislaine): formada e com duas pós, recusou a alternativa e
+ * recebeu "pede graduação completa compatível", que soa como se ela não tivesse formação. Quando a
+ * pós pedida é exclusiva de veterinário, a despedida diz isso.
+ */
+export function respostaDoEncerramento(e: Encerramento | null, opcoes: { posExclusiva?: string | null } = {}): string | null {
+  if (e && opcoes.posExclusiva && motivoDoEncerramento(e) === 'incompativel') {
+    return `a pós de ${opcoes.posExclusiva.toLowerCase()} é exclusiva para médicos veterinários. `
+      + 'fica à vontade pra nos procurar futuramente, vai ser um prazer te ajudar.';
+  }
   if (e?.tool === 'agendar_retorno' && e.input.tipo === 'formatura') {
     // 21/09/2026 (teste do usuário): a despedida precisa dizer POR QUE — a pós é lato sensu.
     return 'como a pós é lato sensu e exige graduação concluída pra matrícula, não vou marcar a reunião agora. '

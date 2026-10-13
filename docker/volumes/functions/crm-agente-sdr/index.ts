@@ -42,7 +42,7 @@ import { AGENTE_AULA, type AulaParaPrompt, montarVarsAula, semCertificadoAntesDo
 import { AULA_V2_ABERTURA, AULA_V2_REGRAS, varsAulaV2 } from './prompts-aula-v2.ts';
 import { aulaV2Ligada, contextoAulaV2, toolsDaAulaV2 } from './aulaV2.ts';
 import { comBlocoDaEscola, comLinkPedido, comPresenteNaDespedida, jaTemOPresente, LINK_ESCOLA_GRATUITA } from './escolaGratuita.ts';
-import { respostaDoEncerramento, toolConcluida, type Encerramento } from './encerramento.ts';
+import { posExclusivaDaConversa, respostaDoEncerramento, toolConcluida, type Encerramento } from './encerramento.ts';
 import { confirmacaoDoResultado, falaEntregaConfirmacao, textoConfirmacaoAgendamento, type ConfirmacaoAgendamento } from './confirmacaoAgendamento.ts';
 import { blocoPerguntasRecentes, falasDoLead } from './perguntasRecentes.ts';
 import { AVISO_CONSULTA_REPETIDA, MemoriaDeConsultas } from './consultaRepetida.ts';
@@ -1170,7 +1170,7 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
         // filtro retirava só algumas frases. Texto de tool_use NUNCA é resposta.
         // Encerramentos conhecidos têm despedida determinística, preservando o
         // adeus mesmo se o modelo escreveu só bastidor ou nenhum texto.
-        const despedida = respostaDoEncerramento(encerramento);
+        const despedida = respostaDoEncerramento(encerramento, { posExclusiva: posExclusivaDaConversa(messages) });
         if (despedida) {
           const comPresente = comPresenteNaDespedida(despedida, encerramento, conversaTexto(messages), estaNaEscola);
           if (comPresente.anexou) tel.registrar('presente_escola_anexado', { onde: 'despedida_com_tool' });

@@ -32,3 +32,39 @@ describe('resposta do encerramento confirmado', () => {
     expect(toolConcluida(output)).toBe(false);
   });
 });
+
+// Caso Regislaine (13/10/2026): formada em Gestão da Qualidade, com duas pós, pediu Sanidade Avícola,
+// recusou a alternativa e recebeu "pede graduação completa compatível", como se não tivesse formação.
+describe('despedida quando a pós pedida é exclusiva de médico veterinário', () => {
+  const resultado = (extra: Record<string, unknown>) => ({ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: JSON.stringify({
+    output: 'A pós de Sanidade Avícola é exclusiva para Médicos Veterinários', compativel: false, pode_cursar: false,
+    curso_solicitado: 'Sanidade Avícola', curso_alternativo: 'Gestão e Produção Avícola', curso_exclusivo_veterinario: true, ...extra }) }] });
+  const pausa = { tool: 'pausa_ia', input: { tipo: 'pausa', motivo: 'Lead formada em Gestão da Qualidade, incompatível com Sanidade Avícola, e recusou a alternativa.' } };
+
+  it('lê a pós exclusiva do último resultado da conferência', async () => {
+    const { posExclusivaDaConversa } = await import('./encerramento');
+    const historico = [
+      { role: 'assistant', content: 'a pós de sanidade avícola é exclusiva para médicos veterinários.' },
+      resultado({}),
+      { role: 'user', content: 'Não gestão não' },
+    ];
+    expect(posExclusivaDaConversa(historico)).toBe('Sanidade Avícola');
+    expect(posExclusivaDaConversa([resultado({ curso_solicitado: 'PÓS | SANIDADE AVÍCOLA' })])).toBe('SANIDADE AVÍCOLA');
+    // A conferência mais recente decide: aprovado depois, ou reprovado numa pós aberta, não é este caso.
+    expect(posExclusivaDaConversa([resultado({}), resultado({ pode_cursar: true, curso_exclusivo_veterinario: true })])).toBeNull();
+    expect(posExclusivaDaConversa([resultado({}), resultado({ curso_exclusivo_veterinario: false, curso_solicitado: 'Produção de Suínos' })])).toBeNull();
+    expect(posExclusivaDaConversa([{ role: 'user', content: [{ type: 'tool_result', content: 'texto solto' }] }])).toBeNull();
+    expect(posExclusivaDaConversa(null)).toBeNull();
+  });
+
+  it('a despedida diz que a pós é exclusiva, sem falar em "graduação completa"', () => {
+    const texto = respostaDoEncerramento(pausa, { posExclusiva: 'Sanidade Avícola' });
+    expect(texto).toBe('a pós de sanidade avícola é exclusiva para médicos veterinários. fica à vontade pra nos procurar futuramente, vai ser um prazer te ajudar.');
+  });
+
+  it('sem pós exclusiva, ou em outro tipo de encerramento, nada muda', () => {
+    expect(respostaDoEncerramento(pausa)).toContain('graduação completa compatível');
+    expect(respostaDoEncerramento({ tool: 'pausa_ia', input: { tipo: 'nao_perturbe' } }, { posExclusiva: 'Sanidade Avícola' })).toContain('agradeço sua preferência');
+    expect(respostaDoEncerramento({ tool: 'pausa_ia', input: { tipo: 'sem_graduacao' } }, { posExclusiva: 'Sanidade Avícola' })).toContain('quando concluir');
+  });
+});

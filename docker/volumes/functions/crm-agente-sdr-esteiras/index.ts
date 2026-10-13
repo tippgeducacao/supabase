@@ -70,10 +70,21 @@ Deno.serve(async (req) => {
 
   const url = new URL(req.url);
   const mode = url.searchParams.get('mode');
-  if (mode !== 'followup' && mode !== 'followup-template' && mode !== 'followup-teste') {
+  if (mode !== 'followup' && mode !== 'followup-template' && mode !== 'followup-teste' && mode !== 'followup-ensaio') {
     return json({ error: 'mode inválido (use followup | followup-template)' }, 400);
   }
   if (!(await autorizado(req))) return json({ error: 'unauthorized' }, 401);
+
+  // Ensaio sem envio: gera a sequência do telefone de teste e devolve as mensagens (testeFollowup.ts).
+  if (mode === 'followup-ensaio') {
+    let body: unknown;
+    try { body = await req.json(); } catch { return json({ error: 'pedido_invalido' }, 400); }
+    try { return json(await ensaiarFollowupSemEnvio(supabase, body)); }
+    catch (erro) {
+      const codigo = erro instanceof Error && /^[a-z_]{1,80}$/.test(erro.message) ? erro.message : 'ensaio_interrompido';
+      return json({ error: codigo }, 409);
+    }
+  }
 
   if (mode === 'followup-teste') {
     let body: unknown;
