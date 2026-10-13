@@ -226,12 +226,29 @@ Deno.serve(async (req) => {
     // por isso o portão é MANUAL. Sem ele qualquer pessoa na internet dispara a fila à
     // vontade — e o limite de taxa do TikTok é curto. Vale o cron (service role) ou gente
     // logada no sistema (o botão "Publicar Agora").
+    //
+    // ⚠️ NÃO comparar com `SUPABASE_SERVICE_ROLE_KEY` do env. Foi o que eu fiz em 13/10/2026 e
+    // DERRUBOU a publicação inteira: a chave de service role que o BANCO usa no cron
+    // (`_get_service_role_key()`) NÃO é a mesma que a edge tem no env — incidente já conhecido
+    // da casa. O cron passou a levar 401 e a fila parou, calada, por horas.
+    //
+    // O teste certo não é comparar texto, é USAR o token: quem é service role de verdade
+    // consegue ler a tabela de contas (que é service-role-only, RLS ligada e zero policy).
+    // Token forjado não passa pela validação de assinatura do PostgREST, e JWT de usuário
+    // comum não lê essa tabela — esse cai no caminho de baixo, que aceita gente logada.
     const bearer = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "");
-    const ehCron = bearer === Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-    if (!ehCron) {
-      const { data: quem } = bearer ? await supabase.auth.getUser(bearer) : { data: null };
-      if (!quem?.user) return json({ error: "Não autorizado." }, 401);
+    let autorizado = false;
+    if (bearer) {
+      const comOToken = createClient(Deno.env.get("SUPABASE_URL")!, bearer);
+      const { error: semAcesso } = await comOToken
+        .from("tiktok_business_accounts").select("id").limit(1);
+      if (!semAcesso) autorizado = true;
+      else {
+        const { data: quem } = await supabase.auth.getUser(bearer);
+        autorizado = !!quem?.user;
+      }
     }
+    if (!autorizado) return json({ error: "Não autorizado." }, 401);
 
     const { count: contasAtivas } = await supabase
       .from("tiktok_business_accounts")
@@ -297,6 +314,11 @@ Deno.serve(async (req) => {
     // (b) Já pode ter virado post lá ⇒ erro para revisão humana, porque publicar duas vezes é
     //     pior que não publicar. O prazo aqui é o do PRÓPRIO TikTok: a documentação diz que o
     //     download da URL expira em 1 HORA, então declarar falha antes disso é chutar.
+    // ⚠️ O corte é por `enviado_em`, NÃO por `updated_at`. `updated_at` é renovado a cada
+    // consulta de status (a "prova de vida" que impede matar publicação em curso), então
+    // ancorar o teto nele ANULA o teto: medido em 13/10/2026, dois posts ficaram
+    // `publishing` por horas porque o carimbo renovava a cada minuto. `enviado_em` não
+    // renova — é a hora em que o vídeo foi entregue ao TikTok, e é dela que o prazo conta.
     const corteEnviado = new Date(Date.now() - 70 * 60 * 1000).toISOString();
     await supabase.from("tiktok_scheduled_posts")
       .update({
@@ -305,7 +327,7 @@ Deno.serve(async (req) => {
         publish_attempts: MAX_TENTATIVAS,
         updated_at: new Date().toISOString(),
       })
-      .eq("status", "publishing").lt("updated_at", corteEnviado);
+      .eq("status", "publishing").lt("enviado_em", corteEnviado);
     // (c) Atrasado demais: o claim só pega o que venceu nas últimas 6 h (ver migration
     //     20261012220000). Sem esta varredura, post de perfil que ficou fora do ar some da
     //     fila para sempre, 'scheduled' e invisível.
