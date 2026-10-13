@@ -31,6 +31,7 @@ import {
 import { type CtxConversa, executarTool, montarToolResults } from './tools.ts';
 import { carregarStatusMateriais } from './envioMateriais.ts';
 import { aplicarDeclaracaoNaJornada, carregarFicha, declaracaoDeConclusao, marcarPerguntasDaFicha, registrarNaJornada } from './fichaAtendimento.ts';
+import { leadConfirmouConclusao, simPelaConversaLigado, TRECHO_SIM_A_PERGUNTA } from './confirmacaoPelaConversa.ts';
 import { blocoDaLeitura, efeitosDaLeitura, type ConfigLeituraJev, type LeituraLead } from './leituraJev.ts';
 import { blocoPerguntasRecentes, falasDoLead } from './perguntasRecentes.ts';
 import { alertaFatoSemFonte } from './fatoSemFonte.ts';
@@ -248,7 +249,9 @@ async function efeitosDaPrimeiraVolta(deps: DepsPassos, e: EstadoRodada, ctx: Ct
   if (!ctx.ficha) return;
   let ficha = await carregarFicha(supabase, ctx);
   if (ficha && !ficha.entrada.jornada.coleta?.graduacao_concluida) {
-    const trecho = declaracaoDeConclusao(falasDoLead(await carregarHistorico(supabase, e.remotejid)));
+    const historicoDaFicha = await carregarHistorico(supabase, e.remotejid);
+    const trecho = declaracaoDeConclusao(falasDoLead(historicoDaFicha))
+      ?? (leadConfirmouConclusao(historicoDaFicha) && await simPelaConversaLigado(supabase) ? TRECHO_SIM_A_PERGUNTA : null);
     if (trecho) {
       try {
         await registrarNaJornada(supabase, ctx.telefone, (j) => aplicarDeclaracaoNaJornada(j));

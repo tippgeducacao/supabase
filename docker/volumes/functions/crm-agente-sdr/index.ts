@@ -79,6 +79,7 @@ import { conversaTexto, enviarResposta, horariosInventados, humanizarTexto, remo
 import { configurarVoz } from './envioVoz.ts';
 import { selecionarProvedorDoLead } from './pilotoOpenai.ts';
 import { cursoDoCardSeFaltar } from './cursoDoCard.ts';
+import { leadConfirmouConclusao, simPelaConversaLigado, TRECHO_SIM_A_PERGUNTA } from './confirmacaoPelaConversa.ts';
 import { aplicarInscricaoPendente, notaDaInscricao } from './inscricaoNova.ts';
 import { corrigirLinksConhecidos } from './linksConhecidos.ts';
 import { contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from './contextoAulaPiloto.ts';
@@ -933,7 +934,9 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
     // quando a ficha ainda não sabe da conclusão (conversa anterior à ficha). Sem isso a ficha
     // mandava perguntar o que ele já tinha dito (fichaAtendimento.ts, declaracaoDeConclusao).
     if (ctx.ficha && rodada === 0 && ficha && !ficha.entrada.jornada.coleta?.graduacao_concluida) {
-      const trecho = declaracaoDeConclusao(falasDoLead(historico));
+      // 13/10/2026 (caso Kamila): o "sim" à pergunta de conclusão também vale (confirmacaoPelaConversa.ts).
+      const trecho = declaracaoDeConclusao(falasDoLead(historico))
+        ?? (leadConfirmouConclusao(historico) && await simPelaConversaLigado(supabase) ? TRECHO_SIM_A_PERGUNTA : null);
       if (trecho) {
         try {
           await registrarNaJornada(supabase, ctx.telefone, (j) => aplicarDeclaracaoNaJornada(j));

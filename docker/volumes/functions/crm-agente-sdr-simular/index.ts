@@ -42,6 +42,7 @@ import {
   aplicarColetaNaJornada, aplicarDeclaracaoNaJornada, aplicarPerguntasNaJornada, avaliarFicha, declaracaoDeConclusao, bloqueioCronograma, contarObjecaoNaJornada, detectarPedidoDeCronograma,
   INSTRUCAO_TEMPO_FICHA, montarBlocoFicha, ORIENTACAO_NAO_E_FALA, perguntasFeitas, registrarBloqueioNaJornada, registrarEnvioNaJornada, type Jornada,
 } from '../crm-agente-sdr/fichaAtendimento.ts';
+import { leadConfirmouConclusao } from '../crm-agente-sdr/confirmacaoPelaConversa.ts';
 import { comGanchoDoLote, cursoDaConversa } from '../crm-agente-sdr/ganchoLote.ts';
 import { bloqueioProximaTurmaDeEstudante, type CtxConversa, executarTool } from '../crm-agente-sdr/tools.ts';
 import { consultarAprovacao, recusaElegibilidade } from '../crm-agente-sdr/elegibilidadeAgendamento.ts';
@@ -180,6 +181,18 @@ async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimula
       // sem ela o modelo escrevia "solicitei o envio" só no harness.
       return `Cronograma enviado ao lead no WhatsApp (conteudo="${input?.conteudo ?? '?'}"). ${instrucaoResultadoMaterial('aceito', false, { soFatos: soInformar, condicao: ficha ? 'a condição do primeiro lote promocional' : 'a condição especial que a secretaria liberou hoje' })}`;
     case 'verificar_compatibilidade_curso': {
+      // Espelho do executor (tools.ts, 13/10/2026): com a ficha, a conclusão sem confirmação devolve
+      // a pergunta em vez de avaliar. Sem isto o simulador aprovava e não reproduzia a pergunta repetida.
+      if (ficha && !soInformar) {
+        const pergunta = avaliarFicha({ cadastro: ficha.cadastro, jornada: ficha.jornada, inicioRodada: ficha.inicioRodada }).perguntaConfirmacaoFormacao;
+        if (pergunta) {
+          return JSON.stringify({ output: 'CONFIRMAR_CONCLUSAO', compativel: null, pode_cursar: null, pergunta,
+            resultado: 'A graduação veio do cadastro, mas a conclusão ainda não foi confirmada pelo lead. A matriz não foi chamada.',
+            instrucao: `Responda agora perguntando diretamente: "${pergunta}". Conecte a confirmação à busca de horário, conservando o período que ele pediu. `
+              + 'Não pergunte qual é a formação nem "posso confirmar?". Não chame mais ferramentas nesta rodada. '
+              + 'Na próxima resposta do lead, registre a conclusão e só depois verifique a compatibilidade.' });
+        }
+      }
       const m = mocks?.compatibilidade ?? 'aprovado';
       // ⚠️ REPROVA POR PRAZO SEM DEPENDER DO MOCK — espelho do executor real (tools.ts),
       // onde `estudante_fora_do_prazo` é reprovado DETERMINISTICAMENTE pelo input, antes de
@@ -515,7 +528,9 @@ Deno.serve(async (req) => {
       // Mesma composição da produção: ficha + perguntas já feitas, derivadas do histórico da volta.
       fichaDaVolta: (messages) => {
         // Espelho da produção (index.ts): declaração explícita de conclusão no histórico vale como coleta.
-        if (fichaSim && !fichaSim.jornada.coleta?.graduacao_concluida && declaracaoDeConclusao(falasDoLead(messages))) {
+        // 13/10/2026: o "sim" à pergunta de conclusão também vale, quando o ensaio liga a regra.
+        if (fichaSim && !fichaSim.jornada.coleta?.graduacao_concluida && (declaracaoDeConclusao(falasDoLead(messages))
+          || (entrada.formacao_sim_pela_conversa && leadConfirmouConclusao(messages)))) {
           fichaSim.jornada = aplicarDeclaracaoNaJornada(fichaSim.jornada);
         }
         const base = blocoDaFicha();

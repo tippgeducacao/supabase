@@ -74,6 +74,8 @@ export type EntradaSimulacao = {
    * pelo executor real em modo teste — nada é gravado. As que gravam ou enviam seguem simuladas.
    */
   ferramentas_reais: boolean;
+  /** Ensaio da regra do "sim" à pergunta de conclusão (confirmacaoPelaConversa.ts). */
+  formacao_sim_pela_conversa: boolean;
   /**
    * 01/10/2026: versão NOVA inteira da IA de aula para comparar com o que foi enviado de verdade.
    * `persona` substitui o prompt da aula, `regras` substitui TODOS os blocos fixos e `ferramentas`
@@ -175,7 +177,7 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
     if (Object.keys(m).some((k) => k !== 'role' && k !== 'content')) throw new Error('histórico aceita somente role e content');
     return { role: m.role, content: texto(m.content, 'content', true) };
   });
-  for (const campo of ['usar_router', 'sem_presente_escola', 'esta_na_escola', 'ficha', 'ferramentas_reais']) {
+  for (const campo of ['usar_router', 'sem_presente_escola', 'esta_na_escola', 'ficha', 'ferramentas_reais', 'formacao_sim_pela_conversa']) {
     if (body[campo] !== undefined && typeof body[campo] !== 'boolean') throw new Error(`${campo} deve ser booleano`);
   }
   if (body.agente_atual != null && body.agente_atual !== 'agente_validacao' && body.agente_atual !== 'agente_qualificador') {
@@ -241,6 +243,7 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
     router_jev: routerJev,
     prompt: conjuntoPrompt,
     ferramentas_reais: body.ferramentas_reais === true,
+    formacao_sim_pela_conversa: body.formacao_sim_pela_conversa === true,
   };
 }
 
