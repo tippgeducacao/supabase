@@ -251,7 +251,7 @@ async function efeitosDaPrimeiraVolta(deps: DepsPassos, e: EstadoRodada, ctx: Ct
   if (ficha && !ficha.entrada.jornada.coleta?.graduacao_concluida) {
     const historicoDaFicha = await carregarHistorico(supabase, e.remotejid);
     const trecho = declaracaoDeConclusao(falasDoLead(historicoDaFicha))
-      ?? (leadConfirmouConclusao(historicoDaFicha) && await simPelaConversaLigado(supabase) ? TRECHO_SIM_A_PERGUNTA : null);
+      ?? (leadConfirmouConclusao(historicoDaFicha) && await simPelaConversaLigado(supabase, ctx.telefone) ? TRECHO_SIM_A_PERGUNTA : null);
     if (trecho) {
       try {
         await registrarNaJornada(supabase, ctx.telefone, (j) => aplicarDeclaracaoNaJornada(j));

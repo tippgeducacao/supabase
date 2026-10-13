@@ -100,5 +100,10 @@ describe('o sim que o modelo esqueceu de registrar', () => {
     expect(await simPelaConversaLigado(banco(null))).toBe(false);
     expect(await simPelaConversaLigado(banco({ formacao_sim_pela_conversa: true }, { message: 'x' }))).toBe(false);
     expect(await simPelaConversaLigado({ from: () => { throw new Error('rede'); } })).toBe(false);
+    // Ensaio: desligada para todos, ligada só para o telefone da lista (8 últimos dígitos).
+    const soTeste = banco({ formacao_sim_pela_conversa: false, formacao_sim_pela_conversa_telefones: ['5546988166051'] });
+    expect(await simPelaConversaLigado(soTeste, '554688166051')).toBe(true);
+    expect(await simPelaConversaLigado(soTeste, '5534988525202')).toBe(false);
+    expect(await simPelaConversaLigado(soTeste)).toBe(false);
   });
 });

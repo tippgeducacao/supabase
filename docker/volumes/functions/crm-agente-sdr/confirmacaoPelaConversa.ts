@@ -90,10 +90,19 @@ export const TRECHO_SIM_A_PERGUNTA = 'sim à pergunta de conclusão';
 
 type Banco = { from: (tabela: string) => any };
 
-/** A regra está ligada na produção? (crm_agente_sdr_config.formacao_sim_pela_conversa). Falha de leitura = desligada. */
-export async function simPelaConversaLigado(supabase: Banco): Promise<boolean> {
+/**
+ * A regra vale para este telefone? Ligada para todos (crm_agente_sdr_config.formacao_sim_pela_conversa)
+ * ou só para os telefones de ensaio (formacao_sim_pela_conversa_telefones, 8 últimos dígitos).
+ * Falha de leitura = desligada.
+ */
+export async function simPelaConversaLigado(supabase: Banco, telefone?: string | null): Promise<boolean> {
   try {
-    const { data, error } = await supabase.from('crm_agente_sdr_config').select('formacao_sim_pela_conversa').eq('id', 1).maybeSingle();
-    return !error && data?.formacao_sim_pela_conversa === true;
+    const { data, error } = await supabase.from('crm_agente_sdr_config')
+      .select('formacao_sim_pela_conversa, formacao_sim_pela_conversa_telefones').eq('id', 1).maybeSingle();
+    if (error || !data) return false;
+    if (data.formacao_sim_pela_conversa === true) return true;
+    const fim = String(telefone ?? '').replace(/\D/g, '').slice(-8);
+    const lista: unknown[] = Array.isArray(data.formacao_sim_pela_conversa_telefones) ? data.formacao_sim_pela_conversa_telefones : [];
+    return fim.length === 8 && lista.some((t) => String(t).replace(/\D/g, '').slice(-8) === fim);
   } catch { return false; }
 }
