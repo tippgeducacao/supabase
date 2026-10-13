@@ -44,11 +44,17 @@ describe('agenda, preço e ficha', () => {
     expect(T.saidaDisponibilidade({ ...base, situacao: 'ok', horarios: [h] } as any, 'c1').resultado).toContain('Ao apresentar as opções');
   });
 
-  it('preço sem o roteiro de mensagens', () => {
-    const dados = { data: { valor_integral: 'R$ 12.730,00 em até 24x no cartão de crédito', valor_matricula: 'R$ 492,50' } };
-    const com = JSON.stringify(montarRetornoInformacoes(true, dados, 'valor', 'c1'));
-    const sem = JSON.stringify(montarRetornoInformacoes(true, dados, 'valor', 'c1', { semGuia: true }));
-    expect(sem).toContain('12.730');
+  it('preço: nenhum valor volta da ferramenta; na IA de aula vai só o fato, sem roteiro de fala', () => {
+    const dados = { data: { cronograma_enviado: true, valor_integral: 'R$ 12.730,00 em até 24x no cartão de crédito', valor_matricula: 'R$ 492,50' } };
+    const com = JSON.stringify(montarRetornoInformacoes(true, dados, 'c1'));
+    const sem = JSON.stringify(montarRetornoInformacoes(true, dados, 'c1', { soFatos: true }));
+    for (const saida of [com, sem]) {
+      expect(saida).not.toContain('12.730');
+      expect(saida).not.toContain('492,50');
+    }
+    expect(com).toContain('Diga, com estas palavras');
+    expect(sem).not.toContain('Diga, com estas palavras');
+    expect(sem).toContain('O cronograma já traz os professores, os módulos e o valor integral');
     expect(sem.length).toBeLessThan(com.length);
   });
 

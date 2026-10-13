@@ -126,7 +126,7 @@ export const CORRECAO_VAZIO =
   'Não mencione esta correção ao lead.';
 
 // Oferta de retenção ("te chamo quando abrir a próxima turma"): o porquê está em rodadaAgente (index.ts).
-export const RE_RETENCAO = /(te cham\w*|te avis\w*)[^.?!]{0,40}pr[óo]xima turma/i;
+export const RE_RETENCAO = /(te cham\w*|te avis\w*)[^.?!]{0,40}pr[óo]xima turma|n[ãa]o (est[áa]|t[áa]) atuando mais na [áa]rea|especializar n[ãa]o [ée] prioridade|pesa mais hoje, tempo ou investimento/i;
 
 // Raciocínio simulado em <thinking>…</thinking> DENTRO do bloco de texto não pode
 // ficar no histórico: o modelo lê o próprio turno anterior e repete o padrão na volta

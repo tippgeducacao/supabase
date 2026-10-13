@@ -100,11 +100,14 @@ describe('tool envia_informacoes: fala proporcional à evidência', () => {
     expect(payload.wa_account_id).toBe(contexto.waAccountId);
   });
 
-  it('consulta de valor não confirma um cronograma incidental na resposta', async () => {
-    responder({ cronograma_enviado: true, valor_integral: '1000,00' });
+  it('pedido de preço envia o cronograma e não devolve o valor (10/10/2026)', async () => {
+    responder({ cronograma_enviado: true, valor_integral: '1000,00', valor_matricula: 'R$ 492,50 e o link https://go.eduq.tec.br/r/x' });
     const resposta = await chamar('valor');
-    expect(resposta.resultado).toContain('1000,00');
-    expect(resposta.cronograma_enviado).toBe(false);
-    expect(resposta.resultado).not.toContain('Cronograma');
+    const tudo = JSON.stringify(resposta);
+    expect(tudo).not.toContain('1000,00');
+    expect(tudo).not.toContain('492,50');
+    expect(tudo).not.toContain('go.eduq.tec.br');
+    expect(resposta.cronograma_enviado).toBe(true);
+    expect(resposta.resultado).toContain('com os professores, os módulos e o valor integral');
   });
 });

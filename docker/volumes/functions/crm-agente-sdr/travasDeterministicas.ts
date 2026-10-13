@@ -221,7 +221,7 @@ function esperaNaReuniao(resposta: string): boolean {
 /** Correção interna (não vai ao lead): diz o que foi barrado e manda refazer preservando o resto. */
 export function correcaoDaFala(motivo: 'valor' | 'reuniao', texto: string, detalhe: string): string {
   const porque = motivo === 'valor'
-    ? `cita valor(es) (${detalhe}) que não vieram de nenhuma ferramenta nesta conversa. Valor só sai do retorno de envia_informacoes: rode envia_informacoes ou fale sem citar número`
+    ? `cita valor(es) (${detalhe}) que não vieram de nenhuma ferramenta nesta conversa. Valor não se escreve na conversa: o integral está no cronograma e a condição é com o monitor. Fale sem citar número`
     : 'diz que a reunião está marcada/confirmada (ou manda link), mas nenhum agendamento foi criado. Reunião só existe depois que confirmar_agendamento retorna sucesso: se o lead escolheu horário, confira elegibilidade e agende; senão, não afirme que está marcado';
   return '[CORRECAO_INTERNA_AUTO_IGNORE] Sua última mensagem NÃO foi enviada ao lead: ela ' + porque + '. O texto barrado foi:\n'
     + `"""\n${texto.slice(0, 600)}\n"""\n`

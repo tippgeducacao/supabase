@@ -848,6 +848,79 @@ function validarMatriz(resultado: any): any {
   return resultado;
 }
 
+// ── Outra pós que aceita a formação (12/10/2026, caso Eliel) ────────────────
+// A matriz só sugeria alternativa para pós EXCLUSIVA de veterinário (mapa fixo acima). Formação não
+// aceita numa pós aberta virava "reprovado, sem alternativa" e a IA encerrava com pausa, mesmo quando
+// OUTRA pós aceitava a formação: engenheiro de alimentos formado, que tinha acabado de escolher o
+// horário das 11h, foi reprovado em Gestão e Produção Avícola e dispensado, com Qualidade e Segurança
+// de Alimentos de Origem Animal aceitando Engenharia de Alimentos na mesma tabela. (A lacuna dele foi
+// fechada na tabela no mesmo dia: Gestão e Produção Avícola passou a aceitar Engenharia de Alimentos.
+// Esta rede fica para as outras lacunas: 17 dos 115 reprovados sem alternativa em 14 dias.)
+// A busca é em CÓDIGO, na própria tabela, e só casa nome idêntico (sem acento/caixa): oferecer uma pós
+// que não aceita a formação é pior do que não oferecer. Só entra quando a matriz NÃO deu alternativa
+// e quando a tabela não lista a formação na própria pós pedida. Os MBAs ("qualquer formação de nível superior")
+// ficam de fora: aceitam todo mundo e não são alternativa de área.
+type LinhaDaMatriz = { pos_graduacao: string; pode_fazer?: string | null; parcialmente_aceitas?: string | null };
+const chaveFormacao = (s: unknown) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu, '')
+  .toLowerCase().replace(/\s+/g, ' ').trim();
+const formacoesDaLista = (lista: unknown) => String(lista ?? '').split(';').map(chaveFormacao).filter((x) => x && x !== '—' && x !== '-');
+const aceitaQualquerFormacao = (linha: LinhaDaMatriz) => /qualquer forma[cç][aã]o/i.test(String(linha.pode_fazer ?? ''));
+
+export function alternativasPelaTabela(resultado: any, cursos: LinhaDaMatriz[] | null | undefined, soInformar = false): any {
+  if (resultado?.pode_cursar !== false) return resultado;
+  // A alternativa do mapa fixo fica como a matriz deu. Conferi-la aqui por nome idêntico a derrubava
+  // por grafia: a tabela escreve "Engenharia Ambiental ou Produção Animal" e a matriz devolve
+  // "Engenharia Ambiental" (revisão de 12/10/2026). Se ela não aceitar a formação, a verificação
+  // do curso novo reprova e esta função entra ali, já sem alternativa fixa.
+  if (resultado.curso_alternativo != null) return resultado;
+  const formacao = chaveFormacao(resultado.formacao_identificada);
+  const pedida = chaveFormacao(resultado.curso_solicitado);
+  if (!formacao || !pedida) return resultado;
+  const aceitaInteira = (c: LinhaDaMatriz) => formacoesDaLista(c.pode_fazer).includes(formacao);
+  // A tabela lista a formação na PRÓPRIA pós pedida: a reprovação contradiz a tabela (a matriz errou
+  // o nome do curso ou da formação). Não afirme "não aceita" em cima disso.
+  const linhaPedida = (cursos ?? []).find((c) => chaveFormacao(c.pos_graduacao) === pedida);
+  if (linhaPedida && (aceitaQualquerFormacao(linhaPedida) || aceitaInteira(linhaPedida))) return resultado;
+  const outras = (cursos ?? []).filter((c) => {
+    const nome = chaveFormacao(c.pos_graduacao);
+    return nome && nome !== pedida && !pedida.includes(nome) && !nome.includes(pedida) && !aceitaQualquerFormacao(c);
+  });
+  // Aceita por inteiro vem antes de "parcialmente aceita"; só cai na parcial se não houver nenhuma inteira.
+  const inteiras = outras.filter(aceitaInteira);
+  const candidatas = inteiras.length ? inteiras : outras.filter((c) => formacoesDaLista(c.parcialmente_aceitas).includes(formacao));
+  if (!candidatas.length) return resultado;
+  const nomes = candidatas.map((c) => c.pos_graduacao).slice(0, 4);
+  const pos = resultado.curso_solicitado;
+  const grad = resultado.formacao_identificada;
+  if (nomes.length === 1) {
+    const fato = `A pós em ${pos} não aceita a formação em ${grad}, mas a pós em ${nomes[0]} aceita.`;
+    const mensagem = soInformar ? fato : `${fato} Quer conhecer?`;
+    return {
+      ...resultado,
+      curso_alternativo: nomes[0], curso_alternativo_recomendado: true, alternativa_por_formacao: true,
+      mensagem_para_lead: mensagem, output: mensagem,
+      ...(soInformar ? {} : {
+        instrucao: 'NÃO encerre nem pause: a formação dele é aceita em OUTRA pós. Ela não é uma versão da pós pedida: não diga '
+          + 'que cobre os mesmos assuntos. Diga em uma frase que a pós pedida não aceita a formação dele e pergunte se faz '
+          + `sentido conhecer a pós em ${nomes[0]}. Se ele já escolheu um horário, guarde essa preferência. Se aceitar, troque o `
+          + 'curso com consulta_pos_disponiveis (trocar_para) e verifique a compatibilidade de novo com o curso novo. Só se ele '
+          + 'recusar, siga o encerramento de formação incompatível.',
+      }),
+    };
+  }
+  const texto = `A pós em ${pos} não aceita a formação em ${grad}. Pós que aceitam essa formação: ${nomes.join('; ')}.`;
+  return {
+    ...resultado,
+    outras_pos_compativeis: nomes, alternativa_por_formacao: true, mensagem_para_lead: texto, output: texto,
+    ...(soInformar ? {} : {
+      instrucao: 'NÃO encerre nem pause: a formação dele é aceita em outras pós (outras_pos_compativeis). Diga em uma frase que a '
+        + 'pós pedida não aceita a formação dele e pergunte qual destas faz mais sentido pra ele, citando os nomes. Se ele '
+        + 'escolher uma, troque o curso com consulta_pos_disponiveis (trocar_para) e verifique a compatibilidade de novo. Só se '
+        + 'nenhuma interessar, siga o encerramento de formação incompatível.',
+    }),
+  };
+}
+
 async function verificarCompatibilidade(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
   if (ctx.ficha) {
     const ficha = await carregarFicha(supabase, ctx);
@@ -1046,7 +1119,7 @@ async function avaliarCompatibilidade(supabase: any, input: any, ctx: CtxConvers
   try { parsed = JSON.parse(semMarkdown.trim()); } catch (e) {
     throw new Error(`IA da matriz não retornou JSON válido: ${(e as Error).message}`);
   }
-  return { ...validarMatriz(parsed), id: toolUseId };
+  return { ...alternativasPelaTabela(validarMatriz(parsed), cursos, ctx.soInformar === true), id: toolUseId };
 }
 
 // ── consulta_objecoes (Voyage + match_ppg_voyage top-1) ─────────────────────
@@ -1119,14 +1192,14 @@ async function consultaObjecoes(supabase: any, input: any, toolUseId: string, ct
     }
     if (ctx?.soInformar && ['pergunta_preco', 'pergunta_conteudo', 'pergunta_duracao'].includes(filtro.tipo_objecao)) {
       return { resposta_objecao: 'CONSULTAR_MATERIAL', id: toolUseId,
-        resultado: 'A base de objeções não responde preço, conteúdo ou duração: esses dados vêm de envia_informacoes.' };
+        resultado: 'A base de objeções não responde preço, conteúdo ou duração: esses dados estão no cronograma, enviado por envia_informacoes. O valor integral vai dentro dele e não é escrito na conversa.' };
     }
     if (ctx?.soInformar && !filtro.tipo_objecao) {
       return { resposta_objecao: 'CONFIANCA_BAIXA', id: toolUseId, resultado: 'Categoria de objeção desconhecida: nenhum argumento confirmado.' };
     }
     if (['pergunta_preco', 'pergunta_conteudo', 'pergunta_duracao'].includes(filtro.tipo_objecao)) {
       return { resposta_objecao: 'CONSULTAR_MATERIAL', id: toolUseId,
-        instrucao: 'Valide a pós em consulta_pos_disponiveis se ainda não foi validada. Atenda à dúvida com envia_informacoes: valor para preço integral, cronograma para grade/conteúdo/duração. Use somente os dados e status retornados; enviar um PDF não comprova entrega e não autoriza inventar o conteúdo dele. Se o dado solicitado não vier no retorno, diga que precisa confirmar, sem estimar.' };
+        instrucao: 'Valide a pós em consulta_pos_disponiveis se ainda não foi validada. Atenda à dúvida com envia_informacoes: o cronograma responde grade, conteúdo, duração e também o preço (o valor integral vai dentro dele; não escreva valor na conversa). Use somente os dados e status retornados; enviar um PDF não comprova entrega e não autoriza inventar o conteúdo dele. Se o dado solicitado não vier no retorno, diga que precisa confirmar, sem estimar.' };
     }
     if (!filtro.tipo_objecao) return { resposta_objecao: 'CONFIANCA_BAIXA', id: toolUseId,
       instrucao: 'Categoria de objeção desconhecida. Não invente argumento nem dados do curso. Esclareça a dúvida ou consulte a ferramenta factual apropriada.' };
@@ -1216,13 +1289,20 @@ async function cursoDaOportunidade(supabase: any, ctx: CtxConversa): Promise<str
   } catch { return ''; }
 }
 
+/** O nome da condição no convite: o mesmo do prompt da conversa (gancho do lote no canário, ganchoLote.ts). */
+const condicaoDoConvite = (ctx: CtxConversa) =>
+  ctx.ficha ? 'a condição do primeiro lote promocional' : 'a condição especial que a secretaria liberou hoje';
+
 async function enviaInformacoes(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
-  const conteudo = input.conteudo || 'cronograma';
+  // Sempre o cronograma: a sdr-api só devolve valor/matrícula/link nos outros modos, e eles não
+  // podem mais chegar à conversa (10/10/2026). O PDF já traz o valor integral.
+  const conteudo = 'cronograma';
+  const opcoesRetorno = { soFatos: ctx.soInformar === true, condicao: condicaoDoConvite(ctx) };
 
   const cursoOp = await cursoDaOportunidade(supabase, ctx);
   const pos = String(input.curso_escolhido ?? '').trim() || cursoOp;
   if (!pos) {
-    return montarRetornoInformacoes(false, { error: 'Curso não informado nem encontrado na oportunidade.', code: 'pos_obrigatoria' }, conteudo, toolUseId);
+    return montarRetornoInformacoes(false, { error: 'Curso não informado nem encontrado na oportunidade.', code: 'pos_obrigatoria' }, toolUseId, opcoesRetorno);
   }
 
   const chamar = async (p: string) => {
@@ -1251,13 +1331,7 @@ async function enviaInformacoes(supabase: any, input: any, ctx: CtxConversa, too
     ({ res, body, d } = await chamar(cursoOp));
   }
 
-  // Mesmo nome da condição que o prompt da conversa usa: gancho do lote no canário (ganchoLote.ts).
-  return montarRetornoInformacoes(res.ok, body, conteudo, toolUseId, {
-    semGuia: ctx.soInformar === true,
-    condicao: ctx.ficha ? 'a condição do primeiro lote promocional' : 'a condição especial que a secretaria liberou hoje',
-    // Versão das frases do guia de preço sorteada a cada consulta (envioMateriais.ts).
-    variante: Math.floor(Math.random() * 3),
-  });
+  return montarRetornoInformacoes(res.ok, body, toolUseId, opcoesRetorno);
 }
 
 // ── pausa_ia ────────────────────────────────────────────────────────────────
@@ -1561,7 +1635,10 @@ export async function executarTool(
       case 'verificar_compatibilidade_curso': return await verificarCompatibilidade(supabase, input, ctx, id);
       case 'consulta_objecoes': return await consultaObjecoes(supabase, input, id, ctx);
       case 'envia_informacoes': {
-        if (input?.conteudo === 'valor') return await enviaInformacoes(supabase, input, ctx, id);
+        // 10/10/2026 (Gustavo e Wellinton): o valor NÃO sai mais em texto. Pedido de preço
+        // (conteudo 'valor' ou 'cronograma_e_valor') faz o MESMO caminho do cronograma: passa pela
+        // trava da graduação e envia o PDF, que já traz professores, módulos e o valor integral.
+        // Antes o 'valor' saía por fora da trava e devolvia o preço seco com link de matrícula.
         // Aula MVP (28/09/2026): o portf\u00f3lio sai pelo WhatsApp (portfolio.ts), n\u00e3o pela sdr-api.
         const ehPortfolio = pedidoDePortfolio(input);
         const chave = ehPortfolio ? 'portfolio'
@@ -1570,7 +1647,7 @@ export async function executarTool(
         const anterior = ctx.enviosMateriais.get(chave);
         if (anterior) return {
           ...anterior, id, reutilizado_nesta_rodada: true,
-          resultado: `${anterior.resultado} Esta tentativa já ocorreu nesta rodada. Não houve novo envio. Se precisa apenas do preço, consulte conteudo="valor".`,
+          resultado: `${anterior.resultado} Esta tentativa já ocorreu nesta rodada. Não houve novo envio. O valor integral está dentro do cronograma.`,
         };
         // Ficha (canário, 19/09/2026): sem o dado da coleta o cronograma NÃO sai — a recusa diz o
         // que perguntar. Bloqueio em rodada ANTERIOR + lead insistiu ⇒ libera (decisão do usuário:
@@ -1594,7 +1671,7 @@ export async function executarTool(
             retorno = montarRetornoInformacoes(true, { data: {
               cronograma_status: 'desconhecido', cronograma_enviado: false,
               cronograma_erro: 'Sem resposta da integração de envio.', cronograma_codigo: 'envio_sem_confirmacao',
-            } }, input?.conteudo ?? 'cronograma', id);
+            } }, id, { soFatos: ctx.soInformar === true, condicao: condicaoDoConvite(ctx) });
           }
         }
         ctx.enviosMateriais.set(chave, retorno);

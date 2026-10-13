@@ -35,7 +35,6 @@ import { blocoCarreira, carregarCarreiraPorNome } from '../crm-agente-sdr/carrei
 import { contextoEspecialidadeCannabis } from '../crm-agente-sdr/especialidadeCannabis.ts';
 import { comAberturaNumero, NOTA_ABERTURA_CONTROLADA } from '../crm-agente-sdr/aberturaTrocaNumero.ts';
 import { VERSAO_MEMORIA_HUMANA } from '../crm-agente-sdr/memoriaHumana.ts';
-import { montarRetornoInformacoes } from '../crm-agente-sdr/envioMateriais.ts';
 import { fatoDaColeta, proximoPassoDaColeta } from '../crm-agente-sdr/proximoPassoColeta.ts';
 import { instrucaoResultadoMaterial } from '../_shared/resultadoEnvioMaterial.ts';
 import { comNotaNoContexto, comNotaParaRouter, notaTrocaDeNumero, sinalInerte } from '../crm-agente-sdr/trocaDeNumero.ts';
@@ -111,12 +110,6 @@ type FichaSimulada = { jornada: Jornada; cadastro: string | null; inicioRodada: 
 
 // Retornos plausíveis das tools — texto no MESMO espírito dos executores reais
 // (tools.ts), porque é o texto que guia a próxima decisão do modelo.
-async function valorDoCadastro(curso: string): Promise<string | null> {
-  if (!curso.trim()) return null;
-  const { data } = await supabase.from('cursos').select('valor_integral').ilike('nome', `%${curso.trim()}%`).not('valor_integral', 'is', null).limit(1);
-  return (data?.[0]?.valor_integral as string | undefined) ?? null;
-}
-
 async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimulada | null = null, aulaSemPos = false, soInformar = false): Promise<string> {
   // Replay de conversa real (24/09/2026): `mocks.respostas_reais[tool]` é o que a tool REAL
   // devolveu naquela rodada (agenda, matriz, cronograma…). Se o modelo chamar a mesma tool,
@@ -163,22 +156,8 @@ async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimula
     case 'consulta_pos_disponiveis':
       return await resolverPos(String(input?.trocar_para ?? '').trim());
     case 'envia_informacoes':
-      // 14/09/2026: consultar preço não envia mensagem nem PDF. O mock antigo
-      // dizia "cronograma enviado" até para valor e induzia a pular a informação
-      // pedida. Usa o mesmo contrato do executor, com preço sintético do ensaio.
-      // Formato da API real (24/09/2026): matrícula e link chegam no mesmo campo.
-      if (input?.conteudo === 'valor') return JSON.stringify(montarRetornoInformacoes(true, {
-        data: {
-          curso: input?.curso_escolhido ?? null,
-          // v2 (ensaio com lead real): o valor do cadastro da pós, como a sdr-api devolveria.
-          valor_integral: (soInformar ? await valorDoCadastro(String(input?.curso_escolhido ?? '')) : null) ?? 'R$ 4.200,00 em até 24x no cartão de crédito',
-          valor_matricula: 'R$ 200,00 e o link da matrícula https://go.eduq.tec.br/r/harness-simulador',
-        },
-      }, 'valor', 'harness-consulta-valor', {
-        semGuia: soInformar,
-        condicao: ficha ? 'a condição do primeiro lote promocional' : 'a condição especial que a secretaria liberou hoje',
-        variante: Math.floor(Math.random() * 3),
-      }));
+      // 10/10/2026: pedido de preço faz o mesmo caminho do cronograma (trava da graduação + PDF).
+      // O valor integral vai dentro do cronograma e não volta mais da ferramenta.
       // Ficha: espelho da trava do executor real — sem o dado da coleta o cronograma não sai;
       // bloqueio em turno anterior + lead insistiu ⇒ libera.
       if (ficha) {
@@ -199,7 +178,7 @@ async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimula
       }
       // Mesma instrução do executor real depois do aceite ("te enviei o cronograma por aqui"…):
       // sem ela o modelo escrevia "solicitei o envio" só no harness.
-      return `Cronograma enviado ao lead no WhatsApp (conteudo="${input?.conteudo ?? '?'}"). ${instrucaoResultadoMaterial('aceito')} Valor integral: R$ 4.200,00.`;
+      return `Cronograma enviado ao lead no WhatsApp (conteudo="${input?.conteudo ?? '?'}"). ${instrucaoResultadoMaterial('aceito', false, { soFatos: soInformar, condicao: ficha ? 'a condição do primeiro lote promocional' : 'a condição especial que a secretaria liberou hoje' })}`;
     case 'verificar_compatibilidade_curso': {
       const m = mocks?.compatibilidade ?? 'aprovado';
       // ⚠️ REPROVA POR PRAZO SEM DEPENDER DO MOCK — espelho do executor real (tools.ts),

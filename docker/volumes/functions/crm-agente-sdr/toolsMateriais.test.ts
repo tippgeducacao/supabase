@@ -47,15 +47,22 @@ describe('executor real de materiais, com transporte isolado', () => {
     await executarTool(banco, pedido('tool-2'), contexto());
     expect(transporte).toHaveBeenCalledTimes(2);
   });
-  it('não repete material na mesma rodada nem ao alternar para cronograma_e_valor', async () => {
+  it('não repete material na mesma rodada, nem ao pedir de novo como preço', async () => {
     const ctx = contexto();
     await executarTool(banco, pedido(), ctx);
     const repetido = await executarTool(banco, pedido('tool-2', 'cronograma_e_valor'), ctx);
     expect(transporte).toHaveBeenCalledTimes(1);
     expect(repetido).toMatchObject({ id: 'tool-2', reutilizado_nesta_rodada: true });
-    await executarTool(banco, pedido('tool-3', 'valor'), ctx);
-    expect(transporte).toHaveBeenCalledTimes(2);
-    expect(JSON.parse(transporte.mock.calls[1][1].body).conteudo).toBe('valor');
+    // 10/10/2026: pedido de preço é o MESMO envio (o valor vai dentro do cronograma), não um caminho à parte.
+    const preco = await executarTool(banco, pedido('tool-3', 'valor'), ctx);
+    expect(transporte).toHaveBeenCalledTimes(1);
+    expect(preco).toMatchObject({ id: 'tool-3', reutilizado_nesta_rodada: true });
+  });
+  it('pedido de preço chama a sdr-api no modo cronograma: valor, matrícula e link não chegam à conversa', async () => {
+    const resultado = await executarTool(banco, pedido('tool-1', 'valor'), contexto());
+    expect(transporte).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(transporte.mock.calls[0][1].body).conteudo).toBe('cronograma');
+    expect(JSON.stringify(resultado)).not.toMatch(/R\$\s*\d/);
   });
   it('falha de rede não usa o catch genérico que escondia o erro', async () => {
     transporte.mockRejectedValue(new Error('Timeout sintético'));

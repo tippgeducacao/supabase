@@ -52,23 +52,43 @@ export function interpretarEnvioMaterial(httpOk: boolean, valor: unknown, httpSt
   return resultadoMaterial(statusMaterial(body.status_entrega ?? 'sent'), body.wa_message_id);
 }
 
-export function instrucaoResultadoMaterial(status: StatusMaterial, reenvioAgendado = false): string {
+/** O que o João diz quando o cronograma sai (10/10/2026). O PDF traz professores, módulos e o valor integral. */
+export const FALA_CRONOGRAMA_ENVIADO = 'te enviei o cronograma da pós por aqui, com os professores, os módulos e o valor integral.';
+/** O convite que vem junto: a condição (valor e parcelamento) só na conversa com o monitor. */
+export const falaConviteDepoisDoCronograma = (condicao: string) =>
+  `e te chamo pra uma conversa rápida com o monitor pra te apresentar ${condicao}, valor e parcelamento, a ementa completa e tirar suas dúvidas.`;
+
+export function instrucaoResultadoMaterial(status: StatusMaterial, reenvioAgendado = false,
+  opcoes: { condicao?: string; soFatos?: boolean } = {}): string {
   const continuidade = ' Não chame pausa_ia nem encaminhe ao humano apenas por esta falha. Termine a mensagem com UMA pergunta: "Enquanto isso, podemos continuar com o agendamento?" Encerre esta rodada logo após essa pergunta. Não emende coleta de dados, perguntas de qualificação, oferta de horários nem argumentos de venda na mesma resposta. Aguarde o aceite; se preferir esperar o arquivo, respeite sem insistir. Se aceitar em uma nova mensagem, retome a qualificação/agenda sem exigir abertura do PDF, mantendo as verificações de elegibilidade e a escolha explícita de dia e horário.';
+  // 10/10/2026 (Gustavo e Wellinton): o valor NÃO é mais escrito na conversa. Ele vai dentro do
+  // cronograma (página de investimento, por modalidade), e a fala do envio diz isso. O convite vem na
+  // mesma mensagem: a condição do lote, com valor e parcelamento, só na conversa com o monitor.
+  const semValor = ' O cronograma já traz os professores, os módulos e o valor integral: não escreva valor, parcela nem preço de matrícula na conversa.';
+  // IA de aula v2 (`soInformar`): só o fato, sem roteiro de fala.
+  if (opcoes.soFatos && (status === 'aceito' || status === 'entregue' || status === 'lido')) {
+    return (status === 'aceito'
+      ? 'O WhatsApp aceitou o envio do cronograma; a entrega ainda não está confirmada.'
+      : 'O WhatsApp registrou a entrega do cronograma; isso não comprova que o PDF foi aberto.') + semValor;
+  }
+  const roteiro = ` Diga, com estas palavras: "${FALA_CRONOGRAMA_ENVIADO}" Em seguida, salvo se a formação ou o prazo dele já foram REPROVADOS nesta conversa (aí não convide): "${falaConviteDepoisDoCronograma(opcoes.condicao ?? 'a condição do primeiro lote promocional')}"`;
   switch (status) {
-    case 'nao_solicitado': return 'Consulta apenas de valor: nenhum cronograma foi solicitado ou enviado nesta chamada.';
+    case 'nao_solicitado': return 'Nenhum cronograma foi solicitado ou enviado nesta chamada.';
     // 19/09/2026 (decisão do usuário, vale para todos): "te enviei o cronograma", não "solicitei o
     // envio". "Enviei" é verdade (o WhatsApp aceitou); a entrega continua sem confirmação, por isso
     // a pergunta "chegou?" fica, e "entregue"/"está acima" seguem proibidos.
     // 09/10/2026: "aguarde a confirmação de acesso antes de retomar a agenda" segurava o convite e
     // a conversa morria no "chegou?" (Luna: 22 aprovados, 1 agendamento em 08/10). Com a
     // compatibilidade aprovada, o envio já leva os horários.
-    case 'aceito': return 'O WhatsApp aceitou o envio do cronograma, mas a entrega ainda NÃO está confirmada. Diga "te enviei o cronograma por aqui". Se a compatibilidade já está APROVADA nesta conversa, na mesma mensagem chame consulta_disponibilidade e ofereça até três horários reais pra conversa com o monitor, sem esperar ele confirmar que abriu; sem APROVADO, pergunte se chegou e abriu. Não diga que foi entregue nem que está acima.';
-    case 'entregue': case 'lido': return 'O WhatsApp registrou a entrega desta mensagem. Isso NÃO comprova abertura do PDF. Diga "te enviei o cronograma por aqui". Se a compatibilidade já está APROVADA nesta conversa, na mesma mensagem chame consulta_disponibilidade e ofereça até três horários reais pra conversa com o monitor; sem APROVADO, pergunte se ele conseguiu abrir. Se ele disser que não recebeu ou pedir novamente, reenvie pela ferramenta, sem contradizê-lo.';
-    case 'falhou': return 'O cronograma NÃO foi enviado nesta tentativa. Não diga que enviou ou que está acima. '
+    case 'aceito': return 'O WhatsApp aceitou o envio do cronograma, mas a entrega ainda NÃO está confirmada.' + semValor + roteiro
+      + ' Se a compatibilidade já está APROVADA nesta conversa, na mesma mensagem chame consulta_disponibilidade e ofereça até três horários reais pra essa conversa, sem esperar ele confirmar que abriu; sem APROVADO, pergunte se chegou e abriu. Não diga que foi entregue nem que está acima.';
+    case 'entregue': case 'lido': return 'O WhatsApp registrou a entrega desta mensagem. Isso NÃO comprova abertura do PDF.' + semValor + roteiro
+      + ' Se a compatibilidade já está APROVADA nesta conversa, na mesma mensagem chame consulta_disponibilidade e ofereça até três horários reais pra essa conversa; sem APROVADO, pergunte se ele conseguiu abrir. Se ele disser que não recebeu ou pedir novamente, reenvie pela ferramenta, sem contradizê-lo.';
+    case 'falhou': return 'O cronograma NÃO foi enviado nesta tentativa. Não diga que enviou ou que está acima. O valor integral vai dentro do cronograma: não escreva valor na conversa; se ele perguntou o preço, diga que valor e condição o monitor apresenta na conversa. '
       + (reenvioAgendado
         ? 'Uma nova tentativa ficou registrada. Diga de forma natural: "O envio do cronograma pelo WhatsApp não está funcionando agora. Assim que normalizar, tento enviar novamente pra você." Não dê prazo nem garanta entrega; a fila tenta novamente enquanto a janela permitir.'
         : 'Diga: "Não estou conseguindo enviar o cronograma pelo WhatsApp agora." Não atribua arquivo ausente/configuração a uma instabilidade geral do WhatsApp. Não prometa envio automático posterior: nenhuma nova tentativa ficou registrada.')
       + continuidade;
-    case 'desconhecido': return 'O resultado do envio é DESCONHECIDO. Diga que não conseguiu confirmar o envio do cronograma pelo WhatsApp agora. Não diga que enviou, entregou ou que está acima. Não repita automaticamente: pode duplicar um envio aceito sem resposta. Não prometa reenvio automático sem uma tentativa registrada.' + continuidade;
+    case 'desconhecido': return 'O resultado do envio é DESCONHECIDO. Diga que não conseguiu confirmar o envio do cronograma pelo WhatsApp agora. Não diga que enviou, entregou ou que está acima. Não escreva valor na conversa: ele vai dentro do cronograma. Não repita automaticamente: pode duplicar um envio aceito sem resposta. Não prometa reenvio automático sem uma tentativa registrada.' + continuidade;
   }
 }

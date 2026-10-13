@@ -152,12 +152,14 @@ describe('contrato do mock de consulta de valor', () => {
     expect(JSON.stringify(pedido)).toContain('Nutrição na prática');
     expect(mocks.from.mock.calls.map(([tabela]) => tabela)).toEqual(['crm_agente_sdr_config']); // 29/09/2026: as tools da Luna vêm de tools-luna.ts
   });
-  it('informa preço ao modelo sem simular envio de cronograma ou de mensagem ao cliente', async () => {
+  // 10/10/2026: pedido de preço faz o mesmo caminho do cronograma; o valor vai dentro do PDF.
+  it('pedido de preço: o mock envia o cronograma e não devolve valor ao modelo', async () => {
+    const FALA = 'te enviei o cronograma da pós por aqui, com os professores, os módulos e o valor integral.';
     const respostas = [
       { content: [{ type: 'tool_use', id: 'consulta-valor', name: 'envia_informacoes',
         input: { conteudo: 'valor', curso_escolhido: 'Sanidade Avícola' } }], stop_reason: 'tool_use' },
       { content: [{ type: 'tool_use', id: 'resposta-final', name: 'responder_ao_cliente',
-        input: { mensagem: 'O valor integral é R$ 4.200,00.' } }], stop_reason: 'tool_use' },
+        input: { mensagem: FALA } }], stop_reason: 'tool_use' },
     ];
     mocks.fetch.mockImplementation(async (url: string) => {
       if (url !== 'https://api.anthropic.com/v1/messages' || !respostas.length) throw new Error('Chamada externa inesperada');
@@ -171,13 +173,11 @@ describe('contrato do mock de consulta de valor', () => {
     expect(resposta.status).toBe(200);
     const segundaChamada = JSON.parse(mocks.fetch.mock.calls[1][1].body);
     const bloco = segundaChamada.messages.at(-1).content.find((item: { type: string }) => item.type === 'tool_result');
-    const consulta = JSON.parse(bloco.content);
-    expect(consulta).toMatchObject({ cronograma_status: 'nao_solicitado', cronograma_enviado: false,
-      cronograma_entregue: false, curso: 'Sanidade Avícola', wa_message_id: null });
-    expect(consulta.resultado).toContain('nenhum cronograma foi solicitado ou enviado');
-    expect(consulta.resultado).toContain('Valor integral da pós: R$ 4.200,00');
+    expect(String(bloco.content)).toContain(FALA);
+    expect(String(bloco.content)).toContain('não escreva valor, parcela nem preço de matrícula na conversa');
+    expect(String(bloco.content)).not.toMatch(/R\$\s*\d/);
     expect(resultado.transcript.filter((item: { quem: string }) => item.quem === 'joao')).toEqual([
-      { quem: 'joao', texto: 'O valor integral é R$ 4.200,00.', turno: 1 },
+      { quem: 'joao', texto: FALA, turno: 1 },
     ]);
     expect(mocks.fetch).toHaveBeenCalledTimes(2);
     expect(mocks.from.mock.calls.map(([tabela]) => tabela)).toEqual(['crm_agente_sdr_config', 'lista_tools_claude']);

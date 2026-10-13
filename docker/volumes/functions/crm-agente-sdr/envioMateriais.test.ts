@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { carregarStatusMateriais, guiaRespostaValor, INSTRUCAO_ENVIO_MATERIAIS, montarRetornoInformacoes } from './envioMateriais';
+import { carregarStatusMateriais, INSTRUCAO_ENVIO_MATERIAIS, montarRetornoInformacoes } from './envioMateriais';
 import { interpretarEnvioMaterial } from '../_shared/resultadoEnvioMaterial';
 import { AGENTE_VALIDACAO, AGENTE_QUALIFICADOR } from './prompts';
 import { AGENTE_RECONTATO } from './prompts-recontato';
@@ -9,7 +9,7 @@ describe('contrato de envio do cronograma', () => {
   it('aceite com id não comprova entrega ou abertura', () => {
     const envio = interpretarEnvioMaterial(true, { success: true, wa_message_id: 'wamid.teste' });
     expect(envio).toMatchObject({ cronograma_status: 'aceito', cronograma_enviado: true, wa_message_id: 'wamid.teste' });
-    const retorno = montarRetornoInformacoes(true, { data: envio }, 'cronograma', 'tool-1');
+    const retorno = montarRetornoInformacoes(true, { data: envio }, 'tool-1');
     expect(retorno.resultado).toContain('entrega ainda NÃO está confirmada');
     expect(retorno.resultado).not.toContain('enviado com sucesso');
   });
@@ -31,7 +31,7 @@ describe('contrato de envio do cronograma', () => {
     { error: 'Recusado', data: { cronograma_enviado: true } },
     { data: { error: 'Recusado', cronograma_enviado: true } },
   ])('falha chega ao modelo mesmo com HTTP 200: %j', (body) => {
-    const retorno = montarRetornoInformacoes(true, body, 'cronograma', 'tool-1');
+    const retorno = montarRetornoInformacoes(true, body, 'tool-1');
     expect(retorno.cronograma_status).toBe('falhou');
     expect(retorno.cronograma_enviado).toBe(false);
     expect(retorno.resultado).toContain('NÃO foi enviado');
@@ -39,68 +39,65 @@ describe('contrato de envio do cronograma', () => {
     expect(retorno.resultado).toContain('podemos continuar com o agendamento?');
     expect(retorno.resultado).not.toContain('vai mandar em seguida');
   });
-  it('preserva motivo e valores quando só o material falha', () => {
+  it('o valor integral, a matrícula e o link NUNCA voltam da ferramenta, nem quando a API os manda', () => {
+    const retorno = montarRetornoInformacoes(true, { data: {
+      cronograma_enviado: true, cronograma_status: 'aceito', wa_message_id: 'wamid.teste',
+      valor_integral: 'R$ 27.429 em até 24x no cartão de crédito',
+      valor_matricula: 'R$ 492,50 e o link da matrícula https://go.eduq.tec.br/r/8dec7174083ccab.',
+      link_matricula: 'https://go.eduq.tec.br/r/8dec7174083ccab',
+    } }, 'tool-1');
+    const tudo = JSON.stringify(retorno);
+    expect(tudo).not.toContain('27.429');
+    expect(tudo).not.toContain('492,50');
+    expect(tudo).not.toContain('go.eduq.tec.br');
+    expect(tudo).not.toContain('COMO RESPONDER');
+  });
+
+  it('envio aceito: a fala diz que o cronograma traz professores, módulos e o valor integral, e convida para a conversa', () => {
+    const retorno = montarRetornoInformacoes(true, { data: { cronograma_enviado: true, cronograma_status: 'aceito', wa_message_id: 'wamid.teste' } }, 'tool-1');
+    expect(retorno.resultado).toContain('"te enviei o cronograma da pós por aqui, com os professores, os módulos e o valor integral."');
+    expect(retorno.resultado).toContain('"e te chamo pra uma conversa rápida com o monitor pra te apresentar a condição do primeiro lote promocional, valor e parcelamento, a ementa completa e tirar suas dúvidas."');
+    expect(retorno.resultado).toContain('não escreva valor, parcela nem preço de matrícula na conversa');
+    expect(retorno.resultado).toContain('ofereça até três horários reais');
+  });
+
+  it('o nome da condição no convite acompanha o prompt da conversa', () => {
+    const retorno = montarRetornoInformacoes(true, { data: { cronograma_enviado: true } }, 'tool-1', { condicao: 'a condição especial que a secretaria liberou hoje' });
+    expect(retorno.resultado).toContain('pra te apresentar a condição especial que a secretaria liberou hoje, valor e parcelamento');
+  });
+
+  it('IA de aula (só fatos): informa o envio e que o valor está no cronograma, sem roteiro de fala', () => {
+    const retorno = montarRetornoInformacoes(true, { data: { cronograma_enviado: true } }, 'tool-1', { soFatos: true });
+    expect(retorno.resultado).toContain('O WhatsApp aceitou o envio do cronograma');
+    expect(retorno.resultado).toContain('não escreva valor');
+    expect(retorno.resultado).not.toContain('Diga, com estas palavras');
+    expect(retorno.resultado).not.toContain('te chamo pra uma conversa');
+  });
+
+  it('falha no envio não libera o valor em texto', () => {
     const retorno = montarRetornoInformacoes(true, { data: {
       cronograma_enviado: false, cronograma_erro: 'Arquivo removido', cronograma_codigo: 'anexo_indisponivel',
       valor_integral: 'R$ 4.200,00', valor_matricula: 'R$ 200,00',
-    } }, 'cronograma_e_valor', 'tool-1');
+    } }, 'tool-1');
     expect(retorno).toMatchObject({ cronograma_erro: 'Arquivo removido', cronograma_codigo: 'anexo_indisponivel' });
-    expect(retorno.resultado).toContain('R$ 4.200,00');
-    expect(retorno.resultado).toContain('R$ 200,00');
-  });
-  it('consulta de valor traz o guia de resposta: partes separadas, link em mensagem própria e pergunta no fim', () => {
-    const retorno = montarRetornoInformacoes(true, { data: {
-      valor_integral: 'R$ 27.429 em até 24x no cartão de crédito',
-      valor_matricula: 'R$ 492,50 e o link da matrícula https://go.eduq.tec.br/r/8dec7174083ccab.',
-    } }, 'valor', 'tool-1', { condicao: 'a condição do primeiro lote promocional' });
-    expect(retorno.resultado).toContain('COMO RESPONDER');
-    expect(retorno.resultado).toContain('"o valor integral da pós é R$ 27.429 em até 24x no cartão de crédito."');
-    expect(retorno.resultado).toContain('"a condição do primeiro lote promocional é apresentada na conversa rápida com o monitor."');
-    expect(retorno.resultado).toContain('a matrícula é R$ 492,50 nesse link: https://go.eduq.tec.br/r/8dec7174083ccab"');
-    expect(retorno.resultado).toContain('4) a ação: UMA pergunta');
-    expect(retorno.resultado).toContain('Nunca mande tudo num parágrafo só nem termine a resposta no link.');
-  });
-
-  it('três versões do guia de valor, todas com os mesmos fatos, link e pergunta no fim', () => {
-    const d = { valor_integral: 'R$ 27.429 em até 24x no cartão de crédito', valor_matricula: 'R$ 492,50 e o link da matrícula https://go.eduq.tec.br/r/x' };
-    const versoes = [0, 1, 2].map((v) => guiaRespostaValor(d, 'a condição do primeiro lote promocional', v)!);
-    expect(new Set(versoes).size).toBe(3);
-    for (const guia of versoes) {
-      expect(guia).toContain('R$ 27.429 em até 24x no cartão de crédito');
-      expect(guia).toContain('a condição do primeiro lote promocional');
-      expect(guia).toContain('R$ 492,50');
-      expect(guia).toContain('https://go.eduq.tec.br/r/x"');
-      expect(guia).toContain('a ação: UMA pergunta');
-    }
-    expect(guiaRespostaValor(d, 'a condição do primeiro lote promocional', 3)).toBe(versoes[0]); // fora da faixa volta ao começo
-  });
-
-  it('guia de valor: sem link a matrícula some e a ação vira o passo 3; com cronograma junto não há guia', () => {
-    expect(guiaRespostaValor({ valor_integral: 'R$ 4.200' }, 'a condição especial')).toContain('3) a ação');
-    expect(guiaRespostaValor({}, 'x')).toBeNull();
-    const junto = montarRetornoInformacoes(true, { data: { valor_integral: 'R$ 4.200', cronograma_enviado: true } }, 'cronograma_e_valor', 'tool-1');
-    expect(junto.resultado).not.toContain('COMO RESPONDER');
-  });
-
-  it('consulta só de valor nunca confirma material', () => {
-    const retorno = montarRetornoInformacoes(true, { data: { valor_integral: 'R$ 4.200,00', cronograma_enviado: true } }, 'valor', 'tool-1');
-    expect(retorno).toMatchObject({ cronograma_enviado: false, cronograma_status: 'nao_solicitado' });
-    expect(retorno.resultado).toContain('nenhum cronograma');
+    expect(retorno.resultado).not.toContain('4.200');
+    expect(retorno.resultado).not.toContain('200,00');
+    expect(retorno.resultado).toContain('não escreva valor na conversa');
   });
   it('timeout permanece desconhecido, sem afirmar sucesso nem recusa certa', () => {
     const retorno = montarRetornoInformacoes(true, { data: {
       cronograma_enviado: false, cronograma_status: 'desconhecido', cronograma_erro: 'Sem resposta',
-    } }, 'cronograma', 'tool-1');
+    } }, 'tool-1');
     expect(retorno.cronograma_status).toBe('desconhecido');
     expect(retorno.resultado).toContain('Não repita automaticamente');
   });
   it.each(['entregue', 'lido'])('receipt %s não invalida pedido de reenvio', (status) => {
-    const retorno = montarRetornoInformacoes(true, { data: { cronograma_enviado: true, cronograma_status: status, wa_message_id: 'wamid.teste', cronograma_wa_account_id: 'conta-teste' } }, 'cronograma', 'tool-1');
+    const retorno = montarRetornoInformacoes(true, { data: { cronograma_enviado: true, cronograma_status: status, wa_message_id: 'wamid.teste', cronograma_wa_account_id: 'conta-teste' } }, 'tool-1');
     expect(retorno.resultado).toContain('NÃO comprova abertura');
     expect(retorno.resultado).toContain('reenvie pela ferramenta');
   });
   it('booleano em string não confirma envio', () => {
-    expect(montarRetornoInformacoes(true, { data: { cronograma_enviado: 'true' } }, 'cronograma', 'tool-1').cronograma_status).toBe('desconhecido');
+    expect(montarRetornoInformacoes(true, { data: { cronograma_enviado: 'true' } }, 'tool-1').cronograma_status).toBe('desconhecido');
   });
 });
 
@@ -155,19 +152,19 @@ describe('roteiro das quatro personas', () => {
 describe('continuidade após falha de material', () => {
   it('só oferece nova tentativa posterior quando a fila confirmou o registro', () => {
     const data = { cronograma_status: 'falhou', cronograma_enviado: false, reenvio_agendado_id: 'fila-1', reenvio_em: '2030-01-01T12:05:00Z' };
-    const retorno = montarRetornoInformacoes(true, { data }, 'cronograma', 'tool');
+    const retorno = montarRetornoInformacoes(true, { data }, 'tool');
     expect(retorno).toMatchObject({ reenvio_agendado_id: 'fila-1', reenvio_em: data.reenvio_em });
     expect(retorno.resultado).toContain('Assim que normalizar');
     expect(retorno.resultado).toContain('Aguarde o aceite');
     expect(retorno.resultado).toContain('mantendo as verificações de elegibilidade');
   });
   it.each([undefined, '', ' ', true])('não inventa reenvio com id inválido %s', (id) => {
-    const r = montarRetornoInformacoes(true, { data: { cronograma_enviado: false, reenvio_agendado_id: id } }, 'cronograma', 'tool');
+    const r = montarRetornoInformacoes(true, { data: { cronograma_enviado: false, reenvio_agendado_id: id } }, 'tool');
     expect(r).not.toHaveProperty('reenvio_agendado_id');
     expect(r.resultado).toContain('nenhuma nova tentativa ficou registrada');
   });
   it('503 da verificação de pendência permanece desconhecido', () => {
-    const r = montarRetornoInformacoes(false, { data: { cronograma_status: 'desconhecido' } }, 'cronograma', 'tool');
+    const r = montarRetornoInformacoes(false, { data: { cronograma_status: 'desconhecido' } }, 'tool');
     expect(r.cronograma_status).toBe('desconhecido');
     expect(r.resultado).toContain('Não chame pausa_ia');
   });

@@ -35,12 +35,12 @@ export const DESCRICOES_AULA_V9: Record<string, DescricaoAulaV9> = {
   },
   envia_informacoes: {
     description: [
-      'Envia material da pós ao WhatsApp do lead ou devolve o preço.',
-      'Retorno: valor = preço integral, sem a condição (essa é com o monitor); informe só o que voltou. PRECISA_COLETAR = nada enviado: falta o dado indicado em falta. SEM_GRADUACAO = não enviado. Solicitação aceita não é entrega, e entrega não é leitura.',
+      'Envia material da pós ao WhatsApp do lead.',
+      'Retorno: o preço não é devolvido; o valor integral vai dentro do cronograma e a condição é com o monitor. PRECISA_COLETAR = nada enviado: falta o dado indicado em falta. SEM_GRADUACAO = não enviado. Solicitação aceita não é entrega, e entrega não é leitura.',
       'Reenvie só se ele pedir de novo ou disser que não recebeu ou não abre.',
     ].join('\n'),
     campos: {
-      conteudo: 'cronograma = PDF (grade, conteúdo, datas, duração); valor = preço integral; cronograma_e_valor = os dois; portfolio = PDF com todas as pós e MBAs, só em aula sem pós vinculada.',
+      conteudo: 'cronograma = PDF (grade, conteúdo, datas, duração); valor e cronograma_e_valor = o mesmo PDF, que traz o valor integral; portfolio = PDF com todas as pós e MBAs, só em aula sem pós vinculada.',
       curso_escolhido: 'Nome da pós (na aula, a da aula, salvo escolha de outra). Com portfolio, "portfolio".',
     },
   },
@@ -97,7 +97,7 @@ export const DESCRICOES_AULA_V9: Record<string, DescricaoAulaV9> = {
     description: [
       'Verifica se a graduação do lead permite cursar a pós e registra a decisão. Sem APROVADO para esta pós, o agendamento é recusado.',
       'Quando chamar: com o nome da graduação e a conclusão já ditos pelo lead e registrados em atualizar_dados_lead; de novo se a pós mudar. É interna: o resultado não se comenta com o lead.',
-      'Retorno: APROVADO = pode seguir para a conversa com o monitor desta pós. pode_cursar=false com curso_alternativo = há outra pós que ele pode fazer. pode_cursar=false sem alternativa = incompatível. REPROVADO_PRAZO = ainda cursa e conclui depois da data-limite: sem reunião agora, o caminho é agendar_retorno tipo formatura. PRECISA_DATA_CONCLUSAO = falta o mês e o ano da conclusão. CONFIRMAR_CONCLUSAO = falta ele confirmar que concluiu: registre graduacao_concluida e verifique de novo. FALHA_TECNICA = não avaliou; não é aprovação.',
+      'Retorno: APROVADO = pode seguir para a conversa com o monitor desta pós. pode_cursar=false com curso_alternativo = há outra pós que ele pode fazer. pode_cursar=false com outras_pos_compativeis = há outras pós que ele pode fazer. pode_cursar=false sem alternativa = incompatível. REPROVADO_PRAZO = ainda cursa e conclui depois da data-limite: sem reunião agora, o caminho é agendar_retorno tipo formatura. PRECISA_DATA_CONCLUSAO = falta o mês e o ano da conclusão. CONFIRMAR_CONCLUSAO = falta ele confirmar que concluiu: registre graduacao_concluida e verifique de novo. FALHA_TECNICA = não avaliou; não é aprovação.',
     ].join('\n'),
     campos: {
       area_trabalho: 'Opcional. Atuação já informada.',

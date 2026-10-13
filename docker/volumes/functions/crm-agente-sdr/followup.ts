@@ -263,7 +263,7 @@ export function contarTentativasDoCiclo(history: Msg[]): number {
 // turma"), não a expressão "próxima turma" solta: o template de abertura do disparo
 // fala em "vagas da próxima turma" e um regex frouxo desligaria a esteira de milhares
 // de leads normais (medido: 3.248 falsos positivos contra 44 retenções reais).
-const RE_RETENCAO = /(te cham\w*|te avis\w*)[^.?!]{0,40}pr[óo]xima turma/i;
+const RE_RETENCAO = /(te cham\w*|te avis\w*)[^.?!]{0,40}pr[óo]xima turma|n[ãa]o (est[áa]|t[áa]) atuando mais na [áa]rea|especializar n[ãa]o [ée] prioridade|pesa mais hoje, tempo ou investimento/i;
 
 function ehMensagemRealDoLead(m: Msg): boolean {
   if (m.role !== 'user') return false;
