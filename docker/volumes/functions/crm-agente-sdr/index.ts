@@ -79,6 +79,7 @@ import { conversaTexto, enviarResposta, horariosInventados, humanizarTexto, remo
 import { configurarVoz } from './envioVoz.ts';
 import { selecionarProvedorDoLead } from './pilotoOpenai.ts';
 import { cursoDoCardSeFaltar } from './cursoDoCard.ts';
+import { aplicarInscricaoPendente, notaDaInscricao } from './inscricaoNova.ts';
 import { corrigirLinksConhecidos } from './linksConhecidos.ts';
 import { contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from './contextoAulaPiloto.ts';
 import { ehAcaoV9, rotaV9 } from './rotasV9.ts';
@@ -406,6 +407,12 @@ async function prepararAntesDoRouter(remotejid: string, itensDoLote: any[], tel:
       tel.registrar('erro', { onde: 'curso_do_card' }, undefined, String((e as Error)?.message ?? e));
     }
   }
+  // ▸ Inscrição em outra pós que esperava a reunião passar (inscricaoNova.ts, 13/10/2026).
+  const inscricaoAplicada = await aplicarInscricaoPendente(supabase, lead);
+  if (inscricaoAplicada) {
+    tel.registrar('curso_da_inscricao', inscricaoAplicada);
+    lead = (await buscarLead(supabase, remotejid)) ?? lead;
+  }
   // Ficha (canário): o clique em "Receber Cronograma" (936 em 30 dias) ou o pedido em texto fica
   // anotado na jornada ANTES de o modelo falar — é o que a ficha usa para cobrar a coleta.
   // ▸ Ficha (só canário): se o lead clicou "Receber Cronograma" ou pediu em texto, anota o pedido.
@@ -515,6 +522,7 @@ async function prepararAntesDoRouter(remotejid: string, itensDoLote: any[], tel:
   const marcadaNaAgendaAgora = reuniaoMarcadaNaAgenda(reunioesDoLead, agoraDaRodada);
   const notaReunioes = notaDasReunioes(reunioesDoLead, agoraDaRodada);
   const contextoTemporal = montarContextoTemporal(await carregarDiasSemAtendimento(supabase)) + notaDoNome(vars.nome) + notaDoCurso(vars.curso_interesse_original)
+    + notaDaInscricao(lead?.jornada, vars.curso_interesse_original, agoraDaRodada)
     + (provedor?.nome === 'openai' ? contextoEspecialidadeCannabis(vars.curso_interesse_original) : '')
     + notaReunioes;
 

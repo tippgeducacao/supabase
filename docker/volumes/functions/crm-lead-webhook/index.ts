@@ -58,6 +58,7 @@ import { processarWebhookModulosPraticos } from "./modulosPraticos.ts";
 import { receberModulosPraticosHttp } from "./modulosPraticosHttp.ts";
 import { obterMotivoExclusaoModulosPraticos } from "./modulosPraticosExclusoes.ts";
 import { executarAcaoEmail, type ResultadoAcaoEmail } from "./acaoEmail.ts";
+import { aplicarCursoDaInscricao } from "./cursoDaInscricao.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -1294,6 +1295,8 @@ Deno.serve(async (req) => {
   // Títulos dos cards desta captação: viram o curso do agente quando o formulário não manda
   // campo de curso (ver o seed 10a).
   const titulosDosCards: string[] = [];
+  // Funis desses cards: inscrição em AULA não troca a pós de interesse do agente (10a).
+  const funisDosCards: string[] = [];
   // (9b) ACAO 'criar_oportunidade' — cria card(s) no pipeline SOMENTE quando configurada.
   // Resolve titulo/valor (tokens {webhook=Campo}), aplica funil/etapa/status, distribui o
   // responsavel e respeita "nao criar oportunidades repetidas". O INSERT na etapa escolhida
@@ -1308,6 +1311,7 @@ Deno.serve(async (req) => {
         const tituloResolved =
           resolveWebhookVar(p.titulo, dados).trim() || cursoInteresse || integration.nome || "Oportunidade";
         titulosDosCards.push(tituloResolved);
+        if (typeof p.funilId === "string" && p.funilId) funisDosCards.push(p.funilId);
         const nowIso = new Date().toISOString();
         const acaoId = typeof a.id === "string" && a.id ? a.id : null;
 
@@ -1841,6 +1845,25 @@ Deno.serve(async (req) => {
         if (acaoAtivarIa) patch.iniciar_atendimento = true; // responde quando reagir ao template
         if (Object.keys(patch).length) {
           await admin.from("cliente_ppg_leads_sdr").update(patch).eq("id", ls.id);
+        }
+        // 13/10/2026: inscrição nova em OUTRA pós troca o curso da IA (antes ela seguia falando
+        // da primeira; caso Eliel). A regra mora em crm_sdr_curso_da_inscricao: aula não troca,
+        // e reunião marcada no futuro adia a troca para depois dela.
+        if (!vazio(ls.curso_interesse_original)) {
+          try {
+            const troca = await aplicarCursoDaInscricao(admin, {
+              remotejid: remoteJid, candidatos: [inCurso, ...titulosDosCards], funilIds: funisDosCards,
+            });
+            if (troca?.trocou) {
+              await logAtividade(leadId, "acao_webhook", "Curso de interesse da IA atualizado pela inscrição nova",
+                integration.nome ?? slug, `${troca.curso_anterior ?? "?"} → ${troca.curso ?? "?"}`);
+            } else if (troca?.motivo === "reuniao_marcada") {
+              await logAtividade(leadId, "acao_webhook", "Inscrição em outra pós com reunião marcada: a IA troca o curso depois da reunião",
+                integration.nome ?? slug, String(troca.curso ?? ""));
+            }
+          } catch (e: any) {
+            console.error("[crm-lead-webhook] curso da inscrição nova falhou:", e?.message);
+          }
         }
       }
 
