@@ -13,6 +13,12 @@ describe('declaracaoDeConclusao', () => {
     'fiz mestrado na UFPR',
     'já concluí a graduação',
     'quando me formei em 2019 fui direto pro campo',
+    // Caso Ludia (13/10/2026): a IA perguntou "já concluiu a graduação em biologia?" a quem cursa mestrado.
+    'Oi, tudo bem? Desculpe. É que no momento estou fazendo mestrado...',
+    'estou cursando o doutorado na UFV',
+    'tô terminando minha residência',
+    'faço mestrado em ciência animal',
+    'sou mestranda',
   ])('declara: %s', (fala) => {
     expect(declaracaoDeConclusao([fala])).not.toBeNull();
   });
@@ -25,6 +31,10 @@ describe('declaracaoDeConclusao', () => {
     'sou estudante de veterinária',
     'tenho interesse na pós',
     'estou fazendo pós',
+    'não estou fazendo mestrado',
+    'quero fazer mestrado ano que vem',
+    'pretendo cursar o doutorado',
+    'fazendo essa pós eu consigo atuar na área?',
   ])('não declara: %s', (fala) => {
     expect(declaracaoDeConclusao([fala])).toBeNull();
   });

@@ -318,6 +318,12 @@ const RE_DECLARA_CONCLUSAO = [
   /\bsou\s+(?:pos\s?-?\s?graduad[oa]|mestre|doutora?)\b/,
   /\bpos\s?-?\s?graduad[oa]\b/,
   /\b(?:tenho|fiz|possuo|conclui|terminei)\s+(?:uma\s+|um\s+|o\s+|a\s+)?(?:pos(?:\s?-?\s?graduacao)?|especializacao|mestrado|doutorado|residencia)\b/,
+  // 13/10/2026 (caso Ludia): "no momento estou fazendo mestrado" e a IA perguntou "já concluiu a
+  // graduação em biologia?". Quem CURSA mestrado, doutorado ou residência já se formou. "Estou
+  // fazendo pós" segue de fora (decisão de 25/09): o lead usa "pós" também para a que ainda vai fazer.
+  /\b(?:fazendo|cursando|terminando|finalizando|concluindo)\s+(?:o\s+|um\s+|a\s+|uma\s+|meu\s+|minha\s+)?(?:mestrado|doutorado|residencia)\b/,
+  /\b(?:faco|curso)\s+(?:o\s+|um\s+|meu\s+)?(?:mestrado|doutorado)\b/,
+  /\b(?:mestrand[oa]|doutorand[oa])\b/,
 ];
 /** Negação ou intenção logo antes ("ainda não me formei", "quero ser pós-graduado") desfaz a declaração. */
 const RE_ANTES_NEGA = /\b(?:nao|nunca|quero|queria|vou|pretendo|gostaria|espero)\s+(?:\S+\s+){0,2}$/;
