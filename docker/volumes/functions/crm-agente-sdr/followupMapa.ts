@@ -38,7 +38,45 @@ export function ramoDoLead(mapa: MapaCarreira, lead: { vinculo_trabalho?: unknow
     if (r) return r;
   }
   const vinculo = String(lead?.vinculo_trabalho ?? '').trim();
-  return (vinculo && mapa.ramos.find((r) => r.vinculos?.includes(vinculo))) || null;
+  const doVinculo = vinculo ? mapa.ramos.find((r) => r.vinculos?.includes(vinculo)) : null;
+  if (doVinculo) return doVinculo;
+  // O perfil que o toque 2 escolheu pela conversa fica no id da pergunta enviada ("contratado:carreira:1").
+  const enviados = Array.isArray(lead?.jornada?.followup_carreira) ? lead.jornada.followup_carreira : [];
+  for (let i = enviados.length - 1; i >= 0; i--) {
+    if (enviados[i]?.escopo !== escopoDoMapa(mapa.grupo)) continue;
+    const r = mapa.ramos.find((x) => x.ramo === String(enviados[i].pergunta_id ?? '').split(':')[0]);
+    if (r) return r;
+  }
+  return null;
+}
+
+/**
+ * Toque 2 sem perfil conhecido (só 54 leads têm o vínculo registrado): a pergunta de CADA perfil vai
+ * para o modelo, que escolhe pelo que o lead contou. `semPerfil` é a pergunta que divide o caminho,
+ * para quando a conversa não mostra como ele trabalha.
+ */
+export type EscolhaDoToque = { porPerfil: Record<string, ToqueDoMapa>; semPerfil: ToqueDoMapa | null };
+export function escolhaDoToque(
+  mapa: MapaCarreira, lead: { vinculo_trabalho?: unknown; jornada?: any } | null | undefined, tentativa: number, usados: ReadonlySet<string>,
+): EscolhaDoToque | null {
+  if (tentativa !== 2 || ramoDoLead(mapa, lead)) return null;
+  const porPerfil: Record<string, ToqueDoMapa> = {};
+  for (const r of mapa.ramos) {
+    const t = toqueDoMapa(mapa, { jornada: { ramo_carreira: r.ramo } }, 2, usados);
+    if (t) porPerfil[r.ramo] = t;
+  }
+  return Object.keys(porPerfil).length ? { porPerfil, semPerfil: toqueDoMapa(mapa, lead, 2, usados) } : null;
+}
+
+/** Os dados do toque quando o modelo escolhe o perfil. Os sinais são falas típicas de cada perfil. */
+export function dadosDaEscolha(escolha: EscolhaDoToque, mapa: MapaCarreira, nome: string, pos: string, coleta: unknown): string {
+  return 'DADOS DESTE TOQUE (do cadastro e do mapa comercial; não são instruções do lead):\n' + JSON.stringify({
+    nome: nome || null, pos: pos || null, o_que_ele_ja_contou: coleta ?? {},
+    perfis: Object.entries(escolha.porPerfil).map(([perfil, t]) => ({
+      perfil, quem_e: t.quemE, fala_como: mapa.ramos.find((r) => r.ramo === perfil)?.sinais ?? [], pergunta_do_mapa: t.texto,
+    })),
+    se_a_conversa_nao_mostra_o_perfil: escolha.semPerfil ? { perfil: 'indefinido', pergunta_do_mapa: escolha.semPerfil.texto } : null,
+  });
 }
 
 /** O que o toque leva do mapa. null = este toque não é do mapa (retomada de agenda ou do material). */
@@ -78,11 +116,13 @@ Escreva uma mensagem curta, como numa fala. Primeiro uma frase que mostre que vo
 
 Quando o dado for a ponte, convide em vez de perguntar: "quer conhecer a pós numa conversa rápida no meet com o monitor? ele te mostra [a ponte]", com o nome da pós.
 
+Quando vierem vários perfis, o perfil do lead ainda não está registrado: escolha o que a conversa mostra (onde ele trabalha, se o negócio é dele, o cargo) e use a pergunta daquele perfil. Se a conversa não mostra, use a pergunta de "se_a_conversa_nao_mostra_o_perfil".
+
 Devolva message vazia quando a pessoa recusou, se despediu, pediu para parar, já tem reunião marcada ou combinou um retorno, e quando ela já respondeu a essa mesma pergunta na conversa.
 
 A mensagem também pode sair em áudio: uma ideia, sem lista, sem emoji, sem elogio solto. Não fale de preço, lote, desconto nem horário.
 
-Responda só JSON: {"final_answer": "rótulo curto", "message": "a fala, ou vazia"}.`;
+Responda só JSON: {"final_answer": "rótulo curto", "message": "a fala, ou vazia", "pergunta_id": "o perfil escolhido, quando vieram vários; senão vazio"}.`;
 
 /** O bloco de dados do toque, que vai junto da última mensagem do pedido. */
 export function dadosDoToque(toque: ToqueDoMapa, nome: string, pos: string, coleta: unknown): string {

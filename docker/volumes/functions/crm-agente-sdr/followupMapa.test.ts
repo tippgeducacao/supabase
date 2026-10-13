@@ -133,3 +133,36 @@ describe('fora do mapa e a chave', () => {
     expect(await followupMapaLigado(banco(null, { message: 'x' }), '5546988166051')).toBe(false);
   });
 });
+
+describe('toque 2 sem perfil registrado: o modelo escolhe pela conversa', () => {
+  const semPerfil = { vinculo_trabalho: null, jornada: {} };
+
+  it('leva a pergunta de cada perfil e a que divide o caminho', async () => {
+    const { escolhaDoToque, dadosDaEscolha } = await import('./followupMapa');
+    const e = escolhaDoToque(MAPA, semPerfil, 2, SEM)!;
+    expect(Object.keys(e.porPerfil)).toEqual(['contratado', 'dono_granja']);
+    expect(e.porPerfil.contratado.id).toBe('contratado:carreira:1');
+    expect(e.semPerfil?.id).toBe('*:divide:0');
+    const d = dadosDaEscolha(e, MAPA, 'Ana', 'a pós em sanidade avícola', { area_atuacao: 'integradora' });
+    expect(d).toContain('"perfil":"contratado"');
+    expect(d).toContain('"se_a_conversa_nao_mostra_o_perfil":{"perfil":"indefinido","pergunta_do_mapa":"Hoje você trabalha em agroindústria ou tem a sua granja?"}');
+  });
+
+  it('com perfil conhecido, ou fora do toque 2, não há escolha', async () => {
+    const { escolhaDoToque } = await import('./followupMapa');
+    expect(escolhaDoToque(MAPA, CLT, 2, SEM)).toBeNull();
+    expect(escolhaDoToque(MAPA, semPerfil, 3, SEM)).toBeNull();
+  });
+
+  it('o perfil escolhido no toque 2 vale para os toques 3 e 4 (fica no id da pergunta enviada)', () => {
+    const depois = { vinculo_trabalho: null, jornada: { followup_carreira: [{ escopo: escopoDoMapa('avicultura'), pergunta_id: 'contratado:carreira:1' }] } };
+    expect(ramoDoLead(MAPA, depois)?.ramo).toBe('contratado');
+    const usados = usadosDoMapa(depois.jornada, 'avicultura');
+    expect(toqueDoMapa(MAPA, depois, 3, usados)?.id).toBe('contratado:ganho:3');
+    expect(toqueDoMapa(MAPA, depois, 4, usados)?.id).toBe('contratado:ponte');
+    // Só a pergunta que divide foi enviada: o perfil segue desconhecido e os toques 3 e 4 saem do mapa.
+    const soDivide = { vinculo_trabalho: null, jornada: { followup_carreira: [{ escopo: escopoDoMapa('avicultura'), pergunta_id: '*:divide:0' }] } };
+    expect(ramoDoLead(MAPA, soDivide)).toBeNull();
+    expect(toqueDoMapa(MAPA, soDivide, 3, usadosDoMapa(soDivide.jornada, 'avicultura'))).toBeNull();
+  });
+});

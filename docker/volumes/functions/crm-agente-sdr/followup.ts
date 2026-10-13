@@ -33,7 +33,8 @@ import { selecionarProvedorDoLead } from './pilotoOpenai.ts';
 import { FOLLOWUP_PILOTO_SYSTEM } from './followupPiloto.ts';
 import { contextoFollowupCarreira, corrigirPremissaDeCarreira, perguntaRepetida, planejarFollowupCarreira, validarFollowupCarreira } from './followupCarreira.ts';
 import {
-  dadosDoToque, escopoDoMapa, falaDoToque, FOLLOWUP_MAPA_SYSTEM, followupMapaLigado, mapaDoLead, soRetomadasConcretas, toqueDoMapa, usadosDoMapa,
+  dadosDaEscolha, dadosDoToque, escolhaDoToque, escopoDoMapa, falaDoToque, FOLLOWUP_MAPA_SYSTEM, followupMapaLigado, mapaDoLead, soRetomadasConcretas,
+  toqueDoMapa, usadosDoMapa,
 } from './followupMapa.ts';
 import { cursoDaConversa } from './ganchoLote.ts';
 import { registrarNaJornada } from './fichaAtendimento.ts';
@@ -364,13 +365,18 @@ export async function gerarFollowup(
   const comMapa = opcoes && planoCarreira && lead.contexto_campanha?.persona !== 'aula'
     && (opcoes.mapa ?? await followupMapaLigado(supabase, lead.numero_formatado ?? remotejid))
     ? await mapaDoLead(supabase, curso) : null;
-  const toque = comMapa ? toqueDoMapa(comMapa.mapa, lead, tentativaAtual, usadosDoMapa(lead.jornada, comMapa.mapa.grupo)) : null;
-  if (comMapa && planoCarreira && !toque) planoCarreira = soRetomadasConcretas(planoCarreira);
+  const usados = comMapa ? usadosDoMapa(lead.jornada, comMapa.mapa.grupo) : new Set<string>();
+  // Sem perfil registrado, o toque 2 leva a pergunta de cada perfil e o modelo escolhe pela conversa.
+  const escolha = comMapa ? escolhaDoToque(comMapa.mapa, lead, tentativaAtual, usados) : null;
+  const toqueFixo = comMapa && !escolha ? toqueDoMapa(comMapa.mapa, lead, tentativaAtual, usados) : null;
+  const noMapa = Boolean(escolha || toqueFixo);
+  if (comMapa && planoCarreira && !noMapa) planoCarreira = soRetomadasConcretas(planoCarreira);
   const posFalada = comMapa ? cursoDaConversa(comMapa.pos).replace(/^d/, '') : '';
   const contextoTemporal = montarContextoTemporal(await carregarDiasSemAtendimento(supabase)) + contextoMateriais + (opcoes?.contexto ?? '')
-    + (planoCarreira && !toque ? contextoFollowupCarreira(planoCarreira, tentativaAtual) : '');
+    + (planoCarreira && !noMapa ? contextoFollowupCarreira(planoCarreira, tentativaAtual) : '');
   const messages = montarMensagensFollowup(history, tentativaAtual, nomeCtx, cursoCtx, Boolean(opcoes),
-    toque ? dadosDoToque(toque, nome, posFalada, lead.jornada?.coleta) : '');
+    escolha && comMapa ? dadosDaEscolha(escolha, comMapa.mapa, nome, posFalada, lead.jornada?.coleta)
+      : toqueFixo ? dadosDoToque(toqueFixo, nome, posFalada, lead.jornada?.coleta) : '');
 
   const inicio = Date.now();
   // thinking disabled EXPLÍCITO: no Sonnet 5, omitir liga o adaptativo — o follow-up
@@ -384,7 +390,7 @@ export async function gerarFollowup(
     // mantém o TTL de 5 min sempre quente, então quase toda chamada lê a 0,1x.
     // O temporal (muda a cada minuto) fica FORA do prefixo, depois do breakpoint.
     system: [
-      { type: 'text', text: toque ? FOLLOWUP_MAPA_SYSTEM : opcoes ? FOLLOWUP_PILOTO_SYSTEM : FOLLOWUP_SYSTEM },
+      { type: 'text', text: noMapa ? FOLLOWUP_MAPA_SYSTEM : opcoes ? FOLLOWUP_PILOTO_SYSTEM : FOLLOWUP_SYSTEM },
       { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA, cache_control: { type: 'ephemeral' } },
       { type: 'text', text: contextoTemporal },
     ],
@@ -401,7 +407,12 @@ export async function gerarFollowup(
   }
   let out = ['max_tokens', 'refusal'].includes(resp?.stop_reason)
     ? { message: '', final_answer: 'resposta_incompleta', pergunta_id: '' } : parseResposta(resp);
-  if (toque && comMapa) {
+  // Na escolha, o perfil que o modelo leu da conversa vem em pergunta_id; sem perfil reconhecido vale a
+  // pergunta que divide o caminho.
+  const toque = escolha ? (escolha.porPerfil[out.pergunta_id] ?? escolha.semPerfil) : toqueFixo;
+  if (noMapa && comMapa && !toque) {
+    out = { message: '', final_answer: 'sem_pergunta_do_mapa', pergunta_id: '' };
+  } else if (toque && comMapa) {
     // A pergunta sai como o Wellinton escreveu: se o modelo a mudou, vai a literal. Pergunta já feita
     // na conversa não se repete (silêncio), e o silêncio do modelo é respeitado.
     const { fala, literalReposto } = falaDoToque(out.message, toque, nome, posFalada);
