@@ -32,7 +32,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3';
 import { rodarEsteiraFollowup } from '../crm-agente-sdr/followup.ts';
 import { rodarEsteiraFollowupTemplate } from '../crm-agente-sdr/followup-template.ts';
-import { executarTesteFollowup } from '../crm-agente-sdr/testeFollowup.ts';
+import { ensaiarFollowupSemEnvio, executarTesteFollowup } from '../crm-agente-sdr/testeFollowup.ts';
 
 declare const EdgeRuntime: { waitUntil?: (p: Promise<unknown>) => void } | undefined;
 
