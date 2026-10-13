@@ -33,8 +33,8 @@ import { selecionarProvedorDoLead } from './pilotoOpenai.ts';
 import { FOLLOWUP_PILOTO_SYSTEM } from './followupPiloto.ts';
 import { contextoFollowupCarreira, corrigirPremissaDeCarreira, perguntaRepetida, planejarFollowupCarreira, validarFollowupCarreira } from './followupCarreira.ts';
 import {
-  dadosDaEscolha, dadosDoToque, escolhaDoToque, escopoDoMapa, falaDoToque, FOLLOWUP_MAPA_SYSTEM, followupMapaLigado, mapaDoLead, soRetomadasConcretas,
-  toqueDoMapa, usadosDoMapa,
+  dadosDaEscolha, dadosDoToque, escolhaDoToque, escopoDoMapa, falaDoToque, FOLLOWUP_MAPA_SYSTEM, followupMapaLigado, mapaDoLead, semContextoRepetido,
+  soRetomadasConcretas, toqueDoMapa, usadosDoMapa,
 } from './followupMapa.ts';
 import { cursoDaConversa } from './ganchoLote.ts';
 import { registrarNaJornada } from './fichaAtendimento.ts';
@@ -362,7 +362,8 @@ export async function gerarFollowup(
   // ▸ Follow-up pelo mapa de carreira do Wellinton (followupMapa.ts, 13/10/2026). Só no piloto OpenAI,
   //   fora da persona aula, e com a chave ligada (ou forçada pelo ensaio). O código escolhe a pergunta
   //   do toque; o modelo só escreve a frase de contexto antes dela.
-  const comMapa = opcoes && planoCarreira && lead.contexto_campanha?.persona !== 'aula'
+  //   As perguntas do mapa são para quem trabalha na área: quem já disse que não atua fica fora.
+  const comMapa = opcoes && planoCarreira && lead.contexto_campanha?.persona !== 'aula' && lead.jornada?.coleta?.atua_na_area !== 'nao'
     && (opcoes.mapa ?? await followupMapaLigado(supabase, lead.numero_formatado ?? remotejid))
     ? await mapaDoLead(supabase, curso) : null;
   const usados = comMapa ? usadosDoMapa(lead.jornada, comMapa.mapa.grupo) : new Set<string>();
@@ -415,7 +416,9 @@ export async function gerarFollowup(
   } else if (toque && comMapa) {
     // A pergunta sai como o Wellinton escreveu: se o modelo a mudou, vai a literal. Pergunta já feita
     // na conversa não se repete (silêncio), e o silêncio do modelo é respeitado.
-    const { fala, literalReposto } = falaDoToque(out.message, toque, nome, posFalada);
+    const bruta = falaDoToque(out.message, toque, nome, posFalada);
+    const literalReposto = bruta.literalReposto;
+    const fala = semContextoRepetido(bruta.fala, history.filter((m) => m.role === 'assistant').map((m) => blocosParaTexto(m.content)).slice(-6));
     const repetida = Boolean(fala) && perguntaRepetida(fala, history);
     tel.registrar('followup_mapa', { id: toque.id, etapa: toque.etapa, ramo: toque.ramo, grupo: comMapa.mapa.grupo,
       literal_reposto: literalReposto, repetida, silencio: !fala });

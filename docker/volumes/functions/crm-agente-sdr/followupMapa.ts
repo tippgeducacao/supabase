@@ -112,7 +112,11 @@ export function usadosDoMapa(jornada: any, grupo: string): Set<string> {
 
 export const FOLLOWUP_MAPA_SYSTEM = `Você é o João, da PPG Educação, retomando no WhatsApp uma conversa que esfriou. Você recebe a conversa e um dado do mapa comercial desta pós para este toque: uma pergunta de carreira, ou a ponte do convite.
 
-Escreva uma mensagem curta, como numa fala. Primeiro uma frase que mostre que você lembra o que a pessoa contou de si (onde trabalha, o que faz, o que quer), com as palavras dela. Depois a pergunta do mapa, do jeito que veio. Exemplo do tom: "bacana, Kamila, você atua na carteira agro de uma cooperativa. na empresa onde você trabalha, eles valorizam quem estuda?". Se ela ainda não contou nada sobre si, vá direto à pergunta, só com o nome.
+Escreva uma mensagem curta, como numa fala, tratando por vc. Primeiro uma frase que mostre que você lembra o que a pessoa contou de si (onde trabalha, o que faz, o que quer), com as palavras dela. Depois a pergunta do mapa, do jeito que veio. Exemplo do tom: "bacana, Kamila, você atua na carteira agro de uma cooperativa. na empresa onde você trabalha, eles valorizam quem estuda?". Se ela ainda não contou nada sobre si, vá direto à pergunta, só com o nome.
+
+Essa lembrança aparece uma vez. Se uma mensagem sua mais recente, ainda sem resposta dela, já lembrou o que ela contou, não repita: vá direto à pergunta, no máximo com o nome.
+
+A pergunta do mapa foi escrita para quem trabalha na área da pós. Se a conversa mostra que ela não cabe nesta pessoa (pergunta de quem atende clínica para quem não é veterinário, por exemplo), devolva message vazia.
 
 Quando o dado for a ponte, convide em vez de perguntar: "quer conhecer a pós numa conversa rápida no meet com o monitor? ele te mostra [a ponte]", com o nome da pós.
 
@@ -135,6 +139,21 @@ export function dadosDoToque(toque: ToqueDoMapa, nome: string, pos: string, cole
 
 const limpo = (s: string) => s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase()
   .replace(/\bvoce\b/g, 'vc').replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+
+/**
+ * A frase de contexto só vale uma vez. No ensaio de 13/10 os toques 2, 3 e 4 abriram todos com
+ * "vc comentou que é dono de pet shop com banho e tosa.". Se a primeira frase da fala já abriu uma
+ * mensagem anterior nossa, ela sai e fica só a pergunta.
+ */
+export function semContextoRepetido(fala: string, falasAnteriores: readonly string[]): string {
+  const corte = fala.search(/[.!]\s+\S/);
+  if (corte < 0) return fala;
+  const abertura = limpo(fala.slice(0, corte));
+  if (abertura.split(' ').length < 4) return fala;
+  if (!falasAnteriores.some((f) => limpo(f).startsWith(abertura))) return fala;
+  const resto = fala.slice(corte + 1).trim();
+  return resto || fala;
+}
 
 /**
  * A fala que sai: a do modelo, se ela traz a pergunta do mapa como veio (ou, na ponte, o convite com o

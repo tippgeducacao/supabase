@@ -166,3 +166,17 @@ describe('toque 2 sem perfil registrado: o modelo escolhe pela conversa', () => 
     expect(toqueDoMapa(MAPA, soDivide, 3, usadosDoMapa(soDivide.jornada, 'avicultura'))).toBeNull();
   });
 });
+
+describe('a lembrança do que ele contou aparece uma vez', () => {
+  it('abertura já usada num toque anterior sai; a pergunta fica', async () => {
+    const { semContextoRepetido } = await import('./followupMapa');
+    const anterior = ['vc comentou que é dono de pet shop com banho e tosa. os tutores já te perguntaram se você prescreve?'];
+    expect(semContextoRepetido('vc comentou que é dono de pet shop com banho e tosa. quer conhecer a pós numa conversa rápida no meet com o monitor? ele te mostra como ser referência.', anterior))
+      .toBe('quer conhecer a pós numa conversa rápida no meet com o monitor? ele te mostra como ser referência.');
+    // Abertura nova, abertura curta demais ou fala sem abertura: nada muda.
+    const nova = 'como vc atende granjas por conta, qual é o seu maior desafio hoje?';
+    expect(semContextoRepetido(nova, anterior)).toBe(nova);
+    expect(semContextoRepetido('oi, Ana. qual é o seu maior desafio hoje?', ['oi, Ana. tudo bem?'])).toBe('oi, Ana. qual é o seu maior desafio hoje?');
+    expect(semContextoRepetido('qual é o seu maior desafio hoje?', anterior)).toBe('qual é o seu maior desafio hoje?');
+  });
+});
