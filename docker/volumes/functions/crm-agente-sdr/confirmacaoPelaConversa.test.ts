@@ -60,6 +60,39 @@ describe('o sim que o modelo esqueceu de registrar', () => {
     expect(leadConfirmouConclusao(null)).toBe(false);
   });
 
+  // Formas vistas nas 50 conversas reais de 07 a 13/10/2026 em que a conferência mandou perguntar.
+  it('resposta citando a própria pergunta (o gateway embute a citação)', () => {
+    expect(leadConfirmouConclusao(conversa('certo, vc já se formou em medicina veterinária?',
+      '[Em resposta à mensagem: "certo, vc já se formou em medicina veterinária?"] Sim'))).toBe(true);
+    // Citou OUTRA mensagem: o "isso" não responde à pergunta de conclusão.
+    expect(leadConfirmouConclusao(conversa('certo, vc já se formou em medicina veterinária?',
+      '[Em resposta à mensagem: "procuro um encaixe pra ainda hoje?"] Isso'))).toBe(false);
+  });
+
+  it.each(['Sim, a muito tempo.', 'Sim, 11 anos de formação', 'Ja sim,a 5 anos', 'sim, há 3 anos', 'Sim. Já tenho até doutorado'])(
+    'sim com o tempo de formado ou com pós: %s', (resposta) => {
+      expect(leadConfirmouConclusao(conversa(PERGUNTA, resposta))).toBe(true);
+    });
+
+  it('pergunta com "ou": só uma declaração responde, o sim sozinho não', () => {
+    const comOu = 'certo. vc já concluiu agronomia ou ainda está cursando?';
+    expect(leadConfirmouConclusao(conversa(comOu, 'Concluído'))).toBe(true);
+    expect(leadConfirmouConclusao(conversa(comOu, 'já me formei'))).toBe(true);
+    expect(leadConfirmouConclusao(conversa(comOu, 'Sim'))).toBe(false);
+    expect(leadConfirmouConclusao(conversa(comOu, 'cursando'))).toBe(false);
+  });
+
+  it('reação não é resposta; "sim" com detalhe que muda o sentido fica de fora', () => {
+    expect(leadConfirmouConclusao(conversa(PERGUNTA, '[reacao]👍'))).toBe(false);
+    expect(leadConfirmouConclusao(conversa(PERGUNTA, '[reacao]❤️', 'Sim'))).toBe(true);
+    expect(leadConfirmouConclusao(conversa(PERGUNTA, 'Sim… MAs agora sou fotógrafa'))).toBe(false);
+    expect(leadConfirmouConclusao(conversa(PERGUNTA, 'sim, daqui a 2 anos'))).toBe(false);
+    expect(leadConfirmouConclusao(conversa(PERGUNTA, 'Sim?'))).toBe(false);
+    // Vistos em 08/10 e 13/10: o sim vem primeiro e a mensagem seguinte é outro assunto.
+    expect(leadConfirmouConclusao(conversa(PERGUNTA, 'Sim', 'Qual são as formas de pagamento de vcs?'))).toBe(true);
+    expect(leadConfirmouConclusao(conversa(PERGUNTA, 'Ja sim', '[Em resposta à mensagem: "oi, a pós está disponível online."] Perfeito'))).toBe(true);
+  });
+
   it('a chave da produção: só liga com true no banco; erro ou ausência = desligada', async () => {
     const banco = (data: unknown, error: unknown = null) => ({ from: () => ({ select: () => ({ eq: () => ({ maybeSingle: async () => ({ data, error }) }) }) }) });
     expect(await simPelaConversaLigado(banco({ formacao_sim_pela_conversa: true }))).toBe(true);
