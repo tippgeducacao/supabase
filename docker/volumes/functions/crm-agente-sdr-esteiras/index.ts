@@ -82,7 +82,8 @@ Deno.serve(async (req) => {
     try { return json(await ensaiarFollowupSemEnvio(supabase, body)); }
     catch (erro) {
       const codigo = erro instanceof Error && /^[a-z_]{1,80}$/.test(erro.message) ? erro.message : 'ensaio_interrompido';
-      return json({ error: codigo }, 409);
+      // Rota só do telefone de teste, atrás do segredo: o detalhe ajuda a ler por que o ensaio parou.
+      return json({ error: codigo, detalhe: String((erro as Error)?.message ?? erro).slice(0, 300) }, 409);
     }
   }
 
