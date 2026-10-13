@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   codigoDoMeet,
+  ESQUEMA_SAIDA,
   interpretarSaida,
   limparDicasDadas,
   limparTurnos,
@@ -63,49 +64,73 @@ describe("montarPedido", () => {
 
 describe("interpretarSaida", () => {
   it("devolve a dica quando o modelo manda mostrar", () => {
-    expect(interpretarSaida('{"mostrar":true,"tipo":"objecao","texto":" Pergunte o que pesa mais: a parcela ou o momento. "}'))
-      .toEqual({ tipo: "objecao", texto: "Pergunte o que pesa mais: a parcela ou o momento." });
+    expect(interpretarSaida('{"mostrar":true,"tipo":"objecao","texto":" O que mudaria pra você em um ano com a pós? "}'))
+      .toEqual({ tipo: "objecao", texto: "O que mudaria pra você em um ano com a pós?" });
   });
 
   it("silêncio é o caso comum: mostrar=false, texto vazio, JSON quebrado ou nada", () => {
-    expect(interpretarSaida('{"mostrar":false,"tipo":"dado","texto":""}')).toBeNull();
-    expect(interpretarSaida('{"mostrar":true,"tipo":"dado","texto":"  "}')).toBeNull();
+    expect(interpretarSaida('{"mostrar":false,"tipo":"pergunta","texto":""}')).toBeNull();
+    expect(interpretarSaida('{"mostrar":true,"tipo":"pergunta","texto":"  "}')).toBeNull();
     expect(interpretarSaida('{"mostrar":true,"tipo":')).toBeNull();
     expect(interpretarSaida(undefined)).toBeNull();
   });
 
-  it("tipo desconhecido vira lembrete em vez de derrubar a dica", () => {
-    expect(interpretarSaida('{"mostrar":true,"tipo":"outro","texto":"Combine o próximo passo."}')?.tipo).toBe("lembrete");
+  it("tipo desconhecido vira pergunta em vez de derrubar a dica", () => {
+    expect(interpretarSaida('{"mostrar":true,"tipo":"outro","texto":"A empresa valoriza quem estuda?"}')?.tipo).toBe("pergunta");
+  });
+
+  it("não existe tipo de dica para fato de curso (preço não é devolvido)", () => {
+    expect(ESQUEMA_SAIDA.properties.tipo.enum).toEqual(["pergunta", "objecao", "lembrete"]);
   });
 });
 
 describe("montarContexto", () => {
   const dados = {
-    agendamento: { pos_graduacao_interesse: "PÓS | SANIDADE AVÍCOLA", principal_dor_objetivo: "quer sair da clínica", observacoes: "" },
+    agendamento: { pos_graduacao_interesse: "PÓS | NUTRIÇÃO E GESTÃO DE BOVINOS", principal_dor_objetivo: "quer cobrar mais pela consultoria", observacoes: "" },
     lead: { nome: "Ana", profissao: "Veterinária", regiao: null },
-    anteriores: [{ data_agendamento: "2026-09-30T17:00:00+00:00", pos_graduacao_interesse: "PÓS | SANIDADE AVÍCOLA", resultado_reuniao: "compareceu_nao_comprou", objecoes_apresentadas: "preço" }],
-    produto: { produto: "Sanidade Avícola", preco_oficial_online: "R$ 12.730,00", matricula_gerenciar_cursos: 300, proximo_pratico: "2026-11-05" },
-    perfis: [
-      { nome: "Segundo", ordem: 2, sinais: ["quero mudar de área"], perguntas: [] },
-      { nome: "Primeiro", ordem: 1, moeda: "territorio", sinais: [], perguntas: [{ pergunta: "já fez necropsia de ave?", lacuna: "rotina de campo" }] },
-    ],
-    objecoes: [{ objecao: "já prescrevo informalmente", resposta: "então vc já viu que funciona", ordem: 1 }],
+    anteriores: [{ data_agendamento: "2026-09-30T17:00:00+00:00", pos_graduacao_interesse: "PÓS | NUTRIÇÃO E GESTÃO DE BOVINOS", resultado_reuniao: "compareceu_nao_comprou", objecoes_apresentadas: "preço" }],
+    mapa: {
+      ramos: [
+        { ramo: "contratado", nome: "Contratado (CLT) de cooperativa", ordem: 2, sinais: ["trabalho na cooperativa", "carteira assinada"], argumento: "cargo, comissão e valorização do estudo" },
+        { ramo: "autonomo", nome: "Autônomo: tem a própria consultoria", ordem: 1, sinais: ["atendo fazendas"], argumento: "cobrar mais pela consultoria" },
+      ],
+      perguntas: [
+        { ramo: "contratado", etapa: "carreira", ordem: 1, texto: "A empresa tem plano de carreira?" },
+        { ramo: "autonomo", etapa: "ganho", ordem: 2, texto: "Quanto você cobra hoje por visita?" },
+        { ramo: "autonomo", etapa: "carreira", ordem: 1, texto: "O que faz o produtor escolher você?" },
+        { ramo: "*", etapa: "divide", ordem: 1, texto: "Você trabalha de forma autônoma ou é contratado?" },
+        { ramo: "*", etapa: "prioridade", ordem: 101, texto: "Por que você está buscando uma pós justamente agora?" },
+      ],
+    },
   };
 
-  it("traz lead, reunião, histórico, curso, perfis na ordem e objeções", () => {
+  it("traz lead, reunião e histórico", () => {
     const texto = montarContexto(dados);
     expect(texto).toContain("- Nome: Ana");
-    expect(texto).toContain("- Dor ou objetivo que o SDR registrou: quer sair da clínica");
+    expect(texto).toContain("- Dor ou objetivo que o SDR registrou: quer cobrar mais pela consultoria");
     expect(texto).toContain("Reunião de 30/09/2026");
-    expect(texto).toContain("- Valor oficial online: R$ 12.730,00");
-    expect(texto).toContain("- Próximo módulo prático: 05/11/2026");
-    expect(texto.indexOf("### Primeiro")).toBeLessThan(texto.indexOf("### Segundo"));
-    expect(texto).toContain("já fez necropsia de ave? (revela: rotina de campo)");
-    expect(texto).toContain('"já prescrevo informalmente" → então vc já viu que funciona');
   });
 
-  it("matrícula numérica sai em reais com centavos, nunca arredondada", () => {
-    expect(montarContexto(dados)).toMatch(/- Matrícula: R\$\s300,00/);
+  it("mapa de carreira: a pergunta que divide vem primeiro, ramos e perguntas na ordem do comercial", () => {
+    const texto = montarContexto(dados);
+    expect(texto.indexOf("Para descobrir como o lead trabalha")).toBeLessThan(texto.indexOf("### Autônomo"));
+    expect(texto.indexOf("### Autônomo")).toBeLessThan(texto.indexOf("### Contratado"));
+    expect(texto.indexOf("O que faz o produtor escolher você?")).toBeLessThan(texto.indexOf("Quanto você cobra hoje por visita?"));
+    expect(texto).toContain("  - [ganho] Quanto você cobra hoje por visita?");
+    expect(texto).toContain("- Sinais na fala do lead: trabalho na cooperativa | carteira assinada");
+    expect(texto).toContain("- O que pesa para ele: cargo, comissão e valorização do estudo");
+    expect(texto).toContain("### Valem para qualquer ramo\n  - [prioridade] Por que você está buscando uma pós justamente agora?");
+  });
+
+  it("a pergunta que divide não se repete dentro dos ramos nem nas gerais", () => {
+    const texto = montarContexto(dados);
+    expect(texto.split("Você trabalha de forma autônoma ou é contratado?")).toHaveLength(2);
+  });
+
+  it("não leva preço nem fato de curso, mesmo que alguém mande junto", () => {
+    const texto = montarContexto({ ...dados, produto: { preco_oficial_online: "R$ 12.730,00" } } as never);
+    expect(texto).not.toContain("12.730");
+    expect(texto).not.toMatch(/Valor|Matrícula|Fatos do curso/);
   });
 
   it("campo vazio não vira linha, e o texto sai idêntico a cada chamada (cache do prompt)", () => {
@@ -115,10 +140,10 @@ describe("montarContexto", () => {
     expect(montarContexto(dados)).toBe(texto);
   });
 
-  it("reunião sem pós cadastrada ainda monta o que tem", () => {
-    const texto = montarContexto({ agendamento: { pos_graduacao_interesse: "CURSO NOVO" }, lead: null });
+  it("pós sem mapa ainda monta o que tem do lead", () => {
+    const texto = montarContexto({ agendamento: { pos_graduacao_interesse: "CURSO NOVO" }, lead: null, mapa: { ramos: [], perguntas: [] } });
     expect(texto).toContain("- Pós de interesse: CURSO NOVO");
-    expect(texto).not.toContain("Perfis de carreira");
+    expect(texto).not.toContain("Mapa de carreira");
   });
 });
 

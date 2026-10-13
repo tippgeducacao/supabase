@@ -1,6 +1,7 @@
 // Réguas PURAS do copiloto de reunião (sem Deno, sem rede) — testadas em logica.test.ts.
 
-export const TIPOS = ["objecao", "pergunta", "lembrete", "dado"] as const;
+// Não existe tipo "dado": o copiloto não devolve preço nem fato de curso (13/10/2026).
+export const TIPOS = ["pergunta", "objecao", "lembrete"] as const;
 export type TipoDica = (typeof TIPOS)[number];
 export type Dica = { tipo: TipoDica; texto: string };
 export type Turno = { quem: "lead" | "vendedor"; texto: string };
@@ -81,7 +82,7 @@ export function interpretarSaida(texto: string | null | undefined): Dica | null 
   }
   const dica = typeof saida?.texto === "string" ? saida.texto.trim() : "";
   if (saida?.mostrar !== true || !dica) return null;
-  const tipo = (TIPOS as readonly string[]).includes(String(saida.tipo)) ? (saida.tipo as TipoDica) : "lembrete";
+  const tipo = (TIPOS as readonly string[]).includes(String(saida.tipo)) ? (saida.tipo as TipoDica) : "pergunta";
   return { tipo, texto: dica.slice(0, MAX_TEXTO_DICA) };
 }
 
@@ -97,9 +98,8 @@ export type DadosReuniao = {
   };
   lead?: Record<string, unknown> | null;
   anteriores?: Array<Record<string, unknown>>;
-  produto?: Record<string, unknown> | null;
-  perfis?: Array<Record<string, unknown>>;
-  objecoes?: Array<Record<string, unknown>>;
+  /** Mapa de carreira do comercial para o grupo desta pós (`sdr_carreira_mapa_*`). */
+  mapa?: { ramos: Array<Record<string, unknown>>; perguntas: Array<Record<string, unknown>> } | null;
 };
 
 const txt = (v: unknown): string => (typeof v === "string" ? v.trim() : typeof v === "number" ? String(v) : "");
@@ -113,18 +113,43 @@ function dataBr(v: unknown): string {
   return m ? `${m[3]}/${m[2]}/${m[1]}` : "";
 }
 
-/** A matrícula vem do cadastro como número cru; valor em reais sempre sai com centavos. */
-function reais(v: unknown): string {
-  if (typeof v !== "number" || !Number.isFinite(v)) return txt(v);
-  return `R$ ${v.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const porOrdem = (a: Record<string, unknown>, b: Record<string, unknown>) =>
+  (Number(a.ordem) || 0) - (Number(b.ordem) || 0) || txt(a.nome ?? a.texto).localeCompare(txt(b.nome ?? b.texto));
+
+/** `ramo = '*'` no mapa: a pergunta vale para qualquer ramo do grupo. */
+const TODOS_OS_RAMOS = "*";
+
+function perguntasDe(perguntas: Array<Record<string, unknown>>, filtro: (p: Record<string, unknown>) => boolean): string[] {
+  return perguntas.filter(filtro).sort(porOrdem).map((p) => `  - [${txt(p.etapa)}] ${txt(p.texto)}`).filter((l) => !l.endsWith("] "));
 }
 
-const porOrdem =(a: Record<string, unknown>, b: Record<string, unknown>) =>
-  (Number(a.ordem) || 0) - (Number(b.ordem) || 0) || txt(a.nome ?? a.objecao).localeCompare(txt(b.nome ?? b.objecao));
+function montarMapa(mapa: NonNullable<DadosReuniao["mapa"]>): string {
+  const blocos: string[] = [];
+  const divide = perguntasDe(mapa.perguntas, (p) => txt(p.etapa) === "divide");
+  if (divide.length) blocos.push(`Para descobrir como o lead trabalha:\n${divide.join("\n")}`);
+
+  for (const ramo of [...mapa.ramos].sort(porOrdem)) {
+    const sinais = Array.isArray(ramo.sinais) ? ramo.sinais.map(txt).filter(Boolean) : [];
+    const perguntas = perguntasDe(mapa.perguntas, (p) => txt(p.ramo) === txt(ramo.ramo) && txt(p.etapa) !== "divide");
+    blocos.push([
+      `### ${txt(ramo.nome) || txt(ramo.ramo)}`,
+      ...linhas([
+        ["Sinais na fala do lead", sinais.join(" | ")],
+        ["O que pesa para ele", ramo.argumento],
+      ]),
+      ...(perguntas.length ? ["- Perguntas, na ordem:", ...perguntas] : []),
+    ].join("\n"));
+  }
+
+  const gerais = perguntasDe(mapa.perguntas, (p) => txt(p.ramo) === TODOS_OS_RAMOS && txt(p.etapa) !== "divide");
+  if (gerais.length) blocos.push(`### Valem para qualquer ramo\n${gerais.join("\n")}`);
+  return blocos.join("\n\n");
+}
 
 /**
  * Texto das informações da reunião. Precisa sair IDÊNTICO a cada chamada enquanto o
  * cadastro não muda (é o que mantém o cache do prompt): ordem fixa, nada de "hoje".
+ * De propósito NÃO entra preço nem fato de curso: o copiloto fala do lead.
  */
 export function montarContexto(d: DadosReuniao): string {
   const partes: string[] = ["# Informações desta reunião"];
@@ -162,50 +187,8 @@ export function montarContexto(d: DadosReuniao): string {
   }).filter(Boolean);
   if (anteriores.length) partes.push(`## Reuniões anteriores deste lead\n${anteriores.join("\n\n")}`);
 
-  if (d.produto) {
-    const p = d.produto;
-    const doCurso = linhas([
-      ["Produto", p.produto],
-      ["Formato", p.formato],
-      ["Carga horária", p.carga_horaria],
-      ["Duração em meses", p.meses],
-      ["Coordenação", p.coordenador],
-      ["Valor oficial online", p.preco_oficial_online],
-      ["Valor oficial semipresencial", p.preco_oficial_semipresencial],
-      ["Matrícula", reais(p.matricula_gerenciar_cursos)],
-      ["Turmas abertas", p.turmas_abertas],
-      ["Próximo módulo prático", dataBr(p.proximo_pratico)],
-      ["Aviso do cadastro", p.aviso],
-    ]);
-    if (doCurso.length) partes.push(`## Fatos do curso (cadastro do sistema)\n${doCurso.join("\n")}`);
-  }
-
-  const perfis = [...(d.perfis ?? [])].sort(porOrdem).map((p) => {
-    const sinais = Array.isArray(p.sinais) ? p.sinais.map(txt).filter(Boolean) : [];
-    const perguntas = (Array.isArray(p.perguntas) ? p.perguntas : [])
-      .map((q) => {
-        const pergunta = txt((q as Record<string, unknown>)?.pergunta);
-        const lacuna = txt((q as Record<string, unknown>)?.lacuna);
-        return pergunta ? `  - ${pergunta}${lacuna ? ` (revela: ${lacuna})` : ""}` : "";
-      })
-      .filter(Boolean);
-    return [
-      `### ${txt(p.nome) || "Perfil"}`,
-      ...linhas([
-        ["O que move esse perfil", p.moeda],
-        ["Sinais na fala do lead", sinais.join(" | ")],
-        ["O que a pós entrega para ele", p.ponte_convite],
-        ["Cuidado", p.observacao],
-      ]),
-      ...(perguntas.length ? ["- Perguntas que abrem a conversa:", ...perguntas] : []),
-    ].join("\n");
-  });
-  if (perfis.length) partes.push(`## Perfis de carreira desta pós (mapa do comercial)\n${perfis.join("\n\n")}`);
-
-  const objecoes = [...(d.objecoes ?? [])].sort(porOrdem)
-    .map((o) => (txt(o.objecao) && txt(o.resposta) ? `- "${txt(o.objecao)}" → ${txt(o.resposta)}` : ""))
-    .filter(Boolean);
-  if (objecoes.length) partes.push(`## Objeções já trabalhadas nesta pós\n${objecoes.join("\n")}`);
+  const mapa = d.mapa && (d.mapa.ramos.length || d.mapa.perguntas.length) ? montarMapa(d.mapa) : "";
+  if (mapa) partes.push(`## Mapa de carreira desta pós (comercial)\n${mapa}`);
 
   return partes.join("\n\n");
 }

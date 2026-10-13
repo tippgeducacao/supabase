@@ -13,9 +13,12 @@
 //   * reunião e lead: `agendamentos` e `leads`, lidos com o JWT de QUEM CHAMA — a RLS
 //     decide se a pessoa pode ver aquela reunião. Contexto livre vindo do cliente foi
 //     exatamente o defeito da `sales-copilot-chat` aposentada.
-//   * fatos do curso: `mimosa_catalogo()` (preço oficial do Pedagógico), também com o JWT.
-//   * mapa de carreira e objeções da pós: `sdr_carreira_pos` / `sdr_carreira_pos_objecoes`,
-//     com a service role, só DEPOIS de a RLS ter liberado a reunião.
+//   * mapa de carreira da pós (ramos, sinais e perguntas do comercial):
+//     `sdr_carreira_mapa_pos` / `_ramo` / `_pergunta`, também com o JWT.
+//
+// O foco é o LEAD (decisão do Gustavo, 13/10/2026): aqui NÃO entra preço, catálogo nem
+// resposta pronta de objeção. E a fonte das perguntas é o mapa do comercial, não o
+// `sdr_carreira_pos` (perguntas técnicas, aposentadas para o SDR em 07/10/2026).
 //
 // ⚠️ Chamada pelo NAVEGADOR → nunca devolver 502/504 (o Cloudflare troca por página
 //    sem CORS). Falha da IA volta 200 com `dica: null` e um `aviso` quando o vendedor
@@ -116,19 +119,14 @@ async function lerReuniao(sbUsuario: SupabaseClient, agendamentoId: string): Pro
   const cursoId = cursoR.data?.id;
   if (!cursoId) return dados;
 
-  const [perfisR, objecoesR, materiaisR, catalogoR] = await Promise.all([
-    admin().from("sdr_carreira_pos").select("nome, moeda, sinais, perguntas, ponte_convite, observacao, ordem")
-      .eq("curso_id", cursoId).eq("ativo", true),
-    admin().from("sdr_carreira_pos_objecoes").select("objecao, resposta, ordem").eq("curso_id", cursoId).eq("ativo", true),
-    admin().from("comercial_cursos").select("nome").eq("curso_id", cursoId).eq("ativo", true),
-    // exige auth.uid(): com a service role volta erro, por isso vai com o JWT de quem chama
-    sbUsuario.rpc("mimosa_catalogo"),
+  const { data: mapaPos } = await sbUsuario.from("sdr_carreira_mapa_pos").select("grupo").eq("curso_id", cursoId).limit(1).maybeSingle();
+  if (!mapaPos?.grupo) return dados;
+
+  const [ramosR, perguntasR] = await Promise.all([
+    sbUsuario.from("sdr_carreira_mapa_ramo").select("ramo, nome, sinais, argumento, ordem").eq("grupo", mapaPos.grupo).eq("ativo", true),
+    sbUsuario.from("sdr_carreira_mapa_pergunta").select("ramo, etapa, texto, ordem").eq("grupo", mapaPos.grupo).eq("ativo", true),
   ]);
-  dados.perfis = perfisR.data ?? [];
-  dados.objecoes = objecoesR.data ?? [];
-  const nomes = new Set((materiaisR.data ?? []).map((m: { nome: string }) => m.nome));
-  const produtos = Array.isArray(catalogoR.data?.produtos) ? catalogoR.data.produtos : [];
-  dados.produto = produtos.find((p: { produto?: string }) => p?.produto && nomes.has(p.produto)) ?? null;
+  dados.mapa = { ramos: ramosR.data ?? [], perguntas: perguntasR.data ?? [] };
   return dados;
 }
 
