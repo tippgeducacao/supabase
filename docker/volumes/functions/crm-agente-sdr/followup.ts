@@ -371,10 +371,13 @@ export async function gerarFollowup(
   const escolha = comMapa ? escolhaDoToque(comMapa.mapa, lead, tentativaAtual, usados) : null;
   const toqueFixo = comMapa && !escolha ? toqueDoMapa(comMapa.mapa, lead, tentativaAtual, usados) : null;
   const noMapa = Boolean(escolha || toqueFixo);
-  if (comMapa && planoCarreira && !noMapa) planoCarreira = soRetomadasConcretas(planoCarreira);
+  // Toque 1 fica como é hoje (é o que mais traz resposta). Do 2 em diante, sem pergunta do mapa, sobra só
+  // o que retoma algo concreto; a preferência vai como "agenda" para o modelo não pedir um tema que saiu.
+  const soConcretas = Boolean(comMapa && planoCarreira && !noMapa && tentativaAtual >= 2);
+  if (soConcretas && planoCarreira) planoCarreira = soRetomadasConcretas(planoCarreira);
   const posFalada = comMapa ? cursoDaConversa(comMapa.pos).replace(/^d/, '') : '';
   const contextoTemporal = montarContextoTemporal(await carregarDiasSemAtendimento(supabase)) + contextoMateriais + (opcoes?.contexto ?? '')
-    + (planoCarreira && !noMapa ? contextoFollowupCarreira(planoCarreira, tentativaAtual) : '');
+    + (planoCarreira && !noMapa ? contextoFollowupCarreira(planoCarreira, soConcretas ? 7 : tentativaAtual) : '');
   const messages = montarMensagensFollowup(history, tentativaAtual, nomeCtx, cursoCtx, Boolean(opcoes),
     escolha && comMapa ? dadosDaEscolha(escolha, comMapa.mapa, nome, posFalada, lead.jornada?.coleta)
       : toqueFixo ? dadosDoToque(toqueFixo, nome, posFalada, lead.jornada?.coleta) : '');
@@ -416,7 +419,8 @@ export async function gerarFollowup(
   } else if (toque && comMapa) {
     // A pergunta sai como o Wellinton escreveu: se o modelo a mudou, vai a literal. Pergunta já feita
     // na conversa não se repete (silêncio), e o silêncio do modelo é respeitado.
-    const bruta = falaDoToque(out.message, toque, nome, posFalada);
+    // A lembrança do que ele contou só abre o toque 2; nos seguintes sai a pergunta, com o nome.
+    const bruta = falaDoToque(out.message, toque, nome, posFalada, tentativaAtual === 2);
     const literalReposto = bruta.literalReposto;
     const fala = semContextoRepetido(bruta.fala, history.filter((m) => m.role === 'assistant').map((m) => blocosParaTexto(m.content)).slice(-6));
     const repetida = Boolean(fala) && perguntaRepetida(fala, history);

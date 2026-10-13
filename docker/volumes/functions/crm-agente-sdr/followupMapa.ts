@@ -122,7 +122,7 @@ Quando o dado for a ponte, convide em vez de perguntar: "quer conhecer a pós nu
 
 Quando vierem vários perfis, o perfil do lead ainda não está registrado: escolha o que a conversa mostra (onde ele trabalha, se o negócio é dele, o cargo) e use a pergunta daquele perfil. Se a conversa não mostra, use a pergunta de "se_a_conversa_nao_mostra_o_perfil".
 
-Devolva message vazia quando a pessoa recusou, se despediu, pediu para parar, já tem reunião marcada ou combinou um retorno, e quando ela já respondeu a essa mesma pergunta na conversa.
+Devolva message vazia quando a pessoa recusou, se despediu, pediu para parar, se mostrou irritada com o atendimento, já tem reunião marcada ou combinou um retorno, e quando ela já respondeu a essa mesma pergunta na conversa.
 
 A mensagem também pode sair em áudio: uma ideia, sem lista, sem emoji, sem elogio solto. Não fale de preço, lote, desconto nem horário.
 
@@ -159,10 +159,16 @@ export function semContextoRepetido(fala: string, falasAnteriores: readonly stri
  * A fala que sai: a do modelo, se ela traz a pergunta do mapa como veio (ou, na ponte, o convite com o
  * monitor); senão a pergunta literal, só com o nome. '' = silêncio do modelo, que é respeitado.
  */
-export function falaDoToque(mensagem: string, toque: ToqueDoMapa, nome: string, pos: string): { fala: string; literalReposto: boolean } {
+export function falaDoToque(mensagem: string, toque: ToqueDoMapa, nome: string, pos: string, comLembranca = true): { fala: string; literalReposto: boolean } {
   const m = mensagem.trim();
   if (!m) return { fala: '', literalReposto: false };
   const chamar = nome ? `${nome}, ` : '';
+  // Fora do toque que leva a lembrança, o modelo só decide se a mensagem sai; o texto é o do mapa.
+  if (!comLembranca) {
+    return toque.etapa === 'ponte'
+      ? { fala: `${chamar}quer conhecer ${pos || 'a pós'} numa conversa rápida no meet com o monitor? ele te mostra ${toque.texto}.`, literalReposto: false }
+      : { fala: `${chamar}${toque.texto.charAt(0).toLowerCase()}${toque.texto.slice(1)}`, literalReposto: false };
+  }
   if (toque.etapa === 'ponte') {
     const ok = /\bmonitor\b/i.test(m) && m.length <= 500 && !/R\$|\b\d{1,2}h\d{0,2}\b|\b\d{1,2}:\d{2}\b/.test(m);
     return ok ? { fala: m, literalReposto: false }

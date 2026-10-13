@@ -180,3 +180,17 @@ describe('a lembrança do que ele contou aparece uma vez', () => {
     expect(semContextoRepetido('qual é o seu maior desafio hoje?', anterior)).toBe('qual é o seu maior desafio hoje?');
   });
 });
+
+describe('toques 3 e 4: sai o texto do mapa, sem a lembrança', () => {
+  it('o modelo só decide se a mensagem sai', () => {
+    const ganho = toqueDoMapa(MAPA, CLT, 3, SEM)!;
+    const ponte = toqueDoMapa(MAPA, CLT, 4, SEM)!;
+    const comLembranca = 'bacana, Ana, você atua numa integradora. quanto você acha que um supervisor ou gerente ganha a mais do que você hoje?';
+    expect(falaDoToque(comLembranca, ganho, 'Ana', 'a pós em sanidade avícola', false).fala)
+      .toBe('Ana, quanto você acha que um supervisor ou gerente ganha a mais do que você hoje?');
+    expect(falaDoToque('qualquer coisa', ponte, 'Ana', 'a pós em sanidade avícola', false).fala)
+      .toBe('Ana, quer conhecer a pós em sanidade avícola numa conversa rápida no meet com o monitor? ele te mostra como essa pós se encaixa no seu momento.');
+    expect(falaDoToque('', ganho, 'Ana', '', false).fala).toBe('');
+    expect(falaDoToque('x', ganho, '', '', false).fala).toBe('quanto você acha que um supervisor ou gerente ganha a mais do que você hoje?');
+  });
+});
