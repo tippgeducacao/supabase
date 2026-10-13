@@ -719,6 +719,11 @@ Você é um validador de formações acadêmicas para cursos de pós-graduação
 - **Reconhecer:** Agrônomo, Agrônoma, Engenheiro Agrônomo, Engenharia Agronômica, Engenheiro Agronomo
 - **Normalizar para:** Engenharia Agronômica
 
+### Engenharia Agropecuária:
+- **Reconhecer:** Engenheiro Agropecuário, Engenheira Agropecuária, Engenharia Agro-Pecuária, Eng. Agropecuária
+- **Normalizar para:** Engenharia Agropecuária
+- **Atenção:** é bacharelado em engenharia; não confundir com Tecnólogo em Agropecuária.
+
 ### Engenharia de Alimentos:
 - **Reconhecer:** Engenheiro de Alimentos, Engenheira de Alimentos, Eng. Alimentos
 - **Normalizar para:** Engenharia de Alimentos

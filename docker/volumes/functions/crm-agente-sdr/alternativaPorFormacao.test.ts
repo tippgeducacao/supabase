@@ -118,3 +118,35 @@ describe('reprovado numa pós, aceito em outra: a ferramenta oferece em vez de e
     expect(varias.instrucao).toBeUndefined();
   });
 });
+
+// Caso Leandro (13/10/2026): engenheiro agrônomo em Cannabis Medicinal Veterinária, que a tabela só
+// aceita de médico veterinário e que não tem alternativa no mapa fixo.
+describe('pós exclusiva de médico veterinário, sem alternativa', () => {
+  const COM_CANNABIS = [...TABELA, { pos_graduacao: 'Cannabis Medicinal', pode_fazer: 'Medicina Veterinária', parcialmente_aceitas: '—' }];
+
+  it('o retorno diz que é exclusiva e não lista outras pós', () => {
+    const r = T.alternativasPelaTabela(reprovado('Engenharia Agronômica', 'Cannabis Medicinal'), COM_CANNABIS);
+    expect(r.curso_exclusivo_veterinario).toBe(true);
+    expect(r.curso_alternativo).toBeNull();
+    expect(r.outras_pos_compativeis).toBeUndefined();
+    expect(r.mensagem_para_lead).toBe('A pós de Cannabis Medicinal é exclusiva para Médicos Veterinários.');
+    expect(r.instrucao).toContain('exclusiva para médicos veterinários');
+    expect(r.instrucao).toContain('Não ofereça outra pós');
+    expect(T.alternativasPelaTabela(reprovado('Engenharia Agronômica', 'Cannabis Medicinal'), COM_CANNABIS, true).instrucao).toBeUndefined();
+  });
+
+  it('a reprovação independe da conclusão: exclusiva de veterinário e formação de outra área', () => {
+    const sim = (curso: string, formacao: string, cadastro: string) => T.reprovacaoIndependeDaConclusao(COM_CANNABIS, curso, formacao, cadastro);
+    // O catálogo e a tabela escrevem o nome diferente.
+    expect(sim('PÓS | CANNABIS MEDICINAL VETERINÁRIA', 'Agronomia', 'Engenheiro Agrônomo')).toBe(true);
+    expect(sim('SANIDADE AVÍCOLA', 'Gestão da Qualidade', 'Sou formado em outra área')).toBe(true);
+    // Veterinário (na fala ou no cadastro), pós aberta, formação vaga ou curso desconhecido: não dispensa.
+    expect(sim('PÓS | CANNABIS MEDICINAL VETERINÁRIA', 'Medicina Veterinária', 'Médico Veterinário (a)')).toBe(false);
+    expect(sim('PÓS | CANNABIS MEDICINAL VETERINÁRIA', 'Agronomia', 'Médico Veterinário (a)')).toBe(false);
+    expect(sim('PÓS | GESTÃO E PRODUÇÃO AVÍCOLA', 'Direito', 'Advogado (a)')).toBe(false);
+    expect(sim('PÓS | CANNABIS MEDICINAL VETERINÁRIA', 'formado', '')).toBe(false);
+    expect(sim('PÓS | CANNABIS MEDICINAL VETERINÁRIA', '', 'Engenheiro Agrônomo')).toBe(false);
+    expect(sim('Pós em Marketing Digital', 'Agronomia', '')).toBe(false);
+    expect(T.reprovacaoIndependeDaConclusao(null, 'Cannabis Medicinal', 'Agronomia', '')).toBe(false);
+  });
+});

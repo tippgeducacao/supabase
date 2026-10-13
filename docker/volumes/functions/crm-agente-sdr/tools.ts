@@ -865,6 +865,35 @@ const chaveFormacao = (s: unknown) => String(s ?? '').normalize('NFD').replace(/
   .toLowerCase().replace(/\s+/g, ' ').trim();
 const formacoesDaLista = (lista: unknown) => String(lista ?? '').split(';').map(chaveFormacao).filter((x) => x && x !== '—' && x !== '-');
 const aceitaQualquerFormacao = (linha: LinhaDaMatriz) => /qualquer forma[cç][aã]o/i.test(String(linha.pode_fazer ?? ''));
+/** A tabela só lista Medicina Veterinária para esta pós (nem "parcialmente aceitas"). */
+const soParaVeterinario = (linha: LinhaDaMatriz) => {
+  const inteiras = formacoesDaLista(linha.pode_fazer);
+  return inteiras.length === 1 && inteiras[0] === 'medicina veterinaria' && formacoesDaLista(linha.parcialmente_aceitas).length === 0;
+};
+const semPontuacao = (s: unknown) => chaveFormacao(String(s ?? '').replace(/^\s*(?:P[ÓO]S|MBA)\s*\|\s*/i, ''))
+  .replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+
+/**
+ * A reprovação NÃO depende de ele ter concluído a graduação? Vale quando a pós é exclusiva de médico
+ * veterinário (pela tabela) e a formação dele, dita na conversa e no cadastro, é outra. Aí perguntar
+ * "já se formou em Agronomia?" só adia a resposta: formado ou não, ele não pode cursar.
+ */
+export function reprovacaoIndependeDaConclusao(
+  cursos: LinhaDaMatriz[] | null | undefined, cursoInteresse: unknown, formacao: unknown, cadastro: unknown,
+): boolean {
+  const f = semPontuacao(formacao);
+  if (f.length < 4 || /veterin/.test(f) || /veterin/.test(semPontuacao(cadastro))) return false;
+  if (/^(formad[oa]?|graduad[oa]?|superior|outra|nao|sim)( |$)/.test(f)) return false;
+  const pedido = semPontuacao(cursoInteresse);
+  if (!pedido) return false;
+  // O catálogo e a tabela escrevem o nome diferente ("Cannabis Medicinal Veterinária" × "Cannabis
+  // Medicinal"): vale a linha de nome mais longo contida no pedido, ou que o contém.
+  const linha = (cursos ?? [])
+    .map((c) => ({ c, nome: semPontuacao(c.pos_graduacao) }))
+    .filter((x) => x.nome && (pedido === x.nome || pedido.includes(x.nome) || x.nome.includes(pedido)))
+    .sort((a, b) => b.nome.length - a.nome.length)[0]?.c;
+  return Boolean(linha && soParaVeterinario(linha));
+}
 
 export function alternativasPelaTabela(resultado: any, cursos: LinhaDaMatriz[] | null | undefined, soInformar = false): any {
   if (resultado?.pode_cursar !== false) return resultado;
@@ -881,6 +910,17 @@ export function alternativasPelaTabela(resultado: any, cursos: LinhaDaMatriz[] |
   // o nome do curso ou da formação). Não afirme "não aceita" em cima disso.
   const linhaPedida = (cursos ?? []).find((c) => chaveFormacao(c.pos_graduacao) === pedida);
   if (linhaPedida && (aceitaQualquerFormacao(linhaPedida) || aceitaInteira(linhaPedida))) return resultado;
+  // 13/10/2026 (caso Leandro, agrônomo em Cannabis Medicinal): pós que a tabela só aceita de médico
+  // veterinário e que não tem alternativa no mapa fixo. O retorno diz que ela é EXCLUSIVA (a despedida
+  // fixa passa a dizer isso) e não lista outras pós: quem quer cannabis não está atrás de suínos.
+  if (linhaPedida && soParaVeterinario(linhaPedida) && resultado.e_medico_veterinario !== true) {
+    const exclusiva = `A pós de ${resultado.curso_solicitado} é exclusiva para Médicos Veterinários.`;
+    return {
+      ...resultado, curso_exclusivo_veterinario: true, mensagem_para_lead: exclusiva, output: exclusiva,
+      ...(soInformar ? {} : { instrucao: 'Diga ao lead, em uma frase, que essa pós é exclusiva para médicos veterinários e encerre com '
+        + 'pausa_ia tipo="pausa", motivo "Lead com formação incompatível". Não ofereça outra pós e não pergunte mais nada.' }),
+    };
+  }
   const outras = (cursos ?? []).filter((c) => {
     const nome = chaveFormacao(c.pos_graduacao);
     return nome && nome !== pedida && !pedida.includes(nome) && !nome.includes(pedida) && !aceitaQualquerFormacao(c);
@@ -921,20 +961,38 @@ export function alternativasPelaTabela(resultado: any, cursos: LinhaDaMatriz[] |
   };
 }
 
+/** Lê a tabela e aplica `reprovacaoIndependeDaConclusao`. Falha de leitura = não dispensa nada. */
+async function exclusivaParaOutraFormacao(supabase: any, input: any, cadastro: unknown): Promise<boolean> {
+  try {
+    const { data, error } = await supabase.from('cursos_pos_graduacao')
+      .select('pos_graduacao, pode_fazer, parcialmente_aceitas, status').eq('status', 'ativo').order('pos_graduacao');
+    return !error && reprovacaoIndependeDaConclusao(data, input?.curso_interesse, input?.formacao_academica, cadastro);
+  } catch { return false; }
+}
+
 async function verificarCompatibilidade(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
+  const confirmarConclusao = (pergunta: string) => ({
+    id: toolUseId, output: 'CONFIRMAR_CONCLUSAO', compativel: null, pode_cursar: null,
+    ...(ctx.soInformar ? {} : { pergunta }),
+    resultado: 'A graduação veio do cadastro, mas a conclusão ainda não foi confirmada pelo lead. A matriz não foi chamada.',
+    ...(ctx.soInformar ? {} : { instrucao: `Responda agora perguntando diretamente: "${pergunta}". Conecte a confirmação à busca de horário, conservando o período que ele pediu. `
+      + 'Não pergunte qual é a formação nem "posso confirmar?". Não chame mais ferramentas nesta rodada. '
+      + 'Na próxima resposta do lead, registre a conclusão e só depois verifique a compatibilidade.' }),
+  });
+  // Preenchida = a conclusão não foi confirmada e a matriz só rodou porque a pós é exclusiva de
+  // veterinário. Se a matriz NÃO reprovar, nada é aprovado: volta a pedir a conclusão, como antes.
+  let perguntaSeNaoReprovar = '';
   if (ctx.ficha) {
     const ficha = await carregarFicha(supabase, ctx);
     const pergunta = ficha?.avaliacao.perguntaConfirmacaoFormacao;
-    if (pergunta) {
+    // 13/10/2026 (caso Leandro): engenheiro agrônomo em pós exclusiva de veterinário. A conferência
+    // parava em "já se formou em Agronomia?" e a matriz nunca rodou; o lead ficou em follow-up e com
+    // vendedor atrás. Quando a reprovação não depende da conclusão, a matriz roda direto.
+    if (pergunta && await exclusivaParaOutraFormacao(supabase, input, ficha?.entrada.cadastro)) {
+      perguntaSeNaoReprovar = pergunta;
+    } else if (pergunta) {
       ctx.perguntaFormacaoPendente = pergunta;
-      return {
-        id: toolUseId, output: 'CONFIRMAR_CONCLUSAO', compativel: null, pode_cursar: null,
-        ...(ctx.soInformar ? {} : { pergunta }),
-        resultado: 'A graduação veio do cadastro, mas a conclusão ainda não foi confirmada pelo lead. A matriz não foi chamada.',
-        ...(ctx.soInformar ? {} : { instrucao: `Responda agora perguntando diretamente: "${pergunta}". Conecte a confirmação à busca de horário, conservando o período que ele pediu. `
-          + 'Não pergunte qual é a formação nem "posso confirmar?". Não chame mais ferramentas nesta rodada. '
-          + 'Na próxima resposta do lead, registre a conclusão e só depois verifique a compatibilidade.' }),
-      };
+      return confirmarConclusao(pergunta);
     }
   }
   let avaliacao: Awaited<ReturnType<typeof iniciarAvaliacao>>;
@@ -958,6 +1016,10 @@ async function verificarCompatibilidade(supabase: any, input: any, ctx: CtxConve
   }
   try {
     const resultado = await avaliarCompatibilidade(supabase, input, ctx, toolUseId);
+    if (perguntaSeNaoReprovar && (resultado as any)?.pode_cursar !== false) {
+      ctx.perguntaFormacaoPendente = perguntaSeNaoReprovar;
+      return await finalizarAvaliacao(supabase, ctx, avaliacao, confirmarConclusao(perguntaSeNaoReprovar));
+    }
     return await finalizarAvaliacao(supabase, ctx, avaliacao, resultado);
   } catch (e) {
     // Revogação ocorre no início. Se matriz ou escrita final falhar, nenhuma licença

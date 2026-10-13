@@ -96,3 +96,51 @@ describe('confirmação antes da matriz no piloto', () => {
     expect(ctx.compatibilidadeIndisponivel).toBeUndefined();
   });
 });
+
+// Caso Leandro (13/10/2026): engenheiro agrônomo em Cannabis Medicinal Veterinária. A conferência parou
+// em "já se formou em Agronomia?", a matriz nunca rodou e o lead seguiu em follow-up e com vendedor atrás.
+describe('pós exclusiva de veterinário e formação de outra área: a conclusão não precisa ser confirmada', () => {
+  const agronomo = () => {
+    const entrada = { cadastro: 'Engenheiro Agrônomo', jornada: { coleta: { graduacao: 'Agronomia' } } };
+    const avaliacao = avaliarFicha(entrada);
+    mocks.ficha.mockResolvedValue({ entrada, avaliacao, texto: montarBlocoFicha(entrada, avaliacao) });
+    return avaliacao;
+  };
+  const pedidoAgronomo = (id: string) => ({ id, name: 'verificar_compatibilidade_curso', input: {
+    formacao_academica: 'Agronomia', curso_interesse: 'SANIDADE AVÍCOLA', contexto_qualificacao: 'normal', conclusao_graduacao_bruta: 'Concluído',
+  } });
+  const matriz = (extra: Record<string, unknown>) => ({ content: [{ type: 'text', text: JSON.stringify({
+    formacao_identificada: 'Engenharia Agronômica', e_medico_veterinario: false, curso_solicitado: 'Sanidade Avícola',
+    pode_cursar: false, compativel: false, curso_exclusivo_veterinario: true, curso_alternativo_recomendado: false,
+    curso_alternativo: null, mensagem_para_lead: 'Curso exclusivo.', output: 'REPROVADO', ...extra }) }] });
+
+  it('a ficha ainda pediria a conclusão, mas a matriz roda e reprova', async () => {
+    expect(agronomo().perguntaConfirmacaoFormacao).toBe('vc já se formou em Agronomia?');
+    mocks.modelo.mockResolvedValue(matriz({}));
+    const b = banco(); const ctx = contexto();
+    const r = await executar(b, pedidoAgronomo('exclusiva'), ctx);
+    expect(r.output).not.toBe('CONFIRMAR_CONCLUSAO');
+    expect(r).toMatchObject({ pode_cursar: false, curso_exclusivo_veterinario: true });
+    expect(ctx.perguntaFormacaoPendente).toBeUndefined();
+    expect(mocks.modelo).toHaveBeenCalledOnce();
+    expect(b.rpc).toHaveBeenCalledWith('crm_agente_elegibilidade_finalizar', expect.objectContaining({ p_decisao: 'reprovado' }));
+  });
+
+  it('se a matriz não reprovar, nada é aprovado sem a conclusão', async () => {
+    agronomo();
+    mocks.modelo.mockResolvedValue(matriz({ e_medico_veterinario: true, pode_cursar: true, compativel: true, output: 'APROVADO' }));
+    const b = banco();
+    const r = await executar(b, pedidoAgronomo('nao-aprova'), contexto());
+    expect(r.pode_cursar).not.toBe(true);
+    // Volta ao caminho de sempre: pede a conclusão antes de qualquer aprovação.
+    expect(r).toMatchObject({ output: 'CONFIRMAR_CONCLUSAO', pergunta: 'vc já se formou em Agronomia?', elegibilidade_status: 'pendente' });
+    expect(b.rpc).not.toHaveBeenCalledWith('crm_agente_elegibilidade_finalizar', expect.objectContaining({ p_decisao: 'aprovado' }));
+  });
+
+  it('veterinário no cadastro, ou pós aberta, seguem pedindo a confirmação', async () => {
+    carregar();
+    const r = await executar(banco(), pedido('vet'), contexto());
+    expect(r.output).toBe('CONFIRMAR_CONCLUSAO');
+    expect(mocks.modelo).not.toHaveBeenCalled();
+  });
+});
