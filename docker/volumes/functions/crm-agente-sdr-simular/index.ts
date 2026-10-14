@@ -390,8 +390,8 @@ Deno.serve(async (req) => {
   let reprovadoPorPrazo = false;
   const cacheTools = new Map<string, any[]>();
   const toolsDe = async (agente: string) => {
-    // provedor openai ⇒ lê lista_tools_openai (a mesma tabela que a produção usará)
-    if (!cacheTools.has(agente)) cacheTools.set(agente, await carregarTools(supabase, agente, provedorAlternativo));
+    // As ferramentas do mesmo conjunto do texto: 'luna' = tools-luna.ts para qualquer modelo, como a produção.
+    if (!cacheTools.has(agente)) cacheTools.set(agente, await carregarTools(supabase, agente, provedorAlternativo, entrada.prompt));
     return cacheTools.get(agente)!;
   };
 

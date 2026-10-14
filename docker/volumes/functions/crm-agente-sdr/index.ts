@@ -282,11 +282,12 @@ async function provedorDoLead(telefone: string): Promise<ProvedorIA | null> {
 // testar no próprio WhatsApp, mas sem o zero dos telefones de teste, que faz cada mensagem
 // virar uma rodada e a 2ª atropelar a geração da 1ª. `null` = não é do canário (ou erro de
 // leitura): vale a regra de sempre.
+// O piloto do Claude por telefone (`claude_telefones`, 14/10/2026) usa o mesmo debounce.
 async function delayDoCanarioLuna(telefone: string): Promise<number | null> {
   try {
-    const { data, error } = await supabase.from('crm_agente_sdr_config').select('luna_telefones, luna_delay_segundos').eq('id', 1).maybeSingle();
+    const { data, error } = await supabase.from('crm_agente_sdr_config').select('*').eq('id', 1).maybeSingle();
     if (error) return null;
-    const lista: string[] = data?.luna_telefones ?? [];
+    const lista: string[] = [...(data?.luna_telefones ?? []), ...(data?.claude_telefones ?? [])];
     const sub8 = String(telefone).replace(/\D/g, '').slice(-8);
     if (!sub8 || !lista.some((t) => String(t).replace(/\D/g, '').slice(-8) === sub8)) return null;
     // `Number(null)` é 0: valor ausente não pode virar "sem debounce" por acidente.
@@ -298,16 +299,22 @@ async function delayDoCanarioLuna(telefone: string): Promise<number | null> {
   }
 }
 
+// As ferramentas de um agente: as de tools-luna.ts para QUALQUER modelo (14/10/2026), como o texto
+// (conjuntoPrompt.ts). A tabela lista_tools_claude ficou só para o webchat.
+function toolsDoAgente(agente: string, provedor: ProvedorIA | null): Promise<any[]> {
+  return carregarTools(supabase, agente, provedor, 'luna');
+}
+
 // Tools da vez. Na campanha direta a ABERTURA usa a persona própria (que tem a
 // atualizar_dados_lead); no FECHAMENTO o qualificador segue idêntico ao dos outros
 // números, só ganhando a atualizar_dados_lead — o lead pode corrigir o nome lá também.
 // ⚠️ Ordem estável: os extras entram sempre no fim (a ordem das tools compõe o
 // prefixo do prompt cache; ordem variável = cache miss silencioso).
 async function toolsDaVez(agenteEfetivo: string, ehCampanha: boolean, provedor: ProvedorIA | null): Promise<any[]> {
-  if (!ehCampanha) return await carregarTools(supabase, agenteEfetivo, provedor);
-  if (agenteEfetivo === 'agente_validacao') return await carregarTools(supabase, 'agente_campanha_direta', provedor);
-  const base = await carregarTools(supabase, agenteEfetivo, provedor);
-  const extras = (await carregarTools(supabase, 'agente_campanha_direta', provedor))
+  if (!ehCampanha) return await toolsDoAgente(agenteEfetivo, provedor);
+  if (agenteEfetivo === 'agente_validacao') return await toolsDoAgente('agente_campanha_direta', provedor);
+  const base = await toolsDoAgente(agenteEfetivo, provedor);
+  const extras = (await toolsDoAgente('agente_campanha_direta', provedor))
     .filter((t: any) => t?.name === 'atualizar_dados_lead');
   return [...base, ...extras];
 }
@@ -367,18 +374,20 @@ async function prepararAntesDoRouter(remotejid: string, itensDoLote: any[], tel:
   // No piloto de voz a preparação pode ser cancelada por uma entrada nova.
   // A fala final só passa a ser memória depois de pelo menos um envio aceito.
   // `let`: se o provedor alternativo falhar no meio da rodada, o resto dela volta para o Claude.
-  // ▸ Qual IA responde este lead: a Luna (OpenAI) se o telefone está no canário; senão, `null` = Claude.
+  // ▸ Qual IA responde este lead: o Claude do piloto (`claude_telefones`), a Luna (OpenAI) na lista ou
+  //   na fatia; senão, `null` = Claude de reserva (Sonnet).
   let provedor = await provedorDoLead(telefone);
   let registrarFalaAposEnvio = Boolean(configurarVoz(telefone, (nome) => Deno.env.get(nome), provedor?.nome));
-  // ▸ Qual TEXTO a IA lê: a Luna tem a sua cópia do prompt (prompts-luna.ts, 29/09/2026), para ser
-  //   cortada e testada sem mudar o João dos outros leads. Fixado aqui, no início: se a Luna cair no
-  //   meio da rodada e o Claude assumir, ele continua com o mesmo texto que a rodada começou.
-  const conjuntoPrompt: ConjuntoPrompt = provedor?.formato === 'openai' ? 'luna' : 'producao';
+  // ▸ Qual TEXTO a IA lê: o da Luna (prompts-luna.ts + tools-luna.ts) para QUALQUER modelo desde
+  //   14/10/2026. Até ali o Claude lia o texto antigo, 1,8x maior e sem os ajustes do canário, e o
+  //   duelo de 09/10 comparou modelos com textos diferentes. O conjunto 'producao' ficou só no webchat.
+  const conjuntoPrompt: ConjuntoPrompt = 'luna';
   const textosDoPrompt = blocosDoPrompt(conjuntoPrompt);
   if (provedor) {
     tel.registrar('provedor_ia', {
-      provedor: provedor.nome, modelo: provedor.formato === 'openai' ? provedor.modelo : null,
-      motivo: provedor.formato === 'openai' && provedor.origem === 'percentual' ? 'canario_luna_percentual' : 'canario_luna_telefones',
+      provedor: provedor.nome, modelo: provedor.modelo ?? null,
+      motivo: provedor.formato !== 'openai' ? 'piloto_claude_telefones'
+        : provedor.origem === 'percentual' ? 'canario_luna_percentual' : 'canario_luna_telefones',
     });
   }
   // ▸ ctx = a "maleta" da conversa: telefone, conta do WhatsApp, lead, oportunidade.
@@ -390,9 +399,10 @@ async function prepararAntesDoRouter(remotejid: string, itensDoLote: any[], tel:
       (await contaDoLead(supabase, telefone, { direcao: 'inbound', incluirRecontato: true })),
     leadId: doUltimoCom('lead_id'),
     oportunidadeId: doUltimoCom('oportunidade_id'),
-    // Ficha do atendimento (19/09/2026) acompanha o canário da Luna — o "novo agente" do
-    // usuário: só esse lead tem a ficha, a instrução e a trava do cronograma (fichaAtendimento.ts).
-    ...(provedor ? { ficha: { inicioRodada: new Date(inicioRodada).toISOString() } } : {}),
+    // Ficha do atendimento (19/09/2026): a ficha, a instrução e a trava do cronograma
+    // (fichaAtendimento.ts). Nasceu no canário da Luna; desde 14/10/2026 vale para qualquer modelo,
+    // junto com o texto (o Claude de reserva também a recebe).
+    ficha: { inicioRodada: new Date(inicioRodada).toISOString() },
   };
 
   // ═══ NÓ 4 · CONTEXTO — o que a IA recebe além da conversa ═══════════════════
@@ -463,7 +473,8 @@ async function prepararAntesDoRouter(remotejid: string, itensDoLote: any[], tel:
   // sabe a conta de cada mensagem); o que fazer com ele depende do modo na config. Regra, casos
   // de borda e a nota em trocaDeNumero.ts.
   const modoTroca = await carregarModoTrocaNumero(supabase, telefone);
-  const aberturaControlada = modoTroca === 'ativo' && provedor?.nome === 'openai' && ctx.canal !== 'webchat';
+  // Abertura escrita pelo código: o agente novo (Luna ou o Claude do piloto), não o Claude de reserva.
+  const aberturaControlada = modoTroca === 'ativo' && provedor !== null && ctx.canal !== 'webchat';
   registrarFalaAposEnvio ||= aberturaControlada;
   const contasNoLote = new Set(itens.map((i: any) => i?.wa_account_id).filter(Boolean)).size;
   // Teste recomeçado com /limpar (limparTeste.ts): o chat do SAC de antes não conta mais.
@@ -534,7 +545,7 @@ async function prepararAntesDoRouter(remotejid: string, itensDoLote: any[], tel:
   const notaReunioes = notaDasReunioes(reunioesDoLead, agoraDaRodada);
   const contextoTemporal = montarContextoTemporal(await carregarDiasSemAtendimento(supabase)) + notaDoNome(vars.nome) + notaDoCurso(vars.curso_interesse_original)
     + notaDaInscricao(lead?.jornada, vars.curso_interesse_original, agoraDaRodada)
-    + (provedor?.nome === 'openai' ? contextoEspecialidadeCannabis(vars.curso_interesse_original) : '')
+    + contextoEspecialidadeCannabis(vars.curso_interesse_original)
     + notaReunioes
     + await notaDoCliqueDaRodada(telefone, itens, agoraDaRodada, tel);
 
@@ -595,7 +606,8 @@ async function prepararAntesDoRouter(remotejid: string, itensDoLote: any[], tel:
   // mandar conversa de lead real para a TypeSafe: decisão do Gustavo (DPA/LGPD), não do código.
   // A leitura do Jev vai junto do router_decisao; o Jev não entra no llm_chamada (a soma do
   // "Uso de IA" cobraria os tokens dele a preço de Sonnet).
-  const naListaDoCanario = provedor?.formato === 'openai' && provedor.origem === 'lista';
+  // Lista = telefones de teste, da Luna ou do piloto do Claude (a fatia percentual nunca vai ao Jev).
+  const naListaDoCanario = provedor?.origem === 'lista';
   const [configJev, configLeitura] = naListaDoCanario
     ? await Promise.all([carregarConfigRouterJev(supabase), ctx.ficha ? carregarConfigLeituraJev(supabase) : Promise.resolve(null)])
     : [null, null];
@@ -671,7 +683,7 @@ async function definirAgente(pre: PreRouter, provedor: ProvedorIA | null, tel: T
   if (persona === 'recontato') {
     agenteEfetivo = 'agente_recontato';
     promptAgente = renderPrompt(AGENTE_RECONTATO, vars);
-    tools = await carregarTools(supabase, 'agente_recontato', provedor);
+    tools = await toolsDoAgente('agente_recontato', provedor);
     const dossie = montarDossieRecontato(lead?.contexto_recontato);
     if (dossie) contextoEfetivo = `${contextoTemporal}\n\n${dossie}`;
     tel.registrar('router_decisao', {
@@ -744,7 +756,7 @@ async function definirAgente(pre: PreRouter, provedor: ProvedorIA | null, tel: T
       const varsV2 = { ...vars, ...varsAulaV2(aulaDaCampanha?.curso_nome) };
       promptAgente = renderPrompt(AULA_V2_ABERTURA, varsV2);
       regrasSubstitutas = renderPrompt(AULA_V2_REGRAS, varsV2);
-      tools = await toolsDaAulaV2(supabase, await carregarTools(supabase, 'agente_aula', provedor), aulaDaCampanha?.curso_nome);
+      tools = await toolsDaAulaV2(supabase, await toolsDoAgente('agente_aula', provedor), aulaDaCampanha?.curso_nome);
       ctx.soInformar = true;
       ctx.cursoDaAula = aulaDaCampanha?.curso_nome ?? null;
       contextoEfetivo += await contextoAulaV2(supabase, lead, aulaDaCampanha, new Date());
@@ -753,7 +765,7 @@ async function definirAgente(pre: PreRouter, provedor: ProvedorIA | null, tel: T
         agenteAtual === 'agente_qualificador' ? textosDoPrompt.qualificador : abrirComAula ? AGENTE_AULA : textosDoPrompt.validacao,
         vars,
       );
-      tools = await carregarTools(supabase, abrirComAula ? 'agente_aula' : agenteAtual, provedor);
+      tools = await toolsDoAgente(abrirComAula ? 'agente_aula' : agenteAtual, provedor);
     }
   }
   // ▸ Acabamentos do prompt (valem para todas as personas): presente da Escola gratuita, aviso de
@@ -844,10 +856,10 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
   if (pontas?.provedor && provedor) provedor = pontas.provedor(provedor);
   const executarFerramenta = pontas?.executarFerramenta ?? ((chamada, c) => executarTool(supabase, chamada, c));
   const renovar = lockRenovar(remotejid);
-  // 22/09/2026: candidato local, só no canário OpenAI já selecionado pelo telefone.
-  // Consulta o provedor na HORA da saída: fallback para Claude conserva o legado.
+  // 22/09/2026: candidato local, só no agente novo (Luna ou o Claude do piloto, 14/10/2026).
+  // Consulta o provedor na HORA da saída: fallback para o Claude de reserva conserva o legado.
   let respostaOperacional = false;
-  const fracionamentoAtual = () => respostaOperacional || (ctx.ficha && provedor?.nome === 'openai' && provedor.formato === 'openai')
+  const fracionamentoAtual = () => respostaOperacional || (ctx.ficha && provedor !== null)
     ? 'codigo' as const : 'modelo' as const;
 
   // ▸ Regras de encerramento e instruções pós-pausa/retorno: regrasDaRodada.ts (o motor por passos usa as mesmas).

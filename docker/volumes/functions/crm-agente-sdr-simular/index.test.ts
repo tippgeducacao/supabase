@@ -180,6 +180,7 @@ describe('contrato do mock de consulta de valor', () => {
       { quem: 'joao', texto: FALA, turno: 1 },
     ]);
     expect(mocks.fetch).toHaveBeenCalledTimes(2);
-    expect(mocks.from.mock.calls.map(([tabela]) => tabela)).toEqual(['crm_agente_sdr_config', 'lista_tools_claude']);
+    // 14/10/2026: o Claude também lê as tools da Luna (tools-luna.ts), não a tabela lista_tools_claude.
+    expect(mocks.from.mock.calls.map(([tabela]) => tabela)).toEqual(['crm_agente_sdr_config']);
   });
 });

@@ -10,7 +10,7 @@ const fronteiras = vi.hoisted(() => ({
   raciocinioEncadeado: false,
   executar: vi.fn(), tools: vi.fn(), gravar: vi.fn(), historico: vi.fn(),
   humanizar: vi.fn(), horarios: vi.fn(), conversa: vi.fn(),
-  sincronizarAudio: vi.fn(), provedorOpenai: vi.fn(), lunaTelefones: [] as string[], lunaDelay: 0 as number | null,
+  sincronizarAudio: vi.fn(), provedorOpenai: vi.fn(), lunaTelefones: [] as string[], claudeTelefones: [] as string[], lunaDelay: 0 as number | null,
 }));
 vi.mock('https://esm.sh/@supabase/supabase-js@2.50.3', () => ({
   createClient: () => ({ from: fronteiras.from, rpc: fronteiras.rpc }),
@@ -23,6 +23,7 @@ vi.mock('./historico.ts', async (original) => ({
 vi.mock('./agente.ts', () => ({
   carregarTools: fronteiras.tools, chamarAgentePrincipal: fronteiras.chamarPrincipal, chamarRouter: fronteiras.chamarRouter,
   provedorOpenai: fronteiras.provedorOpenai,
+  provedorAnthropicModelo: (modelo: string, esforco?: string) => ({ nome: 'anthropic', formato: 'anthropic', base: 'https://api.anthropic.com', chave: 'k', modelo, ...(esforco ? { esforco } : {}) }),
 }));
 vi.mock('./tools.ts', () => ({ executarTool: fronteiras.executar, montarToolResults: (outputs: { id: string }[]) => outputs.map((o) => ({
   type: 'tool_result', tool_use_id: o.id, content: JSON.stringify(o),
@@ -83,6 +84,7 @@ beforeEach(() => {
   fronteiras.vozAtiva = false;
   fronteiras.raciocinioEncadeado = false;
   fronteiras.lunaTelefones = [];
+  fronteiras.claudeTelefones = [];
   fronteiras.lunaDelay = 0;
   fronteiras.sincronizarAudio.mockResolvedValue({ estado: 'pronto', esperouMs: 0, pendentes: 0 });
   fronteiras.buscarLead.mockResolvedValue({ ...leadAtivo });
@@ -95,7 +97,7 @@ beforeEach(() => {
   });
   fronteiras.from.mockImplementation((tabela: string) => {
     if (tabela === 'crm_agente_sdr_config') return {
-      select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { teste_telefones: [], luna_telefones: fronteiras.lunaTelefones, luna_delay_segundos: fronteiras.lunaDelay, openai_raciocinio_encadeado: fronteiras.raciocinioEncadeado }, error: null }) }) }),
+      select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { teste_telefones: [], luna_telefones: fronteiras.lunaTelefones, claude_telefones: fronteiras.claudeTelefones, luna_delay_segundos: fronteiras.lunaDelay, openai_raciocinio_encadeado: fronteiras.raciocinioEncadeado }, error: null }) }) }),
     };
     if (tabela === 'crm_pipeline_settings') return {
       select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { agente_sdr_delay_segundos: 0 }, error: null }) }) }),
@@ -468,23 +470,36 @@ describe('SDR: texto de ferramenta nunca vira despedida', () => {
   // Canário da GPT-5.6 Luna: só o telefone listado em crm_agente_sdr_config.luna_telefones.
   const luna = { nome: 'openai', formato: 'openai', base: 'https://api.openai.com', chave: 'k', modelo: 'gpt-5.6-luna', esforco: 'high' };
 
-  it('lead fora do canário segue no Claude: provedor nulo no principal e nas tools', async () => {
+  it('lead fora do canário segue no Claude de reserva: provedor nulo, mas o texto e as tools da Luna', async () => {
     fronteiras.lunaTelefones = ['5546000000000'];
     fronteiras.provedorOpenai.mockReturnValue(luna);
     fronteiras.chamarPrincipal.mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'certo.' }] });
     await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
     expect(fronteiras.chamarPrincipal.mock.calls[0][0].provedor).toBeNull();
-    expect(fronteiras.tools).toHaveBeenCalledWith(expect.anything(), 'agente_recontato', null);
+    expect(fronteiras.tools).toHaveBeenCalledWith(expect.anything(), 'agente_recontato', null, 'luna');
     expect(fronteiras.registrar.mock.calls.some(([tipo]) => tipo === 'provedor_ia')).toBe(false);
   });
 
-  it('lead do canário (casado pelos 8 últimos dígitos) sai pela Luna: tools da tabela da OpenAI e telemetria com o provedor', async () => {
+  it('piloto do Claude (claude_telefones) vence a Luna: Haiku com o texto e as tools da Luna', async () => {
+    fronteiras.lunaTelefones = ['5511999990001'];
+    fronteiras.claudeTelefones = ['5511999990001'];
+    fronteiras.provedorOpenai.mockReturnValue(luna);
+    fronteiras.chamarPrincipal.mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'certo.' }] });
+    await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
+    const provedor = fronteiras.chamarPrincipal.mock.calls[0][0].provedor;
+    expect(provedor).toMatchObject({ formato: 'anthropic', modelo: 'claude-haiku-5-5', esforco: 'high', origem: 'lista' });
+    expect(fronteiras.chamarPrincipal.mock.calls[0][0].conjunto).toBe('luna');
+    expect(fronteiras.tools).toHaveBeenCalledWith(expect.anything(), 'agente_recontato', provedor, 'luna');
+    expect(fronteiras.registrar).toHaveBeenCalledWith('provedor_ia', expect.objectContaining({ modelo: 'claude-haiku-5-5', motivo: 'piloto_claude_telefones' }));
+  });
+
+  it('lead do canário (casado pelos 8 últimos dígitos) sai pela Luna: tools da Luna e telemetria com o provedor', async () => {
     fronteiras.lunaTelefones = ['+55 (11) 9999-0001'];
     fronteiras.provedorOpenai.mockReturnValue(luna);
     fronteiras.chamarPrincipal.mockResolvedValueOnce({ stop_reason: 'end_turn', model: 'gpt-5.6-luna', content: [{ type: 'text', text: 'certo.' }] });
     await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
     expect(fronteiras.chamarPrincipal.mock.calls[0][0].provedor).toEqual({ ...luna, origem: 'lista' });
-    expect(fronteiras.tools).toHaveBeenCalledWith(expect.anything(), 'agente_recontato', { ...luna, origem: 'lista' });
+    expect(fronteiras.tools).toHaveBeenCalledWith(expect.anything(), 'agente_recontato', { ...luna, origem: 'lista' }, 'luna');
     expect(fronteiras.registrar).toHaveBeenCalledWith('provedor_ia', expect.objectContaining({ provedor: 'openai', modelo: 'gpt-5.6-luna' }));
     expect(fronteiras.registrar).toHaveBeenCalledWith('llm_chamada', expect.objectContaining({ provedor: 'openai' }), expect.any(Number));
     expect(fronteiras.enviar).toHaveBeenCalledOnce();

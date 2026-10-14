@@ -184,9 +184,10 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
     throw new Error('agente_atual inválido');
   }
   if (body.mocks != null && (typeof body.mocks !== 'object' || Array.isArray(body.mocks))) throw new Error('mocks deve ser objeto');
-  // Mesma regra da produção: provedor openai lê a cópia da Luna, a não ser que o ensaio peça a outra.
+  // Mesma regra da produção (14/10/2026): todo modelo lê a cópia da Luna, com as ferramentas dela; 'producao'
+  // (o texto antigo do Claude, hoje só no webchat) fica para quando o ensaio pedir.
   if (body.prompt !== undefined && body.prompt !== 'luna' && body.prompt !== 'producao') throw new Error("prompt deve ser 'luna' ou 'producao'");
-  const conjuntoPrompt: ConjuntoPrompt = (body.prompt as ConjuntoPrompt | undefined) ?? (provedor === 'openai' ? 'luna' : 'producao');
+  const conjuntoPrompt: ConjuntoPrompt = (body.prompt as ConjuntoPrompt | undefined) ?? 'luna';
   let routerJev: ConfigRouterJev | null = null;
   if (body.router_jev != null) {
     const r = body.router_jev as Record<string, unknown>;

@@ -15,7 +15,7 @@ import { blocoElegibilidadeFormatura, limiteFormaturaFormatado } from './elegibi
 import { objecaoDaPos, sobreDaObjecaoDeTempo, toolBuscaCarreira } from './carreiraPos.ts';
 import { type AulaParaPrompt, montarVarsAula } from './prompts-aula.ts';
 import { cursoDaConversa } from './ganchoLote.ts';
-import { carregarTools, chamarAnthropic, type ProvedorIA } from './agente.ts';
+import { carregarTools, chamarAnthropic, MODELO_AGENTE, type ProvedorIA } from './agente.ts';
 import { TOOL_RESPONDER_AO_CLIENTE } from './canalResposta.ts';
 import { AULA_V2_ABERTURA, AULA_V2_REGRAS, varsAulaV2 } from './prompts-aula-v2.ts';
 import { buscaCarreiraDaAula, contextoAulaV2, toolsDaAulaV2 } from './aulaV2.ts';
@@ -177,7 +177,7 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
     case 'tools': {
       const provedor = await deps.provedorDoLead(soDigitos(corpo?.telefone ?? remotejid));
       const agente = String(corpo?.agente ?? 'agente_validacao');
-      const base = await carregarTools(supabase, agente, provedor);
+      const base = await carregarTools(supabase, agente, provedor, 'luna');
       if (agente !== 'agente_aula') return ok({ agente, tools: [...base, TOOL_RESPONDER_AO_CLIENTE] });
       // Na aula: descrições enxutas + busca_carreira da pós da aula + canal (aulaV2.ts, o mesmo da produção).
       const lead = await buscarLead(supabase, remotejid);
@@ -185,13 +185,16 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
       const aula = campanha?.persona === 'aula' && campanha.aula_id ? await carregarAula(supabase, campanha.aula_id) : null;
       return ok({ agente, tools: await toolsDaAulaV2(supabase, [...base, TOOL_RESPONDER_AO_CLIENTE], aula?.curso_nome ?? '') });
     }
-    // Anthropic Claude Sonnet 4.5 → a Luna. Entra e sai no formato do Claude.
+    // Anthropic Claude Sonnet 4.5 → a Luna, ou o Claude do piloto (`claude_telefones`, 14/10/2026) com o
+    // mesmo pedido. Entra e sai no formato do Claude.
     case 'luna': {
       const provedor = await deps.provedorDoLead(soDigitos(corpo?.telefone ?? remotejid));
-      if (provedor?.formato !== 'openai') return { status: 409, corpo: { error: 'telefone fora do canário da Luna' } };
+      if (!provedor) return { status: 409, corpo: { error: 'telefone fora do canário da Luna e do piloto do Claude' } };
       const pedido = corpo?.pedido ?? {};
       const resposta = await chamarAnthropic(
-        { model: provedor.modelo, max_tokens: pedido.max_tokens ?? 8192, system: pedido.system, messages: pedido.messages, tools: pedido.tools },
+        { model: provedor.modelo ?? MODELO_AGENTE, max_tokens: pedido.max_tokens ?? 8192, system: pedido.system, messages: pedido.messages, tools: pedido.tools,
+          // No Claude, o raciocínio da produção (montarPedidoPrincipal); a Luna usa o esforço do provedor.
+          ...(provedor.formato === 'anthropic' ? { thinking: { type: 'adaptive' } } : {}) },
         {}, provedor);
       return ok(resposta);
     }

@@ -36,8 +36,10 @@ export const MODELO_AGENTE = Deno.env.get('AGENTE_SDR_MODEL') ?? 'claude-sonnet-
 //    resposta volta no formato da Anthropic; quem chama não percebe a diferença.
 export type ProvedorIA =
   | { nome: string; formato: 'anthropic'; base: string; chave: string;
-    /** Só o simulador (duelo de modelos): troca o `model` do pedido e põe `output_config.effort`. */
-    modelo?: string; esforco?: string }
+    /** Outro modelo da Anthropic (simulador e piloto `claude_telefones`): troca o `model` e põe `output_config.effort`. */
+    modelo?: string; esforco?: string;
+    /** Piloto do Claude por telefone (pilotoOpenai.ts): só para a telemetria. */
+    origem?: 'lista' }
   | { nome: string; formato: 'openai'; base: string; chave: string; modelo: string; esforco: string;
     /** Devolve o raciocínio cifrado junto com o resultado das tools (provedorOpenai.ts). */
     raciocinio?: boolean;
@@ -51,8 +53,9 @@ export function provedorDeepseek(): ProvedorIA | null {
   const chave = Deno.env.get('AGENTE_SDR_DEEPSEEK_KEY') ?? '';
   return chave ? { nome: 'deepseek', formato: 'anthropic', base: 'https://api.deepseek.com/anthropic', chave } : null;
 }
-// Outro modelo da própria Anthropic (09/10/2026, duelo Haiku 5.5 × Luna × Sonnet): mesmo caminho
-// do João de produção (prompt e tools do Claude), só o modelo e o esforço mudam. A produção não usa.
+// Outro modelo da própria Anthropic (09/10/2026, duelo Haiku 5.5 × Luna × Sonnet). Desde 14/10/2026
+// o texto e as ferramentas são os mesmos da Luna para qualquer modelo (conjuntoPrompt.ts); só o
+// modelo e o esforço mudam. Na produção, só para os telefones de `claude_telefones` (pilotoOpenai.ts).
 export function provedorAnthropicModelo(modelo: string, esforco?: string | null): ProvedorIA {
   return { nome: 'anthropic', formato: 'anthropic', base: 'https://api.anthropic.com', chave: ANTHROPIC_KEY, modelo,
     ...(esforco ? { esforco } : {}) };
@@ -415,17 +418,23 @@ export async function chamarAgentePrincipal(opts: OpcoesPedidoPrincipal): Promis
   return respostaDepoisDaCorrecao(resposta, decisao, corrigida);
 }
 
-// ── Tools do agente: mesma fonte do n8n (tabela lista_tools_claude) ─────────
-export async function carregarTools(supabase: any, agente: string, provedor: ProvedorIA | null = null): Promise<any[]> {
-  // Luna (OpenAI): as ferramentas vêm de tools-luna.ts (29/09/2026), no formato nativo da Responses
-  // API. Até 29/09 vinham da tabela lista_tools_openai, que a Luna deixou de ler: agora têm histórico
+// ── Tools do agente ──────────────────────────────────────────────────────────
+// `conjunto` = o texto que o agente lê (conjuntoPrompt.ts). 'luna' = tools-luna.ts para QUALQUER
+// modelo: o agente SDR passa 'luna' sempre desde 14/10/2026. Sem ele (webchat), a tabela
+// lista_tools_claude de sempre, a não ser que o provedor seja a OpenAI.
+export async function carregarTools(
+  supabase: any, agente: string, provedor: ProvedorIA | null = null, conjunto?: ConjuntoPrompt,
+): Promise<any[]> {
+  // As ferramentas vêm de tools-luna.ts (29/09/2026), no formato nativo da Responses API. Até
+  // 29/09 vinham da tabela lista_tools_openai, que a Luna deixou de ler: agora têm histórico
   // no git, teste antes de valer e edição pelo Markdown, como o prompts-luna.ts. O modelo recebe
   // exatamente o texto do arquivo (`descreverToolsSdr` NÃO roda aqui, de propósito). Por dentro o
-  // agente fala um contrato só (name/description/input_schema): convertido aqui, desfeito no tradutor.
-  if (provedor?.formato === 'openai') {
+  // agente fala um contrato só (name/description/input_schema): convertido aqui; na OpenAI,
+  // desfeito no tradutor; no Claude, vai como está.
+  if (provedor?.formato === 'openai' || conjunto === 'luna') {
     const apelidos = FERRAMENTAS_POR_AGENTE[agente] ?? [];
     // Persona sem ferramentas NÃO vira "agente sem ferramentas" em silêncio.
-    if (!apelidos.length) throw new Error(`carregarTools (openai): nenhuma tool para ${agente} em tools-luna.ts`);
+    if (!apelidos.length) throw new Error(`carregarTools (luna): nenhuma tool para ${agente} em tools-luna.ts`);
     // Cópia: quem chama pode mexer no objeto (cache_control etc.) sem sujar a fonte compartilhada.
     return apelidos.map((apelido) => structuredClone(FERRAMENTAS[apelido])).map((t: any) => ({
       name: t.name, description: t.description ?? '', input_schema: t.parameters, ...(t.strict === true ? { strict: true } : {}),
