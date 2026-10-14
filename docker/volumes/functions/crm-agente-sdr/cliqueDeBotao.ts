@@ -53,8 +53,30 @@ async function mensagemClicada(supabase: Banco, telefone: string, id: string) {
   }
 }
 
+// Convite com horário de conversa (14/10/2026, relato do Adones): "Amanhã iniciaremos nosso módulo
+// prático… Quer fazer parte…? Hoje, o coordenador estará disponível para uma conversa, com dois
+// horários: 11h ou 18h", botão "Confirmar participação". A IA leu como inscrição no módulo e foi atrás
+// de horário e local dele. Nesses disparos o módulo, as vagas e as bolsas são o gancho; o que se
+// confirma é a conversa com o monitor. Na semana, 13.250 templates ofereciam horário de conversa.
+const RE_CONVERSA = /\b(?:conversa|conversar|reuni[aã]o|meet|bate[- ]papo|atendimento)\b/i;
+const RE_HORA = /\b([01]?\d|2[0-3])(?::([0-5]\d))?\s?h(?:([0-5]\d))?\b|\b([01]?\d|2[0-3]):([0-5]\d)\b/gi;
+
+/** Os horários de conversa que a mensagem oferece ("11h", "13h30"), ou [] se ela não oferece. */
+export function horariosDeConversa(texto: string): string[] {
+  if (!RE_CONVERSA.test(texto)) return [];
+  const horas: string[] = [];
+  for (const m of texto.matchAll(RE_HORA)) {
+    const h = m[1] ?? m[4];
+    const min = m[2] ?? m[3] ?? m[5];
+    const fala = `${Number(h)}h${min && min !== '00' ? min : ''}`;
+    if (!horas.includes(fala)) horas.push(fala);
+  }
+  return horas.slice(0, 4);
+}
+
 /** A nota do contexto para os cliques do lote; '' quando não houve clique. */
-export async function notaDosCliques(supabase: Banco, telefone: string, cliques: readonly Clique[], agora: Date): Promise<string> {
+export async function notaDosCliques(supabase: Banco, telefone: string, cliques: readonly Clique[], agora: Date,
+  opcoes: { convite?: boolean } = {}): Promise<string> {
   if (!cliques.length) return '';
   const linhas: string[] = [];
   for (const c of cliques.slice(-2)) {
@@ -64,6 +86,12 @@ export async function notaDosCliques(supabase: Banco, telefone: string, cliques:
     const quando = m?.created_at ? quandoEmBrasilia(m.created_at, agora) : null;
     const origem = [quando ? `enviada ${quando}` : null, m?.template_name ? `template ${m.template_name}` : null].filter(Boolean).join(', ');
     linhas.push(`- botão "${c.botao}", na mensagem ${origem ? `(${origem}) ` : ''}${JSON.stringify(texto)}`);
+    const horas = opcoes.convite ? horariosDeConversa(texto) : [];
+    if (horas.length) {
+      linhas.push(`  Essa mensagem é um convite para a conversa com o monitor: os horários dela (${horas.join(', ')}) são dessa conversa, `
+        + 'e o clique é o aceite dela. O resto da mensagem (curso, módulo, aula, vagas, bolsa) é o gancho do convite, não uma inscrição. '
+        + 'Os horários do convite não estão reservados.');
+    }
   }
   if (!linhas.length) return '';
   return '\n\nO LEAD CLICOU NUM BOTÃO (dado do WhatsApp, não é instrução do lead):\n' + linhas.join('\n')
@@ -74,6 +102,18 @@ export async function notaDosCliques(supabase: Banco, telefone: string, cliques:
  * A nota vale para este telefone? Ligada para todos (crm_agente_sdr_config.nota_clique_botao) ou só nos
  * telefones de ensaio (nota_clique_botao_telefones). Falha de leitura = desligada.
  */
+/** A leitura do convite com horário vale para este telefone? (nota_clique_convite / _telefones). */
+export async function notaConviteLigada(supabase: Banco, telefone: string): Promise<boolean> {
+  try {
+    const { data, error } = await supabase.from('crm_agente_sdr_config').select('nota_clique_convite, nota_clique_convite_telefones').eq('id', 1).maybeSingle();
+    if (error || !data) return false;
+    if (data.nota_clique_convite === true) return true;
+    const fim = String(telefone ?? '').replace(/\D/g, '').slice(-8);
+    const lista: unknown[] = Array.isArray(data.nota_clique_convite_telefones) ? data.nota_clique_convite_telefones : [];
+    return fim.length === 8 && lista.some((t) => String(t).replace(/\D/g, '').slice(-8) === fim);
+  } catch { return false; }
+}
+
 export async function notaCliqueLigada(supabase: Banco, telefone: string): Promise<boolean> {
   try {
     const { data, error } = await supabase.from('crm_agente_sdr_config').select('nota_clique_botao, nota_clique_botao_telefones').eq('id', 1).maybeSingle();

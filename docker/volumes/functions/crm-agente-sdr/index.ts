@@ -79,7 +79,7 @@ import { conversaTexto, enviarResposta, horariosInventados, humanizarTexto, remo
 import { configurarVoz } from './envioVoz.ts';
 import { selecionarProvedorDoLead } from './pilotoOpenai.ts';
 import { cursoDoCardSeFaltar } from './cursoDoCard.ts';
-import { cliqueDoPayload, notaCliqueLigada, notaDosCliques, type Clique } from './cliqueDeBotao.ts';
+import { cliqueDoPayload, notaCliqueLigada, notaConviteLigada, notaDosCliques, type Clique } from './cliqueDeBotao.ts';
 import { leadConfirmouConclusao, simPelaConversaLigado, TRECHO_SIM_A_PERGUNTA } from './confirmacaoPelaConversa.ts';
 import { aplicarInscricaoPendente, notaDaInscricao } from './inscricaoNova.ts';
 import { corrigirLinksConhecidos } from './linksConhecidos.ts';
@@ -339,7 +339,7 @@ async function toolsDaVez(agenteEfetivo: string, ehCampanha: boolean, provedor: 
 async function notaDoCliqueDaRodada(telefone: string, itens: any[], agora: Date, tel: Telemetria): Promise<string> {
   const cliques = itens.map((i: any) => i?.clique).filter(Boolean) as Clique[];
   if (!cliques.length || !(await notaCliqueLigada(supabase, telefone))) return '';
-  const nota = await notaDosCliques(supabase, telefone, cliques, agora);
+  const nota = await notaDosCliques(supabase, telefone, cliques, agora, { convite: await notaConviteLigada(supabase, telefone) });
   if (nota) tel.registrar('clique_de_botao', { botoes: cliques.map((c) => c.botao), com_mensagem: true });
   return nota;
 }

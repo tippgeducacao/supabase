@@ -62,3 +62,27 @@ describe('a nota do contexto', () => {
     expect(await notaCliqueLigada(cfg(null), '5546988166051')).toBe(false);
   });
 });
+
+// Relato do Adones (14/10/2026): o módulo prático era o gancho; o clique confirmava a conversa.
+describe('convite com horário de conversa', () => {
+  const MODULO = 'Oi Amanhã iniciaremos nosso módulo prático presencial aqui no Rio Grande do Sul. Quer fazer parte e aprender na prática sobre reprodução?. \n\nHoje, o coordenador estará disponível para uma conversa, com dois horários: 11h ou 18h. Qual fica melhor para você?\n\nConsegue confirmar?';
+
+  it('acha os horários da conversa nos dois formatos de template', async () => {
+    const { horariosDeConversa } = await import('./cliqueDeBotao');
+    expect(horariosDeConversa(MODULO)).toEqual(['11h', '18h']);
+    expect(horariosDeConversa(VENDA)).toEqual(['13h30', '16h30']);
+    expect(horariosDeConversa('Sua participação na aula do dia 04/11 às 19h está confirmada!')).toEqual([]);
+    expect(horariosDeConversa('Te espero amanhã para a reunião das 10:15')).toEqual(['10h15']);
+  });
+
+  it('com a leitura ligada, a nota diz que o clique aceita a conversa e que o resto é gancho', async () => {
+    const AGORA = new Date('2026-10-14T16:17:00Z');
+    const vazio = { from: () => { const q: any = { select: () => q, eq: () => q, in: () => q, limit: async () => ({ data: [], error: null }) }; return q; } };
+    const clique = cliqueDoPayload({ ...PAYLOAD, conteudo: `[Em resposta à mensagem: "${MODULO}"] Confirmar participação`, quoted: { id: 'x', conteudo: MODULO } })!;
+    const ligada = await notaDosCliques(vazio, '5567999761100', [clique], AGORA, { convite: true });
+    expect(ligada).toContain('os horários dela (11h, 18h) são dessa conversa');
+    expect(ligada).toContain('não uma inscrição');
+    const desligada = await notaDosCliques(vazio, '5567999761100', [clique], AGORA);
+    expect(desligada).not.toContain('são dessa conversa');
+  });
+});
