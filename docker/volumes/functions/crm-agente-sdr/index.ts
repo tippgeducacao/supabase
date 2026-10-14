@@ -79,6 +79,7 @@ import { conversaTexto, enviarResposta, horariosInventados, humanizarTexto, remo
 import { configurarVoz } from './envioVoz.ts';
 import { selecionarProvedorDoLead } from './pilotoOpenai.ts';
 import { cursoDoCardSeFaltar } from './cursoDoCard.ts';
+import { cliqueDoPayload, notaCliqueLigada, notaDosCliques, type Clique } from './cliqueDeBotao.ts';
 import { leadConfirmouConclusao, simPelaConversaLigado, TRECHO_SIM_A_PERGUNTA } from './confirmacaoPelaConversa.ts';
 import { aplicarInscricaoPendente, notaDaInscricao } from './inscricaoNova.ts';
 import { corrigirLinksConhecidos } from './linksConhecidos.ts';
@@ -327,6 +328,15 @@ async function toolsDaVez(agenteEfetivo: string, ehCampanha: boolean, provedor: 
 // o contexto, a persona, roda o router e fecha o prompt e as ferramentas. Extraído de rodadaAgente SEM
 // mudar uma linha, para o agente no n8n usar o MESMO preparo (endpoint de início da rodada).
 // null = o lote não tinha entrada ativa (tudo chegou em pausa).
+/** O clique de botão do lote vira fato no contexto (cliqueDeBotao.ts), com a chave ligada. */
+async function notaDoCliqueDaRodada(telefone: string, itens: any[], agora: Date, tel: Telemetria): Promise<string> {
+  const cliques = itens.map((i: any) => i?.clique).filter(Boolean) as Clique[];
+  if (!cliques.length || !(await notaCliqueLigada(supabase, telefone))) return '';
+  const nota = await notaDosCliques(supabase, telefone, cliques, agora);
+  if (nota) tel.registrar('clique_de_botao', { botoes: cliques.map((c) => c.botao), com_mensagem: true });
+  return nota;
+}
+
 async function prepararAntesDoRouter(remotejid: string, itensDoLote: any[], tel: Telemetria) {
   let itens = itensDoLote;
   const inicioRodada = Date.now();
@@ -525,7 +535,8 @@ async function prepararAntesDoRouter(remotejid: string, itensDoLote: any[], tel:
   const contextoTemporal = montarContextoTemporal(await carregarDiasSemAtendimento(supabase)) + notaDoNome(vars.nome) + notaDoCurso(vars.curso_interesse_original)
     + notaDaInscricao(lead?.jornada, vars.curso_interesse_original, agoraDaRodada)
     + (provedor?.nome === 'openai' ? contextoEspecialidadeCannabis(vars.curso_interesse_original) : '')
-    + notaReunioes;
+    + notaReunioes
+    + await notaDoCliqueDaRodada(telefone, itens, agoraDaRodada, tel);
 
   // Persona: LEAD em modo_recontato manda (independe do número — espelha o gate de
   // entrada); senão vale a persona do número (relay/buffer). 'recontato' = no-show:
@@ -1392,8 +1403,11 @@ async function processarInbound(payload: any): Promise<void> {
     // Mídia é tratada ANTES do buffer (transcrição/análise), como no n8n.
     // ▸ 1. mídia → texto (transcrição do áudio pelo Gemini, descrição de imagem/documento).
     const tratada = await prepararMensagem(payload, telPrep);
+    // Clique de botão: guarda em qual mensagem foi (cliqueDeBotao.ts). Antes se perdia aqui.
+    const clique = cliqueDoPayload(payload);
     await bufferInserir(remotejid, {
       ...tratada,
+      ...(clique ? { clique } : {}),
       msg_id: payload.id,
       timestamp: payload.timestamp,
       wa_account_id: payload.wa_account_id ?? null,
