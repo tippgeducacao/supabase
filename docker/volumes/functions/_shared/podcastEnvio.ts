@@ -17,6 +17,62 @@ export interface CtxPodcast {
   linkAgenda?: string | null;
   /** ped_configuracoes.podcast_plataforma_gravacao (ex.: Zencastr). */
   plataforma?: string | null;
+  // Gravação agendada (pod_gravacao_agendamentos) — lembretes e agradecimentos.
+  dataGravacao?: string | null;
+  horarioGravacao?: string | null;
+  /** nome do host como aparece para o CONVIDADO ("👤 Host: …") */
+  host?: string | null;
+  /** primeiro nome do host, quando ELE é quem recebe ("Oii, {{1}}") */
+  nomeHost?: string | null;
+  /** nome do convidado como aparece para o HOST */
+  convidado?: string | null;
+  telefoneConvidado?: string | null;
+  linkAcesso?: string | null;
+  linkBriefing?: string | null;
+  usuarioAcesso?: string | null;
+}
+
+// Nomes resolvidos pelo nome EXATO, antes da heurística por pedaço: vários deles têm
+// "nome", "convidado" ou "podcast" dentro (`nome_host`, `telefone_convidado`) e a
+// heurística mandaria o primeiro nome do convidado no lugar do telefone.
+const VARIAVEIS_EXATAS: Record<string, keyof CtxPodcast> = {
+  link_agenda: "linkAgenda",
+  plataforma_gravacao: "plataforma",
+  data_gravacao: "dataGravacao",
+  horario_gravacao: "horarioGravacao",
+  host_episodio: "host",
+  nome_host: "nomeHost",
+  convidado_episodio: "convidado",
+  telefone_convidado: "telefoneConvidado",
+  link_acesso: "linkAcesso",
+  link_briefing: "linkBriefing",
+  // o modelo diz "Usuário": "Login" faz a Meta recusar (lê como credencial)
+  login_acesso: "usuarioAcesso",
+};
+
+// Número do WhatsApp para a Graph API (só dígitos, com DDI). Número brasileiro gravado sem
+// o 55 virava outro país — caso real de 11/09/2026: "46 9 9927-0638" virou +46, Suécia.
+export function formatPhone(raw?: string | null): string | null {
+  if (!raw) return null;
+  const t = String(raw).trim();
+  const intl = t.startsWith("+");
+  const d = t.replace(/\D/g, "");
+  if (!d) return null;
+  if (intl) return d; // já com DDI internacional
+  if (d.startsWith("55") && (d.length === 12 || d.length === 13)) return d;
+  // Número brasileiro sem DDI: DDD + 8 dígitos (fixo) ou DDD + 9xxxxxxxx (celular).
+  // Celular BR de 11 dígitos SEMPRE tem '9' no 3º dígito — 11 dígitos sem esse 9 é
+  // internacional sem DDI (ex.: wa_id dos EUA, 1+10) e NÃO pode ganhar 55.
+  if (d.length === 10 || (d.length === 11 && d[2] === "9")) return "55" + d;
+  return d;
+}
+
+/** Telefone para LER na mensagem: (46) 99927-0638. Fora do Brasil, +DDI e os dígitos. */
+export function telefoneLegivel(raw?: string | null): string {
+  const d = formatPhone(raw) ?? "";
+  if (d.startsWith("55") && d.length === 13) return `(${d.slice(2, 4)}) ${d.slice(4, 9)}-${d.slice(9)}`;
+  if (d.startsWith("55") && d.length === 12) return `(${d.slice(2, 4)}) ${d.slice(4, 8)}-${d.slice(8)}`;
+  return d ? `+${d}` : "";
 }
 
 export function primeiroNomePodcast(nome?: string | null): string {
@@ -35,6 +91,8 @@ export function sanitizeWaParam(s: string): string {
  */
 export function resolverVarPodcast(nomeVar: string, ctx: CtxPodcast): string {
   const v = String(nomeVar ?? "").toLowerCase();
+  const exata = VARIAVEIS_EXATAS[v];
+  if (exata) return String(ctx[exata] ?? "");
   if (v.includes("youtube")) return ctx.youtube ?? "";
   if (v.includes("agenda")) return ctx.linkAgenda ?? "";
   if (v.includes("plataforma")) return ctx.plataforma ?? "";

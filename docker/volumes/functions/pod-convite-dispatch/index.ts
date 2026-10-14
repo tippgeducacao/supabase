@@ -8,7 +8,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { ensureToken, base64UrlEncode, encodeHeaderUtf8, encodeDisplayName } from "../_shared/gmail.ts";
 import { logPodcastConversaSac } from "../_shared/podcastSac.ts";
 import {
-  enviarModeloPodcast, modeloAprovadoPorUso, parametrosDoModelo, resolverVarPodcast, usosDoAgendamento,
+  enviarModeloPodcast, formatPhone, modeloAprovadoPorUso, parametrosDoModelo, resolverVarPodcast, usosDoAgendamento,
 } from "../_shared/podcastEnvio.ts";
 
 const corsHeaders = {
@@ -33,20 +33,8 @@ function primeiroNome(nome?: string | null): string {
 function sanitizeWaParam(s: string): string {
   return String(s ?? "").replace(/[\r\n\t]+/g, " ").replace(/\s{4,}/g, "   ").trim();
 }
-function formatPhone(raw?: string | null): string | null {
-  if (!raw) return null;
-  const t = String(raw).trim();
-  const intl = t.startsWith("+");
-  let d = t.replace(/\D/g, "");
-  if (!d) return null;
-  if (intl) return d; // já com DDI internacional
-  if (d.startsWith("55") && (d.length === 12 || d.length === 13)) return d;
-  // Número brasileiro sem DDI: DDD + 8 dígitos (fixo) ou DDD + 9xxxxxxxx (celular).
-  // Celular BR de 11 dígitos SEMPRE tem '9' no 3º dígito — 11 dígitos sem esse 9 é
-  // internacional sem DDI (ex.: wa_id dos EUA, 1+10) e NÃO pode ganhar 55.
-  if (d.length === 10 || (d.length === 11 && d[2] === "9")) return "55" + d;
-  return d;
-}
+// formatPhone (número para a Graph API) vem de _shared/podcastEnvio.ts — a mesma regra dos
+// lembretes de gravação.
 function htmlEscape(s: string): string {
   return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
