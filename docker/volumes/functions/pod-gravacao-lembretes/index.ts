@@ -7,7 +7,8 @@
 // (_shared/podcastLembretes.ts, com teste).
 //
 // Duas portas:
-//  · cron de 15 em 15 min (pg_cron, Bearer = service role) — varre tudo que está em aberto;
+//  · cron de 15 em 15 min (pg_cron, segredo do Vault no cabeçalho x-pod-gravacao-cron-secret)
+//    — varre tudo que está em aberto;
 //  · a tela, logo depois de salvar/marcar Gravado (usuário do Pedagógico) — só aquele
 //    agendamento, para a confirmação e o agradecimento saírem na hora.
 // Cada envio é RESERVADO antes (pod_gravacao_lembrete_reservar): as duas portas podem
@@ -44,9 +45,18 @@ Deno.serve(async (req: Request) => {
     const body = await req.json().catch(() => ({} as any));
     const auth = req.headers.get("Authorization") ?? "";
 
-    // Porta do cron (service role) ou da tela (usuário do pedagógico, um agendamento só).
+    // Porta do cron ou da tela (usuário do pedagógico, um agendamento só). O cron se prova
+    // pelo segredo do Vault no cabeçalho: comparar o Bearer com a service role do runtime
+    // NÃO serve — a chave que o banco manda é outra string, e a edge devolvia 401 a todo
+    // cron (pego em 14/10/2026, migration 20261014130612).
+    let ehCron = auth === `Bearer ${service}`;
+    const segredo = req.headers.get("x-pod-gravacao-cron-secret");
+    if (!ehCron && segredo) {
+      const { data: ok } = await admin.rpc("pod_gravacao_validar_cron", { p_segredo: segredo });
+      ehCron = ok === true;
+    }
     let soId: string | null = null;
-    if (auth !== `Bearer ${service}`) {
+    if (!ehCron) {
       const userClient = createClient(url, Deno.env.get("SUPABASE_ANON_KEY") ?? "", { global: { headers: { Authorization: auth } } });
       const { data: { user } } = await userClient.auth.getUser();
       if (!user) return json({ ok: false, error: "não autenticado" }, 401);
