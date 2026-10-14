@@ -99,3 +99,53 @@ describe('funil-email-dispatch — porta de acesso', () => {
     expect(envios).toEqual([])
   })
 })
+
+describe('funil-email-dispatch — o que o pedido pode pedir', () => {
+  const ana = { Authorization: 'Bearer sessao-ana' }
+
+  it('modelo de outro remetente (marketing) com HTML livre: 403 antes de ler automação ou tarefa', async () => {
+    const r = await chamar(ana, {
+      etapa_key: 'DOCUMENTOS_PENDENTES', force: true, template_id_override: '59002b7b-ad24-4b9a-8aff-09709d1f0197',
+      assunto_override: 'x', corpo_html_override: '<a href="http://golpe">', destinatarios_override: [{ email: 'alvo@externo.com' }],
+    })
+    expect(r.status).toBe(403)
+    expect(tabelas).not.toContain('funil_email_automacoes')
+    expect(tabelas).not.toContain('gt_tasks')
+    expect(envios).toEqual([])
+  })
+
+  it('modelo manual da Aprovação continua saindo pela aba', async () => {
+    const r = await chamar(ana, { etapa_key: 'APROVACAO', force: true, template_id_override: '4b600a23-11e0-49f5-8316-506afe5846df' })
+    expect(r.status).toBe(200)
+    expect(envios[0]).toMatchObject({ template_id: '4b600a23-11e0-49f5-8316-506afe5846df' })
+  })
+
+  it('11 destinatários: 400 sem enviar', async () => {
+    const lista = Array.from({ length: 11 }, (_, i) => ({ email: `a${i}@exemplo.com` }))
+    expect((await chamar(ana, { force: true, destinatarios_override: lista })).status).toBe(400)
+    expect(envios).toEqual([])
+  })
+
+  it('"Reenviar" de Documentos pendentes sem lista: recusa legível, nada sai e nada vai para a tarefa', async () => {
+    const r = await chamar(ana, { etapa_key: 'DOCUMENTOS_PENDENTES', force: true, destinatarios_override: [{ email: 'aluno@exemplo.com' }] })
+    expect(r.status).toBe(200)
+    expect(await r.json()).toMatchObject({ ok: false })
+    expect(envios).toEqual([])
+    expect(comentarios).toEqual([])
+  })
+
+  it('gatilho de Documentos pendentes sem lista: nada sai e o motivo fica comentado na tarefa', async () => {
+    const r = await chamar({ 'x-funil-email-secret': 'segredo-certo' }, { etapa_key: 'DOCUMENTOS_PENDENTES' })
+    expect(r.status).toBe(200)
+    expect(envios).toEqual([])
+    expect(comentarios[0]).toContain('⚠️ Automação de email (DOCUMENTOS_PENDENTES) não disparada')
+  })
+
+  it('Cobrar documentos com a lista sai com <ul> montado no servidor e marcado como HTML', async () => {
+    const r = await chamar(ana, { etapa_key: 'DOCUMENTOS_PENDENTES', force: true, variaveis_override: { docs_faltantes: 'Termo de Aceite\nFicha do <Orientador>' } })
+    expect(r.status).toBe(200)
+    expect(envios[0]).toMatchObject({ variaveis_html: ['docs_faltantes'] })
+    expect((envios[0].variaveis as Record<string, string>).docs_faltantes)
+      .toBe('<ul><li>Termo de Aceite</li><li>Ficha do &lt;Orientador&gt;</li></ul>')
+  })
+})

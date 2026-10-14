@@ -17,10 +17,12 @@
 //
 // Quem pode chamar (14/10/2026): o gatilho (segredo do Vault no cabeçalho
 // x-funil-email-secret), a chave de serviço do runtime ou um colaborador logado e
-// ativo — e este último só em tarefa da lista TCC. Ver acesso.ts.
+// ativo — e este último só em tarefa da lista TCC. Ver acesso.ts. O que o pedido pode
+// pedir (modelo trocado, quantos destinatários, lista de documentos): regrasEnvio.ts.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.0'
 import { htmlDocsFaltantes, itensDocsFaltantes } from './docsFaltantes.ts'
 import { autorizarDispatch, ErroAcesso, type Acesso } from './acesso.ts'
+import { recusarPedido } from './regrasEnvio.ts'
 
 // Lista TCC do Pedagógico — a mesma que o gatilho filtra e que mostra a aba Comunicação.
 const TCC_LIST_ID = 'b530b0ca-3a0e-40d3-93d7-c013a91a6dbf'
@@ -134,6 +136,19 @@ Deno.serve(async (req) => {
   } = body
   if (!task_id || !etapa_key || !funil_tipo) {
     return json({ ok: false, error: 'task_id, etapa_key, funil_tipo obrigatórios' }, 400)
+  }
+
+  // Antes de qualquer leitura no banco — ver regrasEnvio.ts.
+  const recusa = recusarPedido({
+    etapa_key, template_id_override, destinatarios_override, corpo_html_override,
+    docs_faltantes: variaveis_override?.docs_faltantes,
+  })
+  if (recusa) {
+    // Pela tela a mensagem vira toast; o gatilho não tem tela, então fica na tarefa.
+    if (acesso.tipo !== 'usuario') {
+      await logComment(supabase, task_id, `⚠️ Automação de email (${etapa_key}) não disparada: ${recusa.error}`)
+    }
+    return json({ ok: false, error: recusa.error }, recusa.status)
   }
 
   try {
