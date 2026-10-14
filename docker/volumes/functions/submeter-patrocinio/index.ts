@@ -54,6 +54,27 @@ const PUBLIC_SUPABASE_URL =
   Deno.env.get('PUBLIC_SUPABASE_URL') || 'https://api.ppgeducacao.site'
 const toPublicUrl = (u: string) => u.replace(/^https?:\/\/kong:8000/i, PUBLIC_SUPABASE_URL)
 
+// ── Material da PPGVET que vai anexado em TODA solicitação nova (chamado "Ajuste no
+//    Modelo de Tarefa - Patrocínios", 12/10/2026). Só o LINK entra na tarefa: os
+//    arquivos já moram no bucket (subidos no próprio chamado) e o vídeo tem 305,88 MB —
+//    uma cópia por solicitação encheria o disco da VPS. Tirar o anexo de uma tarefa no
+//    Gestor só apaga o link da descrição; o arquivo continua no Storage.
+//    Trocar o material = subir o arquivo novo em qualquer tarefa e colar o caminho aqui.
+const MATERIAL_PPGVET = [
+  {
+    path: 'task-attachments/1791809393701-ipdyuv-Modelo_Proposta_Patrocinio_PPGVET.docx',
+    fileName: 'Modelo_Proposta_Patrocinio_PPGVET.docx',
+    kind: 'file',
+    icon: '📎',
+  },
+  {
+    path: 'task-attachments/1791809310855-ysgohm-Acesso-a-plataforma-patrocinios.mp4',
+    fileName: 'Acesso à plataforma patrocínios.mp4',
+    kind: 'video',
+    icon: '🎬',
+  },
+]
+
 const MAX_FILE_BYTES = 25 * 1024 * 1024 // 25 MB por arquivo
 const MAX_FILES = 10
 // Tipos aceitos (documentos + imagens; sem executáveis). Extensão OU mime bastam.
@@ -397,6 +418,18 @@ Deno.serve(async (req) => {
       })
       .join('\n')
 
+    // Mesmo HTML do anexo nativo do Gestor (uploadHelpers.ts): o painel de Anexos
+    // lê `data-attachment-kind` para mostrar o vídeo como vídeo.
+    const materialHtml = MATERIAL_PPGVET
+      .map((m) => {
+        const url = `${PUBLIC_SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${m.path}`
+        return (
+          `<p><a href="${escapeHtml(url)}" target="_blank" rel="noopener" ` +
+          `data-attachment-kind="${m.kind}" data-attachment-name="${escapeHtml(m.fileName)}">${m.icon} ${escapeHtml(m.fileName)}</a></p>`
+        )
+      })
+      .join('\n')
+
     // Mensagens PRONTAS para o WhatsApp (dados já preenchidos): link "Abrir no
     // WhatsApp" (wa.me — abre a conversa no número do apoiador com o texto) + botão
     // "Copiar" (data-gt-copy, tratado por delegação no front do Gestor de Tarefas).
@@ -440,6 +473,7 @@ Deno.serve(async (req) => {
       solicitanteHtml,
       camposHtml ? `<p><strong>📋 Dados do evento</strong></p><ul>${camposHtml}</ul>` : '',
       enviados.length ? `<p><strong>📎 Anexos enviados</strong></p>\n${anexosHtml}` : '',
+      `<p><strong>🗂️ Material da PPGVET para a proposta</strong></p>\n${materialHtml}`,
       mensagensHtml,
       `<hr/><p><em><strong>Protocolo:</strong> ${escapeHtml(protocolo)} · <strong>Recebido em:</strong> ${escapeHtml(recebidoEm)} · <strong>Prazo de retorno:</strong> até ${escapeHtml(prazoBR)} (${PRAZO_DIAS} dias) · Origem: formulário público de apoio a eventos.</em></p>`,
     ].filter(Boolean).join('\n')
