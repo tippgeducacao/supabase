@@ -55,6 +55,10 @@ function toApiDate(d: Date): string {
   const p = (n: number) => String(n).padStart(2, "0");
   return `${p(d.getUTCDate())}-${p(d.getUTCMonth() + 1)}-${d.getUTCFullYear()}`;
 }
+/** YYYY-MM-DD em UTC — o formato que o Postgres espera num filtro de `date`. */
+function toIsoDay(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
 function addDays(d: Date, n: number): Date {
   const x = new Date(d.getTime());
   x.setUTCDate(x.getUTCDate() + n);
@@ -272,6 +276,32 @@ Deno.serve(async (req) => {
     }
     ini = new Date(qi + "T00:00:00Z");
     fim = new Date(qf + "T00:00:00Z");
+  } else if (modo === "antigos") {
+    // ⚠️ RODÍZIO DO PASSADO. A janela incremental é -60d/+90d, então um título que passa
+    //    dos 60 dias NUNCA MAIS é conferido: fica congelado como "vencido" para sempre,
+    //    mesmo que tenha sido pago, cancelado ou renegociado no SIGA. Medido em
+    //    14/10/2026: 2.150 títulos vencidos e em aberto, R$ 1.087.620,06 em 179 pessoas,
+    //    estavam fora da janela — 87% do valor vencido do SIGA. É o caso do GUILHERME
+    //    PETTER: duas parcelas renegociadas em 28/09 continuavam cobrando.
+    //
+    //    Aqui pegamos o bloco de 30 dias que contém o título em aberto com a conferência
+    //    MAIS VELHA e sincronizamos só ele. Como o rodízio nunca "termina", ele volta ao
+    //    começo depois de cobrir tudo — igual ao `modo=situacao` logo abaixo.
+    const { data: maisVelho } = await supabase
+      .from("siga_titulos_receber")
+      .select("vencimento, synced_at")
+      .is("data_pagamento", null)
+      .lt("vencimento", addDays(hoje, -60).toISOString().slice(0, 10))
+      .order("synced_at", { ascending: true, nullsFirst: true })
+      .limit(1)
+      .maybeSingle();
+    if (!maisVelho?.vencimento) {
+      return new Response(JSON.stringify({ ok: true, modo, nada_a_conferir: true }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+    ini = new Date(maisVelho.vencimento + "T00:00:00Z");
+    fim = addDays(ini, 29);
   } else {
     ini = addDays(hoje, -Number(url.searchParams.get("dias_atras") ?? "60"));
     fim = addDays(hoje, Number(url.searchParams.get("dias_frente") ?? "90"));
@@ -345,6 +375,7 @@ Deno.serve(async (req) => {
   }
 
   let recebidas = 0, titulosUp = 0, alunosUp = 0, contratosUp = 0, turmasUp = 0;
+  let blocosOk = 0, fantasmas = 0;
   const erros: string[] = [];
   const contratos = new Map<number, any>();
   const alunos = new Map<number, any>();
@@ -403,6 +434,33 @@ Deno.serve(async (req) => {
         if (error) erros.push(`titulos: ${error.message}`);
         else titulosUp += titulos.slice(i, i + 500).length;
       }
+      blocosOk++;
+    }
+
+    // ---- FANTASMAS: título que o SIGA parou de devolver -------------------------------
+    // Renegociou, cancelou ou simplesmente sumiu: o upsert nunca apaga nada, então a
+    // parcela ficava "vencido" para sempre e seguia cobrando gente que não deve mais.
+    // Pego em 14/10/2026 no GUILHERME PETTER — as parcelas de 10/08 e 10/09 foram
+    // substituídas por um título novo, pago em 28/09, e as duas antigas continuavam na
+    // fila. Mesmo tratamento que a EDUQ ganhou em 09/10 (`eduq-api-titulos`).
+    //
+    // ⚠️ SÓ COM A VARREDURA LIMPA. Se um bloco deu 429, erro ou estourou o orçamento, a
+    //    gente NÃO viu a janela inteira — marcar aí apagaria dívida real. Por isso exige
+    //    `erros.length === 0` e que todos os blocos tenham passado. E só vale quando o
+    //    eixo é `vencimento`: nos outros a janela não é um intervalo de vencimento.
+    const varreduraLimpa = erros.length === 0 && blocosOk === blocos(ini, fim).length;
+    if (tipoData === "vencimento" && varreduraLimpa) {
+      const { data: sumidos, error: errFant } = await supabase
+        .from("siga_titulos_receber")
+        .update({ situacao: "Ausente no SIGA", synced_at: agora })
+        .gte("vencimento", toIsoDay(ini))
+        .lte("vencimento", toIsoDay(fim))
+        .is("data_pagamento", null)
+        .lt("synced_at", agora)
+        .neq("situacao", "Ausente no SIGA")
+        .select("siga_titulo_id");
+      if (errFant) erros.push(`fantasmas: ${errFant.message}`);
+      else fantasmas = (sumidos ?? []).length;
     }
 
     // ---- ETAPA 2: alunos e contratos vistos nas parcelas -------------------------------
@@ -474,6 +532,7 @@ Deno.serve(async (req) => {
       ok: true, modo,
       janela: { ini: toApiDate(ini), fim: toApiDate(fim) },
       recebidas, titulos: titulosUp, alunos: alunosUp, contratos: contratosUp, turmas: turmasUp,
+      fantasmas, blocos_ok: blocosOk,
       erros: erros.slice(0, 10), duracao_ms: Date.now() - t0,
     }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
   } catch (e) {
