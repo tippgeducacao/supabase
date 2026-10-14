@@ -22,7 +22,7 @@ import {
 import { atualizarLead, buscarLead } from './historico.ts';
 import { VINCULOS_TRABALHO } from './carreiraPos.ts';
 import type { Msg } from './historico.ts';
-import { avaliarEvidenciaSemGraduacao, bloqueioSemEvidenciaGraduacao } from './evidenciaFormacao.ts';
+import { avaliarEvidenciaSemGraduacao, bloqueioSemEvidenciaGraduacao, respostaCurtaLigada } from './evidenciaFormacao.ts';
 import { chamarAnthropic } from './agente.ts';
 import { selecionarProvedorDoLead } from './pilotoOpenai.ts';
 import { INSTRUCAO_FALHA_COMPATIBILIDADE } from './falhaCompatibilidade.ts';
@@ -1407,7 +1407,10 @@ async function pausaIa(supabase: any, input: any, ctx: CtxConversa, toolUseId: s
   // Antes de QUALQUER escrita: o enum escolhido pelo modelo não comprova o fato.
   // Contextos legados sem histórico também ficam fechados para sem_graduacao.
   if (input.tipo === 'sem_graduacao' && !avaliarEvidenciaSemGraduacao(ctx.historicoConversa).autorizada) {
-    return bloqueioSemEvidenciaGraduacao(toolUseId);
+    // 14/10/2026: a resposta curta à pergunta de graduação também vale, com a chave ligada
+    // (evidenciaFormacao.ts). A chave só é lida quando essa leitura mudaria a decisão.
+    const curta = avaliarEvidenciaSemGraduacao(ctx.historicoConversa, { respostaCurta: true }).autorizada;
+    if (!curta || !(await respostaCurtaLigada(supabase, ctx.telefone))) return bloqueioSemEvidenciaGraduacao(toolUseId);
   }
   const { error } = await supabase.rpc('crm_set_pausa_ia', {
     p_telefone: ctx.telefone,
