@@ -18,6 +18,15 @@ import { alguemDoTimeAssume, type Encerramento } from './encerramento.ts';
 
 export const LINK_ESCOLA_GRATUITA = 'https://escoladeespecializacao.ppgvet.com.br';
 
+/**
+ * 14/10/2026 (Gustavo): "vamos parar de enviar o link da escola de especialização". Desligado, o
+ * convite de despedida sai de todas as personas do WhatsApp: o anexo em código (mereceOPresente), o
+ * bloco do prompt (comBlocoDaEscola) e as instruções de despedida (regrasDaRodada.ts). As descrições
+ * das ferramentas perderam a frase no banco (migration 20261014120000) e em tools-luna.ts. O lead
+ * que PEDE o link continua recebendo (comLinkPedido). Religar = trocar para true e repor as frases.
+ */
+export const PRESENTE_ESCOLA_ATIVO = false;
+
 /** Bloco apensado ao system prompt de TODAS as personas do agente (e do webchat). */
 export const BLOCO_ESCOLA_GRATUITA = [
   '',
@@ -112,7 +121,8 @@ export function jaTemOPresente(texto: string | null | undefined): boolean {
  * Um é 70× o outro. Então só os quatro casos RECONHECIDOS de continuação ficam de fora;
  * motivo que ninguém classificou leva o presente.
  */
-export function mereceOPresente(e: Encerramento | null, jaEstaNaEscola = false): boolean {
+export function mereceOPresente(e: Encerramento | null, jaEstaNaEscola = false, ativo = PRESENTE_ESCOLA_ATIVO): boolean {
+  if (!ativo) return false;
   // Quem já tem o acesso não é convidado de novo (decisão do diretor, 21/08/2026): o
   // convite é captação, e mandá-lo pra quem já está dentro é o agente mostrando que não
   // sabe com quem fala. Medido no dia: 2.607 contatos com a tag da Escola, 2.351 deles
@@ -133,8 +143,9 @@ export function comPresenteNaDespedida(
   encerramento: Encerramento | null,
   conversaAteAgora: string,
   jaEstaNaEscola = false,
+  ativo = PRESENTE_ESCOLA_ATIVO,
 ): { texto: string; anexou: boolean } {
-  if (!mereceOPresente(encerramento, jaEstaNaEscola)) return { texto, anexou: false };
+  if (!mereceOPresente(encerramento, jaEstaNaEscola, ativo)) return { texto, anexou: false };
   if (jaTemOPresente(texto) || jaTemOPresente(conversaAteAgora)) return { texto, anexou: false };
   return { texto: `${texto.trimEnd()}\n\n${CONVITE_ESCOLA}`, anexou: true };
 }
@@ -169,7 +180,10 @@ export const NOTA_JA_ESTA_NA_ESCOLA = [
 ].join('\n');
 
 /** Apensa ao prompt o bloco certo: o convite, ou o aviso de que ela já está dentro. */
-export function comBlocoDaEscola(promptRenderizado: string, jaEstaNaEscola: boolean): string {
+export function comBlocoDaEscola(promptRenderizado: string, jaEstaNaEscola: boolean, ativo = PRESENTE_ESCOLA_ATIVO): string {
+  // Sem o convite, quem não está na Escola não recebe bloco nenhum; quem está segue com o aviso
+  // (não oferecer, mas mandar o link se pedir).
+  if (!ativo) return jaEstaNaEscola ? `${promptRenderizado}\n${NOTA_JA_ESTA_NA_ESCOLA}` : promptRenderizado;
   return jaEstaNaEscola
     ? `${promptRenderizado}\n${NOTA_JA_ESTA_NA_ESCOLA}`
     : comPresenteEscola(promptRenderizado);

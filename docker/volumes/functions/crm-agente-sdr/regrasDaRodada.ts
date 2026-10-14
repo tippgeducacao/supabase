@@ -1,7 +1,7 @@
 // Regras fixas do LOOP do agente (30/09/2026): conjuntos de ferramentas que encerram, instruções e
 // correções que o sistema injeta. Saíram de rodadaAgente (index.ts) para o motor por passos do agente
 // no n8n (passosRodada.ts) usar o MESMO texto — regra num lugar só.
-import { LINK_ESCOLA_GRATUITA } from './escolaGratuita.ts';
+import { LINK_ESCOLA_GRATUITA, PRESENTE_ESCOLA_ATIVO } from './escolaGratuita.ts';
 import { removerRaciocinioVazado } from './saida.ts';
 
 // Tools que pausam a IA por decisão do PRÓPRIO agente (pausa_ia, e o
@@ -37,7 +37,13 @@ export const TOOLS_QUE_ENCERRAM = new Set([...TOOLS_QUE_PAUSAM, 'agendar_retorno
 // aí nenhuma guarda de saída resolve — ela só apagaria o que o modelo acabou de escrever.
 export const instrucaoPosPausa = (estaNaEscola: boolean) => '[SISTEMA — você acabou de encerrar/pausar este atendimento. '
   + 'NÃO relate isso e NÃO descreva o estado do atendimento.]\n'
-  + (estaNaEscola
+  // 14/10/2026: sem o convite da Escola (PRESENTE_ESCOLA_ATIVO), a despedida é a curta para todos.
+  + (!PRESENTE_ESCOLA_ATIVO
+    ? 'Se você ainda NÃO se despediu nesta conversa, escreva SÓ a despedida curta ao lead, '
+      + 'por exemplo: "tranquilo, agradeço sua preferência pelo Grupo PPG e fico à disposição '
+      + 'se precisar no futuro."\n'
+      + '⛔ NÃO ofereça a biblioteca gratuita da Escola de Especialização e NÃO mande o link.\n'
+    : estaNaEscola
     ? 'Se você ainda NÃO se despediu nesta conversa, escreva SÓ a despedida curta ao lead, '
       + 'por exemplo: "tranquilo, agradeço sua preferência pelo Grupo PPG e fico à disposição '
       + 'se precisar no futuro."\n'
@@ -65,8 +71,10 @@ export const INSTRUCAO_POS_RETORNO = '[SISTEMA — você acabou de agendar o ret
   + 'Se vc ofereceu ou combinou algum HORÁRIO de reunião nesta conversa, desfaça de forma '
   + 'explícita ("não vou marcar aquele horário que falei") — senão ele fica esperando uma '
   + 'reunião que não vai acontecer.\n'
-  + 'Feche com o presente da Escola (a conversa acabou sem reunião), a menos que vc já tenha '
-  + 'mandado o convite nesta conversa.\n'
+  + (PRESENTE_ESCOLA_ATIVO
+    ? 'Feche com o presente da Escola (a conversa acabou sem reunião), a menos que vc já tenha '
+      + 'mandado o convite nesta conversa.\n'
+    : 'Não ofereça a biblioteca gratuita da Escola de Especialização e não mande o link.\n')
   + 'Nunca mencione a data-limite, "prazo" ou "elegibilidade". Se a mensagem já foi enviada, '
   + 'responda com texto vazio.';
 

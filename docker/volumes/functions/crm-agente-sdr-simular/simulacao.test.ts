@@ -235,7 +235,7 @@ describe('replay sem envio e diagnóstico sem thinking', () => {
     expect(JSON.stringify(resultado)).not.toContain('Isso conta como retenção');
   });
 
-  it('mantém o presente na despedida e registra a resposta pública para o próximo turno', async () => {
+  it('despedida sem o convite da Escola (14/10/2026) e registrada para o próximo turno', async () => {
     const deps = dependencias();
     vi.mocked(deps.chamarPrincipal).mockResolvedValueOnce({ content: [
       { type: 'text', text: 'O roteiro manda pausar e oferecer a Escola.' },
@@ -243,7 +243,8 @@ describe('replay sem envio e diagnóstico sem thinking', () => {
     ] });
     const resultado = await executarSimulacao(validarEntradaSimulacao({ mensagens: ['Pode retirar', 'Obrigado'] }), deps);
     const falas = resultado.transcript.filter((t) => t.quem === 'joao').map((t) => t.texto);
-    expect(falas[0]).toContain(LINK_ESCOLA_GRATUITA);
+    expect(falas[0]).not.toContain(LINK_ESCOLA_GRATUITA);
+    expect(falas[0]).toMatch(/agradeço sua preferência/);
     expect(falas[1]).toBe('Podemos continuar.');
     const ultimaPreparacao = vi.mocked(deps.prepararRodada).mock.calls[1][0];
     expect(ultimaPreparacao).toContainEqual({ role: 'assistant', content: [{ type: 'text', text: falas[0] }] });

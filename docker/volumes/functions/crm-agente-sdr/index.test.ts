@@ -325,7 +325,8 @@ describe('SDR: texto de ferramenta nunca vira despedida', () => {
     expect(fronteiras.enviar).toHaveBeenCalledOnce();
     const enviada = fronteiras.enviar.mock.calls[0][1];
     expect(enviada).toMatch(/^tranquilo, agradeço/);
-    expect(enviada).toContain('https://escoladeespecializacao.ppgvet.com.br');
+    // 14/10/2026: a despedida não leva mais o convite da Escola de Especialização.
+    expect(enviada).not.toContain('escoladeespecializacao');
     expect(enviada).not.toMatch(/retenção|FORMULAÇÃO|Isso conta/);
     expect(fronteiras.enviar.mock.calls[0][4]).toBeUndefined();
     expect(fronteiras.gravar).toHaveBeenCalledWith(expect.anything(), payload.remotejid, { role: 'assistant', content: enviada });
