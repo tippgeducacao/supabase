@@ -51,6 +51,14 @@ describe("render com dados", () => {
     expect(renderizarTags("{{x}}", { x: "a & b" }, { escapar: false })).toBe("a & b");
   });
 
+  it("variável marcada como HTML do sistema entra crua; as outras seguem escapadas", () => {
+    // Lista de documentos pendentes do TCC: chegava ao aluno como "<ul><li>…" visível.
+    const html = renderizarTags("<p>{{nome_aluno}}</p>{{docs_faltantes}}",
+      { nome_aluno: "<b>Ana</b>", docs_faltantes: "<ul><li>Termo</li></ul>" },
+      { variaveisHtml: ["docs_faltantes"] });
+    expect(html).toBe("<p>&lt;b&gt;Ana&lt;/b&gt;</p><ul><li>Termo</li></ul>");
+  });
+
   it("filtro desconhecido é ignorado no render em vez de derrubar o envio", () => {
     expect(renderizarTags("{{contato.primeiro_nome | inventado}}", dados)).toBe("Ana");
   });

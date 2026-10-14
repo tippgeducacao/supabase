@@ -127,6 +127,21 @@ describe("email-send integrado ao Resend", () => {
     expect(tabelas).not.toContain("calendar_integrations");
   });
 
+  // Desde 17/09 o aluno recebia "<ul><li>Termo…" como texto (print de 24/09).
+  const pedidoTcc = (extra = {}) => requisicao({ contexto_tipo: "gt_task", contexto_id: "task-1", template_id: undefined,
+    idempotencia_key: undefined, corpo_texto: undefined, corpo_html: "<p>Olá, {{nome_aluno}}.</p><p> {{docs_faltantes}}</p>",
+    variaveis: { nome_aluno: "<b>Ana</b>", docs_faltantes: "<ul><li>Termo de Aceite</li></ul>" }, ...extra });
+  it("lista de documentos do TCC sai como lista; o resto das variáveis segue escapado", async () => {
+    expect((await atender(pedidoTcc({ variaveis_html: ["docs_faltantes"] }))).status).toBe(200);
+    const html = JSON.parse(fetcher.mock.calls[0][1]!.body as string).html as string;
+    expect(html).toContain("<p> <ul><li>Termo de Aceite</li></ul></p>");
+    expect(html).toContain("Olá, &lt;b&gt;Ana&lt;/b&gt;.");
+  });
+  it("sem a marca variaveis_html a variável continua escapada — o padrão não mudou", async () => {
+    expect((await atender(pedidoTcc())).status).toBe(200);
+    expect(JSON.parse(fetcher.mock.calls[0][1]!.body as string).html).toContain("&lt;ul&gt;&lt;li&gt;Termo");
+  });
+
   it("supressão impede envio e criação de log", async () => {
     suprimido = { email: "aluno@exemplo.com", motivo: "bounce" };
     expect(await (await atender(requisicao())).json()).toMatchObject({ ok: true, suprimido: true });

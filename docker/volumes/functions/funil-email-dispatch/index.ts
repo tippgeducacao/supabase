@@ -10,11 +10,20 @@
 //
 // Body aceito:
 //   { task_id, etapa_key, funil_tipo, funil_ref?,
-//     variaveis_override?: Record<string,string>,   // ex.: docs_faltantes, observacoes
+//     variaveis_override?: Record<string,string>,   // ex.: docs_faltantes (texto, um por linha), observacoes
 //     destinatarios_override?: Array<{nome?,email}>, // força destinatários
 //     template_id_override?: string,                 // outro modelo p/ a MESMA etapa (envio manual)
 //     force?: boolean }                              // ignora idempotência (reenvio manual)
+//
+// Quem pode chamar (14/10/2026): o gatilho (segredo do Vault no cabeçalho
+// x-funil-email-secret), a chave de serviço do runtime ou um colaborador logado e
+// ativo — e este último só em tarefa da lista TCC. Ver acesso.ts.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.0'
+import { htmlDocsFaltantes, itensDocsFaltantes } from './docsFaltantes.ts'
+import { autorizarDispatch, ErroAcesso, type Acesso } from './acesso.ts'
+
+// Lista TCC do Pedagógico — a mesma que o gatilho filtra e que mostra a aba Comunicação.
+const TCC_LIST_ID = 'b530b0ca-3a0e-40d3-93d7-c013a91a6dbf'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -84,6 +93,33 @@ Deno.serve(async (req) => {
   const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
   const supabase = createClient(supabaseUrl, serviceKey, { auth: { persistSession: false } })
 
+  let acesso: Acesso
+  try {
+    acesso = await autorizarDispatch(req, {
+      chaveServico: serviceKey,
+      validarGatilho: async (segredo) => {
+        const { data, error } = await supabase.rpc('funil_email_validar_gatilho', { p_segredo: segredo })
+        if (error) throw error
+        return data === true
+      },
+      usuarioDoToken: async (token) => {
+        const { data, error } = await supabase.auth.getUser(token)
+        return error || !data.user || data.user.is_anonymous ? null : data.user.id
+      },
+      perfil: async (id) => {
+        const { data, error } = await supabase.from('profiles').select('ativo, name').eq('id', id).maybeSingle()
+        if (error) throw error
+        return data as { ativo: boolean | null; name: string | null } | null
+      },
+    })
+  } catch (e) {
+    if (e instanceof ErroAcesso) return json({ ok: false, error: e.message }, e.status)
+    console.error('[funil-email-dispatch] falha ao conferir acesso:', (e as Error)?.message)
+    return json({ ok: false, error: 'Não foi possível conferir seu acesso. Tente novamente.' }, 503)
+  }
+  // Envio manual fica assinado no comentário da tarefa.
+  const autoria = acesso.tipo === 'usuario' && acesso.nome ? ` (por ${acesso.nome})` : ''
+
   let body: DispatchBody
   try {
     body = await req.json()
@@ -127,10 +163,13 @@ Deno.serve(async (req) => {
   // 2) Resolve tarefa
   const { data: task, error: tErr } = await supabase
     .from('gt_tasks')
-    .select('id, title, aluno_id, status_id, description')
+    .select('id, title, aluno_id, status_id, description, list_id')
     .eq('id', task_id)
     .maybeSingle()
   if (tErr || !task) return json({ ok: false, error: 'task not found' }, 404)
+  if (acesso.tipo === 'usuario' && task.list_id !== TCC_LIST_ID) {
+    return json({ ok: false, error: 'Esta tarefa não é da lista TCC.' }, 403)
+  }
 
   // 3) Variáveis de contexto + destinatários — fonte canônica: gt_form_submissions
   let curso = ''
@@ -228,6 +267,9 @@ Deno.serve(async (req) => {
   const windowMin = automacao.idempotencia_minutos ?? 1440
   const sinceIso = new Date(Date.now() - windowMin * 60 * 1000).toISOString()
   const results: Array<{ email: string; status: string }> = []
+  // Lista de documentos pendentes: chega como texto (um por linha) e o HTML é montado
+  // aqui, item a item escapado — ver docsFaltantes.ts.
+  const docsFaltantesHtml = htmlDocsFaltantes(itensDocsFaltantes(variaveis_override?.docs_faltantes))
 
   for (const r of recipients) {
     const idempotenciaKey = `funil-tcc-${task_id}-${logEtapa}-${r.email}`
@@ -258,6 +300,7 @@ Deno.serve(async (req) => {
       titulo_tcc: tituloTcc,
       link_portal: 'https://portal.ppgeducacao.com.br',
       ...(variaveis_override ?? {}),
+      docs_faltantes: docsFaltantesHtml,
     }
 
     const idemKey = force ? `${idempotenciaKey}-${Date.now()}` : idempotenciaKey
@@ -282,6 +325,7 @@ Deno.serve(async (req) => {
           destinatario_email: r.email,
           destinatario_nome: r.nome || null,
           variaveis,
+          ...(docsFaltantesHtml ? { variaveis_html: ['docs_faltantes'] } : {}),
           contexto_tipo: 'gt_task',
           contexto_id: task_id,
           idempotencia_key: idemKey,
@@ -318,14 +362,14 @@ Deno.serve(async (req) => {
     await logComment(
       supabase,
       task_id,
-      `📧 Email da etapa **${etapa_key}** enviado para: ${enviados.map((e) => e.email).join(', ')}.`,
+      `📧 Email da etapa **${etapa_key}** enviado para: ${enviados.map((e) => e.email).join(', ')}${autoria}.`,
     )
   }
   if (erros.length) {
     await logComment(
       supabase,
       task_id,
-      `❌ Falha ao enviar email (${etapa_key}) para: ${erros.map((e) => `${e.email} (${e.status})`).join(', ')}.`,
+      `❌ Falha ao enviar email (${etapa_key}) para: ${erros.map((e) => `${e.email} (${e.status})`).join(', ')}${autoria}.`,
     )
   }
 

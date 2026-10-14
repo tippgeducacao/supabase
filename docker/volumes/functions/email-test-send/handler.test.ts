@@ -35,6 +35,11 @@ describe("teste de e-mail autenticado, sem envio real", () => {
     const [url, opcoes] = a.buscar.mock.calls[0]; expect(url).toBe("https://backend.invalid/functions/v1/email-send");
     expect(opcoes.headers.Authorization).toBe("Bearer token-usuario"); expect(JSON.parse(opcoes.body)).toMatchObject({ usuario_esperado: USUARIO, template_id: TEMPLATE, contexto_tipo: "teste" });
   });
+  it("lista de exemplo dos documentos do TCC vai marcada como HTML; valor digitado no teste, não", async () => {
+    const a = ambiente(); await a.chamar(); expect(JSON.parse(a.buscar.mock.calls[0][1].body).variaveis_html).toEqual(["docs_faltantes"]);
+    const b = ambiente(); await b.chamar({ ...PEDIDO, variaveis: { docs_faltantes: "<b>x</b>" } });
+    expect(JSON.parse(b.buscar.mock.calls[0][1].body).variaveis_html).toBeUndefined();
+  });
   it("quem foi liberado no E-mail Marketing (sem ser admin/diretor) envia teste — caso do Marco, 09/10/2026", async () => {
     const a = ambiente({ cargo: "gestor_email_mkt" }); expect((await a.chamar()).status).toBe(200); expect(a.buscar).toHaveBeenCalledTimes(1);
   });

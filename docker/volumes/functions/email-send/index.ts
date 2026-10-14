@@ -39,6 +39,13 @@ interface SendPayload {
   destinatario_email: string;
   destinatario_nome?: string;
   variaveis?: Record<string, string>;
+  /**
+   * Nomes, em `variaveis`, cujo valor é HTML montado por quem chama (ex.: `docs_faltantes`
+   * do TCC, montado e escapado item a item pelo funil-email-dispatch). Só vale no corpo
+   * HTML; o resto continua escapado. Não abre nada novo: quem passa na autorização já
+   * pode mandar `corpo_html` inteiro.
+   */
+  variaveis_html?: string[];
   contexto_tipo?: string;
   contexto_id?: string;
   campanha_envio_id?: string;
@@ -68,8 +75,8 @@ interface SendPayload {
  * Escapamos só o HTML — assunto é cabeçalho e o corpo de texto é text/plain —, que é a
  * mesma régua do caminho de webhook em `renderizacaoWebhook.ts`.
  */
-function renderTemplate(s: string, dados: Record<string, unknown>, html = false): string {
-  return renderizarTags(s, dados, { escapar: html, naoResolvida: "literal" });
+function renderTemplate(s: string, dados: Record<string, unknown>, html = false, variaveisHtml: string[] = []): string {
+  return renderizarTags(s, dados, { escapar: html, naoResolvida: "literal", variaveisHtml });
 }
 
 function base64url(input: string | Uint8Array): string {
@@ -255,8 +262,11 @@ Deno.serve(async (req) => {
     } else {
       // A bag do envio é PLANA; os modelos são escritos com o catálogo aninhado.
       const dados = expandirVariaveis(vars);
+      const variaveisHtml = Array.isArray(payload.variaveis_html)
+        ? payload.variaveis_html.filter((v): v is string => typeof v === "string")
+        : [];
       assunto = renderTemplate(assunto, dados);
-      corpoHtml = renderTemplate(corpoHtml, dados, true);
+      corpoHtml = renderTemplate(corpoHtml, dados, true, variaveisHtml);
       if (corpoTexto) corpoTexto = renderTemplate(corpoTexto, dados);
     }
 

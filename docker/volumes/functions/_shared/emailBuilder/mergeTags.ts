@@ -195,6 +195,14 @@ export interface OpcoesRender {
    * que os 29 templates legados esperam. 'vazio' remove.
    */
   naoResolvida?: "literal" | "vazio";
+  /**
+   * Variáveis cujo valor JÁ é HTML montado pelo próprio sistema, que entram sem escape.
+   * Existe por causa da lista `docs_faltantes` do TCC (`<ul><li>…`): com o escape geral
+   * de 17/09/2026 o aluno passou a receber as tags como texto. Quem monta o valor escapa
+   * cada pedaço (ver `funil-email-dispatch/docsFaltantes.ts`). Nunca ponha aqui dado
+   * que veio do contato, do lead ou de formulário — é a porta que o escape fecha.
+   */
+  variaveisHtml?: readonly string[];
 }
 
 /** Substitui as merge tags de um texto pelos valores de `dados`. */
@@ -203,7 +211,7 @@ export function renderizarTags(
   dados: Record<string, unknown>,
   opcoes: OpcoesRender = {},
 ): string {
-  const { escapar = true, naoResolvida = "literal" } = opcoes;
+  const { escapar = true, naoResolvida = "literal", variaveisHtml = [] } = opcoes;
   if (!texto) return texto;
 
   return texto.replace(RE_TAG, (bruto, conteudo: string) => {
@@ -215,7 +223,7 @@ export function renderizarTags(
       return naoResolvida === "vazio" ? "" : bruto;
     }
     const texto2 = String(valor ?? "");
-    return escapar ? escaparHtml(texto2) : texto2;
+    return escapar && !variaveisHtml.includes(tag.caminho) ? escaparHtml(texto2) : texto2;
   });
 }
 

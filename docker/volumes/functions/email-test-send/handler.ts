@@ -40,7 +40,10 @@ export function criarHandlerTesteEmail(deps: { cliente: SupabaseClient; urlSupab
       const resposta = await (deps.buscar ?? fetch)(`${deps.urlSupabase.replace(/\/$/, "")}/functions/v1/email-send`, {
         method: "POST", headers: { Authorization: acesso.authorization, "Content-Type": "application/json" },
         body: JSON.stringify({ ...(temAvulso ? { assunto, corpo_html, corpo_texto, remetente_id: remetenteAvulso } : { template_id }),
-          destinatario_email, destinatario_nome: "Destinatário de teste", variaveis: varsFake, contexto_tipo: "teste", usuario_esperado: acesso.usuarioId }),
+          destinatario_email, destinatario_nome: "Destinatário de teste", variaveis: varsFake,
+          // A lista de exemplo é HTML nosso, como a do funil-email-dispatch — sem isto o teste mostrava as tags.
+          ...(variaveis && "docs_faltantes" in variaveis ? {} : { variaveis_html: ["docs_faltantes"] }),
+          contexto_tipo: "teste", usuario_esperado: acesso.usuarioId }),
       });
       const data: unknown = await resposta.json().catch(() => null);
       if (!resposta.ok) return json({ error: objeto(data) && typeof data.error === "string" ? data.error : "O serviço não confirmou o envio do teste." }, resposta.status);
