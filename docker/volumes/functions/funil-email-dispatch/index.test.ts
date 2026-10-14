@@ -10,7 +10,10 @@ let atender: (req: Request) => Promise<Response>
 let tabelas: string[]
 let envios: Array<Record<string, unknown>>
 let comentarios: string[]
+// Linhas da aba Atividade (gt_activity_log) — separadas dos comentários que ninguém lê.
+let atividades: Array<Record<string, unknown>>
 let listaDaTarefa: string
+let falhaNoEnvio: boolean
 
 beforeAll(async () => {
   vi.stubGlobal('Deno', {
@@ -22,14 +25,21 @@ beforeAll(async () => {
 afterAll(() => vi.unstubAllGlobals())
 
 beforeEach(() => {
-  tabelas = []; envios = []; comentarios = []; listaDaTarefa = LISTA_TCC
+  tabelas = []; envios = []; comentarios = []; atividades = []; listaDaTarefa = LISTA_TCC; falhaNoEnvio = false
   ambiente.criarCliente.mockReturnValue({
     rpc: async (nome: string, args: { p_segredo?: string }) =>
       ({ data: nome === 'funil_email_validar_gatilho' && args.p_segredo === 'segredo-certo', error: null }),
     auth: {
       getUser: async (t: string) => ({ data: { user: t === 'sessao-ana' ? { id: 'u-ana' } : t === 'sessao-ex' ? { id: 'u-ex' } : null }, error: null }),
     },
-    functions: { invoke: async (_n: string, o: { body: Record<string, unknown> }) => { envios.push(o.body); return { data: { ok: true }, error: null } } },
+    functions: {
+      invoke: async (_n: string, o: { body: Record<string, unknown> }) => {
+        envios.push(o.body)
+        return falhaNoEnvio
+          ? { data: null, error: { message: 'non-2xx', context: { json: async () => ({ error: 'Caixa Gmail desconectada' }) } } }
+          : { data: { ok: true }, error: null }
+      },
+    },
     from: (tabela: string) => {
       tabelas.push(tabela)
       const filtros: Record<string, unknown> = {}
@@ -38,12 +48,17 @@ beforeEach(() => {
         if (tabela === 'funil_email_automacoes') return { data: { id: 'aut-1', template_id: 'tpl-1', idempotencia_minutos: 1440, funil_ref: 'tcc-padrao', ativo: true }, error: null }
         if (tabela === 'gt_tasks') return { data: { id: 'task-1', title: 'TCC', aluno_id: null, status_id: 's', description: '', list_id: listaDaTarefa }, error: null }
         if (tabela === 'gt_form_submissions') return { data: { payload: { alunos: [{ nome: 'Aluno', email: 'aluno@exemplo.com' }], curso: 'Curso' } }, error: null }
+        if (tabela === 'email_templates') return { data: { remetente_id: 'rem-tcc' }, error: null }
         return { data: null, error: null }
       }
       const q = {
         select: () => q, order: () => q, limit: () => q, gte: () => q,
         eq: (k: string, v: unknown) => { filtros[k] = v; return q },
-        insert: async (v: { content: string }) => { comentarios.push(v.content); return { error: null } },
+        insert: async (v: Record<string, unknown>) => {
+          if (tabela === 'gt_activity_log') atividades.push(v)
+          else comentarios.push(String(v.content))
+          return { error: null }
+        },
         maybeSingle: async () => resolver(), single: async () => resolver(),
       }
       return q
@@ -147,5 +162,47 @@ describe('funil-email-dispatch — o que o pedido pode pedir', () => {
     expect(envios[0]).toMatchObject({ variaveis_html: ['docs_faltantes'] })
     expect((envios[0].variaveis as Record<string, string>).docs_faltantes)
       .toBe('<ul><li>Termo de Aceite</li><li>Ficha do &lt;Orientador&gt;</li></ul>')
+  })
+})
+
+describe('funil-email-dispatch — o envio aparece na aba Atividade', () => {
+  // 14/10/2026: o registro ia só para gt_task_comments, que nenhuma tela lê — quem testou
+  // "não viu nada nos comentários". A aba Atividade lê o gt_activity_log.
+  const ana = { Authorization: 'Bearer sessao-ana' }
+
+  it('envio manual: linha "email_sent" com o autor, a etapa e o destinatário', async () => {
+    expect((await chamar(ana, { force: true })).status).toBe(200)
+    expect(atividades).toEqual([expect.objectContaining({
+      task_id: 'task-1', user_id: 'u-ana', action: 'email_sent', field_changed: 'RECEPCAO', new_value: 'aluno@exemplo.com',
+    })])
+  })
+
+  it('envio automático do gatilho: linha sem autor (a tela mostra "Automação")', async () => {
+    await chamar({ 'x-funil-email-secret': 'segredo-certo' })
+    expect(atividades).toEqual([expect.objectContaining({ action: 'email_sent', user_id: null, field_changed: 'RECEPCAO' })])
+  })
+
+  it('e-mail personalizado aparece como personalizado, não como Documentos pendentes', async () => {
+    await chamar(ana, { etapa_key: 'DOCUMENTOS_PENDENTES', etapa_key_log: 'EMAIL_PERSONALIZADO', force: true, assunto_override: 'Oi', corpo_html_override: '<p>Oi</p>' })
+    expect(atividades[0]).toMatchObject({ action: 'email_sent', field_changed: 'EMAIL_PERSONALIZADO', user_id: 'u-ana' })
+  })
+
+  it('falha do envio: linha "email_failed" com o motivo real', async () => {
+    falhaNoEnvio = true
+    await chamar(ana, { force: true })
+    expect(atividades).toEqual([expect.objectContaining({ action: 'email_failed', user_id: 'u-ana', new_value: 'aluno@exemplo.com' })])
+    expect((atividades[0].metadata as { motivo: string }).motivo).toContain('Caixa Gmail desconectada')
+  })
+
+  it('gatilho recusado (Documentos pendentes sem lista): linha "email_not_sent" com o motivo', async () => {
+    await chamar({ 'x-funil-email-secret': 'segredo-certo' }, { etapa_key: 'DOCUMENTOS_PENDENTES' })
+    expect(atividades).toEqual([expect.objectContaining({ action: 'email_not_sent', user_id: null, field_changed: 'DOCUMENTOS_PENDENTES' })])
+    expect((atividades[0].metadata as { motivo: string }).motivo).toContain('Cobrar documentos')
+  })
+
+  it('recusa pela tela (vira toast) e acesso negado não deixam linha', async () => {
+    await chamar(ana, { etapa_key: 'DOCUMENTOS_PENDENTES', force: true })
+    await chamar({ Authorization: 'Bearer chave-anon' }, { force: true })
+    expect(atividades).toEqual([])
   })
 })

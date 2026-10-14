@@ -85,6 +85,36 @@ async function logComment(
   }
 }
 
+// Linha da aba Atividade (14/10/2026). O comentário acima vai para gt_task_comments, que
+// NENHUMA tela lê — quem testou mandou o e-mail e "não apareceu nada". A aba Atividade lê
+// o gt_activity_log; o texto da linha é escrito no front a partir destes campos
+// (src/components/gestor-tarefas/emailNoHistorico.ts). Sem autor = o automático da etapa.
+async function registrarNaAtividade(
+  supabase: ReturnType<typeof createClient>,
+  taskId: string,
+  linha: {
+    acao: 'email_sent' | 'email_failed' | 'email_not_sent'
+    etapa: string
+    autorId: string | null
+    destinatarios?: string[]
+    motivo?: string
+  },
+) {
+  try {
+    const { error } = await supabase.from('gt_activity_log').insert({
+      task_id: taskId,
+      user_id: linha.autorId,
+      action: linha.acao,
+      field_changed: linha.etapa,
+      new_value: linha.destinatarios?.length ? linha.destinatarios.join(', ') : null,
+      metadata: { origem: 'funil-email-dispatch', ...(linha.motivo ? { motivo: linha.motivo } : {}) },
+    })
+    if (error) console.warn('[funil-email-dispatch] gt_activity_log insert falhou:', error.message)
+  } catch (e) {
+    console.warn('[funil-email-dispatch] gt_activity_log insert falhou:', (e as Error).message)
+  }
+}
+
 const normEmail = (e: string) => e.trim().toLowerCase()
 
 Deno.serve(async (req) => {
@@ -121,6 +151,7 @@ Deno.serve(async (req) => {
   }
   // Envio manual fica assinado no comentário da tarefa.
   const autoria = acesso.tipo === 'usuario' && acesso.nome ? ` (por ${acesso.nome})` : ''
+  const autorId = acesso.tipo === 'usuario' ? acesso.usuarioId : null
 
   let body: DispatchBody
   try {
@@ -147,6 +178,9 @@ Deno.serve(async (req) => {
     // Pela tela a mensagem vira toast; o gatilho não tem tela, então fica na tarefa.
     if (acesso.tipo !== 'usuario') {
       await logComment(supabase, task_id, `⚠️ Automação de email (${etapa_key}) não disparada: ${recusa.error}`)
+      await registrarNaAtividade(supabase, task_id, {
+        acao: 'email_not_sent', etapa: etapa_key_log || etapa_key, autorId: null, motivo: recusa.error,
+      })
     }
     return json({ ok: false, error: recusa.error }, recusa.status)
   }
@@ -256,6 +290,10 @@ Deno.serve(async (req) => {
       task_id,
       `⚠️ Automação de email (${etapa_key}) não disparada: nenhum email de aluno encontrado (sem submissão, sem aluno_id e descrição sem campo Email).`,
     )
+    await registrarNaAtividade(supabase, task_id, {
+      acao: 'email_not_sent', etapa: etapa_key_log || etapa_key, autorId,
+      motivo: 'nenhum e-mail de aluno encontrado na tarefa',
+    })
     return json({ ok: true, skipped: 'no_recipients' })
   }
 
@@ -379,6 +417,9 @@ Deno.serve(async (req) => {
       task_id,
       `📧 Email da etapa **${etapa_key}** enviado para: ${enviados.map((e) => e.email).join(', ')}${autoria}.`,
     )
+    await registrarNaAtividade(supabase, task_id, {
+      acao: 'email_sent', etapa: logEtapa, autorId, destinatarios: enviados.map((e) => e.email),
+    })
   }
   if (erros.length) {
     await logComment(
@@ -386,6 +427,10 @@ Deno.serve(async (req) => {
       task_id,
       `❌ Falha ao enviar email (${etapa_key}) para: ${erros.map((e) => `${e.email} (${e.status})`).join(', ')}${autoria}.`,
     )
+    await registrarNaAtividade(supabase, task_id, {
+      acao: 'email_failed', etapa: logEtapa, autorId, destinatarios: erros.map((e) => e.email),
+      motivo: erros[0].status.replace(/^erro:\s*/, ''),
+    })
   }
 
     return json({
