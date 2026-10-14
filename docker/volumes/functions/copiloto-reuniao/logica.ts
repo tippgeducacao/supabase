@@ -193,6 +193,18 @@ export function montarContexto(d: DadosReuniao): string {
   return partes.join("\n\n");
 }
 
+/**
+ * Janela das "minhas reuniões de agora" no app: 3 h para trás (a reunião que já começou,
+ * ou que atrasou) e 12 h para a frente (o resto do dia de trabalho).
+ */
+export function janelaDasMinhas(agora: Date): { de: string; ate: string } {
+  const hora = 60 * 60 * 1000;
+  return {
+    de: new Date(agora.getTime() - 3 * hora).toISOString(),
+    ate: new Date(agora.getTime() + 12 * hora).toISOString(),
+  };
+}
+
 /** A reunião cujo horário está mais perto de agora (o mesmo link pode ter sido reusado). */
 export function maisProximaDeAgora<T extends { data_agendamento?: string | null; status?: string | null }>(
   reunioes: T[],

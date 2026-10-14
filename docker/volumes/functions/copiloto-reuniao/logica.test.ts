@@ -3,6 +3,7 @@ import {
   codigoDoMeet,
   ESQUEMA_SAIDA,
   interpretarSaida,
+  janelaDasMinhas,
   limparDicasDadas,
   limparTurnos,
   maisProximaDeAgora,
@@ -144,6 +145,15 @@ describe("montarContexto", () => {
     const texto = montarContexto({ agendamento: { pos_graduacao_interesse: "CURSO NOVO" }, lead: null, mapa: { ramos: [], perguntas: [] } });
     expect(texto).toContain("- Pós de interesse: CURSO NOVO");
     expect(texto).not.toContain("Mapa de carreira");
+  });
+});
+
+describe("janelaDasMinhas", () => {
+  it("3 h para trás (reunião em andamento ou atrasada) e 12 h para a frente", () => {
+    expect(janelaDasMinhas(new Date("2026-10-14T12:00:00Z"))).toEqual({
+      de: "2026-10-14T09:00:00.000Z",
+      ate: "2026-10-15T00:00:00.000Z",
+    });
   });
 });
 

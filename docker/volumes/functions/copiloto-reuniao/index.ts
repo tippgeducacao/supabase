@@ -8,6 +8,8 @@
 // Duas ações, sempre com o login do vendedor:
 //   * iniciar — acha a reunião pelo código do Meet (`agendamentos.link_reuniao`).
 //   * dica    — lê as informações da reunião e devolve UMA dica curta, ou nada.
+//   * minhas  — as reuniões em que quem chama é o VENDEDOR, perto de agora (o app de
+//               Windows não lê a aba do Meet: o vendedor escolhe a reunião na lista).
 //
 // De onde vêm as informações (nada é copiado nem mandado pelo navegador):
 //   * reunião e lead: `agendamentos` e `leads`, lidos com o JWT de QUEM CHAMA — a RLS
@@ -31,6 +33,7 @@ import {
   type DadosReuniao,
   ESQUEMA_SAIDA,
   interpretarSaida,
+  janelaDasMinhas,
   limparDicasDadas,
   limparTurnos,
   maisProximaDeAgora,
@@ -161,6 +164,31 @@ async function iniciar(sbUsuario: SupabaseClient, body: Record<string, unknown>)
   });
 }
 
+async function minhas(sbUsuario: SupabaseClient, userId: string) {
+  // Filtro explícito por vendedor_id: a RLS deixa diretor e coordenador verem TODAS as
+  // reuniões, e a lista é "as que eu vou conduzir".
+  const { de, ate } = janelaDasMinhas(new Date());
+  const { data } = await sbUsuario.from("agendamentos")
+    .select("id, lead_id, pos_graduacao_interesse, data_agendamento, status")
+    .eq("vendedor_id", userId).neq("status", "cancelado")
+    .gte("data_agendamento", de).lte("data_agendamento", ate)
+    .order("data_agendamento", { ascending: true }).limit(20);
+  const reunioes = data ?? [];
+  const idsLead = [...new Set(reunioes.map((r) => r.lead_id).filter(Boolean))];
+  const { data: leads } = idsLead.length
+    ? await sbUsuario.from("leads").select("id, nome").in("id", idsLead)
+    : { data: [] };
+  const nomes = new Map((leads ?? []).map((l: { id: string; nome: string | null }) => [l.id, l.nome]));
+  return json({
+    reunioes: reunioes.map((r) => ({
+      agendamento_id: r.id,
+      lead: nomes.get(r.lead_id) ?? null,
+      pos: r.pos_graduacao_interesse ?? null,
+      quando: r.data_agendamento,
+    })),
+  });
+}
+
 async function dica(sbUsuario: SupabaseClient, userId: string, body: Record<string, unknown>) {
   const inicio = Date.now();
   const turnos = limparTurnos(body?.turnos);
@@ -239,6 +267,7 @@ Deno.serve(async (req) => {
   try {
     if (body?.acao === "iniciar") return await iniciar(sbUsuario, body);
     if (body?.acao === "dica") return await dica(sbUsuario, user.id, body);
+    if (body?.acao === "minhas") return await minhas(sbUsuario, user.id);
     return json({ erro: "ação desconhecida" }, 422);
   } catch (e) {
     console.error("[copiloto-reuniao] erro", (e as Error)?.message);
