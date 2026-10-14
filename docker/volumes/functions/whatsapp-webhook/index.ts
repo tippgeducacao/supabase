@@ -1,5 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
-import { logPodcastConversaSac } from "../_shared/podcastSac.ts";
+import { ehBotaoDeRecusa, logPodcastConversaSac } from "../_shared/podcastSac.ts";
 import { baixarAnexoInbound, extrairMidiaInbound } from "../_shared/waMediaInbound.ts";
 
 const corsHeaders = {
@@ -681,19 +681,33 @@ async function handlePodcastInbound(
       anexos = await baixarAnexoInbound(supabase, midia, podcastAccessToken, "whatsapp-webhook/podcast");
     }
 
+    // Botão de RECUSA ("Agora não", "Não tenho interesse") encerra o contato: candidato vira
+    // 'recusou' e o convidado vai para a espera de 6 meses — a mesma do silêncio após os 3
+    // toques. Antes (até 14/10/2026) todo clique virava 'respondeu' = "Interessado", e quem
+    // recusou entrava na lista de agendamento. Só BOTÃO: texto digitado segue para o humano.
+    const recusa = botaoClicado !== null && ehBotaoDeRecusa(resposta);
     const { data: cands } = await supabase
       .from("pod_convite_candidatos")
       .select("id, metadata")
       .eq("professor_id", profRow.id)
-      .in("status", ["na_fila", "convidando"]);
+      .in("status", recusa ? ["na_fila", "convidando", "respondeu"] : ["na_fila", "convidando"]);
     for (const c of (cands ?? [])) {
       await supabase.from("pod_convite_candidatos")
-        .update({
-          status: "respondeu",
-          respondeu_em: new Date().toISOString(),
-          metadata: { ...(c.metadata || {}), ultima_resposta: resposta },
-        })
+        .update(recusa
+          ? { status: "recusou", metadata: { ...(c.metadata || {}), ultima_resposta: resposta, recusou_por_botao: true } }
+          : {
+            status: "respondeu",
+            respondeu_em: new Date().toISOString(),
+            metadata: { ...(c.metadata || {}), ultima_resposta: resposta },
+          })
         .eq("id", c.id);
+    }
+    if (recusa && (cands ?? []).length > 0) {
+      const seis = new Date(); seis.setMonth(seis.getMonth() + 6);
+      await supabase.from("ped_professores")
+        .update({ status_podcast: "convidar_em_6m", reconvidar_a_partir_de: seis.toISOString().slice(0, 10) })
+        .eq("id", profRow.id)
+        .eq("status_podcast", "a_convidar"); // só rebaixa quem ainda está 'a_convidar' (como o motor)
     }
 
     // Espelha a RESPOSTA no SAC pedagógico (mensagem INBOUND → card fica "aguardando resposta").

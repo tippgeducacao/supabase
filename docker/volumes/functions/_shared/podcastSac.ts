@@ -26,6 +26,20 @@ export interface PodcastConversaMsg {
   enviadaEm?: string;           // ISO; default agora
 }
 
+// Botões de RECUSA dos modelos de podcast ("Agora não" em podcast_followup_2_v2,
+// podcast_agenda_2_v2 e mais_info_podcast; "Não tenho interesse" no convite do host).
+// O whatsapp-webhook usa para encerrar o contato em vez de marcar "Interessado".
+// Comparação EXATA do rótulo, sem acento: é clique em botão, não frase solta — um
+// "agora não posso, mas semana que vem sim" digitado continua indo para o humano.
+const BOTOES_DE_RECUSA = new Set(["agora nao", "nao tenho interesse"]);
+
+export function ehBotaoDeRecusa(rotulo: string | null | undefined): boolean {
+  const t = (rotulo || "")
+    .normalize("NFD").replace(/\p{M}/gu, "")
+    .toLowerCase().replace(/\s+/g, " ").trim().replace(/[.!]+$/, "").trim();
+  return BOTOES_DE_RECUSA.has(t);
+}
+
 // Best-effort: nunca lança (o disparo/webhook não pode falhar por causa do espelho no SAC).
 export async function logPodcastConversaSac(admin: any, m: PodcastConversaMsg): Promise<void> {
   try {

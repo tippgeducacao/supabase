@@ -42,6 +42,25 @@ export const SAMPLES: Record<string, string> = {
   nome_convidado: "João Silva",
   nome_podcast: "PPGVET Cast",
   link_youtube: "https://youtube.com/watch?v=exemplo",
+  // `podcast_convite` mapeia o {{3}} como `youtube_url` (não `link_youtube`): sem esta
+  // chave o exemplo — e o {{3}} do envio de TESTE da troca de número — ia com o nome
+  // cru da variável. O envio da régua não passa por aqui.
+  youtube_url: "https://youtube.com/watch?v=exemplo",
+  // Podcast — gravação agendada (lembretes do convidado e do host, agradecimentos, link
+  // da agenda). Nenhum motor preenche estas: no SAC do CRM quem envia digita. Estão aqui
+  // porque o revisor da Meta só vê o EXEMPLO — link e usuário com nome cru são pedido de
+  // rejeição — e porque a troca de número reenvia estes mesmos exemplos ao recriar os
+  // modelos na WABA nova (e os usa como valores no envio de teste).
+  plataforma_gravacao: "Zencastr",
+  horario_gravacao: "14h",
+  host_episodio: "Maria Souza",
+  nome_host: "Maria Souza",
+  convidado_episodio: "João Silva",
+  telefone_convidado: "(11) 99999-9999",
+  link_acesso: "https://zencastr.com/ppgvet/gravacao-exemplo",
+  link_agenda: "https://calendly.com/ppgvet-podcast/gravacao",
+  link_briefing: "https://docs.google.com/document/d/exemplo",
+  login_acesso: "podcast@ppgvet.com",
   modulo: "Módulo 01",
   data_gravacao: "15 de junho de 2026",
   link_sala_aula: "https://meet.google.com/abc-defg-hij",
