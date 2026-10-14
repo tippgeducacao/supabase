@@ -7,6 +7,9 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { ensureToken, base64UrlEncode, encodeHeaderUtf8, encodeDisplayName } from "../_shared/gmail.ts";
 import { logPodcastConversaSac } from "../_shared/podcastSac.ts";
+import {
+  enviarModeloPodcast, modeloAprovadoPorUso, parametrosDoModelo, resolverVarPodcast, usosDoAgendamento,
+} from "../_shared/podcastEnvio.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -20,12 +23,8 @@ const TOQUE_TEMPLATE: Record<number, string> = {
   2: "podcast_followup_1",
   3: "podcast_followup_2",
 };
-// FASE DE AGENDAMENTO (Interessado): templates dos follow-ups 1/2/3 que empurram a gravação.
-const TOQUE_TEMPLATE_AGENDA: Record<number, string> = {
-  1: "podcast_agenda_1",
-  2: "podcast_agenda_2",
-  3: "podcast_agenda_3",
-};
+// FASE DE AGENDAMENTO (Interessado): os follow-ups 1/2/3 usam `podcast_agenda_N` — ou, se o
+// podcast tem link da agenda, `podcast_agenda_N_link` (ver usosDoAgendamento).
 
 function primeiroNome(nome?: string | null): string {
   return String(nome ?? "").trim().split(/\s+/)[0] || "Professor(a)";
@@ -100,14 +99,8 @@ function renderTemplate(corpo: string | null | undefined, params: Array<{ text: 
   params.forEach((p, i) => { t = t.split(`{{${i + 1}}}`).join(p.text ?? ""); });
   return t.trim();
 }
-// resolve o valor de uma variável do template pelo NOME semântico (variaveis_mapping)
-function resolverVar(nomeVar: string, ctx: { nome: string; podcast: string; youtube: string }): string {
-  const v = String(nomeVar ?? "").toLowerCase();
-  if (v.includes("youtube")) return ctx.youtube;
-  if (v.includes("podcast")) return ctx.podcast;
-  if (v.includes("nome") || v.includes("convidado")) return ctx.nome;
-  return "";
-}
+// O valor de cada variável sai de resolverVarPodcast (_shared/podcastEnvio.ts): a mesma
+// régua do whatsapp-webhook, que também envia modelo de podcast.
 
 Deno.serve(handler);
 
@@ -225,7 +218,7 @@ async function handler(req: Request): Promise<Response> {
         const vm = (tpl.variaveis_mapping && typeof tpl.variaveis_mapping === "object")
           ? tpl.variaveis_mapping : { "1": "nome_convidado", "2": "nome_podcast" };
         const bodyParams = Object.keys(vm).filter((k) => /^\d+$/.test(k)).sort((a, b) => Number(a) - Number(b))
-          .map((k) => ({ type: "text", text: sanitizeWaParam(resolverVar(vm[k], varCtx)) }));
+          .map((k) => ({ type: "text", text: sanitizeWaParam(resolverVarPodcast(vm[k], varCtx)) }));
 
         // ---- WhatsApp (Meta template) ----
         const to = formatPhone(c.professor?.contato_whatsapp);
@@ -321,7 +314,7 @@ async function dispatchAgenda(admin: any, candidatoId: string, json: (b: unknown
 
   const { data: c } = await admin
     .from("pod_convite_candidatos")
-    .select("id, podcast_id, professor_id, status, agenda_toque, professor:ped_professores(nome,email,contato_whatsapp), podcast:ped_podcasts(nome,youtube_url)")
+    .select("id, podcast_id, professor_id, status, agenda_toque, professor:ped_professores(nome,email,contato_whatsapp), podcast:ped_podcasts(nome,youtube_url,link_agenda)")
     .eq("id", candidatoId).maybeSingle();
   if (!c) return json({ ok: false, error: "candidato não encontrado" }, 404);
   if (c.status !== "respondeu") return json({ ok: false, error: `candidato não está em Interessado (status=${c.status})` }, 409);
@@ -332,50 +325,36 @@ async function dispatchAgenda(admin: any, candidatoId: string, json: (b: unknown
   const nome = primeiroNome(c.professor?.nome);
   const podcastNome = c.podcast?.nome ?? "podcast";
   const youtube = c.podcast?.youtube_url ?? "";
+  const linkAgenda = String(c.podcast?.link_agenda ?? "").trim() || null;
 
-  // ---- WhatsApp (Meta template 'podcast_agenda_N', se aprovado + convidado tem número) ----
+  // ---- WhatsApp: com link da agenda, o texto novo ('podcast_agenda_N_link'); senão, ou
+  //      enquanto ele não for aprovado, o antigo ('podcast_agenda_N'). ----
   const { data: waRow } = await admin.rpc("get_wa_account_podcast");
   const wa = Array.isArray(waRow) ? waRow[0] : waRow;
-  const { data: tpls } = await admin
-    .from("ped_wa_templates")
-    .select("nome, idioma, corpo, variaveis_mapping")
-    .eq("uso_cadencia", TOQUE_TEMPLATE_AGENDA[proxToque]).eq("status", "aprovado").eq("ativo", true).limit(1);
-  const tpl = (tpls ?? [])[0];
+  const tpl = await modeloAprovadoPorUso(admin, usosDoAgendamento(proxToque, linkAgenda));
 
   const to = formatPhone(c.professor?.contato_whatsapp);
   let waOk = false;
   if (wa?.phone_number_id && wa?.access_token && tpl && to) {
-    const vm = (tpl.variaveis_mapping && typeof tpl.variaveis_mapping === "object")
-      ? tpl.variaveis_mapping : { "1": "nome_convidado", "2": "nome_podcast" };
-    const bodyParams = Object.keys(vm).filter((k) => /^\d+$/.test(k)).sort((a, b) => Number(a) - Number(b))
-      .map((k) => ({ type: "text", text: sanitizeWaParam(resolverVar(vm[k], { nome, podcast: podcastNome, youtube })) }));
-    const r = await fetch(`${META_GRAPH}/${wa.phone_number_id}/messages`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${wa.access_token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        messaging_product: "whatsapp", to, type: "template",
-        template: { name: tpl.nome, language: { code: tpl.idioma || "pt_BR" }, components: [{ type: "body", parameters: bodyParams }] },
-      }),
-    });
-    waOk = r.ok;
-    const waResp = await r.json().catch(() => ({} as any));
-    if (r.ok) {
-      const textoAgenda = renderTemplate(tpl.corpo, bodyParams) || `Follow-up de agendamento · ${podcastNome}`;
-      await logPodcastConversaSac(admin, {
-        professorId: c.professor_id, telefone: c.professor?.contato_whatsapp ?? null, nome: c.professor?.nome ?? null,
-        podcastId: c.podcast_id, waAccountId: wa.id ?? null, direcao: "outbound",
-        conteudo: textoAgenda, waMessageId: waResp?.messages?.[0]?.id ?? null, templateName: tpl.nome, enviadaEm: nowIso,
-      });
+    const { params, vazios } = parametrosDoModelo(tpl.variaveis_mapping, { nome, podcast: podcastNome, youtube, linkAgenda });
+    if (vazios.length) {
+      // a Meta recusaria o modelo inteiro; melhor não gastar o envio
+      console.error("[pod-dispatch agenda] variável sem valor", c.id, tpl.nome, vazios.join(","));
     } else {
-      console.error("[pod-dispatch agenda] wa fail", c.id, JSON.stringify(waResp));
+      const env = await enviarModeloPodcast(admin, {
+        wa, to, tpl, params, enviadaEm: nowIso,
+        sac: { professorId: c.professor_id, telefone: c.professor?.contato_whatsapp ?? null, nome: c.professor?.nome ?? null, podcastId: c.podcast_id },
+      });
+      waOk = env.ok;
+      if (!env.ok) console.error("[pod-dispatch agenda] wa fail", c.id, JSON.stringify(env.erro));
     }
   }
 
-  // ---- E-mail (best-effort; templates 0704/5/6) ----
+  // ---- E-mail (best-effort; templates 0704/5/6) — leva o link da agenda quando houver ----
   let emailOk = false;
   const emailCtx = await resolverEmail(admin, caixaId, TEMPLATE_EMAIL_AGENDA);
   if (emailCtx && c.professor?.email) {
-    emailOk = await enviarEmail(emailCtx, c.professor.email, nome, podcastNome, youtube, proxToque, wa?.phone_number ?? "", "agenda");
+    emailOk = await enviarEmail(emailCtx, c.professor.email, nome, podcastNome, youtube, proxToque, wa?.phone_number ?? "", "agenda", linkAgenda);
   }
 
   if (!waOk && !emailOk) {
@@ -444,20 +423,37 @@ async function resolverEmail(admin: any, caixaId: string | null, idMap: Record<n
   return { admin, caixa, integ, tplEmail };
 }
 
+// Parágrafo do link da agenda (Calendly) nos e-mails de AGENDAMENTO. Os textos de e-mail
+// pedem "me diga um ou dois dias/horários" — o link entra como o caminho mais curto, sem
+// desdizer o texto que a equipe edita.
+function paragrafoAgenda(link: string): string {
+  const l = htmlEscape(link);
+  return `<p>Se preferir, já pode escolher o dia e o horário direto na agenda: 🔗 <a href="${l}">${l}</a></p>`;
+}
+
 // Renderiza um template EDITÁVEL da aba Templates com os placeholders resolvidos por lead.
-function renderTemplateEmail(tpl: TplEmail, nome: string, podcast: string, youtube: string, waNumero: string): { assunto: string; html: string } {
+// `{{link_agenda}}` vira o link; se o texto não tiver o marcador e houver link, o parágrafo
+// do link entra antes do botão de WhatsApp.
+function renderTemplateEmail(tpl: TplEmail, nome: string, podcast: string, youtube: string, waNumero: string, linkAgenda: string | null = null): { assunto: string; html: string } {
   const ytHtml = youtube ? `🎬 <a href="${htmlEscape(youtube)}">${htmlEscape(youtube)}</a>` : "";
   const botao = blocoWhatsapp(nome, podcast, waNumero);
+  const temMarcador = String(tpl.corpo ?? "").includes("{{link_agenda}}");
+  const linkHtml = linkAgenda ? `<a href="${htmlEscape(linkAgenda)}">${htmlEscape(linkAgenda)}</a>` : "";
   let html = String(tpl.corpo ?? "")
     .split("{{nome}}").join(htmlEscape(nome))
     .split("{{podcast}}").join(htmlEscape(podcast))
     .split("{{link_youtube}}").join(ytHtml)
+    .split("{{link_agenda}}").join(linkHtml)
     .split("{{botao_whatsapp}}").join(botao);
   // GARANTIA: se o usuário removeu o {{botao_whatsapp}} ao editar, reinjeta o botão antes da
   // assinatura (o botão de WhatsApp nunca some do e-mail).
   if (!html.includes("Agendar episódio no WhatsApp")) {
     const antes = html.replace(/(<p>\s*Um abra[çc]o)/i, `${botao}$1`);
     html = antes !== html ? antes : html + botao;
+  }
+  if (linkAgenda && !temMarcador) {
+    const i = html.indexOf(`<div style="margin:28px 0;text-align:center;">`);
+    html = i >= 0 ? html.slice(0, i) + paragrafoAgenda(linkAgenda) + html.slice(i) : html + paragrafoAgenda(linkAgenda);
   }
   // se o podcast não tem canal, remove o parágrafo do canal que ficaria vazio
   if (!youtube) html = html.replace(/<p>[^<]*canal:\s*<\/p>/gi, "");
@@ -467,7 +463,7 @@ function renderTemplateEmail(tpl: TplEmail, nome: string, podcast: string, youtu
 }
 
 // Fallback embutido da FASE DE AGENDAMENTO (só se o template editável 0704/5/6 for apagado).
-function corpoEmailAgendaFallback(nome: string, podcast: string, toque: number, waNumero: string): { assunto: string; html: string } {
+function corpoEmailAgendaFallback(nome: string, podcast: string, toque: number, waNumero: string, linkAgenda: string | null = null): { assunto: string; html: string } {
   const p = htmlEscape(podcast);
   const assunto = toque === 1
     ? `Vamos agendar sua gravação no ${podcast}?`
@@ -482,14 +478,17 @@ function corpoEmailAgendaFallback(nome: string, podcast: string, toque: number, 
     corpo = `<p>Estou passando uma última vez para fecharmos a agenda da sua gravação no <strong>${p} Podcast</strong> 🙂.</p>` +
       `<p>Se ainda tiver interesse, é só me dizer um horário que funcione. Se preferir deixar para mais para frente, sem problema — é só me avisar.</p>`;
   }
-  const html = `<p>Olá ${htmlEscape(nome)}, tudo bem?</p>` + corpo + blocoWhatsapp(nome, podcast, waNumero) + `<p>Um abraço,<br>Janaína · PPGVET</p>`;
+  const html = `<p>Olá ${htmlEscape(nome)}, tudo bem?</p>` + corpo + (linkAgenda ? paragrafoAgenda(linkAgenda) : "") +
+    blocoWhatsapp(nome, podcast, waNumero) + `<p>Um abraço,<br>Janaína · PPGVET</p>`;
   return { assunto, html };
 }
 
-function corpoEmail(nome: string, podcast: string, youtube: string, toque: number, waNumero: string, tplEmail?: Map<number, TplEmail>, fase: "fria" | "agenda" = "fria"): { assunto: string; html: string } {
+function corpoEmail(nome: string, podcast: string, youtube: string, toque: number, waNumero: string, tplEmail?: Map<number, TplEmail>, fase: "fria" | "agenda" = "fria", linkAgenda: string | null = null): { assunto: string; html: string } {
+  // O link da agenda só existe no AGENDAMENTO: na régua fria o convidado ainda não disse que quer.
+  const link = fase === "agenda" ? linkAgenda : null;
   const tpl = tplEmail?.get(toque);
-  if (tpl) return renderTemplateEmail(tpl, nome, podcast, youtube, waNumero);
-  if (fase === "agenda") return corpoEmailAgendaFallback(nome, podcast, toque, waNumero);
+  if (tpl) return renderTemplateEmail(tpl, nome, podcast, youtube, waNumero, link);
+  if (fase === "agenda") return corpoEmailAgendaFallback(nome, podcast, toque, waNumero, link);
   // ---- fallback embutido (caso o template tenha sido apagado/desativado na UI) ----
   const p = htmlEscape(podcast);
   const assunto = toque === 1
@@ -517,9 +516,9 @@ function corpoEmail(nome: string, podcast: string, youtube: string, toque: numbe
   return { assunto, html };
 }
 
-async function enviarEmail(ctx: any, to: string, nome: string, podcast: string, youtube: string, toque: number, waNumero: string, fase: "fria" | "agenda" = "fria"): Promise<boolean> {
+async function enviarEmail(ctx: any, to: string, nome: string, podcast: string, youtube: string, toque: number, waNumero: string, fase: "fria" | "agenda" = "fria", linkAgenda: string | null = null): Promise<boolean> {
   try {
-    const { assunto, html } = corpoEmail(nome, podcast, youtube, toque, waNumero, ctx.tplEmail, fase);
+    const { assunto, html } = corpoEmail(nome, podcast, youtube, toque, waNumero, ctx.tplEmail, fase, linkAgenda);
     const token = await ensureToken(ctx.admin, ctx.integ);
     const raw = [
       `From: ${encodeDisplayName(ctx.caixa.nome_exibicao || "PPGVET")} <${ctx.caixa.email_caixa}>`,

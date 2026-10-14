@@ -33,11 +33,31 @@ export interface PodcastConversaMsg {
 // "agora não posso, mas semana que vem sim" digitado continua indo para o humano.
 const BOTOES_DE_RECUSA = new Set(["agora nao", "nao tenho interesse"]);
 
-export function ehBotaoDeRecusa(rotulo: string | null | undefined): boolean {
-  const t = (rotulo || "")
+function normalizarRotulo(rotulo: string | null | undefined): string {
+  return (rotulo || "")
     .normalize("NFD").replace(/\p{M}/gu, "")
-    .toLowerCase().replace(/\s+/g, " ").trim().replace(/[.!]+$/, "").trim();
-  return BOTOES_DE_RECUSA.has(t);
+    .toLowerCase().replace(/[,.!]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+export function ehBotaoDeRecusa(rotulo: string | null | undefined): boolean {
+  return BOTOES_DE_RECUSA.has(normalizarRotulo(rotulo));
+}
+
+// Botões que pedem uma RESPOSTA imediata, conforme o fluxo do time (documento de 13/10/2026):
+//  · "Quero saber mais" → mais_info_podcast (como funciona a gravação);
+//  · "Tenho interesse" / "Vamos agendar" / "Sim, vamos agendar" → o link da agenda.
+// Não é follow-up (esse segue no clique do atendente, decisão do Rafael): é responder, na
+// hora, a um pedido que o convidado acabou de fazer. Mesma comparação exata da recusa.
+export type AcaoCliquePodcast = "mais_info" | "agenda";
+const BOTOES_DE_ACAO: Record<string, AcaoCliquePodcast> = {
+  "quero saber mais": "mais_info",
+  "tenho interesse": "agenda",
+  "vamos agendar": "agenda",
+  "sim vamos agendar": "agenda",
+};
+
+export function acaoDoCliquePodcast(rotulo: string | null | undefined): AcaoCliquePodcast | null {
+  return BOTOES_DE_ACAO[normalizarRotulo(rotulo)] ?? null;
 }
 
 // Best-effort: nunca lança (o disparo/webhook não pode falhar por causa do espelho no SAC).

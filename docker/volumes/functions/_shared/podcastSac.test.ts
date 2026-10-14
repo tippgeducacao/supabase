@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ehBotaoDeRecusa } from "./podcastSac";
+import { acaoDoCliquePodcast, ehBotaoDeRecusa } from "./podcastSac";
 
 /**
  * O clique em "Agora não" encerra o convite de podcast (candidato 'recusou', convidado em
@@ -30,5 +30,28 @@ describe("ehBotaoDeRecusa", () => {
     expect(ehBotaoDeRecusa("agora não posso, mas semana que vem sim")).toBe(false);
     expect(ehBotaoDeRecusa("")).toBe(false);
     expect(ehBotaoDeRecusa(null)).toBe(false);
+  });
+});
+
+/**
+ * Clique que pede resposta na hora. O que se protege: cada botão dos modelos aprovados cai
+ * na ação certa, e recusa/lembrete NUNCA disparam mensagem automática.
+ */
+describe("acaoDoCliquePodcast", () => {
+  it("'Quero saber mais' pede o mais_info; interesse e agendar pedem o link", () => {
+    expect(acaoDoCliquePodcast("Quero saber mais")).toBe("mais_info");
+    expect(acaoDoCliquePodcast("Tenho interesse")).toBe("agenda");
+    expect(acaoDoCliquePodcast("Vamos agendar")).toBe("agenda");
+    expect(acaoDoCliquePodcast("Sim, vamos agendar")).toBe("agenda");
+  });
+
+  it("recusa, lembrete e agendamento já feito não respondem nada", () => {
+    for (const rotulo of [
+      "Agora não", "Não tenho interesse", "Indicar alguém", "Já agendei", "Não consegui acessar",
+      "Prefiro outro horário", "Tenho uma dúvida", "Confirmado", "Preciso reagendar", "Tudo certo",
+      "Tive um imprevisto", "Escolher horário", "Falar depois", "tenho interesse sim, mas só em dezembro",
+    ]) {
+      expect(acaoDoCliquePodcast(rotulo), rotulo).toBeNull();
+    }
   });
 });
