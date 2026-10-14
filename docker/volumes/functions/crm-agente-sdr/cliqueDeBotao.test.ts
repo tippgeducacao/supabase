@@ -73,6 +73,9 @@ describe('convite com horário de conversa', () => {
     expect(horariosDeConversa(VENDA)).toEqual(['13h30', '16h30']);
     expect(horariosDeConversa('Sua participação na aula do dia 04/11 às 19h está confirmada!')).toEqual([]);
     expect(horariosDeConversa('Te espero amanhã para a reunião das 10:15')).toEqual(['10h15']);
+    // Lembrete de reunião já marcada não é convite.
+    expect(horariosDeConversa('Lembrete: sua reunião com o monitor é amanhã às 10h. Consegue confirmar?')).toEqual([]);
+    expect(horariosDeConversa('Sua conversa está confirmada para hoje às 15h')).toEqual([]);
   });
 
   it('com a leitura ligada, a nota diz que o clique aceita a conversa e que o resto é gancho', async () => {

@@ -58,12 +58,14 @@ async function mensagemClicada(supabase: Banco, telefone: string, id: string) {
 // horários: 11h ou 18h", botão "Confirmar participação". A IA leu como inscrição no módulo e foi atrás
 // de horário e local dele. Nesses disparos o módulo, as vagas e as bolsas são o gancho; o que se
 // confirma é a conversa com o monitor. Na semana, 13.250 templates ofereciam horário de conversa.
-const RE_CONVERSA = /\b(?:conversa|conversar|reuni[aã]o|meet|bate[- ]papo|atendimento)\b/i;
+const RE_CONVERSA = /\b(?:conversa|conversar|reuni[aã]o|meet|bate[- ]papo)\b/i;
+// Lembrete de reunião JÁ marcada ("sua reunião é amanhã às 10h") não é convite: o clique confirma o que existe.
+const RE_JA_MARCADA = /\b(?:sua (?:reuni[aã]o|conversa)|lembrete|agendad[ao]|marcad[ao]|est[aá] confirmad[ao])\b/i;
 const RE_HORA = /\b([01]?\d|2[0-3])(?::([0-5]\d))?\s?h(?:([0-5]\d))?\b|\b([01]?\d|2[0-3]):([0-5]\d)\b/gi;
 
 /** Os horários de conversa que a mensagem oferece ("11h", "13h30"), ou [] se ela não oferece. */
 export function horariosDeConversa(texto: string): string[] {
-  if (!RE_CONVERSA.test(texto)) return [];
+  if (!RE_CONVERSA.test(texto) || RE_JA_MARCADA.test(texto)) return [];
   const horas: string[] = [];
   for (const m of texto.matchAll(RE_HORA)) {
     const h = m[1] ?? m[4];
