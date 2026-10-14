@@ -4,6 +4,8 @@ import {
   ESQUEMA_SAIDA,
   interpretarSaida,
   janelaDasMinhas,
+  lerRespostaLuna,
+  pedidoLuna,
   limparDicasDadas,
   limparTurnos,
   maisProximaDeAgora,
@@ -184,5 +186,36 @@ describe("maisProximaDeAgora", () => {
     expect(maisProximaDeAgora(lista, agora)?.id).toBe("valida");
     expect(maisProximaDeAgora([lista[0]], agora)?.id).toBe("cancelada");
     expect(maisProximaDeAgora([], agora)).toBeNull();
+  });
+});
+
+describe("Luna 6", () => {
+  it("pedido: instruções fixas primeiro, saída presa ao mesmo esquema da dica", () => {
+    const p = pedidoLuna({ modelo: "gpt-6-luna", esforco: "low", instrucoes: "PROMPT + REUNIÃO", pedido: "Lead: achei caro" });
+    expect(p).toMatchObject({
+      model: "gpt-6-luna", store: false, instructions: "PROMPT + REUNIÃO",
+      input: [{ role: "user", content: "Lead: achei caro" }], reasoning: { effort: "low" },
+      text: { format: { type: "json_schema", strict: true, schema: ESQUEMA_SAIDA } },
+    });
+  });
+
+  it("resposta com pergunta vira a mesma dica do Haiku, com uso e modelo", () => {
+    const r = lerRespostaLuna({
+      model: "gpt-6-luna-2026-09-30",
+      output: [
+        { type: "reasoning" },
+        { type: "message", content: [{ type: "output_text", text: '{"mostrar":true,"tipo":"pergunta","texto":"A cooperativa tem plano de carreira?"}' }] },
+      ],
+      usage: { input_tokens: 3200, input_tokens_details: { cached_tokens: 2944 }, output_tokens: 90, output_tokens_details: { reasoning_tokens: 40 } },
+    });
+    expect(r.dica).toEqual({ tipo: "pergunta", texto: "A cooperativa tem plano de carreira?" });
+    expect(r.modelo).toBe("gpt-6-luna-2026-09-30");
+    expect(r.uso).toEqual({ entrada: 3200, cacheLido: 2944, saida: 90, raciocinio: 40 });
+  });
+
+  it("silêncio, recusa ou resposta sem mensagem = nada a mostrar", () => {
+    expect(lerRespostaLuna({ output: [{ type: "message", content: [{ type: "output_text", text: '{"mostrar":false,"tipo":"pergunta","texto":""}' }] }] }).dica).toBeNull();
+    expect(lerRespostaLuna({ output: [{ type: "message", content: [{ type: "refusal", refusal: "não" }] }] }).dica).toBeNull();
+    expect(lerRespostaLuna({}).dica).toBeNull();
   });
 });

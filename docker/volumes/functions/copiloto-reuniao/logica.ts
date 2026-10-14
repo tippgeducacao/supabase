@@ -86,6 +86,54 @@ export function interpretarSaida(texto: string | null | undefined): Dica | null 
   return { tipo, texto: dica.slice(0, MAX_TEXTO_DICA) };
 }
 
+// ── Luna 6 (OpenAI, Responses API) ───────────────────────────────────────────
+
+/**
+ * Pedido da pergunta ao vivo para a Luna. As instruções (prompt + informações da reunião)
+ * vêm primeiro e iguais a cada fala: é o prefixo que o cache automático da OpenAI reaproveita.
+ */
+export function pedidoLuna(p: { modelo: string; esforco: string; instrucoes: string; pedido: string }) {
+  return {
+    model: p.modelo,
+    store: false,
+    instructions: p.instrucoes,
+    input: [{ role: "user", content: p.pedido }],
+    reasoning: { effort: p.esforco },
+    // inclui o raciocínio: com esforço baixo sobra folga para a frase
+    max_output_tokens: 2000,
+    text: { format: { type: "json_schema", name: "dica_do_copiloto", schema: ESQUEMA_SAIDA, strict: true } },
+  };
+}
+
+type RespostaLuna = {
+  model?: string;
+  output?: Array<{ type?: string; content?: Array<{ type?: string; text?: string; refusal?: string }> }>;
+  usage?: {
+    input_tokens?: number;
+    input_tokens_details?: { cached_tokens?: number };
+    output_tokens?: number;
+    output_tokens_details?: { reasoning_tokens?: number };
+  };
+};
+
+/** A resposta da Luna vira a mesma dica do Haiku. Recusa ou texto vazio = nada a mostrar. */
+export function lerRespostaLuna(resposta: RespostaLuna) {
+  const partes = (resposta.output ?? []).filter((i) => i?.type === "message").flatMap((i) => i.content ?? []);
+  const recusou = partes.some((c) => c?.type === "refusal");
+  const texto = partes.filter((c) => c?.type === "output_text").map((c) => c.text ?? "").join("");
+  const u = resposta.usage ?? {};
+  return {
+    dica: recusou ? null : interpretarSaida(texto),
+    modelo: resposta.model ?? "luna",
+    uso: {
+      entrada: u.input_tokens ?? null,
+      cacheLido: u.input_tokens_details?.cached_tokens ?? null,
+      saida: u.output_tokens ?? null,
+      raciocinio: u.output_tokens_details?.reasoning_tokens ?? null,
+    },
+  };
+}
+
 // ── As informações da reunião (bloco cacheado do prompt) ─────────────────────
 
 export type DadosReuniao = {

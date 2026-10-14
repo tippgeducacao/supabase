@@ -37,6 +37,8 @@ import {
   ESQUEMA_SAIDA,
   interpretarSaida,
   janelaDasMinhas,
+  lerRespostaLuna,
+  pedidoLuna,
   limparDicasDadas,
   limparTurnos,
   maisProximaDeAgora,
@@ -56,6 +58,29 @@ const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const MODELO = Deno.env.get("COPILOTO_REUNIAO_MODEL") ?? "claude-haiku-5-5";
 const SEM_RACIOCINIO = MODELO.startsWith("claude-haiku");
 const PRAZO_IA_MS = 12_000;
+
+// Perguntas ao vivo pela Luna 6 (gpt-6-luna, a mesma do João) desde 14/10/2026, a pedido do
+// Gustavo. Mesma chave do agente SDR. O Haiku acima vira a reserva: Luna fora do ar, sem
+// chave ou com erro ⇒ a pergunta sai pelo Haiku, sem o vendedor perceber.
+// Trocas sem deploy de código: COPILOTO_REUNIAO_PROVEDOR (openai | anthropic),
+// COPILOTO_REUNIAO_MODELO_OPENAI e COPILOTO_REUNIAO_ESFORCO_OPENAI (none | low | medium | high).
+const PROVEDOR_DICA = Deno.env.get("COPILOTO_REUNIAO_PROVEDOR") ?? "openai";
+const MODELO_OPENAI = Deno.env.get("COPILOTO_REUNIAO_MODELO_OPENAI") ?? "gpt-6-luna";
+const ESFORCO_OPENAI = Deno.env.get("COPILOTO_REUNIAO_ESFORCO_OPENAI") ?? "low";
+const CHAVE_OPENAI = Deno.env.get("AGENTE_SDR_OPENAI_KEY") ?? Deno.env.get("OPENAI_API_KEY") ?? "";
+
+/** Uma pergunta pela Luna (Responses API, saída presa ao mesmo esquema do Haiku). */
+async function dicaPelaLuna(contexto: string, pedido: string) {
+  const r = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${CHAVE_OPENAI}` },
+    signal: AbortSignal.timeout(PRAZO_IA_MS),
+    body: JSON.stringify(pedidoLuna({ modelo: MODELO_OPENAI, esforco: ESFORCO_OPENAI, instrucoes: `${PROMPT_BASE}\n\n${contexto}`, pedido })),
+  });
+  const resposta = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`Luna ${r.status}: ${JSON.stringify(resposta?.error ?? resposta).slice(0, 300)}`);
+  return lerRespostaLuna(resposta);
+}
 
 // Resumo do lead: uma vez por reunião, antes de começar — aqui vale mais acertar que ser
 // rápido. Opus 5.5 com esforço baixo; troca pelo secret COPILOTO_REUNIAO_MODELO_RESUMO.
@@ -301,6 +326,23 @@ async function dica(sbUsuario: SupabaseClient, userId: string, body: Record<stri
     }
   }
 
+  const pedido = montarPedido(turnos, limparDicasDadas(body?.dicas_dadas));
+
+  // 1º a Luna 6 (decisão do Gustavo, 14/10/2026); falhou, o Haiku responde no lugar
+  if (PROVEDOR_DICA === "openai" && CHAVE_OPENAI) {
+    try {
+      const r = await dicaPelaLuna(contexto, pedido);
+      const ms = Date.now() - inicio;
+      console.log(JSON.stringify({
+        fn: "copiloto-reuniao", usuario: userId, agendamento: agendamentoId, ms, mostrou: !!r.dica, modelo: r.modelo,
+        entrada: r.uso.entrada, cache_lido: r.uso.cacheLido, saida: r.uso.saida, raciocinio: r.uso.raciocinio,
+      }));
+      return json({ dica: r.dica, ms, modelo: r.modelo });
+    } catch (e) {
+      console.error("[copiloto-reuniao] luna, indo para o haiku", (e as Error)?.message);
+    }
+  }
+
   const chave = await chaveAnthropic();
   if (!chave) return json({ dica: null, aviso: "IA sem chave configurada. Avise o TI." });
 
@@ -315,7 +357,7 @@ async function dica(sbUsuario: SupabaseClient, userId: string, body: Record<stri
         { type: "text", text: PROMPT_BASE },
         { type: "text", text: contexto, cache_control: { type: "ephemeral" } },
       ],
-      messages: [{ role: "user", content: montarPedido(turnos, limparDicasDadas(body?.dicas_dadas)) }],
+      messages: [{ role: "user", content: pedido }],
     } as never) as Anthropic.Message;
 
     const texto = resposta.content.find((b): b is Anthropic.TextBlock => b.type === "text")?.text;
@@ -324,9 +366,9 @@ async function dica(sbUsuario: SupabaseClient, userId: string, body: Record<stri
     console.log(JSON.stringify({
       fn: "copiloto-reuniao", usuario: userId, agendamento: agendamentoId, ms, mostrou: !!saida,
       entrada: resposta.usage.input_tokens, cache_lido: resposta.usage.cache_read_input_tokens,
-      cache_escrito: resposta.usage.cache_creation_input_tokens, saida: resposta.usage.output_tokens,
+      cache_escrito: resposta.usage.cache_creation_input_tokens, saida: resposta.usage.output_tokens, modelo: resposta.model,
     }));
-    return json({ dica: saida, ms });
+    return json({ dica: saida, ms, modelo: resposta.model });
   } catch (e) {
     console.error("[copiloto-reuniao] ia", (e as Error)?.message);
     if (e instanceof Anthropic.AuthenticationError || e instanceof Anthropic.PermissionDeniedError) {
