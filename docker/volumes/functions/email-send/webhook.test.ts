@@ -13,6 +13,8 @@ const teste = vi.hoisted(() => ({
 vi.mock("https://esm.sh/@supabase/supabase-js@2.45.0", () => ({
   createClient: () => ({
     auth: { getUser: async () => ({ data: { user: null } }) },
+    // Reserva da conta Resend (14/10/2026): trava aberta, uso registrado sem efeito aqui.
+    rpc: async (nome: string) => ({ data: nome === "email_resend_cota_liberar" ? { liberado: true } : null, error: null }),
     from(tabela: string) {
       let insercao: Record<string, unknown> | null = null;
       const resposta = () => {

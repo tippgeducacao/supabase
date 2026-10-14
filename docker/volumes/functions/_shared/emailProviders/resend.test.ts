@@ -33,6 +33,17 @@ describe("ResendProvider", () => {
     });
   });
 
+  it("devolve o uso do ciclo da conta lido em x-resend-monthly-quota (reserva de 14/10/2026)", async () => {
+    const comCabecalho = (valor: string) => vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ id: "mensagem-1" }), { headers: { "x-resend-monthly-quota": valor } }));
+    expect(await new ResendProvider({ apiKey: "teste", fetcher: comCabecalho("64634") }).send(EMAIL))
+      .toStrictEqual({ providerMessageId: "mensagem-1", usoMensalConta: 64634 });
+    for (const invalido of ["", "abc", "-1", "1.5", "99999999999"]) {
+      expect(await new ResendProvider({ apiKey: "teste", fetcher: comCabecalho(invalido) }).send(EMAIL))
+        .toStrictEqual({ providerMessageId: "mensagem-1" });
+    }
+  });
+
   it("exige chave e idempotência antes de chamar a rede", async () => {
     const fetcher = vi.fn<typeof fetch>();
     await expect(new ResendProvider({ apiKey: "", fetcher }).send(EMAIL)).rejects.toMatchObject({ codigo: "resend_sem_credencial" });

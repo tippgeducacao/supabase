@@ -49,7 +49,19 @@ function traduzirErro(status: number, corpo: unknown): ErroEnvio {
   });
 }
 
-async function requisitarResend(caminho: string, init: RequestInit, opcoes: OpcoesResend): Promise<unknown> {
+/** `x-resend-monthly-quota` = uso do ciclo da conta inteira. Só número inteiro vale. */
+export function lerUsoMensalResend(cabecalhos: Headers): number | undefined {
+  const valor = cabecalhos.get("x-resend-monthly-quota")?.trim();
+  if (!valor || !/^\d{1,9}$/.test(valor)) return undefined;
+  return Number(valor);
+}
+
+async function requisitarResend(
+  caminho: string,
+  init: RequestInit,
+  opcoes: OpcoesResend,
+  aoAceitar?: (cabecalhos: Headers) => void,
+): Promise<unknown> {
   const apiKey = (opcoes.apiKey ?? lerEnv("RESEND_API_KEY"))?.trim();
   if (!apiKey) throw new ErroEnvio("Configure a chave de API do Resend no servidor.", {
     codigo: "resend_sem_credencial", repetivel: false,
@@ -63,6 +75,7 @@ async function requisitarResend(caminho: string, init: RequestInit, opcoes: Opco
     });
     const corpo: unknown = await resposta.json().catch(() => null);
     if (!resposta.ok) throw traduzirErro(resposta.status, corpo);
+    aoAceitar?.(resposta.headers);
     return corpo;
   } catch (erro) {
     if (erro instanceof ErroEnvio) throw erro;
@@ -83,6 +96,7 @@ export class ResendProvider implements EmailProvider {
         codigo: "invalid_idempotency_key", repetivel: false,
       });
     }
+    let usoMensalConta: number | undefined;
     const corpo = await requisitarResend("/emails", {
       method: "POST",
       headers: { "Idempotency-Key": msg.idempotencyKey },
@@ -98,14 +112,14 @@ export class ResendProvider implements EmailProvider {
           ...(a.contentType ? { content_type: a.contentType } : {}),
         })) } : {}),
       }),
-    }, this.opcoes);
+    }, this.opcoes, (cabecalhos) => { usoMensalConta = lerUsoMensalResend(cabecalhos); });
     const id = corpo && typeof corpo === "object" && "id" in corpo ? corpo.id : undefined;
     if (typeof id !== "string" || !/^[a-zA-Z0-9_-]{1,256}$/.test(id)) {
       throw new ErroEnvio("O Resend respondeu sem identificar o envio. Confira o resultado antes de reenviar.", {
         codigo: "resend_resposta_invalida", repetivel: false,
       });
     }
-    return { providerMessageId: id };
+    return { providerMessageId: id, ...(usoMensalConta != null ? { usoMensalConta } : {}) };
   }
 }
 

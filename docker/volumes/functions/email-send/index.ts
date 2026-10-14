@@ -22,6 +22,7 @@ import { resolverModeloCampanhaAB } from "./campanhaAB.ts";
 import { expandirVariaveis, renderizarTags } from "../_shared/emailBuilder/mergeTags.ts";
 import { respostaOpcoesCampanhas } from "../_shared/emailCampanhasCapacidades.ts";
 import { autorizarEnvioEmail, conferirContaEnvioEmail, ErroAcessoEnvioEmail } from "../_shared/emailSendAuth.ts";
+import { CODIGO_RESERVA_RESEND, lerLiberacaoCotaResend, motivoReservaResend, type LiberacaoCotaResend } from "../_shared/emailCotaResend.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -503,6 +504,34 @@ Deno.serve(async (req) => {
 
     // --- Motores de disparo (Resend/SES; SMTP só com override explícito em dev) ---
     if (provider === "ses" || provider === "resend") {
+      // Reserva da conta Resend para outros sistemas (14/10/2026): o PPGVET para quando o uso
+      // da CONTA chega a limite - reserva (200.000 - 5.000). A régua é do banco
+      // (`email_resend_cota_liberar`); consulta que falha LIBERA — a trava protege a reserva,
+      // mas não pode derrubar todo e-mail do sistema por erro de leitura.
+      const usaContaResend = provider === "resend" && provedorEfetivo(provider) === "resend";
+      let cota: LiberacaoCotaResend | null = null;
+      if (usaContaResend) {
+        const { data: liberacao, error: erroCota } = await supabaseAdmin.rpc("email_resend_cota_liberar");
+        if (erroCota) {
+          console.warn("[email-send] reserva do Resend não conferida; envio liberado", { envio: log.id, motivo: erroCota.message });
+        } else {
+          cota = lerLiberacaoCotaResend(liberacao);
+          if (!cota.liberado) {
+            const motivo = motivoReservaResend(cota);
+            await supabaseAdmin.from("emails_enviados").update({
+              status: "falhou", erro_msg: `${CODIGO_RESERVA_RESEND}: ${motivo}`.slice(0, 500),
+            }).eq("id", log.id).eq("status", "enfileirado");
+            // 429 de propósito: é o que faz o disparador PAUSAR a campanha em vez de gastar a
+            // lista inteira em falhas (email-campaign-dispatcher).
+            return new Response(JSON.stringify({
+              error: "Limite do PPGVET no Resend atingido", details: motivo, codigo: CODIGO_RESERVA_RESEND,
+              log_id: log.id, rate_limited: true,
+            }), { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+          }
+          if (cota.sonda) console.info("[email-send] reserva do Resend: envio-sonda para reler o uso do ciclo", { envio: log.id });
+        }
+      }
+
       const cabecalhos: Record<string, string> = {};
       if (urlDescadastro) {
         cabecalhos["List-Unsubscribe"] = `<${urlDescadastro}>`;
@@ -511,7 +540,7 @@ Deno.serve(async (req) => {
 
       try {
         const provedor = obterProvedor({ doRemetente: rem.provider });
-        const { providerMessageId } = await provedor.send({
+        const { providerMessageId, usoMensalConta } = await provedor.send({
           from: formatarFrom(fromName, rem.email_completo),
           to: payload.destinatario_email,
           subject: assunto,
@@ -551,6 +580,13 @@ Deno.serve(async (req) => {
         }).eq("id", log.id).eq("status", "enfileirado");
         if (metadadosErro || statusErro) console.error("email-send: envio aceito, persistência pendente", log.id);
 
+        // Uso do ciclo da conta, lido na resposta do próprio envio: é o que fecha (ou reabre,
+        // quando o ciclo renova) a trava da reserva.
+        if (usaContaResend && usoMensalConta != null) {
+          const { error: erroUso } = await supabaseAdmin.rpc("email_resend_cota_registrar", { p_uso: usoMensalConta });
+          if (erroUso) console.warn("[email-send] uso do Resend não registrado", { envio: log.id, motivo: erroUso.message });
+        }
+
         return new Response(JSON.stringify({
           ok: true, log_id: log.id, provider, provider_message_id: providerMessageId,
           ...(metadadosErro || statusErro ? { persistencia_pendente: true } : {}),
@@ -560,6 +596,13 @@ Deno.serve(async (req) => {
         await supabaseAdmin.from("emails_enviados").update({
           status: "falhou", erro_msg: `${erro.codigo ?? "erro"}: ${erro.message}`.slice(0, 500),
         }).eq("id", log.id).eq("status", "enfileirado");
+
+        // O próprio Resend disse que a conta acabou: a conta está cheia. Fecha a trava para não
+        // gastar uma chamada por e-mail até o ciclo renovar (a sonda de 6 h reabre).
+        if (usaContaResend && erro.codigo === "monthly_quota_exceeded" && cota?.limitePlano != null) {
+          const { error: erroUso } = await supabaseAdmin.rpc("email_resend_cota_registrar", { p_uso: cota.limitePlano });
+          if (erroUso) console.warn("[email-send] cota esgotada não registrada", { envio: log.id, motivo: erroUso.message });
+        }
 
         // Preserva o 429 para o dispatcher pausar a campanha em vez de insistir.
         return new Response(JSON.stringify({

@@ -15,6 +15,9 @@ let insercoes: number;
 let usuarioAtivo: boolean;
 let usuarioValido: boolean;
 let cargoUsuario: string;
+// Reserva da conta Resend (14/10/2026): resposta de `email_resend_cota_liberar` e chamadas feitas.
+let cota: { data: unknown; error: { message: string } | null };
+let rpcs: Array<[string, unknown]>;
 
 beforeAll(async () => {
   vi.stubGlobal("Deno", { env: { get: (k: string) => env?.[k] }, serve: (handler: typeof atender) => { atender = handler; } });
@@ -27,14 +30,21 @@ beforeEach(() => {
     SUPABASE_SERVICE_ROLE_KEY: "service-teste", RESEND_API_KEY: "resend-teste", RESEND_WEBHOOK_SECRET: "whsec_teste" };
   log = {}; existente = null; suprimido = null; provider = "resend"; tabelas = []; insercoes = 0;
   usuarioAtivo = true; usuarioValido = true; cargoUsuario = "admin";
+  cota = { data: { liberado: true, uso: 64634, teto: 195000, limite_plano: 200000, reserva_externa: 5000 }, error: null };
+  rpcs = [];
   fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ id: "resend-1" })));
   vi.stubGlobal("fetch", fetcher);
   ambiente.criarCliente.mockReturnValue({
     auth: { getUser: async () => ({ data: { user: usuarioValido ? { id: "usuario-1" } : null } }) },
     // `email_marketing_pode_gerir` (banco) = perfil ativo E admin/diretor/liberado nominalmente.
-    rpc: async (nome: string, args: { role_name?: string; p_usuario?: string }) => nome === "email_marketing_pode_gerir"
-      ? { data: usuarioAtivo && args.p_usuario === "usuario-1" && ["admin", "diretor"].includes(cargoUsuario), error: null }
-      : { data: args.role_name === cargoUsuario, error: null },
+    rpc: async (nome: string, args: { role_name?: string; p_usuario?: string; p_uso?: number } = {}) => {
+      rpcs.push([nome, args]);
+      if (nome === "email_resend_cota_liberar") return cota;
+      if (nome === "email_resend_cota_registrar") return { data: null, error: null };
+      return nome === "email_marketing_pode_gerir"
+        ? { data: usuarioAtivo && args.p_usuario === "usuario-1" && ["admin", "diretor"].includes(cargoUsuario), error: null }
+        : { data: args.role_name === cargoUsuario, error: null };
+    },
     from: (tabela: string) => {
       tabelas.push(tabela);
       let acao = "select";
@@ -177,5 +187,45 @@ describe("email-send integrado ao Resend", () => {
     expect(await resposta.json()).toMatchObject({ rate_limited: true, codigo: "rate_limit_exceeded" });
     expect(log.status).toBe("falhou");
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("reserva da conta Resend para outros sistemas (14/10/2026)", () => {
+  it("trava fechada: não chama o Resend, grava o motivo e devolve 429 para pausar a campanha", async () => {
+    cota = { data: { liberado: false, uso: 195020, teto: 195000, limite_plano: 200000, reserva_externa: 5000 }, error: null };
+    const resposta = await atender(requisicao());
+    expect(resposta.status).toBe(429);
+    expect(await resposta.json()).toMatchObject({ codigo: "ppgvet_reserva_resend", rate_limited: true, log_id: "log-1" });
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(log.status).toBe("falhou");
+    expect(String(log.erro_msg)).toMatch(/^ppgvet_reserva_resend: O PPGVET parou de enviar pelo Resend/);
+    expect(String(log.erro_msg)).toContain("195.020 de 200.000");
+    expect(String(log.erro_msg)).toContain("5.000 ficam reservados");
+    // não pode cair no aviso de cota do próprio Resend, que procura "quota"
+    expect(String(log.erro_msg)).not.toMatch(/quota/i);
+  });
+
+  it("envio aceito registra o uso do ciclo lido no cabeçalho do Resend", async () => {
+    fetcher.mockResolvedValue(new Response(JSON.stringify({ id: "resend-1" }), { headers: { "x-resend-monthly-quota": "64635" } }));
+    expect((await atender(requisicao())).status).toBe(200);
+    expect(rpcs).toContainEqual(["email_resend_cota_registrar", { p_uso: 64635 }]);
+  });
+
+  it("sem o cabeçalho, envia e não inventa uso", async () => {
+    expect((await atender(requisicao())).status).toBe(200);
+    expect(rpcs.map(([nome]) => nome)).toContain("email_resend_cota_liberar");
+    expect(rpcs.map(([nome]) => nome)).not.toContain("email_resend_cota_registrar");
+  });
+
+  it("consulta da trava falhou: envia mesmo assim (não derruba todo e-mail do sistema)", async () => {
+    cota = { data: null, error: { message: "timeout" } };
+    expect((await atender(requisicao())).status).toBe(200);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("recusa de cota mensal do próprio Resend fecha a trava com o limite do plano", async () => {
+    fetcher.mockResolvedValue(new Response(JSON.stringify({ name: "monthly_quota_exceeded" }), { status: 429 }));
+    expect((await atender(requisicao())).status).toBe(429);
+    expect(rpcs).toContainEqual(["email_resend_cota_registrar", { p_uso: 200000 }]);
   });
 });

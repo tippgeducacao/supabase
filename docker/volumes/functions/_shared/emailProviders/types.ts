@@ -36,6 +36,12 @@ export interface OutboundEmail {
 
 export interface ResultadoEnvio {
   providerMessageId: string;
+  /**
+   * Resend: quanto da cota do ciclo a CONTA inteira já usou (cabeçalho `x-resend-monthly-quota`,
+   * só vem em envio aceito). Alimenta a reserva para outros sistemas — ver
+   * `email_resend_cota` (migration 20261014130000). Ausente nos outros provedores.
+   */
+  usoMensalConta?: number;
 }
 
 export interface EmailProvider {
