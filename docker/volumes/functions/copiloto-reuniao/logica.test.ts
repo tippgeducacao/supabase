@@ -141,6 +141,13 @@ describe("montarContexto", () => {
     expect(montarContexto(dados)).toBe(texto);
   });
 
+  it("resumo do lead e origem do agendamento entram no contexto", () => {
+    const texto = montarContexto({ ...dados, agendamento: { ...dados.agendamento, origem: "API SDR" }, resumo: "**Quem é:** contratada de cooperativa" });
+    expect(texto).toContain("- Como a reunião foi marcada: pela IA de atendimento no WhatsApp");
+    expect(texto).toContain("a partir da conversa no WhatsApp)\n**Quem é:** contratada de cooperativa");
+    expect(texto.indexOf("O que já se sabe do lead")).toBeLessThan(texto.indexOf("Mapa de carreira"));
+  });
+
   it("pós sem mapa ainda monta o que tem do lead", () => {
     const texto = montarContexto({ agendamento: { pos_graduacao_interesse: "CURSO NOVO" }, lead: null, mapa: { ramos: [], perguntas: [] } });
     expect(texto).toContain("- Pós de interesse: CURSO NOVO");

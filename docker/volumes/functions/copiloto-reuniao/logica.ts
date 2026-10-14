@@ -95,9 +95,12 @@ export type DadosReuniao = {
     principal_dor_objetivo?: string | null;
     local_trabalho?: string | null;
     canal_contato?: string | null;
+    origem?: string | null;
   };
   lead?: Record<string, unknown> | null;
   anteriores?: Array<Record<string, unknown>>;
+  /** Resumo do lead gerado antes da reunião (`copiloto_reuniao_resumos`). */
+  resumo?: string | null;
   /** Mapa de carreira do comercial para o grupo desta pós (`sdr_carreira_mapa_*`). */
   mapa?: { ramos: Array<Record<string, unknown>>; perguntas: Array<Record<string, unknown>> } | null;
 };
@@ -173,6 +176,7 @@ export function montarContexto(d: DadosReuniao): string {
     ["Dor ou objetivo que o SDR registrou", ag.principal_dor_objetivo],
     ["Anotações de quem marcou a reunião", ag.observacoes],
     ["Canal do contato", ag.canal_contato],
+    ["Como a reunião foi marcada", ag.origem === "API SDR" ? "pela IA de atendimento no WhatsApp" : ag.origem],
   ]);
   if (daReuniao.length) partes.push(`## Reunião\n${daReuniao.join("\n")}`);
 
@@ -186,6 +190,9 @@ export function montarContexto(d: DadosReuniao): string {
     return itens.length ? `Reunião de ${dataBr(a.data_agendamento) || "data não registrada"} (${txt(a.pos_graduacao_interesse) || "pós não registrada"}):\n${itens.join("\n")}` : "";
   }).filter(Boolean);
   if (anteriores.length) partes.push(`## Reuniões anteriores deste lead\n${anteriores.join("\n\n")}`);
+
+  const resumo = txt(d.resumo);
+  if (resumo) partes.push(`## O que já se sabe do lead (resumo feito antes da reunião, a partir da conversa no WhatsApp)\n${resumo}`);
 
   const mapa = d.mapa && (d.mapa.ramos.length || d.mapa.perguntas.length) ? montarMapa(d.mapa) : "";
   if (mapa) partes.push(`## Mapa de carreira desta pós (comercial)\n${mapa}`);

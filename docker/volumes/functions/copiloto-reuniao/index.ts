@@ -8,6 +8,9 @@
 // Duas ações, sempre com o login do vendedor:
 //   * iniciar — acha a reunião pelo código do Meet (`agendamentos.link_reuniao`).
 //   * dica    — lê as informações da reunião e devolve UMA dica curta, ou nada.
+//   * preparar — gera (uma vez por reunião) o RESUMO do lead: dados, o que foi registrado
+//               ao marcar e a conversa de WhatsApp. O vendedor lê no app e a IA das
+//               perguntas recebe junto. Guardado em `copiloto_reuniao_resumos`.
 //   * minhas  — as reuniões em que quem chama é o VENDEDOR, perto de agora (o app de
 //               Windows não lê a aba do Meet: o vendedor escolhe a reunião na lista).
 //
@@ -41,6 +44,7 @@ import {
   montarPedido,
 } from "./logica.ts";
 import { PROMPT_BASE, SEM_REUNIAO } from "./prompt.ts";
+import { MAX_MENSAGENS, type Mensagem, montarEntradaResumo, PROMPT_RESUMO } from "./resumo.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
@@ -53,9 +57,14 @@ const MODELO = Deno.env.get("COPILOTO_REUNIAO_MODEL") ?? "claude-haiku-5-5";
 const SEM_RACIOCINIO = MODELO.startsWith("claude-haiku");
 const PRAZO_IA_MS = 12_000;
 
+// Resumo do lead: uma vez por reunião, antes de começar — aqui vale mais acertar que ser
+// rápido. Opus 5.5 com esforço baixo; troca pelo secret COPILOTO_REUNIAO_MODELO_RESUMO.
+const MODELO_RESUMO = Deno.env.get("COPILOTO_REUNIAO_MODELO_RESUMO") ?? "claude-opus-5-5";
+const PRAZO_RESUMO_MS = 50_000;
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CAMPOS_REUNIAO =
-  "id, lead_id, pos_graduacao_interesse, data_agendamento, status, observacoes, principal_dor_objetivo, local_trabalho, canal_contato";
+  "id, lead_id, pos_graduacao_interesse, data_agendamento, status, observacoes, principal_dor_objetivo, local_trabalho, canal_contato, origem";
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
@@ -97,11 +106,11 @@ function passouDoTeto(userId: string, agora: number): boolean {
 
 // ── Informações da reunião ───────────────────────────────────────────────────
 
-async function lerReuniao(sbUsuario: SupabaseClient, agendamentoId: string): Promise<DadosReuniao | null> {
+async function lerReuniao(sbUsuario: SupabaseClient, agendamentoId: string, comMapa = true): Promise<DadosReuniao | null> {
   const { data: ag } = await sbUsuario.from("agendamentos").select(CAMPOS_REUNIAO).eq("id", agendamentoId).maybeSingle();
   if (!ag) return null;
 
-  const [leadR, anterioresR, cursoR] = await Promise.all([
+  const [leadR, anterioresR, cursoR, resumoR] = await Promise.all([
     ag.lead_id
       ? sbUsuario.from("leads")
         .select("nome, profissao, tempo_formacao, cargo, local_trabalho, regiao, curso_interesse, area_interesse, observacoes")
@@ -113,12 +122,16 @@ async function lerReuniao(sbUsuario: SupabaseClient, agendamentoId: string): Pro
         .eq("lead_id", ag.lead_id).neq("id", ag.id).not("resultado_reuniao", "is", null)
         .order("data_agendamento", { ascending: false }).limit(3)
       : Promise.resolve({ data: [] }),
-    ag.pos_graduacao_interesse
+    ag.pos_graduacao_interesse && comMapa
       ? admin().from("cursos").select("id").eq("nome", ag.pos_graduacao_interesse).limit(1).maybeSingle()
       : Promise.resolve({ data: null }),
+    // só depois de a RLS liberar a reunião (a linha acima veio com o JWT de quem chama)
+    admin().from("copiloto_reuniao_resumos").select("resumo").eq("agendamento_id", ag.id).maybeSingle(),
   ]);
 
-  const dados: DadosReuniao = { agendamento: ag, lead: leadR.data, anteriores: anterioresR.data ?? [] };
+  const dados: DadosReuniao = {
+    agendamento: ag, lead: leadR.data, anteriores: anterioresR.data ?? [], resumo: resumoR.data?.resumo ?? null,
+  };
   const cursoId = cursoR.data?.id;
   if (!cursoId) return dados;
 
@@ -162,6 +175,84 @@ async function iniciar(sbUsuario: SupabaseClient, body: Record<string, unknown>)
     pos: reuniao.pos_graduacao_interesse ?? null,
     quando: reuniao.data_agendamento,
   });
+}
+
+async function preparar(sbUsuario: SupabaseClient, userId: string, body: Record<string, unknown>) {
+  const agendamentoId = typeof body?.agendamento_id === "string" && UUID.test(body.agendamento_id) ? body.agendamento_id : null;
+  if (!agendamentoId) return json({ erro: "reunião inválida" }, 422);
+
+  // RLS: só segue se quem chama pode ver a reunião
+  const dados = await lerReuniao(sbUsuario, agendamentoId, false);
+  if (!dados) return json({ erro: "Não achei essa reunião, ou ela não é sua." }, 422);
+  const leadId = (dados.agendamento as { lead_id?: string }).lead_id ?? null;
+
+  const [guardadoR, mensagensR, analiseR] = await Promise.all([
+    admin().from("copiloto_reuniao_resumos").select("resumo, mensagens_ate, gerado_em").eq("agendamento_id", agendamentoId).maybeSingle(),
+    leadId
+      ? admin().from("crm_whatsapp_messages")
+        .select("direcao, tipo, conteudo, template_name, created_at, audio:metadata->>audio_transcricao, audio_sdr:metadata->>sdr_audio_transcricao")
+        .eq("lead_id", leadId).order("created_at", { ascending: false }).limit(MAX_MENSAGENS)
+      : Promise.resolve({ data: [] }),
+    admin().from("mimosa_analises").select("conteudo_markdown")
+      .eq("agendamento_id", agendamentoId).eq("tipo", "pre_reuniao").neq("status", "descartada")
+      .order("created_at", { ascending: false }).limit(1).maybeSingle(),
+  ]);
+  const mensagens = (mensagensR.data ?? []) as Mensagem[];
+  const ultima = mensagens[0]?.created_at ?? null; // veio da mais nova para a mais antiga
+  const guardado = guardadoR.data;
+
+  // já resumido e nenhuma mensagem nova desde então: devolve o que tem
+  if (guardado && (!ultima || (guardado.mensagens_ate && new Date(guardado.mensagens_ate) >= new Date(ultima)))) {
+    return json({ resumo: guardado.resumo, gerado_em: guardado.gerado_em, novo: false });
+  }
+
+  const chave = await chaveAnthropic();
+  if (!chave) return json({ erro: "IA sem chave configurada. Avise o TI." }, 422);
+
+  const entrada = montarEntradaResumo({
+    contexto: montarContexto({ ...dados, resumo: null }),
+    analisePreReuniao: analiseR.data?.conteudo_markdown ?? null,
+    mensagens,
+  });
+
+  const cliente = new Anthropic({ apiKey: chave, maxRetries: 1, timeout: PRAZO_RESUMO_MS });
+  const comFallback = MODELO_RESUMO.startsWith("claude-opus-5") || MODELO_RESUMO.startsWith("claude-fable");
+  let resumo: string | undefined;
+  try {
+    const resposta = await cliente.beta.messages.create({
+      model: MODELO_RESUMO,
+      max_tokens: 4000,
+      output_config: { effort: "low" },
+      ...(comFallback ? { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" } : {}),
+      system: PROMPT_RESUMO,
+      messages: [{ role: "user", content: entrada }],
+    } as never) as Anthropic.Beta.BetaMessage;
+    if (resposta.stop_reason !== "refusal") {
+      resumo = resposta.content.filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === "text").map((b) => b.text).join("\n").trim();
+    }
+    console.log(JSON.stringify({
+      fn: "copiloto-reuniao", acao: "preparar", agendamento: agendamentoId, mensagens: mensagens.length,
+      entrada: resposta.usage.input_tokens, saida: resposta.usage.output_tokens, modelo: resposta.model,
+    }));
+  } catch (e) {
+    console.error("[copiloto-reuniao] resumo", (e as Error)?.message);
+  }
+  // falhou agora, mas havia um resumo antigo: melhor ele que nada
+  if (!resumo) {
+    return guardado
+      ? json({ resumo: guardado.resumo, gerado_em: guardado.gerado_em, novo: false, aviso: "Não consegui atualizar o resumo; este é o anterior." })
+      : json({ erro: "Não consegui preparar o resumo do lead agora. As perguntas seguem funcionando." }, 422);
+  }
+
+  const agora = new Date().toISOString();
+  const { error } = await admin().from("copiloto_reuniao_resumos").upsert({
+    agendamento_id: agendamentoId, lead_id: leadId, resumo, mensagens_usadas: mensagens.length,
+    mensagens_ate: ultima, modelo: MODELO_RESUMO, gerado_por: userId, gerado_em: agora,
+  });
+  if (error) console.error("[copiloto-reuniao] gravar resumo", error.message);
+  // o contexto das perguntas guardado em memória ficou velho: o próximo pedido relê com o resumo
+  for (const k of contextos.keys()) if (k.endsWith(`:${agendamentoId}`)) contextos.delete(k);
+  return json({ resumo, gerado_em: agora, novo: true });
 }
 
 async function minhas(sbUsuario: SupabaseClient, userId: string) {
@@ -268,6 +359,7 @@ Deno.serve(async (req) => {
     if (body?.acao === "iniciar") return await iniciar(sbUsuario, body);
     if (body?.acao === "dica") return await dica(sbUsuario, user.id, body);
     if (body?.acao === "minhas") return await minhas(sbUsuario, user.id);
+    if (body?.acao === "preparar") return await preparar(sbUsuario, user.id, body);
     return json({ erro: "ação desconhecida" }, 422);
   } catch (e) {
     console.error("[copiloto-reuniao] erro", (e as Error)?.message);
