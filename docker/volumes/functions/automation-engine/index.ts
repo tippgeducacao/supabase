@@ -312,8 +312,15 @@ Deno.serve(async (req) => {
             }
             case 'add_comment': {
               const text = replaceVariables(cfg.content || '', task, { user_id, type: trigger_type });
-              await supabase.from('gt_task_comments').insert({ task_id, user_id: null, content: text });
-              executedActions.push({ type: 'add_comment', status: 'success' });
+              const posted = await postTaskChatComment(supabase, task, text, user_id || null, cfg.mention_user_id || null);
+              if (posted.ok) {
+                // A menção já avisa a pessoa marcada (sino) — o aviso genérico
+                // "Automação executada" para todos os responsáveis seria ruído.
+                if (posted.mentioned) notifiedThisAutomation = true;
+                executedActions.push({ type: 'add_comment', status: 'success', label: posted.mentioned ? `${posted.mentioned} marcado(a) no chat` : undefined });
+              } else {
+                executedActions.push({ type: 'add_comment', status: 'failed', error: posted.error });
+              }
               break;
             }
             case 'send_notification': {
@@ -803,6 +810,77 @@ async function copyTaskToList(
     if (rows.length) await supabase.from('gt_task_assignees').insert(rows);
 
     return { ok: true, id: newTask.id, status_id: statusId };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// "Adicionar comentário" = mensagem no CHAT da tarefa (canal `task-<id>`), que é o
+// que a aba Comentários do drawer mostra. Antes gravava em gt_task_comments, que
+// nenhuma tela lê — o comentário da automação nunca aparecia.
+// Autor = quem disparou a mudança (como se ele mesmo tivesse marcado a pessoa): o
+// trigger gt_notify_chat_mentions só notifica a menção quando a mensagem tem autor.
+// Sem autor (raro), a mensagem sai como "Usuário" e a notificação é gravada aqui.
+async function postTaskChatComment(
+  supabase: any,
+  task: any,
+  text: string,
+  authorId: string | null,
+  mentionUserId: string | null,
+): Promise<{ ok: boolean; mentioned?: string; error?: string }> {
+  try {
+    let mentionHtml = '';
+    let mentionName = '';
+    if (mentionUserId) {
+      const { data: prof } = await supabase.from('profiles').select('name').eq('id', mentionUserId).maybeSingle();
+      if (!prof) return { ok: false, error: 'pessoa a marcar não encontrada' };
+      mentionName = prof.name || 'Usuário';
+      // Mesmo HTML que o editor do chat grava ao escolher alguém no "@".
+      mentionHtml = `<span class="gt-mention" data-type="mention" data-id="${mentionUserId}" data-label="${escapeHtml(mentionName)}" data-mention-suggestion-char="@">@${escapeHtml(mentionName)}</span>`;
+    }
+    const body = escapeHtml(text.trim()).replace(/\r?\n/g, '<br>');
+    if (!mentionHtml && !body) return { ok: false, error: 'comentário vazio' };
+    const content = `<p>${[mentionHtml, body].filter(Boolean).join(' ')}</p>`;
+
+    const slug = `task-${task.id}`;
+    let { data: channel } = await supabase.from('gt_chat_channels').select('id').eq('slug', slug).maybeSingle();
+    if (!channel) {
+      // Mesmo formato do gt_get_or_create_task_channel (que exige auth.uid()).
+      const ins = await supabase.from('gt_chat_channels')
+        .insert({ name: `Tarefa ${String(task.id).slice(0, 8)}`, slug, type: 'task', is_private: false, created_by: authorId })
+        .select('id').maybeSingle();
+      channel = ins.data;
+      // Corrida: alguém abriu a tarefa e criou o canal no meio (slug é único).
+      if (!channel) ({ data: channel } = await supabase.from('gt_chat_channels').select('id').eq('slug', slug).maybeSingle());
+    }
+    if (!channel) return { ok: false, error: 'canal da tarefa não encontrado' };
+
+    const { error: msgErr } = await supabase.from('gt_chat_messages').insert({
+      channel_id: channel.id,
+      user_id: authorId,
+      content,
+      message_type: 'text',
+      mentions: mentionUserId ? [mentionUserId] : [],
+    });
+    if (msgErr) return { ok: false, error: msgErr.message };
+
+    if (mentionUserId && !authorId) {
+      await supabase.rpc('gt_insert_mention_notification', {
+        _user_id: mentionUserId,
+        _actor_id: null,
+        _type: 'task_mention',
+        _title: `Automação mencionou você em "Tarefa: ${task.title || 'sem título'}"`,
+        _body: `@${mentionName} ${text.trim()}`.slice(0, 140),
+        _link: `/gestor-tarefas?task=${task.id}`,
+        _ref_type: 'task',
+        _ref_id: task.id,
+      });
+    }
+    return { ok: true, mentioned: mentionUserId ? mentionName : undefined };
   } catch (e) {
     return { ok: false, error: String(e) };
   }
