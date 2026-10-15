@@ -98,6 +98,12 @@ function respostasLimpas(v: unknown): Record<string, string | string[]> {
   return saida;
 }
 
+/** Pós marcadas na confirmação: só o formato (lista de textos). Se o nome vale, o banco confere. */
+function cursosLimpos(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return v.slice(0, 40).map((x) => texto(x, 200)).filter((x) => x !== '');
+}
+
 function horaBR(iso: string): string {
   return new Intl.DateTimeFormat('pt-BR', {
     timeZone: 'America/Sao_Paulo', weekday: 'long', day: '2-digit', month: '2-digit',
@@ -238,6 +244,7 @@ Deno.serve(async (req) => {
         p_token: token,
         p_lattes: texto(body?.lattes, 500),
         p_experiencia: texto(body?.experiencia, 2000),
+        p_cursos: cursosLimpos(body?.cursos),
       });
       if (error) throw error;
       if (!r?.ok) return json({ ok: false, motivo: r?.motivo ?? 'falhou' });
