@@ -3,6 +3,7 @@
 // (multipart -> /media -> /messages com media_id), persiste em ped_conversas_mensagens
 // e atualiza ped_conversas_avulsas.ultima_atividade_em.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { extensaoDoArquivo } from "../_shared/extensaoArquivo.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -107,22 +108,6 @@ function formatPhone(raw: string): string | null {
   return digits;
 }
 
-function extFromMime(mime: string, fallback = "bin"): string {
-  const m = mime.toLowerCase();
-  if (m.includes("ogg")) return "ogg";
-  if (m.includes("mp4") && m.includes("audio")) return "m4a";
-  if (m.includes("aac")) return "aac";
-  if (m.includes("mpeg") && m.includes("audio")) return "mp3";
-  if (m === "audio/amr") return "amr";
-  if (m === "video/mp4") return "mp4";
-  if (m === "video/3gpp") return "3gp";
-  if (m === "image/jpeg") return "jpg";
-  if (m === "image/png") return "png";
-  if (m === "image/webp") return "webp";
-  if (m === "application/pdf") return "pdf";
-  return fallback;
-}
-
 function jsonResp(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -177,7 +162,8 @@ Deno.serve(async (req) => {
     const fileName =
       filename ||
       (fileEntry instanceof File && fileEntry.name) ||
-      `arquivo.${extFromMime(mime_type)}`;
+      // sem nome, o aluno recebia "arquivo.bin" em todo docx/xlsx — a regra compartilhada conhece o tipo
+      `arquivo.${extensaoDoArquivo(mime_type)}`;
 
     const to = formatPhone(telefoneRaw);
     if (!to) return jsonResp({ error: "telefone inválido" }, 400);
@@ -290,7 +276,7 @@ Deno.serve(async (req) => {
     // 5) (Opcional) salva no Storage para histórico
     let urlStorage: string | null = null;
     try {
-      const ext = extFromMime(mime_type);
+      const ext = extensaoDoArquivo(mime_type, fileName);
       const path = `${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}.${ext}`;
       const { error: stErr } = await admin.storage.from(BUCKET).upload(path, blobForUpload, {
         contentType: mime_type,

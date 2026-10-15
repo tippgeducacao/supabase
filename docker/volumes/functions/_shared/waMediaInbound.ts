@@ -10,6 +10,11 @@
 // ⚠️ O token é POR CONTA (`wa_accounts.access_token`): o media_id só é resolvível pelo app
 // dono do número que recebeu. Passar o token da conta errada devolve 404/190 e o anexo some.
 
+// Extensão do arquivo salvo: regra única em `extensaoArquivo.ts` (o nome que a Meta mandou manda;
+// o mime desempata). A cópia que morava aqui transformava nome SEM ponto em extensão
+// ("Aula1" → `.aula1`) e só conhecia 6 mimes — o resto virava `.bin` (15/10/2026).
+import { extensaoDoArquivo as extensaoDe } from "./extensaoArquivo.ts";
+
 const PUBLIC_SUPABASE_URL = Deno.env.get("PUBLIC_SUPABASE_URL") || "https://api.ppgeducacao.site";
 
 /** URL interna do Kong → host público (o navegador do atendente não enxerga `kong:8000`). */
@@ -65,28 +70,6 @@ export function extrairMidiaInbound(msg: any): MidiaInbound | null {
       : null;
   }
   return null;
-}
-
-const EXT_POR_MIME: Record<string, string> = {
-  "image/jpeg": "jpg",
-  "image/png": "png",
-  "image/webp": "webp",
-  "video/mp4": "mp4",
-  "video/3gpp": "3gp",
-  "application/pdf": "pdf",
-};
-
-/** Extensão do arquivo salvo: o nome que a Meta mandou manda; o mime é o desempate. */
-function extensaoDe(mime: string, filename?: string): string {
-  const doNome = (filename ?? "").split(".").pop() ?? "";
-  if (doNome && doNome.length <= 5 && /^[A-Za-z0-9]+$/.test(doNome)) return doNome.toLowerCase();
-  if (EXT_POR_MIME[mime]) return EXT_POR_MIME[mime];
-  if (mime.startsWith("audio/")) {
-    if (mime.includes("ogg")) return "ogg";
-    if (mime.includes("mpeg")) return "mp3";
-    if (mime.includes("mp4") || mime.includes("aac")) return "m4a";
-  }
-  return "bin";
 }
 
 /**

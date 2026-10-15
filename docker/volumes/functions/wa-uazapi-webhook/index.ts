@@ -15,6 +15,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { getWaProvider } from "../_shared/waProviders.ts";
 import { atualizarStatusWaConexao } from "../_shared/waConexaoStatus.ts";
+import { extensaoDoArquivo } from "../_shared/extensaoArquivo.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -31,19 +32,6 @@ function json(data: unknown, status = 200) {
     status,
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
-}
-
-function extFromMime(mime: string): string {
-  const m = (mime ?? "").toLowerCase();
-  if (m.includes("ogg")) return "ogg";
-  if (m.includes("audio") && m.includes("mpeg")) return "mp3";
-  if (m.includes("audio") && m.includes("mp4")) return "m4a";
-  if (m === "video/mp4") return "mp4";
-  if (m === "image/jpeg") return "jpg";
-  if (m === "image/png") return "png";
-  if (m === "image/webp") return "webp";
-  if (m === "application/pdf") return "pdf";
-  return "bin";
 }
 
 function b64ToBytes(b64: string): Uint8Array {
@@ -218,7 +206,8 @@ Deno.serve(async (req) => {
           }
           if (!bytes && mediaB64) bytes = b64ToBytes(mediaB64);
           if (bytes) {
-            const ext = extFromMime(mime);
+            // Regra compartilhada: o mapa local só conhecia 8 mimes e gravava docx/pptx/xlsx como `.bin`.
+            const ext = extensaoDoArquivo(mime, m.mediaFilename);
             const path = `crm/${new Date().toISOString().slice(0, 10)}/uazapi-${crypto.randomUUID()}.${ext}`;
             const { error: stErr } = await admin.storage.from("whatsapp-anexos").upload(path, bytes, { contentType: mime, upsert: false });
             if (stErr) {

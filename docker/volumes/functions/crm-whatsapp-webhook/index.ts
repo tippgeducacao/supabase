@@ -9,6 +9,7 @@ import { carimboInbound } from "./carimbo.ts";
 import { prepararPortfolioInstagram } from "./portfolioInstagram.ts";
 import { alertaDeFalhaDeConta, statusProvaEntrega, TIPO_ALERTA_ENTREGA, type AlertaEntrega } from "./alertaEntrega.ts";
 import { CABECALHO_SEGREDO_N8N, carregarDesvioN8n, vaiParaN8n } from "../_shared/desvioN8n.ts";
+import { extensaoDoArquivo } from "../_shared/extensaoArquivo.ts";
 
 declare const EdgeRuntime: { waitUntil?: (p: Promise<unknown>) => void } | undefined;
 
@@ -1015,14 +1016,10 @@ Deno.serve(async (req) => {
                 const bin = new Uint8Array(await binRes.arrayBuffer());
                 if (bin.length === 0) throw new Error("download vazio");
                 // c) upload to storage
-                const ext = (mime.includes("ogg") ? "ogg" :
-                  mime.includes("mpeg") && mime.includes("audio") ? "mp3" :
-                  mime.includes("mp4") && mime.includes("audio") ? "m4a" :
-                  mime === "video/mp4" ? "mp4" :
-                  mime === "image/jpeg" ? "jpg" :
-                  mime === "image/png" ? "png" :
-                  mime === "image/webp" ? "webp" :
-                  mime === "application/pdf" ? "pdf" : "bin");
+                // ⚠️ Extensão pela regra compartilhada: o mapa daqui só conhecia 8 mimes e gravou
+                // todo docx/pptx/xlsx/zip/xml como `.bin` — o navegador baixava com esse nome e o
+                // Windows não abria (Monique, 15/10/2026).
+                const ext = extensaoDoArquivo(mime, mediaInbound.filename);
                 const path = `crm/${new Date().toISOString().slice(0, 10)}/inbound-${crypto.randomUUID()}.${ext}`;
                 const { error: stErr } = await admin.storage.from("whatsapp-anexos").upload(path, bin, {
                   contentType: mime, upsert: false,
