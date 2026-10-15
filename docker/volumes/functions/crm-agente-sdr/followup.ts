@@ -36,6 +36,7 @@ import {
   dadosDaEscolha, dadosDoToque, escolhaDoToque, escopoDoMapa, falaDoToque, FOLLOWUP_MAPA_SYSTEM, followupMapaLigado, mapaDoLead, semContextoRepetido,
   semGenericasLigado, semRetomadasGenericas, soRetomadasConcretas, toqueDoMapa, usadosDoMapa,
 } from './followupMapa.ts';
+import { ETIQUETA_RESPOSTA_AUTOMATICA, marcarRespostasAutomaticas, respostaAutomaticaLigada } from './respostaAutomatica.ts';
 import { cursoDaConversa } from './ganchoLote.ts';
 import { registrarNaJornada } from './fichaAtendimento.ts';
 import { carregarAulaParaFollowup, contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from './contextoAulaPiloto.ts';
@@ -226,6 +227,15 @@ export function montarMensagensFollowup(history: Msg[], tentativaAtual: number, 
   return norm as Msg[];
 }
 
+/** O histórico que o follow-up lê: com a chave, a mensagem pronta do WhatsApp do lead vai etiquetada. */
+export async function historicoDoFollowup(supabase: any, remotejid: string, tel: Telemetria | null, forcar?: boolean): Promise<Msg[]> {
+  const history = await carregarHistorico(supabase, remotejid);
+  if (!(forcar ?? await respostaAutomaticaLigada(supabase, String(remotejid).split('@')[0]))) return history;
+  const { history: marcado, marcadas } = marcarRespostasAutomaticas(history);
+  if (marcadas) tel?.registrar('followup_resposta_automatica', { marcadas });
+  return marcado;
+}
+
 function contarTentativas(history: Msg[]): number {
   let n = 0;
   for (const m of history) {
@@ -277,7 +287,8 @@ function ehMensagemRealDoLead(m: Msg): boolean {
   // Só resultados de tools (inclusive misturados com texto) ficam fora da autoria.
   if (Array.isArray(m.content) && !m.content.every((bloco) => bloco?.type === 'text')) return false;
   const t = blocosParaTexto(m.content);
-  return Boolean(t) && !t.includes(MARCADOR_FOLLOWUP);   // marcador de follow não é fala do lead
+  // Marcador de follow não é fala do lead; mensagem pronta do WhatsApp dele também não (respostaAutomatica.ts).
+  return Boolean(t) && !t.includes(MARCADOR_FOLLOWUP) && !t.startsWith(ETIQUETA_RESPOSTA_AUTOMATICA);
 }
 
 export function retencaoPendente(history: Msg[]): boolean {
@@ -505,7 +516,7 @@ export async function processarFollowupLead(supabase: any, leadSel: any, stageSe
     // turma e o lead ainda não respondeu → silêncio, e as esteiras são desligadas
     // (janela aberta E template). Insistir com quem acabou de dizer que não é o
     // momento é o pior movimento possível.
-    const history = await carregarHistorico(supabase, remotejid);
+    const history = await historicoDoFollowup(supabase, remotejid, tel);
     if (retencaoPendente(history)) {
       await atualizarLead(supabase, remotejid, { followup_ativado: false, followup_desligado_motivo: 'retencao_pendente' });
       tel.registrar('followup_pulado', { motivo: 'retencao_pendente', stage, esteiras: 'desligadas' });
@@ -768,7 +779,7 @@ export async function processarFigurinhaFollowup(
     const referencia = Date.parse(referenciaEm);
     // O lead respondeu depois que o job nasceu: a figurinha era do silêncio anterior.
     if (!Number.isFinite(ts) || !Number.isFinite(referencia) || Math.abs(ts - referencia) > 1000) return pular('lead_respondeu');
-    const history = await carregarHistorico(supabase, remotejid);
+    const history = await historicoDoFollowup(supabase, remotejid, tel);
     const motivo = motivoSemFigurinha({
       lead,
       elapsedMin: (Date.now() - ts) / 60_000,
