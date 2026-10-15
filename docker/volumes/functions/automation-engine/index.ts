@@ -846,18 +846,11 @@ async function postTaskChatComment(
     if (!mentionHtml && !body) return { ok: false, error: 'comentário vazio' };
     const content = `<p>${[mentionHtml, body].filter(Boolean).join(' ')}</p>`;
 
-    const slug = `task-${task.id}`;
-    let { data: channel } = await supabase.from('gt_chat_channels').select('id').eq('slug', slug).maybeSingle();
-    if (!channel) {
-      // Mesmo formato do gt_get_or_create_task_channel (que exige auth.uid()).
-      const ins = await supabase.from('gt_chat_channels')
-        .insert({ name: `Tarefa ${String(task.id).slice(0, 8)}`, slug, type: 'task', is_private: false, created_by: authorId })
-        .select('id').maybeSingle();
-      channel = ins.data;
-      // Corrida: alguém abriu a tarefa e criou o canal no meio (slug é único).
-      if (!channel) ({ data: channel } = await supabase.from('gt_chat_channels').select('id').eq('slug', slug).maybeSingle());
-    }
-    if (!channel) return { ok: false, error: 'canal da tarefa não encontrado' };
+    // O canal nasce quando alguém abre a tarefa (gt_get_or_create_task_channel). Daqui
+    // não dá para criar: o trigger gt_set_chat_channel_created_by recusa insert sem
+    // auth.uid(), e a chave de serviço não tem. Tarefa nunca aberta ⇒ falha no log.
+    const { data: channel } = await supabase.from('gt_chat_channels').select('id').eq('slug', `task-${task.id}`).maybeSingle();
+    if (!channel) return { ok: false, error: 'tarefa ainda sem chat (ninguém a abriu)' };
 
     const { error: msgErr } = await supabase.from('gt_chat_messages').insert({
       channel_id: channel.id,
