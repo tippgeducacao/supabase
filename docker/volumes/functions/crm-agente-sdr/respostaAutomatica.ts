@@ -10,7 +10,7 @@
 // continuam pendentes) e o modelo lê que a pessoa ainda não respondeu.
 import type { Msg } from './historico.ts';
 
-export const ETIQUETA_RESPOSTA_AUTOMATICA = '[RESPOSTA AUTOMÁTICA do WhatsApp do lead (mensagem pronta de empresa/clínica): não foi a pessoa que escreveu; ela ainda não respondeu]';
+export const ETIQUETA_RESPOSTA_AUTOMATICA = '[RESPOSTA AUTOMÁTICA do WhatsApp do lead (mensagem pronta de empresa/clínica). Não foi a pessoa que escreveu: ela ainda não respondeu nada, nem a nossa última pergunta, e esta mensagem não diz nada sobre ela]';
 
 const normalizar = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ');
 
