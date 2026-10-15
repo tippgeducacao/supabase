@@ -212,6 +212,27 @@ export async function followupMapaLigado(supabase: { from: (tabela: string) => a
   } catch { return false; }
 }
 
+// Retomadas genéricas (15/10/2026, caso Adriana): "ficou alguma dúvida sobre a pós…?", "o que mais pesa…?",
+// "já fez alguma pós…?" não retomam nada que a pessoa disse. Na semana, 703 envios para 465 leads, a maior
+// parte no toque de 15 min, para quem nem tinha conversado. Com a chave, saem de todos os toques.
+const RETOMADAS_GENERICAS = new Set(['retomada:geral_duvida', 'retomada:geral_prioridade', 'retomada:geral_experiencia']);
+
+export function semRetomadasGenericas<T extends { retomadas: readonly { id: string }[] }>(plano: T): T {
+  return { ...plano, retomadas: plano.retomadas.filter((r) => !RETOMADAS_GENERICAS.has(r.id)) };
+}
+
+/** A retirada das retomadas genéricas vale para este telefone? (followup_sem_genericas / _telefones). */
+export async function semGenericasLigado(supabase: { from: (tabela: string) => any }, telefone: string | null | undefined): Promise<boolean> {
+  try {
+    const { data, error } = await supabase.from('crm_agente_sdr_config').select('followup_sem_genericas, followup_sem_genericas_telefones').eq('id', 1).maybeSingle();
+    if (error || !data) return false;
+    if (data.followup_sem_genericas === true) return true;
+    const fim = String(telefone ?? '').replace(/\D/g, '').slice(-8);
+    const lista: unknown[] = Array.isArray(data.followup_sem_genericas_telefones) ? data.followup_sem_genericas_telefones : [];
+    return fim.length === 8 && lista.some((t) => String(t).replace(/\D/g, '').slice(-8) === fim);
+  } catch { return false; }
+}
+
 /** Nos toques que não são do mapa sobra só o que retoma algo concreto: agenda e material. */
 export function soRetomadasConcretas<T extends { perguntas: unknown[]; retomadas: readonly { id: string; tipo: string }[] }>(plano: T): T {
   return { ...plano, perguntas: [], retomadas: plano.retomadas.filter((r) => r.tipo === 'agenda' || r.id === 'retomada:geral_material') };

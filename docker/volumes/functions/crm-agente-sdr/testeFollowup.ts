@@ -120,20 +120,21 @@ export async function executarTesteFollowup(supabase: any, body: unknown) {
 // lidos uma vez e a sequência anda em memória. Serve para ler as mensagens antes de ligar uma mudança
 // (ex.: o follow-up pelo mapa de carreira, `mapa: true`). O contato de teste arquivado no CRM barra o
 // teste com envio (voz), e este ensaio não depende dele.
-export function validarPedidoEnsaioFollowup(body: unknown): { telefone: string; mapa: boolean; passos: number } {
+export function validarPedidoEnsaioFollowup(body: unknown): { telefone: string; mapa: boolean; semGenericas: boolean; passos: number } {
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('pedido_invalido');
   const p = body as Record<string, unknown>;
-  if (Object.keys(p).some(k => !['telefone', 'mapa', 'passos'].includes(k))) throw new Error('pedido_invalido');
+  if (Object.keys(p).some(k => !['telefone', 'mapa', 'sem_genericas', 'passos'].includes(k))) throw new Error('pedido_invalido');
   const telefone = typeof p.telefone === 'string' ? p.telefone.replace(/\D/g, '') : '';
   if (!['5546988166051', '46988166051', '554688166051', '4688166051'].includes(telefone)) throw new Error('fora_do_telefone_de_teste');
   if (p.mapa !== undefined && typeof p.mapa !== 'boolean') throw new Error('pedido_invalido');
+  if (p.sem_genericas !== undefined && typeof p.sem_genericas !== 'boolean') throw new Error('pedido_invalido');
   const passos = p.passos === undefined ? 5 : Number(p.passos);
   if (!Number.isInteger(passos) || passos < 1 || passos > MAXIMO_PASSOS) throw new Error('pedido_invalido');
-  return { telefone: TELEFONE_TESTE, mapa: p.mapa === true, passos };
+  return { telefone: TELEFONE_TESTE, mapa: p.mapa === true, semGenericas: p.sem_genericas === true, passos };
 }
 
 export async function ensaiarFollowupSemEnvio(supabase: any, body: unknown) {
-  const { telefone, mapa, passos } = validarPedidoEnsaioFollowup(body);
+  const { telefone, mapa, semGenericas, passos } = validarPedidoEnsaioFollowup(body);
   const remotejid = telefone + '@s.whatsapp.net';
   const lead = await buscarLead(supabase, remotejid);
   if (!lead) throw new Error('lead_indisponivel_para_teste');
@@ -145,7 +146,7 @@ export async function ensaiarFollowupSemEnvio(supabase: any, body: unknown) {
   for (let passo = 1; passo <= passos; passo++) {
     const tel = criarTelemetria(supabase, remotejid);
     const contexto = '\n\nDADOS JÁ COLETADOS (não perguntar de novo): ' + JSON.stringify(local.jornada?.coleta ?? {});
-    const gerada = await gerarFollowup(supabase, local, passo, tel, history, '', { provedor, contexto, mapa });
+    const gerada = await gerarFollowup(supabase, local, passo, tel, history, '', { provedor, contexto, mapa, semGenericas });
     resultados.push({ passo, texto: gerada.message, rotulo: gerada.final_answer, pergunta: gerada.perguntaCarreira ?? null, provedor: gerada.provedorResposta });
     if (!gerada.message) break;
     // A sequência anda só em memória: o marcador conta a tentativa e a fala entra como dita.
@@ -155,5 +156,5 @@ export async function ensaiarFollowupSemEnvio(supabase: any, body: unknown) {
         { ...gerada.perguntaCarreira, enviado_em: new Date().toISOString() }];
     }
   }
-  return { ok: true, sem_envio: true, mapa, resultados };
+  return { ok: true, sem_envio: true, mapa, sem_genericas: semGenericas, resultados };
 }

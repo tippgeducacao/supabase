@@ -194,3 +194,27 @@ describe('toques 3 e 4: sai o texto do mapa, sem a lembrança', () => {
     expect(falaDoToque('x', ganho, '', '', false).fala).toBe('quanto você acha que um supervisor ou gerente ganha a mais do que você hoje?');
   });
 });
+
+// Caso Adriana (15/10/2026): "ficou alguma dúvida sobre a pós de Cannabis…?" no toque de 15 min.
+describe('sem as retomadas genéricas', () => {
+  it('tira dúvida, prioridade e experiência; agenda e material ficam', async () => {
+    const { semRetomadasGenericas } = await import('./followupMapa');
+    const plano = { escopo: 'x', perguntas: [{ id: 'x:objetivo' }], retomadas: [
+      { id: 'retomada:agenda_interesse', tipo: 'agenda' }, { id: 'retomada:geral_duvida', tipo: 'geral' },
+      { id: 'retomada:geral_prioridade', tipo: 'geral' }, { id: 'retomada:geral_experiencia', tipo: 'geral' },
+      { id: 'retomada:geral_material', tipo: 'geral' },
+    ] };
+    const r = semRetomadasGenericas(plano);
+    expect(r.retomadas.map((x) => x.id)).toEqual(['retomada:agenda_interesse', 'retomada:geral_material']);
+    expect(r.perguntas).toEqual([{ id: 'x:objetivo' }]);
+  });
+
+  it('a chave: desligada por padrão; liga para todos ou só para o telefone de ensaio', async () => {
+    const { semGenericasLigado } = await import('./followupMapa');
+    const banco = (data: unknown, error: unknown = null) => ({ from: () => ({ select: () => ({ eq: () => ({ maybeSingle: async () => ({ data, error }) }) }) }) });
+    expect(await semGenericasLigado(banco({ followup_sem_genericas: false, followup_sem_genericas_telefones: [] }), '5546988166051')).toBe(false);
+    expect(await semGenericasLigado(banco({ followup_sem_genericas: true, followup_sem_genericas_telefones: [] }), '5511999990000')).toBe(true);
+    expect(await semGenericasLigado(banco({ followup_sem_genericas: false, followup_sem_genericas_telefones: ['5546988166051'] }), '554688166051@s.whatsapp.net')).toBe(true);
+    expect(await semGenericasLigado(banco(null, { message: 'x' }), '5546988166051')).toBe(false);
+  });
+});

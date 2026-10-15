@@ -34,7 +34,7 @@ import { FOLLOWUP_PILOTO_SYSTEM } from './followupPiloto.ts';
 import { contextoFollowupCarreira, corrigirPremissaDeCarreira, perguntaRepetida, planejarFollowupCarreira, validarFollowupCarreira } from './followupCarreira.ts';
 import {
   dadosDaEscolha, dadosDoToque, escolhaDoToque, escopoDoMapa, falaDoToque, FOLLOWUP_MAPA_SYSTEM, followupMapaLigado, mapaDoLead, semContextoRepetido,
-  soRetomadasConcretas, toqueDoMapa, usadosDoMapa,
+  semGenericasLigado, semRetomadasGenericas, soRetomadasConcretas, toqueDoMapa, usadosDoMapa,
 } from './followupMapa.ts';
 import { cursoDaConversa } from './ganchoLote.ts';
 import { registrarNaJornada } from './fichaAtendimento.ts';
@@ -346,7 +346,7 @@ export async function gerarFollowup(
   tel: Telemetria,
   history: Msg[],
   contextoMateriais = '',
-  opcoes?: { provedor: ProvedorIA; contexto: string; mapa?: boolean },
+  opcoes?: { provedor: ProvedorIA; contexto: string; mapa?: boolean; semGenericas?: boolean },
 ): Promise<{ message: string; final_answer: string; provedorResposta: 'openai' | 'anthropic'; perguntaCarreira?: { escopo: string; pergunta_id: string } }> {
   const remotejid = lead.remotejid;
   const tentativaAtual = (opcoes ? contarTentativasDoCiclo(history) : contarTentativas(history)) + 1;
@@ -359,6 +359,9 @@ export async function gerarFollowup(
   const nomeCtx = nome || '(ausente no cadastro; use apenas autoidentificação explícita do lead no histórico)';
   const cursoCtx = curso || '(ausente no cadastro; use apenas curso explicitamente escolhido pelo lead no histórico)';
   let planoCarreira = opcoes ? planejarFollowupCarreira(curso, lead.jornada?.followup_carreira) : null;
+  if (planoCarreira && (opcoes?.semGenericas ?? await semGenericasLigado(supabase, lead.numero_formatado ?? remotejid))) {
+    planoCarreira = semRetomadasGenericas(planoCarreira);
+  }
   // ▸ Follow-up pelo mapa de carreira do Wellinton (followupMapa.ts, 13/10/2026). Só no piloto OpenAI,
   //   fora da persona aula, e com a chave ligada (ou forçada pelo ensaio). O código escolhe a pergunta
   //   do toque; o modelo só escreve a frase de contexto antes dela.
