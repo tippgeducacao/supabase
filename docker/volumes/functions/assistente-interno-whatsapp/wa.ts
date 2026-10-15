@@ -30,6 +30,35 @@ export async function carregarLinha(admin: any): Promise<LinhaWa | null> {
   return { ...linha, token: sec.token } as LinhaWa;
 }
 
+/**
+ * Uma linha do WhatsApp Web do CRM (wa_conexoes) — usada só pelos relatórios no grupo, que
+ * escolhem a linha na config. Envio direto pelo provider: nada passa por crm-whatsapp-send nem
+ * grava em crm_whatsapp_messages (e o webhook dessas linhas descarta grupo).
+ */
+export async function carregarLinhaWeb(admin: any, conexaoId: string): Promise<LinhaWa | null> {
+  const { data: linha } = await admin
+    .from("wa_conexoes")
+    .select("id, provider, server_url, instancia_externa_id, numero")
+    .eq("id", conexaoId)
+    .eq("ativo", true)
+    .maybeSingle();
+  if (!linha?.server_url) return null;
+  const { data: sec } = await admin
+    .from("wa_conexoes_secrets")
+    .select("token")
+    .eq("conexao_id", linha.id)
+    .maybeSingle();
+  if (!sec?.token) return null;
+  return { ...linha, token: sec.token } as LinhaWa;
+}
+
+/** A linha do WhatsApp Web da config ou, sem ela, a linha própria do assistente. Lança se não houver. */
+export async function carregarLinhaDe(admin: any, conexaoId: string | null | undefined): Promise<LinhaWa> {
+  const linha = conexaoId ? await carregarLinhaWeb(admin, conexaoId) : await carregarLinha(admin);
+  if (!linha) throw new Error(conexaoId ? `linha ${conexaoId} inativa ou sem token` : "sem linha WhatsApp ativa do assistente");
+  return linha;
+}
+
 export async function enviarTexto(linha: LinhaWa, numeroDigits: string, texto: string) {
   const provider = getWaProvider(linha.provider || "uazapi");
   return await provider.sendText(linha.server_url, linha.token, numeroDigits, texto);

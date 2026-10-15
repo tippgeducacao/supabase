@@ -12,7 +12,8 @@
 //   POST  /instance/disconnect  header token
 //   DELETE /instance            header token
 //   POST  /webhook              header token        body {url,events,...}  (modo simples)
-//   POST  /send/text            header token        body {number,text}
+//   POST  /send/text            header token        body {number,text}   (number = dígitos ou "…@g.us")
+//   GET   /group/list           header token                               -> {groups:[{JID,Name,...}]}
 //   POST  /send/media           header token        body {number,type,file,text?,docName?}
 //
 // ⚠️ O SHAPE do webhook de mensagem da Uazapi é confirmado via LOG-FIRST
@@ -108,8 +109,10 @@ export interface WaProvider {
   disconnect(serverUrl: string, token: string): Promise<void>;
   /** Deleta a instância no servidor. */
   deleteInstance(serverUrl: string, token: string): Promise<void>;
-  /** Envia texto. `numberDigits` = só dígitos com DDI (ex.: 5546...). */
+  /** Envia texto. `numberDigits` = só dígitos com DDI (ex.: 5546...) ou o id de um grupo ("…@g.us"). */
   sendText(serverUrl: string, token: string, numberDigits: string, text: string): Promise<WaSendResult>;
+  /** Grupos de que a linha participa (o `jid` é o destino do sendText para o grupo). */
+  listGroups(serverUrl: string, token: string): Promise<{ jid: string; nome: string }[]>;
   /** Envia mídia por URL pública. */
   sendMedia(
     serverUrl: string,
@@ -367,6 +370,18 @@ const uazapi: WaProvider = {
       ok: r.ok,
       raw: r.json,
     };
+  },
+
+  async listGroups(serverUrl, token) {
+    const r = await uazFetch(serverUrl, "/group/list?noparticipants=true", "GET", { token });
+    if (!r.ok) throw new Error(`group/list HTTP ${r.status}`);
+    const lista: any[] = Array.isArray(r.json) ? r.json : (r.json?.groups ?? []);
+    return lista
+      .map((g) => ({
+        jid: String(pick<string>(g, ["JID", "jid", "id"]) ?? ""),
+        nome: String(pick<string>(g, ["Name", "name", "subject", "Subject"]) ?? ""),
+      }))
+      .filter((g) => g.jid.endsWith("@g.us"));
   },
 
   async sendMedia(serverUrl, token, numberDigits, opts) {
