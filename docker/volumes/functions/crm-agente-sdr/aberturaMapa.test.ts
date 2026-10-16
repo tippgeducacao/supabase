@@ -17,6 +17,7 @@ const MAPA = {
     { ramo: 'contratado', etapa: 'carreira', texto: 'Você quer sair do plantão?', ordem: 3 },
     { ramo: 'dono', etapa: 'carreira', texto: 'Você quer oferecer um serviço que os concorrentes da sua região ainda não têm?', ordem: 3 },
     { ramo: 'contratado', etapa: 'ganho', texto: 'Quanto você cobra hoje por consulta?', ordem: 1 },
+    { ramo: '*', etapa: 'prioridade', texto: 'Por que você está buscando essa pós agora?', ordem: 2 },
   ],
 } as any;
 
@@ -33,6 +34,13 @@ describe('a fase antes do convite', () => {
     expect(b).toContain('"Hoje você é contratado de uma clínica');
     expect(b).toContain('"Os tutores já te perguntaram se você prescreve?"');
     expect(b).toContain('ponte do convite: "como a pós te leva');
+  });
+
+  it('quem ainda não atua: as perguntas de momento do mapa (caso Lua)', () => {
+    const hist = h(['assistant', TEMPLATE], ['user', 'Não, quero começar']);
+    const b = blocoDaAbertura(MAPA, faseDaAbertura(MAPA, hist, { jornada: {} })!, hist);
+    expect(b).toContain('ainda não atua nessa área');
+    expect(b).toContain('"Por que você está buscando essa pós agora?"');
   });
 
   it('pergunta feita sai da lista; com duas feitas é hora da abertura, sem perguntas', () => {

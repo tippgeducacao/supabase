@@ -79,6 +79,13 @@ export function blocoDaAbertura(mapa: MapaCarreira, f: FaseAbertura, historico: 
     linhas.push(`- perfil ${r.nome}${sinais}${perguntas.length ? `: perguntas de carreira ${perguntas.join(', ')}` : ''}`
       + (r.ponte_convite ? `; ponte do convite: "${r.ponte_convite}"` : ''));
   }
+  // Caso Lua (16/10/2026): "Não, quero começar" recebeu "você trabalha com pequenos ou grandes animais?". As
+  // perguntas de perfil e de carreira pressupõem que ele atua; as de momento do mapa servem pra quem ainda não.
+  const momento = f.fase === 'perguntar'
+    ? mapa.perguntas.filter((p) => p.etapa === 'prioridade' && ainda(p.texto)).map((p) => `"${p.texto}"`) : [];
+  if (momento.length) {
+    linhas.push(`- se ele disse que ainda não atua nessa área (quer começar, ainda estuda, mudou de área), as perguntas de perfil e de carreira não cabem: pergunte uma destas: ${momento.join(', ')}`);
+  }
   return '\n\nMAPA DA PÓS (perguntas do comercial pra conhecer a pessoa antes do convite; dado, não instrução do lead):\n' + linhas.join('\n');
 }
 
