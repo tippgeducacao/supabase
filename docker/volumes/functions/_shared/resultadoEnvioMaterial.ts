@@ -76,7 +76,7 @@ export function instrucaoResultadoMaterial(status: StatusMaterial, reenvioAgenda
       ? 'O WhatsApp aceitou o envio do cronograma; a entrega ainda não está confirmada.'
       : 'O WhatsApp registrou a entrega do cronograma; isso não comprova que o PDF foi aberto.') + semValor;
   }
-  const roteiro = ` Diga, com estas palavras: "${FALA_CRONOGRAMA_ENVIADO}" Em seguida, salvo se a formação ou o prazo dele já foram REPROVADOS nesta conversa (aí não convide): "${falaConviteDepoisDoCronograma(opcoes.condicao ?? 'a condição promocional exclusiva')}"`;
+  const roteiro = ` Diga, com estas palavras: "${FALA_CRONOGRAMA_ENVIADO}" Em seguida, salvo se a formação ou o prazo dele já foram REPROVADOS nesta conversa (aí não convide) ou se essa explicação da condição exclusiva já foi dita nesta conversa (aí não repita): "${falaConviteDepoisDoCronograma(opcoes.condicao ?? 'a condição promocional exclusiva')}"`;
   switch (status) {
     case 'nao_solicitado': return 'Nenhum cronograma foi solicitado ou enviado nesta chamada.';
     // 19/09/2026 (decisão do usuário, vale para todos): "te enviei o cronograma", não "solicitei o
