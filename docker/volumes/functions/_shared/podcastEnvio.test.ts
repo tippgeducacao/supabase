@@ -1,11 +1,35 @@
 import { describe, expect, it } from "vitest";
-import { parametrosDoModelo, renderModelo, resolverVarPodcast, usosDoAgendamento } from "./podcastEnvio";
+import { linkAgendaDoCandidato, parametrosDoModelo, renderModelo, resolverVarPodcast, usosDoAgendamento } from "./podcastEnvio";
 
 describe("usosDoAgendamento", () => {
   it("com link: texto novo primeiro, antigo de reserva; sem link: só o antigo", () => {
     expect(usosDoAgendamento(1, "https://calendly.com/x")).toEqual(["podcast_agenda_1_link", "podcast_agenda_1"]);
     expect(usosDoAgendamento(2, null)).toEqual(["podcast_agenda_2"]);
     expect(usosDoAgendamento(3, "")).toEqual(["podcast_agenda_3"]);
+  });
+});
+
+// O sorteio do host mora na RPC; aqui só se protege a leitura do retorno: a linha vem em array
+// (RETURNS TABLE), sem linha = sem link, e erro da RPC não derruba o envio (vira "sem link").
+describe("linkAgendaDoCandidato", () => {
+  const admin = (data: unknown, error: unknown = null) => ({
+    rpc: async (nome: string, args: unknown) => {
+      expect(nome).toBe("pod_link_agenda_do_candidato");
+      expect(args).toEqual({ p_candidato_id: "c1" });
+      return { data, error };
+    },
+  });
+  it("devolve o link e o host sorteado", async () => {
+    const r = await linkAgendaDoCandidato(admin([{ link: " https://calendly.com/h/petfood ", host_id: "h1" }]), "c1");
+    expect(r).toEqual({ link: "https://calendly.com/h/petfood", hostId: "h1" });
+  });
+  it("link único do podcast vem sem host", async () => {
+    expect(await linkAgendaDoCandidato(admin([{ link: "https://calendly.com/p", host_id: null }]), "c1"))
+      .toEqual({ link: "https://calendly.com/p", hostId: null });
+  });
+  it("sem linha ou com erro: null", async () => {
+    expect(await linkAgendaDoCandidato(admin([]), "c1")).toBeNull();
+    expect(await linkAgendaDoCandidato(admin(null, { message: "boom" }), "c1")).toBeNull();
   });
 });
 

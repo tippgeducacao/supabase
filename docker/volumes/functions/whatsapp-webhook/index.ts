@@ -1,7 +1,8 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { acaoDoCliquePodcast, ehBotaoDeRecusa, logPodcastConversaSac } from "../_shared/podcastSac.ts";
 import {
-  enviarModeloPodcast, modeloAprovadoPorUso, parametrosDoModelo, primeiroNomePodcast,
+  enviarModeloPodcast, linkAgendaDoCandidato, modeloAprovadoPorUso, parametrosDoModelo, primeiroNomePodcast,
+  type CtxPodcast,
 } from "../_shared/podcastEnvio.ts";
 import { baixarAnexoInbound, extrairMidiaInbound } from "../_shared/waMediaInbound.ts";
 
@@ -744,8 +745,9 @@ async function handlePodcastInbound(
 // Resposta automática a um clique de convidado de podcast (14/10/2026, fluxo do documento do
 // Pedagógico). Não é follow-up — esses seguem no clique do atendente (decisão do Rafael) —:
 // é responder a um pedido que o convidado acabou de fazer. Só sai com o modelo APROVADO e,
-// no caso da agenda, com o podcast tendo link; faltando qualquer coisa, nada é enviado e o
-// atendente segue como antes. Cada envio é TRAVADO antes de sair (a Meta reentrega o mesmo
+// no caso da agenda, com link (o único do podcast ou, desde 16/10, o Calendly de um host em
+// rodízio — linkAgendaDoCandidato); faltando qualquer coisa, nada é enviado e o atendente
+// segue como antes. Cada envio é TRAVADO antes de sair (a Meta reentrega o mesmo
 // webhook): mais_info uma vez por candidatura; agenda só se nenhum follow-up de agenda saiu.
 // Nunca lança: o webhook tem de responder 200.
 async function responderCliquePodcast(supabase: any, prof: any, to: string, rotulo: string) {
@@ -754,7 +756,7 @@ async function responderCliquePodcast(supabase: any, prof: any, to: string, rotu
   try {
     const { data: cand } = await supabase
       .from("pod_convite_candidatos")
-      .select("id, podcast_id, agenda_toque, metadata, podcast:ped_podcasts(nome, youtube_url, link_agenda)")
+      .select("id, podcast_id, agenda_toque, metadata, podcast:ped_podcasts(nome, youtube_url)")
       .eq("professor_id", prof.id).eq("status", "respondeu")
       .order("respondeu_em", { ascending: false, nullsFirst: false }).limit(1).maybeSingle();
     if (!cand) return;
@@ -766,11 +768,11 @@ async function responderCliquePodcast(supabase: any, prof: any, to: string, rotu
     const { data: cfg } = await supabase.from("ped_configuracoes").select("chave, valor")
       .in("chave", ["podcast_plataforma_gravacao", "podcast_agenda_intervalo_horas"]);
     const cfgMap = new Map((cfg ?? []).map((c: any) => [c.chave, String(c.valor ?? "")]));
-    const ctx = {
+    const ctx: CtxPodcast = {
       nome: primeiroNomePodcast(prof.nome),
       podcast: cand.podcast?.nome ?? "podcast",
       youtube: cand.podcast?.youtube_url ?? "",
-      linkAgenda: String(cand.podcast?.link_agenda ?? "").trim() || null,
+      linkAgenda: null, // só a agenda precisa — e pedir o link já sorteia o host
       plataforma: cfgMap.get("podcast_plataforma_gravacao") || "Zencastr",
     };
     const sac = { professorId: prof.id, telefone: to, nome: prof.nome ?? null, podcastId: cand.podcast_id };
@@ -795,9 +797,11 @@ async function responderCliquePodcast(supabase: any, prof: any, to: string, rotu
     }
 
     // acao === "agenda": só o texto com o link, e só como 1º follow-up de agenda
-    if (!ctx.linkAgenda || (cand.agenda_toque ?? 0) > 0) return;
+    if ((cand.agenda_toque ?? 0) > 0) return;
     const tpl = await modeloAprovadoPorUso(supabase, ["podcast_agenda_1_link"]);
     if (!tpl) return;
+    ctx.linkAgenda = (await linkAgendaDoCandidato(supabase, cand.id))?.link ?? null;
+    if (!ctx.linkAgenda) return;
     const { params, vazios } = parametrosDoModelo(tpl.variaveis_mapping, ctx);
     if (vazios.length) return;
     const horas = parseInt(cfgMap.get("podcast_agenda_intervalo_horas") || "72", 10) || 72;

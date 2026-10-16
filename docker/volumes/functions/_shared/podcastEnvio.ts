@@ -13,7 +13,7 @@ export interface CtxPodcast {
   nome: string;
   podcast: string;
   youtube: string;
-  /** ped_podcasts.link_agenda (Calendly). */
+  /** Calendly: o link único do podcast ou o do host sorteado (linkAgendaDoCandidato). */
   linkAgenda?: string | null;
   /** ped_configuracoes.podcast_plataforma_gravacao (ex.: Zencastr). */
   plataforma?: string | null;
@@ -157,6 +157,22 @@ export async function modeloAprovadoPorUso(admin: any, usos: string[]): Promise<
 export function usosDoAgendamento(toque: number, linkAgenda?: string | null): string[] {
   const base = `podcast_agenda_${toque}`;
   return linkAgenda ? [`${base}_link`, base] : [base];
+}
+
+/**
+ * Link da agenda para ESTE convidado (16/10/2026): o link único do podcast, se houver; senão o
+ * Calendly de um host do podcast, em rodízio e fixo por candidatura — o follow-up 2 manda o
+ * mesmo host do 1 (RPC pod_link_agenda_do_candidato). Sem link nenhum ⇒ null (texto antigo).
+ */
+export async function linkAgendaDoCandidato(admin: any, candidatoId: string): Promise<{ link: string; hostId: string | null } | null> {
+  const { data, error } = await admin.rpc("pod_link_agenda_do_candidato", { p_candidato_id: candidatoId });
+  if (error) {
+    console.error("[podcast] link da agenda:", error.message);
+    return null;
+  }
+  const row = Array.isArray(data) ? data[0] : data;
+  const link = String(row?.link ?? "").trim();
+  return link ? { link, hostId: row?.host_id ?? null } : null;
 }
 
 /** Envia o modelo e espelha no SAC. Nunca lança: devolve ok/erro. */

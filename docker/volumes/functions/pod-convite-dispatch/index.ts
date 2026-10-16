@@ -8,7 +8,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { ensureToken, base64UrlEncode, encodeHeaderUtf8, encodeDisplayName } from "../_shared/gmail.ts";
 import { logPodcastConversaSac } from "../_shared/podcastSac.ts";
 import {
-  enviarModeloPodcast, formatPhone, modeloAprovadoPorUso, parametrosDoModelo, resolverVarPodcast, usosDoAgendamento,
+  enviarModeloPodcast, formatPhone, linkAgendaDoCandidato, modeloAprovadoPorUso, parametrosDoModelo, resolverVarPodcast, usosDoAgendamento,
 } from "../_shared/podcastEnvio.ts";
 
 const corsHeaders = {
@@ -23,8 +23,9 @@ const TOQUE_TEMPLATE: Record<number, string> = {
   2: "podcast_followup_1",
   3: "podcast_followup_2",
 };
-// FASE DE AGENDAMENTO (Interessado): os follow-ups 1/2/3 usam `podcast_agenda_N` — ou, se o
-// podcast tem link da agenda, `podcast_agenda_N_link` (ver usosDoAgendamento).
+// FASE DE AGENDAMENTO (Interessado): os follow-ups 1/2/3 usam `podcast_agenda_N` — ou, se há
+// link da agenda (o único do podcast ou o Calendly do host sorteado para o convidado),
+// `podcast_agenda_N_link` (ver usosDoAgendamento e linkAgendaDoCandidato).
 
 function primeiroNome(nome?: string | null): string {
   return String(nome ?? "").trim().split(/\s+/)[0] || "Professor(a)";
@@ -302,7 +303,7 @@ async function dispatchAgenda(admin: any, candidatoId: string, json: (b: unknown
 
   const { data: c } = await admin
     .from("pod_convite_candidatos")
-    .select("id, podcast_id, professor_id, status, agenda_toque, professor:ped_professores(nome,email,contato_whatsapp), podcast:ped_podcasts(nome,youtube_url,link_agenda)")
+    .select("id, podcast_id, professor_id, status, agenda_toque, professor:ped_professores(nome,email,contato_whatsapp), podcast:ped_podcasts(nome,youtube_url)")
     .eq("id", candidatoId).maybeSingle();
   if (!c) return json({ ok: false, error: "candidato não encontrado" }, 404);
   if (c.status !== "respondeu") return json({ ok: false, error: `candidato não está em Interessado (status=${c.status})` }, 409);
@@ -313,7 +314,9 @@ async function dispatchAgenda(admin: any, candidatoId: string, json: (b: unknown
   const nome = primeiroNome(c.professor?.nome);
   const podcastNome = c.podcast?.nome ?? "podcast";
   const youtube = c.podcast?.youtube_url ?? "";
-  const linkAgenda = String(c.podcast?.link_agenda ?? "").trim() || null;
+  // link único do podcast ou, sem ele, o Calendly do host sorteado para este convidado (o
+  // mesmo em todos os follow-ups dele)
+  const linkAgenda = (await linkAgendaDoCandidato(admin, c.id))?.link ?? null;
 
   // ---- WhatsApp: com link da agenda, o texto novo ('podcast_agenda_N_link'); senão, ou
   //      enquanto ele não for aprovado, o antigo ('podcast_agenda_N'). ----
