@@ -27,6 +27,11 @@ import {
   mesmoTelefone,
   montarContexto,
   limparResposta,
+  decidirCorrecao,
+  decidirRodada,
+  pareceBastidor,
+  limparTagsDoCanal,
+  pareceFerramentaEmTexto,
   linhaDaAula,
   primeiroNome,
   rotuloDiasSemana,
@@ -679,5 +684,113 @@ describe('perfil do aluno: quando pode perguntar', () => {
       expect(v).toContain('Tire essa pergunta da mensagem');
       expect(v).not.toMatch(/[\u2013\u2014]/);
     }
+  });
+});
+
+
+describe('o canal da fala (Gustavo, 15/10/2026)', () => {
+  // O que o aluno recebeu às 14:45, antes da resposta de verdade.
+  const VAZADO = 'Ele disse "não precisa", recusando a oferta de mostrar a plataforma, não é aceite, é recusa. ' +
+    'Não devo chamar entregar_proximo_passo aqui. Vou apenas seguir para a pergunta de perfil.\n\n' +
+    'Que bom, Gustavo! Fico tranquilo sabendo que já está se virando bem por aí.';
+  const fala = (mensagem: unknown) => ({ type: 'tool_use', id: 'f1', name: 'responder_ao_aluno', input: { mensagem } });
+
+  it('a análise que vazou é pega, e por mais de um sinal', () => {
+    expect(pareceBastidor(VAZADO)).not.toBeNull();
+    // Cada pedaço sozinho também: tirar um padrão não pode reabrir a porta.
+    expect(pareceBastidor('Não devo chamar entregar_proximo_passo aqui.')).toBe('identificador');
+    expect(pareceBastidor('Ele disse que não precisa, então sigo.')).toBe('terceira_pessoa');
+    expect(pareceBastidor('Não devo oferecer de novo.')).toBe('nao_devo');
+    expect(pareceBastidor('Isso é recusa, então só pergunto a meta.')).toBe('classificacao');
+    expect(pareceBastidor('Vou apenas seguir para a pergunta de perfil.')).toBe('perfil');
+    expect(pareceBastidor('O aluno quer saber do cronograma.')).toBe('terceira_pessoa');
+    expect(pareceBastidor('O contexto diz que a turma é 02/26 #01.')).toBe('contexto');
+    expect(pareceBastidor('Ele está no D+3, então mando o vídeo.')).toBe('etapa_numerada');
+    expect(pareceBastidor('<analise>ok</analise> Fica na plataforma.')).toBe('tag');
+  });
+
+  it('fala normal não é bastidor, nem com link, e-mail ou sublinhado dentro do link', () => {
+    for (const ok of [
+      'Hahaha gostei da ambição, Gustavo!',
+      'Que bom, Gustavo! Deixa eu te perguntar uma coisa: qual é a sua maior meta com essa pós?',
+      'Deixa eu confirmar isso certinho aqui e já te retorno.',
+      'Fica na plataforma, no *material didático do curso*, logo na tela de entrada.',
+      'Segue o link do grupo da sua turma: https://chat.whatsapp.com/Ab_Cd-EfGh123',
+      'Tudo sobre o TCC está aqui: https://tcc.ppgeducacao.com.br. Dúvida, é só escrever para tcc@ppgeducacao.com',
+      'A mentoria é todo sábado às 9h: https://meet.google.com/cft-inax-tbw',
+      'A próxima aula é terça-feira, 15/09/2026, das 19:00 às 22:00.',
+      'Entendi! Vou levar isso para a coordenação avaliar.',
+      'Ela é aberta para toda a turma, e ele pode levar as dúvidas do trabalho.',
+      'Prefere ligação ou videochamada?',
+    ]) expect([ok, pareceBastidor(ok)]).toEqual([ok, null]);
+  });
+
+  it('decide a rodada: ação executa, fala junto da ação some', () => {
+    const acao = { type: 'tool_use', id: 't1', name: 'consultar_proximas_aulas', input: {} };
+    expect(decidirRodada({ content: [acao] })).toEqual({ tipo: 'ferramentas', acoes: [acao], falaDescartada: false });
+    expect(decidirRodada({ content: [{ type: 'text', text: 'pensando' }, fala('A próxima é amanhã.'), acao] }))
+      .toEqual({ tipo: 'ferramentas', acoes: [acao], falaDescartada: true });
+  });
+
+  it('decide a rodada: só a fala limpa pelo canal vira resposta', () => {
+    expect(decidirRodada({ content: [{ type: 'text', text: 'pensei' }, fala('Fica na plataforma.')] }))
+      .toEqual({ tipo: 'resposta', mensagem: 'Fica na plataforma.' });
+    expect(decidirRodada({ content: [fala('')] })).toEqual({ tipo: 'resposta', mensagem: '' });
+    expect(decidirRodada({ content: [{ type: 'text', text: 'Fica na plataforma.' }] }))
+      .toEqual({ tipo: 'corrigir', motivo: 'texto_solto' });
+    expect(decidirRodada({ content: [] })).toEqual({ tipo: 'corrigir', motivo: 'texto_solto' });
+    expect(decidirRodada(null)).toEqual({ tipo: 'corrigir', motivo: 'texto_solto' });
+    expect(decidirRodada({ content: [fala('Oi.'), fala('Oi de novo.')] })).toEqual({ tipo: 'corrigir', motivo: 'fala_dupla' });
+    expect(decidirRodada({ content: [fala(VAZADO)] })).toMatchObject({ tipo: 'corrigir', motivo: 'bastidor' });
+    // Campo que não é texto não vira "[object Object]" no WhatsApp: vira silêncio.
+    expect(decidirRodada({ content: [fala({ x: 1 })] })).toEqual({ tipo: 'resposta', mensagem: '' });
+    expect(decidirRodada({ stop_reason: 'max_tokens', content: [fala('Fica na plata')] }))
+      .toEqual({ tipo: 'bloquear', motivo: 'geracao_max_tokens' });
+    expect(decidirRodada({ stop_reason: 'refusal', content: [] })).toEqual({ tipo: 'bloquear', motivo: 'geracao_refusal' });
+  });
+
+  it('a reescrita tem uma chance só', () => {
+    expect(decidirCorrecao({ content: [fala('Fica na plataforma.')] })).toEqual({ tipo: 'resposta', mensagem: 'Fica na plataforma.' });
+    expect(decidirCorrecao({ content: [{ type: 'text', text: 'Fica na plataforma.' }] }))
+      .toEqual({ tipo: 'bloquear', motivo: 'correcao_texto_solto' });
+    expect(decidirCorrecao({ content: [fala(VAZADO)] })).toEqual({ tipo: 'bloquear', motivo: 'correcao_bastidor:identificador' });
+    expect(decidirCorrecao({ content: [{ type: 'tool_use', id: 't', name: 'passar_para_atendente', input: {} }] }))
+      .toEqual({ tipo: 'bloquear', motivo: 'ferramenta_na_correcao' });
+  });
+});
+
+describe('o canal da fala: achados da revisão adversarial (16/10/2026)', () => {
+  const fala = (mensagem: unknown) => ({ type: 'tool_use', id: 'f1', name: 'responder_ao_aluno', input: { mensagem } });
+
+  it('a tag do campo sai antes da conferência, até colada num link', () => {
+    expect(limparTagsDoCanal('Fica na plataforma.</mensagem>')).toBe('Fica na plataforma.');
+    expect(limparTagsDoCanal('<mensagem>Oi</mensagem>')).toBe('Oi');
+    expect(decidirRodada({ content: [fala('Segue: https://chat.whatsapp.com/abc</mensagem>')] }))
+      .toEqual({ tipo: 'resposta', mensagem: 'Segue: https://chat.whatsapp.com/abc' });
+    // Outra tag colada num link não some junto com ele.
+    expect(pareceBastidor('Segue: https://chat.whatsapp.com/abc</invoke>')).toBe('tag');
+  });
+
+  it('ferramenta escrita como texto vai para a equipe, sem reescrita', () => {
+    const xml = '<invoke name="marcar_passo_concluido">\n<parameter name="como_ele_disse">perguntou</parameter>\n</invoke>';
+    expect(pareceFerramentaEmTexto(xml)).toBe(true);
+    expect(pareceFerramentaEmTexto('passar_para_atendente(assunto="financeiro")')).toBe(true);
+    expect(pareceFerramentaEmTexto('{"name": "nao_responder", "input": {}}')).toBe(true);
+    expect(pareceFerramentaEmTexto('Deixa eu confirmar isso certinho aqui e já te retorno.')).toBe(false);
+    expect(decidirRodada({ content: [{ type: 'text', text: xml }] })).toEqual({ tipo: 'bloquear', motivo: 'ferramenta_como_texto' });
+    expect(decidirRodada({ content: [fala(xml)] })).toEqual({ tipo: 'bloquear', motivo: 'ferramenta_como_texto' });
+  });
+});
+
+describe('imagem e figurinha (Gustavo, 15/10/2026)', () => {
+  it('imagem e vídeo sem legenda dizem "sem legenda"; com legenda, a legenda vai', () => {
+    expect(descreverParaModelo('image', '[imagem]')).toBe('(ele mandou uma imagem sem legenda, que você não consegue ver)');
+    expect(descreverParaModelo('video', '[vídeo]')).toBe('(ele mandou um vídeo sem legenda, que você não consegue ver)');
+    expect(descreverParaModelo('image', 'print do erro'))
+      .toBe('(ele mandou uma imagem, que você não consegue ver, com a legenda) print do erro');
+  });
+
+  it('figurinha vira nada: o modelo não reage ao que não lê', () => {
+    expect(descreverParaModelo('sticker', '[sticker]')).toBe('');
   });
 });

@@ -347,6 +347,125 @@ export function limparResposta(texto: string): string {
   return t.trim();
 }
 
+// ── O canal da resposta ────────────────────────────────────────────────────
+//
+// ⚠️ 15/10/2026, Gustavo: o aluno recebeu "Ele disse 'não precisa', recusando a oferta de mostrar
+// a plataforma, não é aceite, é recusa. Não devo chamar entregar_proximo_passo aqui. Vou apenas
+// seguir para a pergunta de perfil." e só DEPOIS a resposta de verdade. Com o raciocínio
+// desligado, o modelo pensa em voz alta no texto, e o texto final ia inteiro para o WhatsApp:
+// `limparResposta` só corta análise embrulhada em tag, e essa veio sem tag nenhuma.
+//
+// A regra agora é de canal, não de limpeza: o aluno só lê o que vier na ferramenta
+// `responder_ao_aluno`. Texto solto é bastidor e nunca sai, nem como reserva. Mesmo desenho do
+// `responder_ao_cliente` do João (14/09), copiado e não importado: o assistente é independente.
+
+export const NOME_TOOL_RESPOSTA = 'responder_ao_aluno';
+
+/**
+ * A lição do `</mensagem>` do João (15-16/09, 21 mensagens a 17 leads): o modelo fecha o campo da
+ * ferramenta como se fosse XML e a tag vaza dentro da fala. Ela nunca é fala: sai ANTES da
+ * conferência. Colada num link, a conferência nem a veria (o link é ignorado inteiro).
+ */
+const TAG_DO_CANAL = /<\s*\/?\s*mensagem\b[^<>]*>/gi;
+export function limparTagsDoCanal(texto: string): string {
+  return String(texto ?? '').replace(TAG_DO_CANAL, '').trim();
+}
+
+/**
+ * Ferramenta ESCRITA como texto em vez de chamada (28/09/2026: um aluno recebeu
+ * `<invoke name="marcar_passo_concluido">`). Não vai para reescrita: a reescrita só fala, e o
+ * que sairia é uma promessa ("já te retorno") da ação que nunca rodou. O turno vai para a equipe.
+ */
+const NOMES_DAS_FERRAMENTAS = [
+  'nao_responder', 'passar_para_atendente', 'consultar_proximas_aulas', 'registrar_grupo_da_turma',
+  'registrar_preferencia_ligacao', 'consultar_tcc', 'registrar_perfil_do_aluno', 'marcar_passo_concluido',
+  'entregar_proximo_passo', NOME_TOOL_RESPOSTA,
+];
+const FERRAMENTA_EM_TEXTO = new RegExp(
+  '<\\s*\\/?\\s*(?:antml:)?(?:invoke|function_calls|parameter|tool_use|tool_call)\\b' +
+  `|\\b(?:${NOMES_DAS_FERRAMENTAS.join('|')})\\s*\\(` +
+  `|"name"\\s*:\\s*"(?:${NOMES_DAS_FERRAMENTAS.join('|')})"`,
+  'i',
+);
+export const pareceFerramentaEmTexto = (texto: string) => FERRAMENTA_EM_TEXTO.test(String(texto ?? ''));
+
+/**
+ * O que o turno faz com a resposta de UMA chamada ao modelo.
+ * - `ferramentas`: há ação a executar; a fala que veio junto foi escrita antes de ler os
+ *   resultados e é descartada.
+ * - `resposta`: a fala pelo canal, já conferida. Vazia é silêncio escolhido.
+ * - `corrigir`: nada sai; o turno pede UMA reescrita só pelo canal.
+ * - `bloquear`: nada sai e não há reescrita.
+ */
+export type DecisaoDaRodada =
+  | { tipo: 'ferramentas'; acoes: any[]; falaDescartada: boolean }
+  | { tipo: 'resposta'; mensagem: string }
+  | { tipo: 'corrigir'; motivo: 'texto_solto' | 'fala_dupla' | 'bastidor'; sinal?: string }
+  | { tipo: 'bloquear'; motivo: string };
+
+export function decidirRodada(r: { content?: unknown; stop_reason?: unknown } | null | undefined): DecisaoDaRodada {
+  // Geração cortada pela metade não é mensagem, por mais que pareça completa.
+  if (r?.stop_reason === 'max_tokens' || r?.stop_reason === 'refusal') {
+    return { tipo: 'bloquear', motivo: `geracao_${r.stop_reason}` };
+  }
+  const blocos: any[] = Array.isArray(r?.content) ? (r!.content as any[]) : [];
+  const usos = blocos.filter((b) => b?.type === 'tool_use');
+  const falas = usos.filter((u) => u.name === NOME_TOOL_RESPOSTA);
+  const acoes = usos.filter((u) => u.name !== NOME_TOOL_RESPOSTA);
+  if (acoes.length) return { tipo: 'ferramentas', acoes, falaDescartada: falas.length > 0 };
+  if (!falas.length) {
+    const solto = blocos.filter((b) => b?.type === 'text').map((b) => String(b.text ?? '')).join('\n');
+    if (pareceFerramentaEmTexto(solto)) return { tipo: 'bloquear', motivo: 'ferramenta_como_texto' };
+    return { tipo: 'corrigir', motivo: 'texto_solto' };
+  }
+  if (falas.length > 1) return { tipo: 'corrigir', motivo: 'fala_dupla' };
+  const mensagem = limparTagsDoCanal(typeof falas[0]?.input?.mensagem === 'string' ? falas[0].input.mensagem : '');
+  if (pareceFerramentaEmTexto(mensagem)) return { tipo: 'bloquear', motivo: 'ferramenta_como_texto' };
+  const sinal = pareceBastidor(mensagem);
+  if (sinal) return { tipo: 'corrigir', motivo: 'bastidor', sinal };
+  return { tipo: 'resposta', mensagem };
+}
+
+/** A reescrita tem uma chance só: o que não for fala limpa pelo canal não sai. */
+export function decidirCorrecao(r: { content?: unknown; stop_reason?: unknown } | null | undefined): DecisaoDaRodada {
+  const d = decidirRodada(r);
+  if (d.tipo === 'resposta' || d.tipo === 'bloquear') return d;
+  if (d.tipo === 'ferramentas') return { tipo: 'bloquear', motivo: 'ferramenta_na_correcao' };
+  return { tipo: 'bloquear', motivo: `correcao_${d.motivo}${d.sinal ? `:${d.sinal}` : ''}` };
+}
+
+/**
+ * O que, dentro da própria fala, denuncia análise em vez de conversa. Devolve o nome do sinal,
+ * ou nulo. É a segunda trava: o canal tira o texto solto, e esta pega o raciocínio que o
+ * modelo escrever DENTRO do campo da mensagem.
+ *
+ * Estreita de propósito: o que casa aqui não sai (vai para uma reescrita e, se repetir, para
+ * silêncio). Cada padrão é coisa que nenhuma fala ao aluno precisa dizer.
+ */
+// Para no `<`/`>`: tag colada no fim de um link não pode sair junto com ele.
+const LINKS_E_EMAILS = /\bhttps?:\/\/[^\s<>]+|\bwww\.[^\s<>]+|[^\s<>]+@[^\s<>]+\.[^\s<>]+/gi;
+/** Palavra inteira com acento: o `\b` do JavaScript não vê fronteira antes de "é" nem depois de "á". */
+const inteira = (src: string) => new RegExp(`(?<![\\p{L}\\d])(?:${src})(?![\\p{L}\\d])`, 'iu');
+const SINAIS_DE_BASTIDOR: [string, RegExp][] = [
+  // Nome de ferramenta, de coluna ou de status: nada que o aluno leia tem sublinhado.
+  ['identificador', /[a-z0-9]_[a-z0-9]/i],
+  ['tag', /<\/?\s*[a-z][a-z_:-]*\b[^<>]*>/i],
+  ['etapa_numerada', /\bD\s*\+\s*\d/],
+  ['nao_devo', inteira('n[ãa]o devo')],
+  ['ferramenta', inteira('(chamar|usar|acionar)\\s+(a\\s+|essa\\s+|esta\\s+)?ferramenta')],
+  ['contexto', inteira('o contexto (diz|mostra|indica|informa|aponta)')],
+  ['perfil', inteira('pergunta (de|do) perfil')],
+  ['terceira_pessoa', inteira('o aluno (disse|respondeu|mandou|escreveu|recusou|aceitou|pediu|quer|est[áa])')],
+  ['terceira_pessoa', /(^|\n)\s*(ele|ela) (disse|respondeu|mandou|escreveu|recusou|aceitou)(?![\p{L}\d])/iu],
+  ['classificacao', inteira('recusando a oferta|n[ãa]o [ée] (um )?aceite|[ée] (uma )?recusa')],
+  ['decisao', inteira('vou apenas (seguir|responder|registrar|perguntar)')],
+];
+export function pareceBastidor(texto: string): string | null {
+  const t = String(texto ?? '').replace(LINKS_E_EMAILS, ' ');
+  for (const [nome, re] of SINAIS_DE_BASTIDOR) if (re.test(t)) return nome;
+  return null;
+}
+
 // ── Aulas e turma, do jeito que o aluno lê ─────────────────────────────────
 
 const DIA_CURTO = ['domingo', 'segunda', 'terça', 'quarta', 'quinta', 'sexta', 'sábado'];
@@ -441,16 +560,22 @@ export function descreverParaModelo(tipo: unknown, conteudo: unknown, transcrica
         return c.includes('[áudio]') ? c.replace('[áudio]', moldura) : moldura;
       }
       return c.replace('[áudio]', '(ele mandou um áudio, que você não consegue ouvir)');
+    // "Sem legenda" é dito com todas as letras: é o que separa o meme (não pede nada, seção
+    // IMAGEM, VÍDEO E FIGURINHA do prompt) da foto que vem explicada. 15/10/2026, Gustavo: a
+    // imagem de brincadeira virou "Sobre a imagem, deixa eu confirmar isso certinho aqui e já te
+    // retorno" e uma passagem para a equipe sem assunto nenhum.
     case 'image':
-      return c.includes('[imagem]') ? c.replace('[imagem]', '(ele mandou uma imagem, que você não consegue ver)')
+      return c.includes('[imagem]') ? c.replace('[imagem]', '(ele mandou uma imagem sem legenda, que você não consegue ver)')
         : `(ele mandou uma imagem, que você não consegue ver, com a legenda) ${c}`;
     case 'video':
-      return c.includes('[vídeo]') ? c.replace('[vídeo]', '(ele mandou um vídeo, que você não consegue ver)')
+      return c.includes('[vídeo]') ? c.replace('[vídeo]', '(ele mandou um vídeo sem legenda, que você não consegue ver)')
         : `(ele mandou um vídeo, que você não consegue ver, com a legenda) ${c}`;
     case 'document':
       return `(ele mandou um arquivo, que você não consegue abrir) ${c}`;
+    // Figurinha não chega ao modelo (decisão do Rafael, 15/10/2026: "não quero que o agente reaja
+    // a figurinhas"). Vazio é descartado na montagem do histórico; o index.ts também a tira antes.
     case 'sticker':
-      return c.replace('[sticker]', '(ele mandou uma figurinha)');
+      return '';
     case 'reaction':
       return `(ele reagiu com ${c.replace('[reacao]', '').trim() || 'um emoji'})`;
     case 'location':

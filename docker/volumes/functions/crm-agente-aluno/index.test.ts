@@ -175,6 +175,13 @@ vi.mock('https://esm.sh/@supabase/supabase-js@2.50.3', () => ({
 
 let handler: (req: Request) => Promise<Response>;
 
+/** A fala ao aluno pelo canal (`responder_ao_aluno`): desde 15/10/2026, a única que sai. */
+let falaSeq = 0;
+function fala(mensagem: string) {
+  falaSeq += 1;
+  return { type: 'tool_use', id: `fala-${falaSeq}`, name: 'responder_ao_aluno', input: { mensagem } };
+}
+
 /** O instante mais recente, no passado, em que Ampére marcava `hora`:00 (UTC-3 fixo). */
 function ultimaVez(hora: number): string {
   const agora = new Date();
@@ -216,7 +223,9 @@ beforeAll(async () => {
   vi.stubGlobal('fetch', vi.fn(async (url: string, init: { body: string }) => {
     if (!String(url).startsWith('https://api.anthropic.com/')) throw new Error(`rede não autorizada: ${url}`);
     estado.anthropic.push(JSON.parse(init.body));
-    const r = estado.respostasModelo.shift() ?? { content: [{ type: 'text', text: 'ok' }] };
+    const r: any = estado.respostasModelo.shift() ?? { content: [fala('ok')] };
+    // `__status` simula a API recusando a chamada (ex.: 400 da escolha forçada de ferramenta).
+    if (r?.__status) return new Response(JSON.stringify({ error: { message: 'recusado' } }), { status: r.__status });
     return new Response(JSON.stringify(r), { status: 200 });
   }));
   await import('./index');
@@ -461,7 +470,7 @@ describe('crm-agente-aluno: a retomada que chega depois das 24 h', () => {
 
 describe('crm-agente-aluno: o turno', () => {
   it('responde pela fila, como assistente, sem criado_por, pela conta do aluno', async () => {
-    estado.respostasModelo = [{ content: [{ type: 'text', text: 'Fica na plataforma \u2014 no **material didático do curso**.' }] }];
+    estado.respostasModelo = [{ content: [fala('Fica na plataforma \u2014 no **material didático do curso**.')] }];
     await chamar(C);
     const [linha] = fila();
     expect(linha).toMatchObject({ criado_por_nome: 'Assistente pedagógico', wa_account_id: '<CONTA>', tipo_mensagem: 'texto', status: 'agendado', oportunidade_id: OP });
@@ -488,7 +497,14 @@ describe('crm-agente-aluno: o turno', () => {
       'nao_responder', 'passar_para_atendente', 'consultar_proximas_aulas',
       'registrar_grupo_da_turma', 'registrar_preferencia_ligacao', 'consultar_tcc',
       'registrar_perfil_do_aluno', 'marcar_passo_concluido', 'entregar_proximo_passo',
+      // 15/10/2026: o canal da fala. Por último, para o prefixo do cache mudar uma vez só.
+      'responder_ao_aluno',
     ]);
+    // O canal com o campo garantido pela API.
+    const canal = (corpo.tools as Linha[]).find((t) => t.name === 'responder_ao_aluno')!;
+    expect(canal.strict).toBe(true);
+    // A chamada normal NÃO força ferramenta: a escolha forçada é só da reescrita.
+    expect((corpo as Linha).tool_choice).toBeUndefined();
   });
 
   it('a ferramenta do perfil não tem campo de sexo, e as listas são fechadas', async () => {
@@ -510,7 +526,7 @@ describe('crm-agente-aluno: o turno', () => {
       tipo: 'button', conteudo: 'Não estou',
       metadata: { interactive_reply: { tipo: 'template_button', id: 'Não estou', title: 'Não estou' } },
     });
-    estado.respostasModelo = [{ content: [{ type: 'text', text: 'Te mando o link agora!' }] }];
+    estado.respostasModelo = [{ content: [fala('Te mando o link agora!')] }];
     await chamar(C);
     expect(estado.rpcs).toContainEqual({ nome: 'onb_agente_registrar_grupo', args: { p_oportunidade_id: OP, p_no_grupo: false } });
     const [linha] = fila();
@@ -532,7 +548,7 @@ describe('crm-agente-aluno: o turno', () => {
     estado.origem = mensagem({ conteudo: 'meu boleto veio com valor errado' });
     estado.respostasModelo = [
       { content: [{ type: 'tool_use', id: 't1', name: 'passar_para_atendente', input: { assunto: 'financeiro', motivo: 'boleto com valor errado' } }] },
-      { content: [{ type: 'text', text: 'Deixa eu confirmar isso certinho aqui e já te retorno.' }] },
+      { content: [fala('Deixa eu confirmar isso certinho aqui e já te retorno.')] },
     ];
     await chamar(C);
     const transf = estado.rpcs.find((r) => r.nome === 'onb_agente_registrar_transferencia');
@@ -554,18 +570,22 @@ describe('crm-agente-aluno: o turno', () => {
     expect(fila()).toHaveLength(0);
   });
 
-  it('texto antes da ferramenta nunca vira resposta quando a rodada seguinte fica vazia', async () => {
+  it('texto antes da ferramenta nunca vira resposta, nem quando a rodada seguinte e a reescrita ficam vazias', async () => {
     estado.respostasModelo = [
       { content: [
         { type: 'text', text: 'Preciso analisar a turma e decidir o que responder.' },
         { type: 'tool_use', id: 't1', name: 'consultar_proximas_aulas', input: {} },
       ] },
       { content: [] },
+      { content: [] }, // a reescrita também volta sem fala
     ];
     await chamar(C);
-    expect(estado.anthropic).toHaveLength(2);
+    expect(estado.anthropic).toHaveLength(3);
     expect(fila()).toHaveLength(0);
-    expect(eventos()).toContain('erro');
+    expect(eventos()).toContain('canal:corrigir');
+    // Falha não é silêncio: o aluno escreveu e ninguém respondeu, então vai para a equipe.
+    expect(eventos()).toContain('transferido_sem_aviso');
+    expect(estado.rpcs.find((r) => r.nome === 'onb_agente_registrar_transferencia')?.args).toMatchObject({ p_assunto: 'outro' });
     expect(eventos()).not.toContain('respondido');
   });
 
@@ -578,6 +598,8 @@ describe('crm-agente-aluno: o turno', () => {
     expect(estado.anthropic).toHaveLength(4);
     expect(fila()).toHaveLength(0);
     expect(eventos()).not.toContain('respondido');
+    // Esgotar as rodadas também vai para a equipe, em vez de calar.
+    expect(eventos()).toContain('transferido_sem_aviso');
   });
 
   it('transfere sem aviso se só recebeu análise junto da ferramenta', async () => {
@@ -587,6 +609,8 @@ describe('crm-agente-aluno: o turno', () => {
         { type: 'tool_use', id: 't1', name: 'passar_para_atendente', input: { assunto: 'financeiro' } },
       ] },
       { content: [{ type: 'text', text: '<thinking>Preciso formular uma frase curta.' }] },
+      // A reescrita insiste em texto solto: nada sai, e a passagem já aberta fica sem aviso.
+      { content: [{ type: 'text', text: 'Deixa eu confirmar isso certinho aqui e já te retorno.' }] },
     ];
     await chamar(C);
     expect(fila()).toHaveLength(0);
@@ -597,7 +621,7 @@ describe('crm-agente-aluno: o turno', () => {
   it('consultar_proximas_aulas devolve a linha saneada ao modelo', async () => {
     estado.respostasModelo = [
       { content: [{ type: 'tool_use', id: 't1', name: 'consultar_proximas_aulas', input: { quantidade: 1 } }] },
-      { content: [{ type: 'text', text: 'A próxima é terça, 15/09, das 19:00 às 22:00.' }] },
+      { content: [fala('A próxima é terça, 15/09, das 19:00 às 22:00.')] },
     ];
     await chamar(C);
     expect(estado.rpcs).toContainEqual({ nome: 'onb_agente_proximas_aulas', args: { p_turma_id: 'turma-1', p_qtd: 1 } });
@@ -610,7 +634,7 @@ describe('crm-agente-aluno: o turno', () => {
     estado.contexto = { ...estado.contexto, turma_id: null, turma_nome: null };
     estado.respostasModelo = [
       { content: [{ type: 'tool_use', id: 't1', name: 'consultar_proximas_aulas', input: {} }] },
-      { content: [{ type: 'text', text: 'Deixa eu confirmar sua turma e já te retorno.' }] },
+      { content: [fala('Deixa eu confirmar sua turma e já te retorno.')] },
     ];
     await chamar(C);
     expect(estado.rpcs.map((r) => r.nome)).not.toContain('onb_agente_proximas_aulas');
@@ -652,7 +676,7 @@ describe('crm-agente-aluno: o turno', () => {
     estado.tcc = { encontrados: null, rotulo: null, transferir: true };
     estado.respostasModelo = [
       { content: [{ type: 'tool_use', id: 't1', name: 'consultar_tcc', input: {} }] },
-      { content: [{ type: 'text', text: 'Deixa eu confirmar isso certinho aqui e já te retorno.' }] },
+      { content: [fala('Deixa eu confirmar isso certinho aqui e já te retorno.')] },
     ];
     await chamar(C);
     const segunda = estado.anthropic[1] as { messages: { content: Linha[] }[] };
@@ -672,7 +696,7 @@ describe('crm-agente-aluno: o turno', () => {
     ];
     estado.respostasModelo = [
       { content: [{ type: 'tool_use', id: 't1', name: 'registrar_grupo_da_turma', input: { esta_no_grupo: false } }] },
-      { content: [{ type: 'text', text: 'É vídeo sim, já te mando.' }] },
+      { content: [fala('É vídeo sim, já te mando.')] },
     ];
     await chamar(C);
     // O que importa é o que SAI: o link não pode aparecer na mensagem. (O evento sozinho não
@@ -695,7 +719,7 @@ describe('crm-agente-aluno: o turno', () => {
     ];
     estado.respostasModelo = [
       { content: [{ type: 'tool_use', id: 't1', name: 'registrar_grupo_da_turma', input: { esta_no_grupo: false } }] },
-      { content: [{ type: 'text', text: 'Segue o link do grupo da sua turma.' }] },
+      { content: [fala('Segue o link do grupo da sua turma.')] },
     ];
     await chamar(C);
     expect(eventos()).not.toContain('link_do_grupo:ja_foi');
@@ -711,7 +735,7 @@ describe('crm-agente-aluno: o turno', () => {
     estado.origem = mensagem({ tipo: 'text', conteudo: 'Simm' });
     estado.respostasModelo = [
       { content: [{ type: 'tool_use', id: 't1', name: 'marcar_passo_concluido', input: { como_ele_disse: 'Simm' } }] },
-      { content: [{ type: 'text', text: 'Segue o vídeo do material didático.' }] },
+      { content: [fala('Segue o vídeo do material didático.')] },
     ];
     await chamar(C);
     const segunda = estado.anthropic[1] as { messages: { content: Linha[] }[] };
@@ -725,7 +749,7 @@ describe('crm-agente-aluno: o turno', () => {
     estado.origem = mensagem({ tipo: 'text', conteudo: 'consegui entrar, obrigada' });
     estado.respostasModelo = [
       { content: [{ type: 'tool_use', id: 't1', name: 'marcar_passo_concluido', input: { como_ele_disse: 'consegui entrar' } }] },
-      { content: [{ type: 'text', text: 'Que bom que deu certo.' }] },
+      { content: [fala('Que bom que deu certo.')] },
     ];
     await chamar(C);
     const segunda = estado.anthropic[1] as { messages: { content: Linha[] }[] };
@@ -739,7 +763,7 @@ describe('crm-agente-aluno: o turno', () => {
     estado.origem = mensagem({ tipo: 'text', conteudo: 'vi o vídeo' });
     estado.respostasModelo = [
       { content: [{ type: 'tool_use', id: 't1', name: 'marcar_passo_concluido', input: { como_ele_disse: 'vi o vídeo' } }] },
-      { content: [{ type: 'text', text: 'Boa.' }] },
+      { content: [fala('Boa.')] },
     ];
     await chamar(C);
     const segunda = estado.anthropic[1] as { messages: { content: Linha[] }[] };
@@ -755,7 +779,7 @@ describe('crm-agente-aluno: o turno', () => {
     });
     estado.respostasModelo = [
       { content: [{ type: 'tool_use', id: 't1', name: 'passar_para_atendente', input: { assunto: 'nao_quer_mensagens', motivo: 'parem de me mandar mensagem' } }] },
-      { content: [{ type: 'text', text: 'Entendi, vou ajustar isso por aqui.' }] },
+      { content: [fala('Entendi, vou ajustar isso por aqui.')] },
     ];
     await chamar(C);
     const assuntos = estado.rpcs.filter((r) => r.nome === 'onb_agente_registrar_transferencia').map((r) => r.args.p_assunto);
@@ -783,7 +807,7 @@ describe('crm-agente-aluno: o turno', () => {
     estado.historico = [botao, { direcao: 'outbound', tipo: 'template', conteudo: 'Podemos te ligar?', telefone: FONE, created_at: convite, metadata: { origem: 'automacao' } }];
     estado.saidas = [{ telefone: FONE, created_at: convite, metadata: { origem: 'automacao' } }];
     estado.marcaManha = { telefone: FONE };
-    estado.respostasModelo = [{ content: [{ type: 'text', text: 'Combinado! Prefere ligação ou videochamada?' }] }];
+    estado.respostasModelo = [{ content: [fala('Combinado! Prefere ligação ou videochamada?')] }];
     await chamar({ ...C, id: 'manha-teste-1', motivo: 'manha', telefone: FONE });
     const transf = estado.rpcs.find((r) => r.nome === 'onb_agente_registrar_transferencia');
     expect(transf?.args).toMatchObject({ p_assunto: 'ligacao' });
@@ -817,7 +841,7 @@ describe('crm-agente-aluno: o perfil do aluno (a meta e como conheceu)', () => {
     estado.origem = mensagem({ conteudo: 'quero abrir minha própria clínica' });
     estado.respostasModelo = [
       { content: [ferramenta('t1', { meta_pessoal: 'quero abrir minha própria clínica', meta_pessoal_categoria: 'empreender' })] },
-      { content: [{ type: 'text', text: 'Que bacana, Ana. A pós vai te dar base pra isso.' }] },
+      { content: [fala('Que bacana, Ana. A pós vai te dar base pra isso.')] },
     ];
     await chamar(C);
     expect(doPerfil()).toEqual([{
@@ -836,7 +860,7 @@ describe('crm-agente-aluno: o perfil do aluno (a meta e como conheceu)', () => {
     estado.origem = mensagem({ conteudo: 'foi a colega Júlia que me falou de vocês' });
     estado.respostasModelo = [
       { content: [ferramenta('t1', { como_conheceu: 'indicacao', como_conheceu_detalhe: 'a colega Júlia' })] },
-      { content: [{ type: 'text', text: 'Que bom que ela te indicou!' }] },
+      { content: [fala('Que bom que ela te indicou!')] },
     ];
     await chamar(C);
     expect(doPerfil()[0].args).toMatchObject({ p_oportunidade_id: OP, p_como_conheceu: 'indicacao', p_como_detalhe: 'a colega Júlia', p_perguntou: null });
@@ -846,7 +870,7 @@ describe('crm-agente-aluno: o perfil do aluno (a meta e como conheceu)', () => {
     estado.origem = mensagem({ conteudo: 'oi, tudo bem?' });
     estado.respostasModelo = [
       { content: [ferramenta('t1', { meta_pessoal: 'quer crescer na carreira', meta_pessoal_categoria: 'crescer_na_carreira' })] },
-      { content: [{ type: 'text', text: 'Tudo ótimo!' }] },
+      { content: [fala('Tudo ótimo!')] },
     ];
     await chamar(C);
     expect(doPerfil()).toHaveLength(0);
@@ -867,7 +891,7 @@ describe('crm-agente-aluno: o perfil do aluno (a meta e como conheceu)', () => {
     estado.historico = [estado.origem as Linha];
     estado.respostasModelo = [
       { content: [ferramenta('t1', { meta_pessoal: 'sair de 5 a 10 mil por mês', meta_pessoal_categoria: 'aumentar_renda' })] },
-      { content: [{ type: 'text', text: 'Anotado, Ana.' }] },
+      { content: [fala('Anotado, Ana.')] },
     ];
     await chamar(C);
     expect(doPerfil()[0].args).toMatchObject({ p_meta_pessoal: 'sair de 5 a 10 mil por mês', p_meta_categoria: 'aumentar_renda' });
@@ -877,7 +901,7 @@ describe('crm-agente-aluno: o perfil do aluno (a meta e como conheceu)', () => {
   it('acabei_de_perguntar: a pergunta só conta DEPOIS de a resposta entrar na fila', async () => {
     estado.respostasModelo = [
       { content: [{ type: 'text', text: 'Fica na plataforma. E me conta: qual é a sua maior meta com essa pós?' }, ferramenta('t1', { acabei_de_perguntar: 'meta_pessoal' })] },
-      { content: [{ type: 'text', text: 'Fica na plataforma. E me conta: qual é a sua maior meta com essa pós?' }] },
+      { content: [fala('Fica na plataforma. E me conta: qual é a sua maior meta com essa pós?')] },
     ];
     await chamar(C);
     expect(doPerfil()).toHaveLength(1);
@@ -909,7 +933,7 @@ describe('crm-agente-aluno: o perfil do aluno (a meta e como conheceu)', () => {
     estado.filaCancela = 'Telefone arquivado.';
     estado.respostasModelo = [
       { content: [ferramenta('t1', { acabei_de_perguntar: 'meta_pessoal' })] },
-      { content: [{ type: 'text', text: 'E me conta: qual é a sua maior meta com essa pós?' }] },
+      { content: [fala('E me conta: qual é a sua maior meta com essa pós?')] },
     ];
     await chamar(C);
     expect(doPerfil()).toHaveLength(0);
@@ -921,7 +945,7 @@ describe('crm-agente-aluno: o perfil do aluno (a meta e como conheceu)', () => {
     estado.marcasPergunta = [{
       detalhe: { pergunta: 'meta_pessoal', fila_id: 'fila-velha', marcada_em: MARCADA_EM, antes: null },
     }];
-    estado.respostasModelo = [{ content: [{ type: 'text', text: 'Fica na plataforma.' }] }];
+    estado.respostasModelo = [{ content: [fala('Fica na plataforma.')] }];
     await chamar(C);
     expect(estado.rpcs.filter((r) => r.nome === 'onb_agente_desmarcar_pergunta')).toEqual([{
       nome: 'onb_agente_desmarcar_pergunta',
@@ -933,7 +957,7 @@ describe('crm-agente-aluno: o perfil do aluno (a meta e como conheceu)', () => {
   it('categoria fora da lista: recusada, sem RPC, e o modelo é avisado com a lista', async () => {
     estado.respostasModelo = [
       { content: [ferramenta('t1', { meta_pessoal: 'ficar rico', meta_pessoal_categoria: 'ficar_rico' })] },
-      { content: [{ type: 'text', text: 'Entendi!' }] },
+      { content: [fala('Entendi!')] },
     ];
     await chamar(C);
     expect(doPerfil()).toHaveLength(0);
@@ -947,7 +971,7 @@ describe('crm-agente-aluno: o perfil do aluno (a meta e como conheceu)', () => {
     estado.origem = mensagem({ conteudo: 'vi vocês no Instagram' });
     estado.respostasModelo = [
       { content: [ferramenta('t1', { como_conheceu: 'redes_sociais', como_conheceu_detalhe: 'Instagram', sexo: 'F' })] },
-      { content: [{ type: 'text', text: 'Legal!' }] },
+      { content: [fala('Legal!')] },
     ];
     await chamar(C);
     const [{ args }] = doPerfil();
@@ -969,7 +993,7 @@ describe('crm-agente-aluno: o perfil do aluno (a meta e como conheceu)', () => {
     estado.contexto = { ...estado.contexto, ...perfil({ meta_pessoal_perguntas: 1, meta_pessoal_perguntada_em: new Date().toISOString() }) };
     estado.respostasModelo = [
       { content: [ferramenta('t1', { acabei_de_perguntar: 'meta_pessoal' })] },
-      { content: [{ type: 'text', text: 'Fica na plataforma.' }] },
+      { content: [fala('Fica na plataforma.')] },
     ];
     await chamar(C);
     expect(doPerfil()).toHaveLength(0);
@@ -980,7 +1004,7 @@ describe('crm-agente-aluno: o perfil do aluno (a meta e como conheceu)', () => {
   it('como conheceu antes da meta: vetada, a meta vem primeiro', async () => {
     estado.respostasModelo = [
       { content: [ferramenta('t1', { acabei_de_perguntar: 'como_conheceu' })] },
-      { content: [{ type: 'text', text: 'Fica na plataforma.' }] },
+      { content: [fala('Fica na plataforma.')] },
     ];
     await chamar(C);
     expect(doPerfil()).toHaveLength(0);
@@ -991,7 +1015,7 @@ describe('crm-agente-aluno: o perfil do aluno (a meta e como conheceu)', () => {
     estado.contexto = { ...estado.contexto, ...perfil({ meta_pessoal_perguntas: 1, meta_pessoal_perguntada_em: ontem() }) };
     estado.respostasModelo = [
       { content: [ferramenta('t1', { acabei_de_perguntar: 'meta_pessoal' }), ferramenta('t2', { acabei_de_perguntar: 'como_conheceu' })] },
-      { content: [{ type: 'text', text: 'Me conta: qual é a sua maior meta com essa pós?' }] },
+      { content: [fala('Me conta: qual é a sua maior meta com essa pós?')] },
     ];
     await chamar(C);
     expect(doPerfil().map((r) => r.args.p_perguntou)).toEqual(['meta_pessoal']);
@@ -1008,7 +1032,7 @@ describe('crm-agente-aluno: o perfil do aluno (a meta e como conheceu)', () => {
           ferramenta('t3', { acabei_de_perguntar: 'meta_pessoal' }),
         ],
       },
-      { content: [{ type: 'text', text: 'Deixa eu confirmar isso certinho aqui e já te retorno.' }] },
+      { content: [fala('Deixa eu confirmar isso certinho aqui e já te retorno.')] },
     ];
     await chamar(C);
     expect(doPerfil()).toHaveLength(1);
@@ -1020,7 +1044,7 @@ describe('crm-agente-aluno: o perfil do aluno (a meta e como conheceu)', () => {
     estado.perfilErro = 'function onb_agente_registrar_perfil does not exist';
     estado.respostasModelo = [
       { content: [ferramenta('t1', { acabei_de_perguntar: 'meta_pessoal' })] },
-      { content: [{ type: 'text', text: 'E me conta: qual é a sua maior meta com essa pós?' }] },
+      { content: [fala('E me conta: qual é a sua maior meta com essa pós?')] },
     ];
     await chamar(C);
     expect(fila()).toHaveLength(1);
@@ -1034,7 +1058,7 @@ describe('crm-agente-aluno: o perfil do aluno (a meta e como conheceu)', () => {
     estado.origem = mensagem({ conteudo: 'quero passar em concurso' });
     estado.respostasModelo = [
       { content: [ferramenta('t1', { meta_pessoal: 'passar em concurso', meta_pessoal_categoria: 'concurso' })] },
-      { content: [{ type: 'text', text: 'Boa!' }] },
+      { content: [fala('Boa!')] },
     ];
     await chamar(C);
     expect(String(resultados()[0].content)).toContain('Não deu para registrar agora');
@@ -1048,7 +1072,7 @@ describe('crm-agente-aluno: o perfil do aluno (a meta e como conheceu)', () => {
     estado.contexto = semPerfil;
     estado.respostasModelo = [
       { content: [ferramenta('t1', { acabei_de_perguntar: 'meta_pessoal' })] },
-      { content: [{ type: 'text', text: 'Fica na plataforma.' }] },
+      { content: [fala('Fica na plataforma.')] },
     ];
     await chamar(C);
     const [corpo] = estado.anthropic as { system: Linha[] }[];
@@ -1134,7 +1158,7 @@ describe('crm-agente-aluno: o que chegou no meio do turno', () => {
     estado.novas = [b];
     estado.respostasModelo = [
       { content: [{ type: 'tool_use', id: 't1', name: 'nao_responder', input: { motivo: 'agradecimento' } }] },
-      { content: [{ type: 'text', text: 'A próxima é terça, 15/09, das 19:00 às 22:00.' }] },
+      { content: [fala('A próxima é terça, 15/09, das 19:00 às 22:00.')] },
     ];
     await chamar(C);
     expect(eventos()).toContain('silencio');
@@ -1154,13 +1178,174 @@ describe('crm-agente-aluno: o que chegou no meio do turno', () => {
     estado.novas = [{ ...b, wa_message_id: 'wamid.FIGURINHA' }, b];
     estado.feitas = ['wamid.FIGURINHA'];
     estado.respostasModelo = [
-      { content: [{ type: 'text', text: 'Fica na plataforma.' }] },
-      { content: [{ type: 'text', text: 'A próxima é terça.' }] },
+      { content: [fala('Fica na plataforma.')] },
+      { content: [fala('A próxima é terça.')] },
     ];
     await chamar(C);
     const retomadas = estado.consultas
       .filter((c) => c.tabela === 'onb_agente_eventos' && c.op === 'insert' && (c.dados as Linha).tipo === 'retomando:chegou_no_meio')
       .map((c) => ((c.dados as Linha).detalhe as Linha).msgId);
     expect(retomadas).toEqual(['wamid.B']);
+  });
+});
+
+describe('crm-agente-aluno: o canal da fala (Gustavo, 15/10/2026)', () => {
+  // O que o aluno recebeu de verdade às 14:45, antes da resposta.
+  const ANALISE = 'Ele disse "não precisa", recusando a oferta de mostrar a plataforma, não é aceite, é recusa. ' +
+    'Não devo chamar entregar_proximo_passo aqui. Vou apenas seguir para a pergunta de perfil.';
+  const RESPOSTA = 'Que bom, Gustavo! Fico tranquilo sabendo que já está se virando bem por aí.';
+  const motivoDe = (tipo: string) => estado.consultas
+    .filter((c) => c.tabela === 'onb_agente_eventos' && c.op === 'insert' && (c.dados as Linha).tipo === tipo)
+    .map((c) => ((c.dados as Linha).detalhe as Linha).motivo);
+
+  it('texto solto com a análise NUNCA sai: o que vai é a reescrita pelo canal', async () => {
+    estado.origem = mensagem({ conteudo: 'Eu dei uma olhada já, acho que não precisa. Obrigado' });
+    estado.respostasModelo = [
+      { content: [{ type: 'text', text: `${ANALISE}\n\n${RESPOSTA}` }] },
+      { content: [fala(RESPOSTA)] },
+    ];
+    await chamar(C);
+    expect(estado.anthropic).toHaveLength(2);
+    const [primeira, reescrita] = estado.anthropic as Linha[];
+    expect(reescrita.tool_choice).toEqual({ type: 'tool', name: 'responder_ao_aluno', disable_parallel_tool_use: true });
+    expect(String((reescrita.system as Linha[]).at(-1)!.text)).toContain('CORREÇÃO INTERNA');
+    // Mesmas ferramentas e o mesmo bloco com cache: a reescrita não regrava o prefixo.
+    expect(reescrita.tools).toEqual(primeira.tools);
+    expect((reescrita.system as Linha[])[0]).toEqual((primeira.system as Linha[])[0]);
+    expect(fila().map((l) => l.conteudo)).toEqual([RESPOSTA]);
+    expect(motivoDe('canal:corrigir')).toEqual(['texto_solto']);
+    expect(eventos()).toContain('respondido');
+  });
+
+  it('análise DENTRO do campo da fala também não sai: vai para a reescrita', async () => {
+    estado.respostasModelo = [
+      { content: [fala(`${ANALISE}\n\n${RESPOSTA}`)] },
+      { content: [fala(RESPOSTA)] },
+    ];
+    await chamar(C);
+    expect(fila().map((l) => l.conteudo)).toEqual([RESPOSTA]);
+    expect(motivoDe('canal:corrigir')).toEqual(['bastidor']);
+  });
+
+  it('se a reescrita repetir a análise, o aluno não recebe nada, e fica o rastro', async () => {
+    estado.respostasModelo = [
+      { content: [fala(`${ANALISE}\n\n${RESPOSTA}`)] },
+      { content: [fala(`${ANALISE}\n\n${RESPOSTA}`)] },
+    ];
+    await chamar(C);
+    expect(estado.anthropic).toHaveLength(2);
+    expect(fila()).toHaveLength(0);
+    expect(motivoDe('transferido_sem_aviso')).toEqual(['canal:correcao_bastidor:identificador']);
+    expect(eventos()).toContain('transferido:outro');
+    expect(eventos()).not.toContain('respondido');
+  });
+
+  it('a API recusando a escolha forçada (modelo que não a aceita) também cala', async () => {
+    estado.respostasModelo = [
+      { content: [{ type: 'text', text: `${ANALISE}\n\n${RESPOSTA}` }] },
+      { __status: 400 },
+    ];
+    await chamar(C);
+    expect(fila()).toHaveLength(0);
+    expect(String(motivoDe('transferido_sem_aviso')[0])).toMatch(/^canal:falha_na_correcao/);
+  });
+
+  it('fala junto de uma ação é descartada: vale a escrita depois do resultado', async () => {
+    estado.respostasModelo = [
+      { content: [fala('A próxima é amanhã.'), { type: 'tool_use', id: 't1', name: 'consultar_proximas_aulas', input: {} }] },
+      { content: [fala('A próxima é terça, 15/09, das 19:00 às 22:00.')] },
+    ];
+    await chamar(C);
+    expect(fila().map((l) => l.conteudo)).toEqual(['A próxima é terça, 15/09, das 19:00 às 22:00.']);
+    // No histórico da 2ª chamada vai só a ação: a fala descartada não entra (e nem pede tool_result).
+    const segunda = estado.anthropic[1] as { messages: { role: string; content: Linha[] }[] };
+    const doAssistente = segunda.messages[segunda.messages.length - 2];
+    expect(doAssistente.content.map((b) => b.name)).toEqual(['consultar_proximas_aulas']);
+    expect(eventos()).toContain('canal:fala_descartada');
+  });
+
+  it('fala vazia pelo canal é silêncio escolhido, não erro', async () => {
+    estado.respostasModelo = [{ content: [fala('')] }];
+    await chamar(C);
+    expect(fila()).toHaveLength(0);
+    expect(eventos()).toContain('silencio');
+    expect(eventos()).not.toContain('erro');
+  });
+
+  it('geração cortada no max_tokens não sai, nem reescrita', async () => {
+    estado.respostasModelo = [{ stop_reason: 'max_tokens', content: [fala('Fica na plataforma, na tela de en')] }];
+    await chamar(C);
+    expect(estado.anthropic).toHaveLength(1);
+    expect(fila()).toHaveLength(0);
+    expect(motivoDe('transferido_sem_aviso')).toEqual(['canal:geracao_max_tokens']);
+  });
+
+  // ── Achados da revisão adversarial de 16/10/2026 ──────────────────────────────
+  it('fala vazia depois do "Não estou": o link do grupo vai mesmo assim', async () => {
+    estado.origem = mensagem({
+      tipo: 'button', conteudo: 'Não estou',
+      metadata: { interactive_reply: { tipo: 'template_button', id: 'Não estou', title: 'Não estou' } },
+    });
+    estado.historico = [estado.origem, ...estado.historico.slice(1)];
+    estado.respostasModelo = [{ content: [fala('')] }];
+    await chamar(C);
+    expect(fila().map((l) => l.conteudo)).toEqual(['Segue o link do grupo da sua turma: https://chat.whatsapp.com/grupo-da-turma']);
+    expect(eventos()).toContain('canal:link_sem_fala');
+    expect(eventos()).not.toContain('silencio');
+  });
+
+  it('reescrita que falha depois do "Não estou": o link vai, e não abre passagem', async () => {
+    estado.origem = mensagem({
+      tipo: 'button', conteudo: 'Não estou',
+      metadata: { interactive_reply: { tipo: 'template_button', id: 'Não estou', title: 'Não estou' } },
+    });
+    estado.historico = [estado.origem, ...estado.historico.slice(1)];
+    estado.respostasModelo = [
+      { content: [{ type: 'text', text: `${ANALISE}` }] },
+      { content: [{ type: 'text', text: `${ANALISE}` }] },
+    ];
+    await chamar(C);
+    expect(fila().map((l) => l.conteudo)).toEqual(['Segue o link do grupo da sua turma: https://chat.whatsapp.com/grupo-da-turma']);
+    expect(estado.rpcs.map((r) => r.nome)).not.toContain('onb_agente_registrar_transferencia');
+  });
+
+  it('a tag </mensagem> colada no fim do link sai antes de ir ao aluno (lição do João)', async () => {
+    estado.respostasModelo = [{ content: [fala('Segue o link do grupo da sua turma: https://chat.whatsapp.com/grupo-da-turma</mensagem>')] }];
+    await chamar(C);
+    expect(fila().map((l) => l.conteudo)).toEqual(['Segue o link do grupo da sua turma: https://chat.whatsapp.com/grupo-da-turma']);
+  });
+
+  it('ferramenta escrita como texto: nada sai, sem reescrita, e vai para a equipe (28/09/2026)', async () => {
+    estado.respostasModelo = [{ content: [{ type: 'text', text:
+      '<invoke name="passar_para_atendente">\n<parameter name="assunto">financeiro</parameter>\n</invoke>' }] }];
+    await chamar(C);
+    expect(estado.anthropic).toHaveLength(1);
+    expect(fila()).toHaveLength(0);
+    expect(motivoDe('transferido_sem_aviso')).toEqual(['canal:ferramenta_como_texto']);
+    expect(estado.rpcs.find((r) => r.nome === 'onb_agente_registrar_transferencia')?.args).toMatchObject({ p_assunto: 'outro' });
+  });
+});
+
+describe('crm-agente-aluno: imagem e figurinha (Gustavo, 15/10/2026)', () => {
+  it('figurinha que chegou junto de um texto não chega ao modelo', async () => {
+    estado.origem = mensagem({ conteudo: 'Tentar dominar o mundo' });
+    const texto = mensagem({ conteudo: 'Tentar dominar o mundo', created_at: new Date(Date.parse(ultimaVez(15)) - 5_000).toISOString() });
+    estado.historico = [
+      { direcao: 'inbound', tipo: 'sticker', conteudo: '[sticker]', telefone: FONE, created_at: ultimaVez(15), metadata: {} },
+      texto,
+      ...estado.historico.slice(1),
+    ];
+    await chamar(C);
+    const lido = JSON.stringify((estado.anthropic[0] as Linha).messages);
+    expect(lido).toContain('Tentar dominar o mundo');
+    expect(lido).not.toMatch(/figurinha|sticker/i);
+  });
+
+  it('imagem sem legenda chega dita com todas as letras: "sem legenda"', async () => {
+    estado.origem = mensagem({ tipo: 'image', conteudo: '[imagem]' });
+    estado.historico = [mensagem({ tipo: 'image', conteudo: '[imagem]' }), ...estado.historico.slice(1)];
+    await chamar(C);
+    const lido = JSON.stringify((estado.anthropic[0] as Linha).messages);
+    expect(lido).toContain('(ele mandou uma imagem sem legenda, que você não consegue ver)');
   });
 });

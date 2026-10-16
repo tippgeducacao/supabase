@@ -60,6 +60,10 @@ import {
   digitos,
   esperaSorteada,
   interpretarBotao,
+  decidirCorrecao,
+  decidirRodada,
+  type DecisaoDaRodada,
+  NOME_TOOL_RESPOSTA,
   limparResposta,
   linhaDaAula,
   mesmoTelefone,
@@ -260,7 +264,8 @@ const TOOL_QUIETO = {
   name: 'nao_responder',
   description:
     'Use quando a mensagem não pede nada: agradecimento, "ok", "beleza", "vou ver", confirmação ' +
-    'do que você acabou de dizer, emoji ou figurinha. Chamar isto encerra o turno sem enviar ' +
+    'do que você acabou de dizer, emoji, ou imagem ou vídeo sem legenda que a conversa não explica ' +
+    '(meme, brincadeira). Chamar isto encerra o turno sem enviar ' +
     'mensagem nenhuma. Não use para fugir de pergunta que você não sabe responder: nesse caso o ' +
     'certo é passar_para_atendente.',
   input_schema: {
@@ -285,7 +290,7 @@ const TOOL_PASSAR = {
     'da turma sem link; pedido para falar com uma pessoa ou com o pedagógico; quem não quer mais ' +
     'receber mensagens; áudio que chegou sem transcrição; e qualquer coisa que você não saiba. ' +
     'Chamar isto registra a passagem e deixa a conversa marcada para a equipe, que responde neste ' +
-    'mesmo número. Depois, escreva no máximo uma frase curta dizendo que vai confirmar e já ' +
+    'mesmo número. Depois, mande pelo responder_ao_aluno no máximo uma frase curta dizendo que vai confirmar e já ' +
     'retorna, sem falar em encaminhar para setor nenhum (só crítica, sugestão e feedback são ditos ' +
     'de outro jeito: que você vai levar aquilo para a coordenação avaliar).',
   input_schema: {
@@ -464,10 +469,45 @@ const TOOL_ENTREGAR = {
   input_schema: { type: 'object', properties: {}, additionalProperties: false },
 } as const;
 
+/**
+ * O CANAL: a única porta por onde uma fala chega ao aluno (15/10/2026, ver `decidirRodada` no
+ * regras.ts). `strict` garante o campo; o que vai dentro dele ainda passa por `pareceBastidor`.
+ * Fica por ÚLTIMO na lista: entrar no fim muda o prefixo do cache uma vez só.
+ */
+const TOOL_RESPONDER = {
+  name: 'responder_ao_aluno',
+  description:
+    'O ÚNICO jeito de uma mensagem chegar ao aluno. Tudo o que você escrever fora desta ferramenta ' +
+    'é rascunho seu: ninguém lê e nunca é enviado. O campo mensagem leva SÓ a fala para ele, no ' +
+    'tom de sempre: nada de análise da conversa, do que você decidiu ou vai fazer, de nome de ' +
+    'ferramenta, de regra, de etapa ou de contexto. Use uma vez, sozinha, depois de usar as outras ' +
+    'ferramentas e ler o que elas devolveram. Para não responder nada, use nao_responder.',
+  strict: true,
+  input_schema: {
+    type: 'object',
+    properties: {
+      mensagem: { type: 'string', description: 'Só o que ele vai ler no WhatsApp.' },
+    },
+    required: ['mensagem'],
+    additionalProperties: false,
+  },
+} as const;
+
 const FERRAMENTAS = [
   TOOL_QUIETO, TOOL_PASSAR, TOOL_AULAS, TOOL_GRUPO, TOOL_LIGACAO, TOOL_TCC, TOOL_PERFIL,
-  TOOL_FECHOU, TOOL_ENTREGAR,
+  TOOL_FECHOU, TOOL_ENTREGAR, TOOL_RESPONDER,
 ];
+
+/**
+ * A reescrita: só quando a resposta não veio limpa pelo canal. Vai DEPOIS do contexto, fora do
+ * bloco com cache. Ferramentas e prompt ficam idênticos, senão a correção regrava o cache inteiro.
+ */
+const CORRECAO_DO_CANAL =
+  '[CORREÇÃO INTERNA] Nada do que você escreveu nesta resposta foi enviado ao aluno. Responda ' +
+  'agora exclusivamente por responder_ao_aluno, só com a fala para ele, no tom de sempre. Nada de ' +
+  'análise, de explicação do que você decidiu, de nome de ferramenta, de regra, de etapa ou de ' +
+  'contexto: os resultados das ferramentas são internos e ele não os leu. Não mencione esta ' +
+  'correção. Se não houver nada a dizer, mande a mensagem vazia.';
 
 // ── Envio pela fila ──────────────────────────────────────────────────────────
 
@@ -994,8 +1034,12 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
       ? msgId
       : (linhaDoBotaoPendente?.wa_message_id ? String(linhaDoBotaoPendente.wa_message_id) : null);
 
+    // Figurinha não entra (Rafael, 15/10/2026: "não quero que o agente reaja a figurinhas"). Ela
+    // já não acordava o modelo, mas a que chegava junto de um texto ia no histórico, e ele
+    // respondia sobre ela.
     const conversa = daPessoa
       .filter((m: any) => String(m.conteudo ?? '').trim() && !(m.direcao === 'outbound' && m.status_entrega === 'failed'))
+      .filter((m: any) => !(m.direcao === 'inbound' && m.tipo === 'sticker'))
       .reverse()
       .slice(-MAX_HISTORICO);
 
@@ -1372,6 +1416,15 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
     let rodada = 0;
     let usouFerramentas: string[] = [];
     const historico: any[] = [...messages];
+    const sistema = [
+      { type: 'text', text: PROMPT_ALUNO, cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: contexto },
+    ];
+    /**
+     * Como a fala saiu do modelo. Nulo = esgotou as rodadas sem falar. É o que separa o silêncio
+     * que ele escolheu (fala vazia pelo canal) do turno que falhou.
+     */
+    let desfecho: DecisaoDaRodada | null = null;
 
     while (rodada < MAX_RODADAS) {
       rodada++;
@@ -1379,23 +1432,26 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
         model: modelo,
         max_tokens: 1024,
         thinking: { type: 'disabled' },
-        system: [
-          { type: 'text', text: PROMPT_ALUNO, cache_control: { type: 'ephemeral' } },
-          { type: 'text', text: contexto },
-        ],
+        system: sistema,
         messages: historico,
         tools: FERRAMENTAS,
       });
 
-      const blocos = r?.content ?? [];
-      const texto = blocos.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n').trim();
-      const usos = blocos.filter((b: any) => b.type === 'tool_use');
-
-      if (!usos.length) { resposta = texto; break; }
+      // ⚠️ O ALUNO SÓ LÊ O QUE VEM PELO CANAL (15/10/2026, ver `decidirRodada`). Texto solto, de
+      // qualquer rodada, é rascunho do modelo e nunca sai.
+      const decisao = decidirRodada(r);
+      if (decisao.tipo !== 'ferramentas') { desfecho = decisao; break; }
+      const usos = decisao.acoes;
+      if (decisao.falaDescartada) {
+        // Fala escrita no mesmo fôlego de uma ação, antes de ler o resultado dela: some, e ele
+        // escreve de novo na rodada seguinte, já sabendo o que a ferramenta devolveu.
+        await evento('canal:fala_descartada', { ...rastro, rodada });
+      }
 
       // ⚠️ SÓ os blocos de ferramenta entram no histórico, nunca o texto que veio junto: esse
       // texto ainda não foi enviado, e deixá-lo aqui faz o modelo achar que já falou (lição do
-      // RH, 30/08). Também não serve como resposta reserva: pode ser análise interna.
+      // RH, 30/08). Também não serve como resposta reserva: pode ser análise interna. A fala do
+      // canal que veio junto também fica de fora, e por isso não precisa de tool_result.
       historico.push({ role: 'assistant', content: usos });
       const results: any[] = [];
       for (const u of usos) {
@@ -1656,6 +1712,36 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
       historico.push({ role: 'user', content: results });
     }
 
+    // ── A fala não veio limpa pelo canal: UMA reescrita, e só pelo canal ─────
+    // Texto solto, duas falas ou análise dentro da fala. Nada do que ele escreveu saiu. A
+    // reescrita é forçada na ferramenta do canal e sem paralelo: nenhuma ação roda nela, então
+    // nada do que já foi registrado no turno se repete. Falhou de novo, o aluno não recebe nada
+    // (a conversa segue não lida no SAC para a equipe) e fica o rastro.
+    if (desfecho?.tipo === 'corrigir') {
+      await evento('canal:corrigir', {
+        ...rastro, motivo: desfecho.motivo, sinal: desfecho.sinal ?? null, rodada,
+      });
+      try {
+        const corrigida = await chamarClaude({
+          model: modelo,
+          max_tokens: 1024,
+          thinking: { type: 'disabled' },
+          // ⚠️ Escolha forçada vale no claude-sonnet-5; modelo que a recusa (400) cai no catch e o
+          // turno fica calado, que é o lado seguro.
+          tool_choice: { type: 'tool', name: NOME_TOOL_RESPOSTA, disable_parallel_tool_use: true },
+          system: [...sistema, { type: 'text', text: CORRECAO_DO_CANAL }],
+          messages: historico,
+          tools: FERRAMENTAS,
+        });
+        desfecho = decidirCorrecao(corrigida);
+      } catch (e) {
+        desfecho = { tipo: 'bloquear', motivo: `falha_na_correcao: ${(e instanceof Error ? e.message : String(e)).slice(0, 200)}` };
+      }
+    }
+    // Esgotar as rodadas sem falar também é falha, e não silêncio escolhido.
+    if (!desfecho) desfecho = { tipo: 'bloquear', motivo: 'rodadas_esgotadas' };
+    resposta = desfecho.tipo === 'resposta' ? desfecho.mensagem : '';
+
     // 14/09/2026: resposta vazia ou limite de tools não autoriza enviar o texto
     // intermediário. O fluxo abaixo registra silêncio/transferência sem aviso.
     resposta = sanearParaModelo(limparResposta(resposta)).trim();
@@ -1667,7 +1753,7 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
     // ⚠️⚠️ ENVIO QUE FALHOU NÃO CONTA. 17% das saídas da casa em 30 dias são `failed`: o link que
     // não chegou ao aparelho dele não pode desarmar a rede, senão o aluno fica sem link nenhum
     // justamente quando pede. (A mesma regra que a `conversa` já aplica logo acima.)
-    const linkJaFoi = linkQueTemQueIr && resposta
+    const linkJaFoi = linkQueTemQueIr
       ? daPessoa.some((m: any) => m.direcao === 'outbound' &&
           m.status_entrega !== 'failed' &&
           String(m.conteudo ?? '').includes(linkQueTemQueIr!) &&
@@ -1677,13 +1763,41 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
       await evento('link_do_grupo:ja_foi', { ...rastro });
       linkQueTemQueIr = null;
     }
+    if (linkQueTemQueIr && !resposta) {
+      // ⚠️ O LINK TEM QUE IR, com fala ou sem (revisão adversarial, 16/10/2026). Antes do canal, o
+      // único jeito de calar era `nao_responder`, e ele já recusa calar com link pendente. Agora há
+      // mais três: fala vazia, reescrita que falhou e rodadas esgotadas. Quem tocou "Não estou" sai
+      // daqui com o link e uma frase fixa, e nada mais vai junto: nem passo da acelerada (a régua
+      // manda no dia dele), nem pergunta do perfil (a frase não a leva).
+      resposta = `Segue o link do grupo da sua turma: ${linkQueTemQueIr}`;
+      entregaPendente = false;
+      entregaMidia = null;
+      perguntaPendente = null;
+      await evento('canal:link_sem_fala', {
+        ...rastro, desfecho: desfecho.tipo, motivo: desfecho.tipo === 'bloquear' ? desfecho.motivo : null,
+      });
+    } else if (desfecho.tipo === 'bloquear') {
+      // ⚠️ FALHA NÃO É SILÊNCIO (revisão adversarial, 16/10/2026). O aluno escreveu e não vai ter
+      // resposta do assistente: o card não pode ficar na coluna da IA, onde ninguém olha. A
+      // passagem põe na fila da equipe (PAUSADO) e cala o assistente até uma pessoa responder.
+      // No turno da OFERTA ele não perguntou nada: ali não há o que passar, só fica o rastro.
+      if (!ehOferta && !transferenciaDesteTurno) {
+        await passar('outro', `o assistente não conseguiu responder a esta mensagem (${desfecho.motivo}), ` +
+          'e ninguém respondeu o aluno ainda');
+      }
+      await evento(transferenciaDesteTurno ? 'transferido_sem_aviso' : 'erro', {
+        ...rastro, motivo: `canal:${desfecho.motivo}`, ferramentas: usouFerramentas,
+      });
+      return;
+    }
     if (linkQueTemQueIr && resposta && !resposta.includes(linkQueTemQueIr)) {
       // O modelo prometeu o link e esqueceu de colar: o link é o que resolve, então vai junto.
       resposta = `${resposta}\n${linkQueTemQueIr}`;
     }
     if (!resposta) {
-      await evento(transferenciaDesteTurno ? 'transferido_sem_aviso' : 'erro', {
-        ...rastro, motivo: 'resposta vazia', ferramentas: usouFerramentas,
+      // Daqui só se chega com fala VAZIA pelo canal: é silêncio escolhido, não falha.
+      await evento(transferenciaDesteTurno ? 'transferido_sem_aviso' : 'silencio', {
+        ...rastro, motivo: 'fala vazia pelo canal', ferramentas: usouFerramentas,
       });
       return;
     }
