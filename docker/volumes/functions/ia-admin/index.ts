@@ -249,7 +249,10 @@ async function processarItem(item: ItemFila): Promise<void> {
     await concluir({
       status: ok ? "ok" : "erro",
       resumo: resumo.textoFinal.trim() || null,
-      erro: ok ? null : resumo.terminou === "resposta" ? "Terminou sem escrever o resumo." : `Terminou em: ${resumo.terminou}`,
+      erro: ok
+        ? null
+        : `${resumo.terminou === "resposta" ? "Terminou sem escrever o resumo." : `Terminou em: ${resumo.terminou}.`}` +
+          (resumo.vazias.length ? ` Rodadas vazias: ${resumo.vazias.join(" | ")}` : ""),
       achados: resumo.achados.length,
       consultas: resumo.consultas,
       tokens_entrada: resumo.uso.entrada + resumo.uso.cacheLeitura + resumo.uso.cacheEscrita,

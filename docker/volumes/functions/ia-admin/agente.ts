@@ -73,6 +73,8 @@ export interface ResumoAgente {
   /** Texto da última rodada (a resposta final). */
   textoFinal: string;
   terminou: "resposta" | "recusa" | "limite" | "cancelado" | "erro";
+  /** Rodadas que voltaram SEM texto: motivo de parada + tipos de bloco (só metadados). */
+  vazias: string[];
 }
 
 const MAX_REFAZER_JSON = 2;
@@ -156,6 +158,7 @@ export async function rodarAgente(
     uso: { entrada: 0, saida: 0, cacheLeitura: 0, cacheEscrita: 0 },
     textoFinal: "",
     terminou: "limite",
+    vazias: [],
   };
   const inicio = opcoes.passoInicial ?? 0;
   let avisouPrazo = false;
@@ -236,6 +239,9 @@ export async function rodarAgente(
       // O texto vem do stream; se não veio, dos blocos da mensagem.
       const texto = textoDoPasso.trim() ||
         msg.content.filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === "text").map((b) => b.text).join("").trim();
+      if (!texto) {
+        resumo.vazias.push(`rodada ${rodada + 1}: stop=${msg.stop_reason} blocos=[${msg.content.map((b) => b.type).join(",")}] saida=${msg.usage?.output_tokens ?? "?"}`);
+      }
       // Terminou só pensando, sem escrever (visto na 1ª varredura, 16/10, depois do prazo):
       // pede o texto UMA vez, sem ferramentas, em vez de entregar uma resposta vazia.
       if (!texto && !pediuTexto && msg.stop_reason !== "max_tokens") {
