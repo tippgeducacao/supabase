@@ -90,7 +90,7 @@ export function comPassoDoMapa(prompt: string): { prompt: string; trocou: boolea
   const m = prompt.match(RE_PASSO_1);
   if (!m) return { prompt, trocou: false };
   const novo = '1. **Antes da abertura, conheça a pessoa.** Enquanto o lote não foi apresentado nesta conversa, siga o bloco MAPA DA PÓS do contexto: ele diz se ainda cabe uma pergunta e quais são. Cada mensagem leva uma reação curta ao que ele disse (VOZ DO JOÃO, item 2) e uma pergunta só, sem cumprimentar de novo ("bom dia" dele não pede "bom dia" de volta). Se ele pedir horário, preço ou material, ou disser que quer conhecer a pós, vá ao item correspondente sem perguntar mais.\n'
-    + '   **Hora da abertura** (o bloco diz quando), numa mensagem só, sem quebrar em partes: uma reação curta ao que ele contou e a ponte do perfil dele numa frase inteira ("quero te mostrar como a pós te leva a ser a referência em cannabis na sua região."), e, na mesma mensagem, com estas palavras:'
+    + '   **Hora da abertura** (o bloco diz quando), numa mensagem só, sem quebrar em partes: uma reação curta ao que ele contou e a ponte do perfil dele numa frase inteira, começando por "quero te mostrar" ("quero te mostrar " + a ponte do bloco + "."), e, na mesma mensagem, com estas palavras:'
     + m[1]
     + '\n   Feche com uma frase do CONVITE DE AGENDA.';
   return { prompt: prompt.replace(RE_PASSO_1, novo), trocou: true };
