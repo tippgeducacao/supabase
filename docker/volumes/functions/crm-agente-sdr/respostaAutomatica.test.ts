@@ -87,11 +87,11 @@ describe('o robô do lead: "fico no aguardo" e a sequência do follow-up', () =>
     expect(soRoboRespondeu([t] as any)).toBe(false);
   });
 
-  it('a sequência é a do Gustavo, e para no 3º toque', async () => {
+  it('a sequência é a do Gustavo (duas mensagens), e para no 2º toque', async () => {
     const { falaDoFollowupDoRobo } = await import('./respostaAutomatica');
     expect(falaDoFollowupDoRobo(1, 'Adriana')).toBe('Adriana, pode conversar agora?');
-    expect(falaDoFollowupDoRobo(2, 'Adriana')).toBe('Adriana, temos uma condição promocional liberada hoje.');
-    expect(falaDoFollowupDoRobo(3, '')).toBe('Eu preciso falar com você.');
-    expect(falaDoFollowupDoRobo(4, 'Adriana')).toBe('');
+    expect(falaDoFollowupDoRobo(2, 'Adriana')).toBe('Adriana, temos uma condição promocional liberada hoje, eu preciso falar com você hoje.');
+    expect(falaDoFollowupDoRobo(1, '')).toBe('Pode conversar agora?');
+    expect(falaDoFollowupDoRobo(3, 'Adriana')).toBe('');
   });
 });

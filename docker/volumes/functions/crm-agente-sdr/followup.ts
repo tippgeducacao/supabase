@@ -363,8 +363,8 @@ export async function gerarFollowup(
   const tentativaAtual = (opcoes ? contarTentativasDoCiclo(history) : contarTentativas(history)) + 1;
 
   const nome = extrairPrimeiroNome(lead.nome);
-  // Quem só respondeu com mensagem pronta (16/10/2026, pedido do Gustavo): "pode conversar agora?",
-  // "temos uma condição promocional liberada hoje.", "eu preciso falar com você.", e depois silêncio.
+  // Quem só respondeu com mensagem pronta (16/10/2026, pedido do Gustavo): "pode conversar agora?" e
+  // "temos uma condição promocional liberada hoje, eu preciso falar com você hoje.", e depois silêncio.
   if (opcoes && soRoboRespondeu(history)
     && (opcoes.roboSequencia ?? await chaveDeEnsaioLigada(supabase, 'followup_robo_sequencia', lead.numero_formatado ?? remotejid))) {
     const fala = falaDoFollowupDoRobo(tentativaAtual, nome);

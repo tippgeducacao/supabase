@@ -111,7 +111,7 @@ export function loteSoDeRespostaAutomatica(itens: readonly any[]): boolean {
 // desse lead segue uma sequência própria, sem pergunta genérica. A fala sai do código, uma vez só até o lead
 // escrever de verdade, para não virar conversa entre o João e o robô.
 export const FALA_PARA_ROBO = 'fico no aguardo';
-const SEQUENCIA_DO_ROBO = ['pode conversar agora?', 'temos uma condição promocional liberada hoje.', 'eu preciso falar com você.'];
+const SEQUENCIA_DO_ROBO = ['pode conversar agora?', 'temos uma condição promocional liberada hoje, eu preciso falar com você hoje.'];
 
 const ehFalaDeGente = (t: string) => Boolean(t.trim()) && !t.includes('AUTO_IGNORE') && !t.startsWith(ETIQUETA_RESPOSTA_AUTOMATICA)
   && !ehRespostaAutomatica(t);
@@ -139,7 +139,7 @@ export function soRoboRespondeu(history: readonly Msg[]): boolean {
   return robo;
 }
 
-/** O toque `tentativa` (1, 2, 3) do follow-up de quem só tem robô; '' depois do 3º. */
+/** O toque `tentativa` (1, 2) do follow-up de quem só tem robô; '' depois do 2º. */
 export function falaDoFollowupDoRobo(tentativa: number, nome: string): string {
   const fala = SEQUENCIA_DO_ROBO[tentativa - 1];
   if (!fala) return '';
