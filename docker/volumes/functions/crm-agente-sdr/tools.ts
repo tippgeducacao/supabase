@@ -20,6 +20,7 @@ import {
   limiteFormaturaFormatado,
 } from './elegibilidadeFormatura.ts';
 import { atualizarLead, buscarLead } from './historico.ts';
+import { assuntoDoCadastroLigado, notaDoAssunto } from './assuntoDaPos.ts';
 import { VINCULOS_TRABALHO } from './carreiraPos.ts';
 import type { Msg } from './historico.ts';
 import { avaliarEvidenciaSemGraduacao, bloqueioSemEvidenciaGraduacao, respostaCurtaLigada } from './evidenciaFormacao.ts';
@@ -1561,6 +1562,20 @@ async function consultaPosDisponiveis(supabase: any, input: any, ctx: CtxConvers
   if (consulta && troca) return { status: 'entrada_ambigua', id: toolUseId,
     instrucao: 'Use curso_consulta para uma dúvida OU trocar_para para escolha explícita; nunca ambos.' };
   const resultado = await consultarCatalogo(supabase, consulta || troca);
+  // Assunto ≠ nome de pós (assuntoDaPos.ts, 16/10/2026): sem achar, lembra a pós do cadastro antes do "não temos".
+  if (!troca && consulta && (resultado.status === 'curso_nao_encontrado' || resultado.status === 'curso_nao_confirmado')
+    && await assuntoDoCadastroLigado(supabase, ctx.telefone)) {
+    try {
+      const cadastro = String((await buscarLead(supabase, ctx.remotejid))?.curso_interesse_original ?? '').trim();
+      const doCadastro = cadastro ? await consultarCatalogo(supabase, cadastro) : null;
+      if (doCadastro?.status === 'curso_confirmado' && 'curso' in doCadastro && doCadastro.curso) {
+        return { ...resultado, pos_do_cadastro: doCadastro.curso, id: toolUseId,
+          instrucao: `${notaDoAssunto(consulta, doCadastro.curso.nome)} ${'instrucao' in resultado ? resultado.instrucao : ''}`.trim() };
+      }
+    } catch (e) {
+      console.error('[crm-agente-sdr] pós do cadastro (assunto):', (e as Error)?.message ?? e);
+    }
+  }
   if (!troca || resultado.status !== 'curso_confirmado' || !('curso' in resultado) || !resultado.curso) {
     return { ...resultado, id: toolUseId };
   }
