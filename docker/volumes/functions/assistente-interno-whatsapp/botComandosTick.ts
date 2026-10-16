@@ -13,9 +13,10 @@ import { carregarLinhaWeb, enviarTexto } from "./wa.ts";
 import { hojeSP } from "./datas.ts";
 import { blocoComercial } from "./relatoriosGrupoTick.ts";
 import {
-  encontrarPessoa, interpretarComando, linhaDasFontes, textoComercialPeriodo, textoMenu, textoNaoAchei,
-  textoPendentes, textoResumoPessoa, textoVarias, TEXTO_PERIODO_INVALIDO, TEXTO_RESUMO_SEM_NOME, TEXTO_SO_TEXTO,
-  type PessoaComercial,
+  ehPos, encontrarPorNome, interpretarComando, lerItensPos, linhaDasFontes, mesesDoPeriodo, textoCac,
+  textoComercialPeriodo, textoFaturamento, textoMenu, textoNaoAchei, textoNaoAcheiPos, textoPendentes, textoRanking,
+  textoResumoPessoa, textoResumoPos, textoVarias, TEXTO_PERIODO_INVALIDO, TEXTO_RESUMO_SEM_NOME, TEXTO_SO_TEXTO,
+  type ItemPos, type LinhaCac, type PessoaComercial, type Periodo,
 } from "./botComandos.ts";
 
 const MAX_TENTATIVAS = 3;
@@ -59,6 +60,28 @@ async function pessoasComerciais(admin: any): Promise<PessoaComercial[]> {
     .map((p) => ({ id: p.id, nome: p.name, user_type: p.user_type }));
 }
 
+/** Pós, cursos e módulos do período (bot_comercial_por_pos): vendas, faturamento, leads, verba, reuniões. */
+async function itensPorPos(admin: any, p: Periodo): Promise<ItemPos[]> {
+  const { data, error } = await admin.rpc("bot_comercial_por_pos", { p_de: p.de, p_ate: p.ate });
+  if (error) throw new Error(`bot_comercial_por_pos: ${error.message}`);
+  return lerItensPos(data);
+}
+
+/** mkt_cac_mensal (tela CAC e Payback) nos meses inteiros que o período toca. */
+async function linhasCac(admin: any, p: Periodo): Promise<LinhaCac[]> {
+  const { ini, fim } = mesesDoPeriodo(p);
+  const { data, error } = await admin.rpc("mkt_cac_mensal", { p_inicio: ini, p_fim: fim });
+  if (error) throw new Error(`mkt_cac_mensal: ${error.message}`);
+  return ((data ?? []) as any[]).map((l) => ({
+    mes: String(l.mes),
+    canal_nome: String(l.canal_nome ?? "?"),
+    custo: Number(l.custo) || 0,
+    verba_midia: Number(l.verba_midia) || 0,
+    matriculas: Number(l.matriculas) || 0,
+    mes_consolidado: l.mes_consolidado === true,
+  }));
+}
+
 /** O texto da resposta e o nome do comando (gravado na fila, para auditoria). */
 async function responder(admin: any, cfg: ConfigBot, item: ItemFila): Promise<{ texto: string; comando: string }> {
   if (item.tipo && item.tipo !== "text") return { texto: TEXTO_SO_TEXTO, comando: "nao_texto" };
@@ -83,19 +106,48 @@ async function responder(admin: any, cfg: ConfigBot, item: ItemFila): Promise<{ 
       return { texto: textoComercialPeriodo(cmd.periodo, bloco), comando: `comercial ${cmd.periodo.de}..${cmd.periodo.ate}` };
     }
     case "resumo": {
-      const busca = encontrarPessoa(await pessoasComerciais(admin), cmd.nome);
+      const busca = encontrarPorNome(await pessoasComerciais(admin), cmd.nome);
       if (busca.tipo === "nenhuma") return { texto: textoNaoAchei(cmd.nome), comando: "resumo" };
       if (busca.tipo === "varias") return { texto: textoVarias(busca.opcoes), comando: "resumo" };
       const { data: fontes, error } = await admin.rpc("bot_comercial_fontes_pessoa", {
-        p_como: cfg.como_usuario_id, p_pessoa: busca.pessoa.id, p_de: cmd.periodo.de, p_ate: cmd.periodo.ate,
+        p_como: cfg.como_usuario_id, p_pessoa: busca.item.id, p_de: cmd.periodo.de, p_ate: cmd.periodo.ate,
       });
       if (error) throw new Error(`bot_comercial_fontes_pessoa: ${error.message}`);
-      if (fontes?.erro) return { texto: `Não consegui montar o resumo de ${busca.pessoa.nome}: ${fontes.erro}.`, comando: "resumo" };
+      if (fontes?.erro) return { texto: `Não consegui montar o resumo de ${busca.item.nome}: ${fontes.erro}.`, comando: "resumo" };
       return {
-        texto: textoResumoPessoa(linhaDasFontes(fontes, busca.pessoa.id), cmd.periodo),
-        comando: `resumo ${busca.pessoa.nome} ${cmd.periodo.de}..${cmd.periodo.ate}`,
+        texto: textoResumoPessoa(linhaDasFontes(fontes, busca.item.id), cmd.periodo),
+        comando: `resumo ${busca.item.nome} ${cmd.periodo.de}..${cmd.periodo.ate}`,
       };
     }
+    case "pos_sem_nome":
+      return { texto: "Qual pós? Mande *pos* e uma palavra do nome, ex.: _pos sanidade_ ou _pos bovinos mês_.", comando: "pos" };
+    case "pos": {
+      const itens = (await itensPorPos(admin, cmd.periodo)).filter(ehPos);
+      // Pós inativa só entra na busca se teve movimento no período.
+      const candidatas = itens.filter((i) => i.ativo || i.vendas || i.leads || i.reunioes || i.verba);
+      const busca = encontrarPorNome(candidatas, cmd.nome);
+      if (busca.tipo === "nenhuma") return { texto: textoNaoAcheiPos(cmd.nome), comando: "pos" };
+      if (busca.tipo === "varias") return { texto: textoVarias(busca.opcoes, "pos"), comando: "pos" };
+      return {
+        texto: textoResumoPos(busca.item, cmd.periodo),
+        comando: `pos ${busca.item.nome} ${cmd.periodo.de}..${cmd.periodo.ate}`,
+      };
+    }
+    case "ranking":
+      return {
+        texto: textoRanking(await itensPorPos(admin, cmd.periodo), cmd.periodo),
+        comando: `ranking ${cmd.periodo.de}..${cmd.periodo.ate}`,
+      };
+    case "faturamento":
+      return {
+        texto: textoFaturamento(await itensPorPos(admin, cmd.periodo), cmd.periodo),
+        comando: `faturamento ${cmd.periodo.de}..${cmd.periodo.ate}`,
+      };
+    case "cac":
+      return {
+        texto: textoCac(await linhasCac(admin, cmd.periodo), cmd.periodo),
+        comando: `cac ${cmd.periodo.de}..${cmd.periodo.ate}`,
+      };
   }
 }
 

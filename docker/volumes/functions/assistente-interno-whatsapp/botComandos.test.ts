@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
-  dec2, encontrarPessoa, inicioSemanaComercial, interpretarComando, interpretarPeriodo, linhaDasFontes,
-  textoMenu, textoPendentes, textoResumoPessoa, type LinhaPessoa, type PessoaComercial,
+  dec2, encontrarPorNome, inicioSemanaComercial, interpretarComando, interpretarPeriodo, lerItensPos, linhaDasFontes,
+  mesesDoPeriodo, textoCac, textoFaturamento, textoMenu, textoPendentes, textoRanking, textoResumoPessoa, textoResumoPos,
+  type ItemPos, type LinhaPessoa, type PessoaComercial,
 } from './botComandos';
 
 const HOJE = '2026-10-16'; // sexta
@@ -60,21 +61,21 @@ describe('interpretarComando', () => {
   });
 });
 
-describe('encontrarPessoa', () => {
+describe('encontrarPorNome', () => {
   const p = (nome: string): PessoaComercial => ({ id: nome, nome, user_type: 'vendedor' });
   const time = [p('Aline Souza'), p('Ana Ligia'), p('Anabela Costa'), p('Pedro Flores'), p('Pedro Henrique'), p('Flávia')];
   it('prefixo de cada palavra, sem acento', () => {
-    expect(encontrarPessoa(time, 'ped flo')).toMatchObject({ tipo: 'ok', pessoa: { nome: 'Pedro Flores' } });
-    expect(encontrarPessoa(time, 'flavia')).toMatchObject({ tipo: 'ok', pessoa: { nome: 'Flávia' } });
+    expect(encontrarPorNome(time, 'ped flo')).toMatchObject({ tipo: 'ok', item: { nome: 'Pedro Flores' } });
+    expect(encontrarPorNome(time, 'flavia')).toMatchObject({ tipo: 'ok', item: { nome: 'Flávia' } });
   });
   it('palavra inteira vence o prefixo ("ana" = Ana Ligia, não Anabela)', () => {
-    expect(encontrarPessoa(time, 'ana')).toMatchObject({ tipo: 'ok', pessoa: { nome: 'Ana Ligia' } });
+    expect(encontrarPorNome(time, 'ana')).toMatchObject({ tipo: 'ok', item: { nome: 'Ana Ligia' } });
   });
   it('empate pergunta de volta; ninguém = nenhuma', () => {
-    const r = encontrarPessoa(time, 'pedro');
+    const r = encontrarPorNome(time, 'pedro');
     expect(r.tipo).toBe('varias');
     expect(r.tipo === 'varias' && r.opcoes.map((o) => o.nome)).toEqual(['Pedro Flores', 'Pedro Henrique']);
-    expect(encontrarPessoa(time, 'zé')).toEqual({ tipo: 'nenhuma' });
+    expect(encontrarPorNome(time, 'zé')).toEqual({ tipo: 'nenhuma' });
   });
 });
 
@@ -142,5 +143,109 @@ describe('textos', () => {
   });
   it('dec2 sempre com 2 casas', () => {
     expect(dec2(5)).toBe('5,00');
+  });
+});
+
+describe('meses pelo nome e comandos novos', () => {
+  it('"setembro" = o mês inteiro; mês corrente vai até hoje; mês futuro = ano passado', () => {
+    expect(interpretarPeriodo('setembro', HOJE)).toMatchObject({ de: '2026-09-01', ate: '2026-09-30', rotulo: 'Setembro/2026 · 01/09 a 30/09' });
+    expect(interpretarPeriodo('outubro', HOJE)).toMatchObject({ de: '2026-10-01', ate: HOJE });
+    expect(interpretarPeriodo('dezembro', HOJE)).toMatchObject({ de: '2025-12-01', ate: '2025-12-31' });
+    expect(interpretarPeriodo('março de 2026', HOJE)).toMatchObject({ de: '2026-03-01', ate: '2026-03-31' });
+    expect(interpretarPeriodo('fevereiro', HOJE)).toMatchObject({ de: '2026-02-01', ate: '2026-02-28' });
+  });
+  it('pos: nome + período, como o resumo', () => {
+    expect(interpretarComando('pos sanidade avícola mês', HOJE))
+      .toMatchObject({ tipo: 'pos', nome: 'sanidade avicola', periodo: { de: '2026-10-01' } });
+    expect(interpretarComando('Pós bovinos', HOJE)).toMatchObject({ tipo: 'pos', nome: 'bovinos', periodo: { de: '2026-10-14' } });
+    expect(interpretarComando('pos', HOJE)).toEqual({ tipo: 'pos_sem_nome' });
+  });
+  it('ranking e faturamento: período padrão = semana; cac: padrão = mês atual', () => {
+    expect(interpretarComando('ranking setembro', HOJE)).toMatchObject({ tipo: 'ranking', periodo: { de: '2026-09-01', ate: '2026-09-30' } });
+    expect(interpretarComando('faturamento', HOJE)).toMatchObject({ tipo: 'faturamento', periodo: { de: '2026-10-14' } });
+    expect(interpretarComando('receita ontem', HOJE)).toMatchObject({ tipo: 'faturamento', periodo: { de: '2026-10-15' } });
+    expect(interpretarComando('cac', HOJE)).toMatchObject({ tipo: 'cac', periodo: { de: '2026-10-01', ate: HOJE } });
+    expect(interpretarComando('cac mês passado', HOJE)).toMatchObject({ tipo: 'cac', periodo: { de: '2026-09-01' } });
+  });
+  it('busca de pós ignora o "PÓS |" e acha por qualquer palavra', () => {
+    const pos = [{ nome: 'PÓS | SANIDADE AVÍCOLA' }, { nome: 'PÓS | NUTRIÇÃO E GESTÃO DE BOVINOS' }, { nome: 'PÓS | CLÍNICA MÉDICA E CIRÚRGICA DE BOVINOS' }];
+    expect(encontrarPorNome(pos, 'sanidade')).toMatchObject({ tipo: 'ok', item: { nome: 'PÓS | SANIDADE AVÍCOLA' } });
+    expect(encontrarPorNome(pos, 'bovinos').tipo).toBe('varias');
+    expect(encontrarPorNome(pos, 'clinica bov')).toMatchObject({ tipo: 'ok', item: { nome: 'PÓS | CLÍNICA MÉDICA E CIRÚRGICA DE BOVINOS' } });
+  });
+});
+
+const item = (o: Partial<ItemPos>): ItemPos => ({
+  curso_id: 'x', nome: 'PÓS | X', tipo: 'Pós-Graduação', ativo: true, categoria: 'pos_graduacao',
+  vendas: 0, faturamento: 0, valor_contratos: 0, valor_matriculas: 0, leads: 0, qualificados: 0,
+  verba: 0, reunioes: 0, avaliadas: 0, comparecidas: 0, ...o,
+});
+const SETEMBRO = { de: '2026-09-01', ate: '2026-09-30', rotulo: 'Setembro/2026 · 01/09 a 30/09' };
+
+describe('pós, ranking e faturamento', () => {
+  it('lerItensPos converte o jsonb da função', () => {
+    const [i] = lerItensPos({ itens: [{ curso_id: 'a', nome: 'PÓS | A', tipo: 'Pós-Graduação', categoria: 'pos_graduacao', vendas: 3, faturamento: '45000.00', verba: '9363.98' }] });
+    expect(i).toMatchObject({ vendas: 3, faturamento: 45000, verba: 9363.98, leads: 0 });
+  });
+  it('resumo da pós: faturamento com matrícula, ticket e CAC de mídia', () => {
+    const t = textoResumoPos(item({ nome: 'PÓS | SANIDADE AVÍCOLA', vendas: 3, faturamento: 45000, valor_contratos: 43522.5, valor_matriculas: 1477.5,
+      leads: 210, qualificados: 150, verba: 9363.98, reunioes: 18, avaliadas: 15, comparecidas: 9 }), SETEMBRO);
+    expect(t).toContain('🎓 *PÓS | SANIDADE AVÍCOLA*');
+    expect(t).toContain('✅ Comparecidas: *9* · comparecimento *60,00%*');
+    expect(t).toContain('💵 Faturamento: *R$ 45.000,00*');
+    expect(t).toContain('contratos R$ 43.522,50 + matrículas R$ 1.477,50');
+    expect(t).toContain('ticket médio R$ 15.000,00');
+    expect(t).toContain('💸 CAC de mídia (verba ÷ vendas): *R$ 3.121,33*');
+  });
+  it('ranking: só pós com venda, por vendas e depois faturamento, com medalhas e total', () => {
+    const t = textoRanking([
+      item({ nome: 'PÓS | B', vendas: 5, faturamento: 60000 }),
+      item({ nome: 'PÓS | A', vendas: 5, faturamento: 80000 }),
+      item({ nome: 'PÓS | C', vendas: 1, faturamento: 15000 }),
+      item({ nome: 'PÓS | SEM VENDA', vendas: 0 }),
+      item({ nome: 'CURSO | LIVRE', tipo: null, categoria: 'curso_livre', vendas: 9, faturamento: 900 }),
+    ], SETEMBRO);
+    expect(t.indexOf('🥇 PÓS | A')).toBeGreaterThan(-1);
+    expect(t.indexOf('🥈 PÓS | B')).toBeGreaterThan(-1);
+    expect(t).toContain('🥉 PÓS | C — *1* venda · R$ 15.000,00');
+    expect(t).not.toContain('SEM VENDA');
+    expect(t).not.toContain('CURSO | LIVRE');
+    expect(t).toContain('*Total:* 11 vendas de pós · R$ 155.000,00 (matrícula inclusa)');
+  });
+  it('faturamento: pós com contrato + matrícula, cursos e módulos, e o total', () => {
+    const t = textoFaturamento([
+      item({ vendas: 121, faturamento: 1440000, valor_contratos: 1417812.25, valor_matriculas: 22187.75 }),
+      item({ nome: 'CURSO | Y', tipo: null, categoria: 'curso_livre', vendas: 13, faturamento: 23437.99 }),
+    ], SETEMBRO);
+    expect(t).toContain('🎓 Pós-graduação: *R$ 1.440.000,00* · 121 vendas');
+    expect(t).toContain('contratos R$ 1.417.812,25 + matrículas R$ 22.187,75');
+    expect(t).toContain('📘 Cursos livres: *R$ 23.437,99* · 13 vendas');
+    expect(t).toContain('*Total: R$ 1.463.437,99* · 134 vendas');
+  });
+});
+
+describe('CAC', () => {
+  // mkt_cac_mensal de setembro/2026 (dado real, 16/10/2026).
+  const setembro = [
+    { mes: '2026-09-01', canal_nome: 'Indicação', custo: 4710, verba_midia: 0, matriculas: 17, mes_consolidado: true },
+    { mes: '2026-09-01', canal_nome: 'Orgânico', custo: 17110, verba_midia: 0, matriculas: 36, mes_consolidado: true },
+    { mes: '2026-09-01', canal_nome: 'Tráfego pago', custo: 180751.66, verba_midia: 123871.66, matriculas: 68, mes_consolidado: true },
+  ];
+  it('geral = custo total ÷ matrículas; por canal, maior primeiro', () => {
+    const t = textoCac(setembro, SETEMBRO);
+    expect(t).toContain('💸 *CAC* · Setembro/2026 (fechado)');
+    expect(t).toContain('Custo total (mídia + times): *R$ 202.571,66*');
+    expect(t).toContain('*CAC geral: R$ 1.674,15 por matrícula*');
+    expect(t.indexOf('Tráfego pago')).toBeLessThan(t.indexOf('Orgânico'));
+    expect(t).toContain('• Tráfego pago: *R$ 2.658,11* por matrícula (68 matr.) · mídia R$ 123.871,66');
+  });
+  it('mês aberto avisa da premiação', () => {
+    const t = textoCac([{ ...setembro[0], mes: '2026-10-01', mes_consolidado: false }], SETEMBRO);
+    expect(t).toContain('(mês aberto)');
+    expect(t).toContain('a premiação só entra quando o mês fecha');
+  });
+  it('o período vira os meses inteiros que ele toca', () => {
+    expect(mesesDoPeriodo({ de: '2026-09-28', ate: '2026-10-02', rotulo: '' })).toEqual({ ini: '2026-09-01', fim: '2026-10-31' });
+    expect(mesesDoPeriodo({ de: '2026-12-10', ate: '2026-12-11', rotulo: '' })).toEqual({ ini: '2026-12-01', fim: '2026-12-31' });
   });
 });

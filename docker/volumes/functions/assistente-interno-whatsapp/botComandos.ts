@@ -11,6 +11,8 @@ export interface Periodo { de: string; ate: string; rotulo: string }
 export const MAX_DIAS_PERIODO = 120;
 
 const DIAS_CURTO = ["dom", "seg", "ter", "qua", "qui", "sex", "sáb"];
+const MESES = ["janeiro", "fevereiro", "marco", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"];
+const MESES_ROTULO = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"];
 
 function dow(ymd: string): number {
   return new Date(`${ymd}T12:00:00Z`).getUTCDay(); // meio-dia UTC: sem escorregar de dia pelo fuso
@@ -81,6 +83,19 @@ export function interpretarPeriodo(texto: string, hoje: string): Periodo | null 
     const de = `${ate.slice(0, 7)}-01`;
     return { de, ate, rotulo: `Mês passado · ${ddmm(de)} a ${ddmm(ate)}` };
   }
+  // "setembro" / "setembro 2025": mês pelo nome. Sem ano, o último que já começou.
+  const mesNome = t.match(/^(?:em |de |no mes de )?([a-z]+)(?: de)?(?: (\d{4}))?$/);
+  const idxMes = mesNome ? MESES.indexOf(mesNome[1]) : -1;
+  if (mesNome && idxMes >= 0) {
+    let ano = mesNome[2] ? Number(mesNome[2]) : Number(hoje.slice(0, 4));
+    const mm = String(idxMes + 1).padStart(2, "0");
+    if (!mesNome[2] && `${ano}-${mm}-01` > hoje) ano -= 1;
+    const de = `${ano}-${mm}-01`;
+    if (de > hoje) return null;
+    const fimMes = addDias(`${idxMes === 11 ? ano + 1 : ano}-${String(((idxMes + 1) % 12) + 1).padStart(2, "0")}-01`, -1);
+    const ate = fimMes > hoje ? hoje : fimMes;
+    return { de, ate, rotulo: `${MESES_ROTULO[idxMes]}/${ano} · ${ddmm(de)} a ${ddmm(ate)}` };
+  }
 
   const faixa = t.match(/^(?:de )?(\S+)\s+(?:a|ate|-)\s+(\S+)$/);
   let de: string | null = null;
@@ -101,60 +116,82 @@ export type Comando =
   | { tipo: "menu" }
   | { tipo: "resumo"; nome: string; periodo: Periodo }
   | { tipo: "resumo_sem_nome" }
+  | { tipo: "pos"; nome: string; periodo: Periodo }
+  | { tipo: "pos_sem_nome" }
   | { tipo: "comercial"; periodo: Periodo }
+  | { tipo: "ranking"; periodo: Periodo }
+  | { tipo: "faturamento"; periodo: Periodo }
+  | { tipo: "cac"; periodo: Periodo }
   | { tipo: "pendentes" }
   | { tipo: "periodo_invalido"; texto: string }
   | { tipo: "desconhecido" };
 
 const MENU = new Set(["", "menu", "ajuda", "help", "comandos", "oi", "ola", "bom dia", "boa tarde", "boa noite", "inicio", "start", "?"]);
 
+/**
+ * "Aline mês" / "da Ana Paula 01/10 a 15/10": o nome é o começo, o período é o MAIOR final que
+ * vira período. Sempre acha (sufixo vazio = semana): um período digitado errado vira parte do nome
+ * e a resposta é "não achei", que mostra o que foi lido.
+ */
+function nomeEPeriodo(args: string[], hoje: string): { nome: string; periodo: Periodo } | null {
+  const a = args[0] === "da" || args[0] === "do" || args[0] === "de" ? args.slice(1) : args;
+  for (let i = 1; i <= a.length; i++) {
+    const periodo = interpretarPeriodo(a.slice(i).join(" "), hoje);
+    if (periodo) return { nome: a.slice(0, i).join(" "), periodo };
+  }
+  return null;
+}
+
 export function interpretarComando(texto: string, hoje: string): Comando {
   const t = normalizar(texto).replace(/^[/!]+/, "");
   if (MENU.has(t)) return { tipo: "menu" };
 
-  const palavras = t.split(" ");
-  const [cabeca, ...resto] = palavras;
+  const [cabeca, ...resto] = t.split(" ");
+  const periodoDoResto = (tipo: "comercial" | "ranking" | "faturamento"): Comando => {
+    const periodo = interpretarPeriodo(resto.join(" "), hoje);
+    return periodo ? { tipo, periodo } : { tipo: "periodo_invalido", texto: resto.join(" ") };
+  };
 
   if (cabeca === "resumo" || cabeca === "pessoa") {
-    // "resumo da Aline mês": o nome é o começo, o período é o MAIOR final que vira período. O
-    // laço sempre termina (sufixo vazio = semana): um período digitado errado vira parte do nome e
-    // a resposta é "não achei", que mostra o que foi lido.
-    const args = resto[0] === "da" || resto[0] === "do" || resto[0] === "de" ? resto.slice(1) : resto;
-    if (!args.length) return { tipo: "resumo_sem_nome" };
-    for (let i = 1; i <= args.length; i++) {
-      const periodo = interpretarPeriodo(args.slice(i).join(" "), hoje);
-      if (periodo) return { tipo: "resumo", nome: args.slice(0, i).join(" "), periodo };
-    }
-    return { tipo: "periodo_invalido", texto: args.join(" ") };
+    if (!resto.length) return { tipo: "resumo_sem_nome" };
+    const r = nomeEPeriodo(resto, hoje);
+    return r ? { tipo: "resumo", ...r } : { tipo: "periodo_invalido", texto: resto.join(" ") };
   }
-
-  if (cabeca === "comercial" || cabeca === "relatorio" || cabeca === "time") {
-    const periodo = interpretarPeriodo(resto.join(" "), hoje);
-    return periodo ? { tipo: "comercial", periodo } : { tipo: "periodo_invalido", texto: resto.join(" ") };
+  if (cabeca === "pos" || cabeca === "curso") {
+    if (!resto.length) return { tipo: "pos_sem_nome" };
+    const r = nomeEPeriodo(resto, hoje);
+    return r ? { tipo: "pos", ...r } : { tipo: "periodo_invalido", texto: resto.join(" ") };
   }
-
+  if (cabeca === "comercial" || cabeca === "relatorio" || cabeca === "time") return periodoDoResto("comercial");
+  if (cabeca === "ranking") return periodoDoResto("ranking");
+  if (cabeca === "faturamento" || cabeca === "receita") return periodoDoResto("faturamento");
+  if (cabeca === "cac") {
+    // O CAC é MENSAL (salário não se divide por semana): sem período, o mês corrente.
+    const periodo = interpretarPeriodo(resto.length ? resto.join(" ") : "mes", hoje);
+    return periodo ? { tipo: "cac", periodo } : { tipo: "periodo_invalido", texto: resto.join(" ") };
+  }
   if (cabeca === "pendentes" || cabeca === "pendente") return { tipo: "pendentes" };
   return { tipo: "desconhecido" };
 }
 
-// ── A pessoa ─────────────────────────────────────────────────────────────────
+// ── Achar pelo nome (pessoa ou pós) ──────────────────────────────────────────
 
 export interface PessoaComercial { id: string; nome: string; user_type: string }
 
-export type Busca =
-  | { tipo: "ok"; pessoa: PessoaComercial }
+export type Busca<T> =
+  | { tipo: "ok"; item: T }
   | { tipo: "nenhuma" }
-  | { tipo: "varias"; opcoes: PessoaComercial[] };
+  | { tipo: "varias"; opcoes: T[] };
 
 /**
- * Cada palavra digitada tem de ser o começo de uma palavra do nome ("ped flo" acha Pedro Flores).
- * Entre vários, vence quem casa as palavras INTEIRAS ("ana" fica com Ana, não com Anabela); empate
- * = pergunta de volta, nunca chuta.
+ * Cada palavra digitada tem de ser o começo de uma palavra do nome ("ped flo" acha Pedro Flores;
+ * "sanidade" acha "PÓS | SANIDADE AVÍCOLA"). Entre vários, vence quem casa as palavras INTEIRAS
+ * ("ana" fica com Ana, não com Anabela); empate = pergunta de volta, nunca chuta.
  */
-export function encontrarPessoa(pessoas: PessoaComercial[], consulta: string): Busca {
+export function encontrarPorNome<T extends { nome: string }>(itens: T[], consulta: string): Busca<T> {
   const q = normalizar(consulta).split(" ").filter(Boolean);
   if (!q.length) return { tipo: "nenhuma" };
-  const pontuadas = pessoas
+  const pontuadas = itens
     .map((p) => {
       const palavras = normalizar(p.nome).split(" ");
       const casa = q.every((t) => palavras.some((w) => w.startsWith(t)));
@@ -165,7 +202,7 @@ export function encontrarPessoa(pessoas: PessoaComercial[], consulta: string): B
     .filter((x) => x.casa)
     .sort((a, b) => b.pontos - a.pontos);
   if (!pontuadas.length) return { tipo: "nenhuma" };
-  if (pontuadas.length === 1 || pontuadas[0].pontos > pontuadas[1].pontos) return { tipo: "ok", pessoa: pontuadas[0].p };
+  if (pontuadas.length === 1 || pontuadas[0].pontos > pontuadas[1].pontos) return { tipo: "ok", item: pontuadas[0].p };
   const topo = pontuadas.filter((x) => x.pontos === pontuadas[0].pontos);
   return { tipo: "varias", opcoes: topo.slice(0, 8).map((x) => x.p) };
 }
@@ -259,6 +296,18 @@ export function textoMenu(): string {
     "👤 *resumo <nome>* [período]",
     "Funil de uma pessoa do comercial: leads recebidos, reuniões, comparecidas, vendas, as taxas e as interações no WhatsApp.",
     "",
+    "🎓 *pos <nome da pós>* [período]",
+    "Resumo de uma pós: leads, reuniões, comparecidas, vendas, faturamento e CAC de mídia.",
+    "",
+    "🏆 *ranking* [período]",
+    "As pós mais vendidas, com o faturamento de cada uma.",
+    "",
+    "💵 *faturamento* [período]",
+    "Quanto foi vendido, com a matrícula inclusa: pós, cursos livres e módulos.",
+    "",
+    "💸 *cac* [mês]",
+    "Custo por matrícula (mídia + times), geral e por canal. Padrão: o mês atual.",
+    "",
     "📊 *comercial* [período]",
     "O time todo: reuniões comparecidas, sem resultado marcado, vendas e pendentes.",
     "",
@@ -269,7 +318,7 @@ export function textoMenu(): string {
     "",
     "*Períodos:* hoje · ontem · semana (padrão: de quarta até hoje) · semana passada · mês · mês passado · 15/10 · 01/10 a 15/10",
     "",
-    "Exemplos: _resumo Aline_ · _resumo Pedro mês_ · _comercial ontem_",
+    "Exemplos: _resumo Aline_ · _pos sanidade mês_ · _ranking setembro_ · _cac mês passado_",
   ].join("\n");
 }
 
@@ -334,8 +383,191 @@ export function textoNaoAchei(nome: string): string {
   return `Não achei ninguém do comercial chamado *${nome}* (procuro vendedores e SDRs ativos). Tente o primeiro nome ou nome e sobrenome.`;
 }
 
-export function textoVarias(opcoes: PessoaComercial[]): string {
-  return [`Achei mais de uma pessoa. Qual delas?`, ...opcoes.map((o) => `• ${o.nome}`), "", "Mande o nome completo, ex.: _resumo " + opcoes[0].nome + "_"].join("\n");
+export function textoNaoAcheiPos(nome: string): string {
+  return `Não achei nenhuma pós com *${nome}* no nome. Tente uma palavra do nome, ex.: _pos sanidade_, _pos bovinos_, _pos cannabis_.`;
+}
+
+/** Empate na busca: lista as opções e mostra como pedir. `comando` = "resumo" ou "pos". */
+export function textoVarias(opcoes: { nome: string }[], comando = "resumo"): string {
+  const exemplo = normalizar(opcoes[0].nome).split(" ").filter((w) => w !== "pos" && w !== "mba").slice(0, 3).join(" ");
+  return [
+    comando === "pos" ? "Achei mais de uma pós. Qual delas?" : "Achei mais de uma pessoa. Qual delas?",
+    ...opcoes.map((o) => `• ${o.nome}`),
+    "",
+    `Mande o nome mais completo, ex.: _${comando} ${comando === "pos" ? exemplo : opcoes[0].nome}_`,
+  ].join("\n");
+}
+
+// ── Pós, ranking, faturamento e CAC ──────────────────────────────────────────
+
+/** Um item de bot_comercial_por_pos (uma pós, curso livre ou módulo no período). */
+export interface ItemPos {
+  curso_id: string;
+  nome: string;
+  tipo: string | null;
+  ativo: boolean;
+  categoria: string | null; // pos_graduacao | curso_livre | modulo_pratico | null (sem venda)
+  vendas: number;
+  faturamento: number;
+  valor_contratos: number;
+  valor_matriculas: number;
+  leads: number;
+  qualificados: number;
+  verba: number;
+  reunioes: number;
+  avaliadas: number;
+  comparecidas: number;
+}
+
+export function lerItensPos(j: any): ItemPos[] {
+  return (Array.isArray(j?.itens) ? j.itens : []).map((e: any) => ({
+    curso_id: String(e?.curso_id ?? ""),
+    nome: String(e?.nome ?? "(sem curso)"),
+    tipo: e?.tipo ?? null,
+    ativo: e?.ativo !== false,
+    categoria: e?.categoria ?? null,
+    vendas: num(e?.vendas),
+    faturamento: num(e?.faturamento),
+    valor_contratos: num(e?.valor_contratos),
+    valor_matriculas: num(e?.valor_matriculas),
+    leads: num(e?.leads),
+    qualificados: num(e?.qualificados),
+    verba: num(e?.verba),
+    reunioes: num(e?.reunioes),
+    avaliadas: num(e?.avaliadas),
+    comparecidas: num(e?.comparecidas),
+  }));
+}
+
+/** É pós? Curso do tipo Pós-Graduação (MBA incluso), ou que vendeu como pós no período. */
+export function ehPos(i: ItemPos): boolean {
+  return i.tipo === "Pós-Graduação" || i.categoria === "pos_graduacao";
+}
+
+export function textoResumoPos(i: ItemPos, p: Periodo): string {
+  return [
+    `🎓 *${i.nome}*`,
+    `📅 ${p.rotulo}`,
+    "",
+    `📥 Leads: *${i.leads}* (qualificados: ${i.qualificados})`,
+    `📆 Reuniões: *${i.reunioes}*`,
+    `✅ Comparecidas: *${i.comparecidas}* · comparecimento *${pct(i.comparecidas, i.avaliadas)}*`,
+    `💰 Vendas: *${i.vendas}*`,
+    `📊 Vendas ÷ comparecidas: *${pct(i.vendas, i.comparecidas)}* · vendas ÷ leads: *${pct(i.vendas, i.leads)}*`,
+    "",
+    `💵 Faturamento: *${reais(i.faturamento)}*`,
+    `   contratos ${reais(i.valor_contratos)} + matrículas ${reais(i.valor_matriculas)}`,
+    `   ticket médio ${i.vendas ? reais(i.faturamento / i.vendas) : "—"}`,
+    `📣 Verba de mídia: *${reais(i.verba)}*`,
+    `💸 CAC de mídia (verba ÷ vendas): *${i.vendas ? reais(i.verba / i.vendas) : "—"}*`,
+    "",
+    "_Leads e verba: Dashboard por Pós · reuniões: interesse marcado na reunião · vendas e faturamento: régua do Receita por Pós (data de assinatura; contrato + matrícula). O CAC completo, com os times, é o comando *cac*._",
+  ].join("\n");
+}
+
+const MEDALHAS = ["🥇", "🥈", "🥉"];
+
+export function textoRanking(itens: ItemPos[], p: Periodo, limite = 15): string {
+  const pos = itens.filter((i) => ehPos(i) && i.vendas > 0)
+    .sort((a, b) => b.vendas - a.vendas || b.faturamento - a.faturamento || a.nome.localeCompare(b.nome));
+  if (!pos.length) return [`🏆 *Pós mais vendidas*`, `📅 ${p.rotulo}`, "", "Nenhuma pós vendida no período."].join("\n");
+  const totalVendas = pos.reduce((s, i) => s + i.vendas, 0);
+  const totalFat = pos.reduce((s, i) => s + i.faturamento, 0);
+  const linhas = pos.slice(0, limite).map((i, k) =>
+    `${MEDALHAS[k] ?? `${k + 1}.`} ${i.nome} — *${i.vendas}* ${i.vendas === 1 ? "venda" : "vendas"} · ${reais(i.faturamento)}`);
+  const resto = pos.length > limite ? [`… e mais ${pos.length - limite} pós com venda.`] : [];
+  return [
+    `🏆 *Pós mais vendidas*`,
+    `📅 ${p.rotulo}`,
+    "",
+    ...linhas,
+    ...resto,
+    "",
+    `*Total:* ${totalVendas} vendas de pós · ${reais(totalFat)} (matrícula inclusa)`,
+  ].join("\n");
+}
+
+export function textoFaturamento(itens: ItemPos[], p: Periodo): string {
+  const soma = (cat: string) => {
+    const xs = itens.filter((i) => i.categoria === cat);
+    return {
+      vendas: xs.reduce((s, i) => s + i.vendas, 0),
+      fat: xs.reduce((s, i) => s + i.faturamento, 0),
+      contratos: xs.reduce((s, i) => s + i.valor_contratos, 0),
+      matriculas: xs.reduce((s, i) => s + i.valor_matriculas, 0),
+    };
+  };
+  const pos = soma("pos_graduacao");
+  const livres = soma("curso_livre");
+  const modulos = soma("modulo_pratico");
+  const totalVendas = pos.vendas + livres.vendas + modulos.vendas;
+  const total = pos.fat + livres.fat + modulos.fat;
+  return [
+    `💵 *Faturamento* (matrícula inclusa)`,
+    `📅 ${p.rotulo}`,
+    "",
+    `🎓 Pós-graduação: *${reais(pos.fat)}* · ${pos.vendas} vendas`,
+    `   contratos ${reais(pos.contratos)} + matrículas ${reais(pos.matriculas)}`,
+    `   ticket médio ${pos.vendas ? reais(pos.fat / pos.vendas) : "—"}`,
+    `📘 Cursos livres: *${reais(livres.fat)}* · ${livres.vendas} vendas`,
+    `🧪 Módulos práticos: *${reais(modulos.fat)}* · ${modulos.vendas} vendas`,
+    "",
+    `*Total: ${reais(total)}* · ${totalVendas} vendas`,
+    "",
+    "_Valor vendido (contratos assinados no período), não o que entrou no caixa. Mesma régua do gráfico Receita por Pós._",
+  ].join("\n");
+}
+
+/** Uma linha de mkt_cac_mensal (mês × canal). */
+export interface LinhaCac {
+  mes: string;
+  canal_nome: string;
+  custo: number;
+  verba_midia: number;
+  matriculas: number;
+  mes_consolidado: boolean;
+}
+
+/** O CAC é mensal: os meses inteiros que o período toca. */
+export function mesesDoPeriodo(p: Periodo): { ini: string; fim: string } {
+  const ini = `${p.de.slice(0, 7)}-01`;
+  const [y, m] = p.ate.slice(0, 7).split("-").map(Number);
+  const prox = m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, "0")}-01`;
+  return { ini, fim: addDias(prox, -1) };
+}
+
+export function textoCac(linhas: LinhaCac[], p: Periodo): string {
+  const meses = [...new Set(linhas.map((l) => l.mes.slice(0, 7)))].sort();
+  const rotuloMeses = meses.map((m) => `${MESES_ROTULO[Number(m.slice(5, 7)) - 1]}/${m.slice(0, 4)}`).join(" + ");
+  const aberto = linhas.some((l) => !l.mes_consolidado);
+  const custo = linhas.reduce((s, l) => s + l.custo, 0);
+  const verba = linhas.reduce((s, l) => s + l.verba_midia, 0);
+  const matr = linhas.reduce((s, l) => s + l.matriculas, 0);
+  if (!linhas.length) return `💸 *CAC* · ${p.rotulo}\n\nSem dados de custo para esse período.`;
+
+  const porCanal = new Map<string, { custo: number; verba: number; matr: number }>();
+  for (const l of linhas) {
+    const c = porCanal.get(l.canal_nome) ?? { custo: 0, verba: 0, matr: 0 };
+    c.custo += l.custo; c.verba += l.verba_midia; c.matr += l.matriculas;
+    porCanal.set(l.canal_nome, c);
+  }
+  const canais = [...porCanal.entries()].sort((a, b) => b[1].matr - a[1].matr).map(([nome, c]) => {
+    const midia = c.verba > 0 ? ` · mídia ${reais(c.verba)}` : "";
+    return `• ${nome}: *${c.matr ? reais(c.custo / c.matr) : "—"}* por matrícula (${c.matr} matr.)${midia}`;
+  });
+  return [
+    `💸 *CAC* · ${rotuloMeses}${aberto ? " (mês aberto)" : " (fechado)"}`,
+    "",
+    `Custo total (mídia + times): *${reais(custo)}*`,
+    `Verba de mídia: ${reais(verba)}`,
+    `Matrículas: *${matr}*`,
+    `*CAC geral: ${matr ? reais(custo / matr) : "—"} por matrícula*`,
+    "",
+    "Por canal de origem:",
+    ...canais,
+    "",
+    `_Mídia + salários e premiação dos times, com o comercial rateado por tempo (tela CAC e Payback). O CAC é mensal: o período vira os meses inteiros que ele toca.${aberto ? " Mês aberto: a premiação só entra quando o mês fecha." : ""}_`,
+  ].join("\n");
 }
 
 export const TEXTO_PERIODO_INVALIDO =
