@@ -152,6 +152,16 @@ export function interpretarComando(texto: string, hoje: string): Comando {
     return periodo ? { tipo, periodo } : { tipo: "periodo_invalido", texto: resto.join(" ") };
   };
 
+  // "resumo comercial ontem" / "resumo do time" / "resumo pos sanidade": o jeito natural de pedir
+  // os outros comandos (pego no uso real em 16/10 — "Resumo comercial ontem" virou "não achei ninguém
+  // chamado comercial").
+  if (cabeca === "resumo" && ["comercial", "time", "geral"].includes(resto[0] === "do" ? resto[1] : resto[0])) {
+    return interpretarComando(`comercial ${resto.slice(resto[0] === "do" ? 2 : 1).join(" ")}`, hoje);
+  }
+  if (cabeca === "resumo" && ["pos", "curso"].includes(resto[0] === "da" ? resto[1] : resto[0])) {
+    return interpretarComando(`pos ${resto.slice(resto[0] === "da" ? 2 : 1).join(" ")}`, hoje);
+  }
+
   if (cabeca === "resumo" || cabeca === "pessoa") {
     if (!resto.length) return { tipo: "resumo_sem_nome" };
     const r = nomeEPeriodo(resto, hoje);

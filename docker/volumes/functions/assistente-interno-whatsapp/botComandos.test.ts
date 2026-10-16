@@ -167,6 +167,12 @@ describe('meses pelo nome e comandos novos', () => {
     expect(interpretarComando('cac', HOJE)).toMatchObject({ tipo: 'cac', periodo: { de: '2026-10-01', ate: HOJE } });
     expect(interpretarComando('cac mês passado', HOJE)).toMatchObject({ tipo: 'cac', periodo: { de: '2026-09-01' } });
   });
+  it('"resumo comercial ontem" e "resumo da pós X" viram os comandos certos (uso real de 16/10)', () => {
+    expect(interpretarComando('Resumo comercial ontem', HOJE)).toMatchObject({ tipo: 'comercial', periodo: { de: '2026-10-15' } });
+    expect(interpretarComando('resumo do time mês', HOJE)).toMatchObject({ tipo: 'comercial', periodo: { de: '2026-10-01' } });
+    expect(interpretarComando('resumo da pós sanidade', HOJE)).toMatchObject({ tipo: 'pos', nome: 'sanidade' });
+    expect(interpretarComando('resumo adones mês', HOJE)).toMatchObject({ tipo: 'resumo', nome: 'adones' });
+  });
   it('busca de pós ignora o "PÓS |" e acha por qualquer palavra', () => {
     const pos = [{ nome: 'PÓS | SANIDADE AVÍCOLA' }, { nome: 'PÓS | NUTRIÇÃO E GESTÃO DE BOVINOS' }, { nome: 'PÓS | CLÍNICA MÉDICA E CIRÚRGICA DE BOVINOS' }];
     expect(encontrarPorNome(pos, 'sanidade')).toMatchObject({ tipo: 'ok', item: { nome: 'PÓS | SANIDADE AVÍCOLA' } });
