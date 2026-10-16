@@ -19,8 +19,12 @@ import { ESQUEMA_DECISAO, interpretarDecisao, montarConversa, PROMPT_FIM_DE_CONV
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-// Troca sem deploy de código: SAC_FIM_CONVERSA_MODEL (ex.: claude-haiku-5-5, mais barato).
-const MODELO = Deno.env.get("SAC_FIM_CONVERSA_MODEL") ?? "claude-opus-5-5";
+// Haiku 5.5 desde 16/10/2026, a pedido do usuário (custo). Nas 30 leituras reais do dia decidiu
+// igual ao Opus 5.5 em 28; nas outras 2 ficou com "não acabou", o lado seguro. Medido: 1.887
+// tokens de entrada e ~69 de saída por leitura = ~US$ 0,0002 (o Opus dava US$ 0,0087). Sem
+// fallback do servidor (o Haiku não tem): falha passageira só repete na rodada seguinte.
+// Troca sem deploy de código: SAC_FIM_CONVERSA_MODEL.
+const MODELO = Deno.env.get("SAC_FIM_CONVERSA_MODEL") ?? "claude-haiku-5-5";
 const COM_FALLBACK = MODELO.startsWith("claude-opus-5") || MODELO.startsWith("claude-fable");
 const LIMITE_PADRAO = 20;
 const EM_PARALELO = 4;
