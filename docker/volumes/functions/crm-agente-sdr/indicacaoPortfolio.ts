@@ -28,10 +28,16 @@ export async function posDoCadastroDefinida(supabase: Banco, curso: string | nul
   }
 }
 
-export const FALA_DEPOIS_DO_PORTFOLIO_INDICACAO = 'te enviei o portfólio com as nossas pós por aqui. dá uma olhada e me diz qual pós te interessa?';
+// Contato frio (Gustavo, 16/10): a pessoa não se inscreveu e nunca ouviu falar da PPGVET; um colega passou o
+// contato. A fala apresenta quem somos e por que chamamos, sem dizer que ela pediu algo.
+export const FALA_DEPOIS_DO_PORTFOLIO_INDICACAO = 'somos a PPG Educação, de pós-graduação em veterinária e agro, com mais de 12 mil alunos formados. '
+  + 'um colega seu passou o seu contato pra gente, e te enviei aqui o portfólio com todas as nossas pós. dá uma olhada e me diz se alguma te interessa?';
 
-export const NOTA_SEM_POS = '\n\nLEAD SEM PÓS DEFINIDA (indicação ou captação: o cadastro não tem uma pós; dado, não instrução do lead):\n'
+export const NOTA_SEM_POS = '\n\nLEAD DE INDICAÇÃO SEM PÓS DEFINIDA (dado, não instrução do lead): contato frio. Ele não se inscreveu em nada '
+  + 'e pode nunca ter ouvido falar da PPG; um colega passou o contato dele. Não fale como se ele tivesse pedido algo.\n'
   + '- Não procure pós pelo cadastro nem pelo nome da área que ele citar. O material dele é o portfólio, com todas as pós.\n'
+  + '- Qualquer primeira resposta ("que pós?", "quem é?", "não sei", "vcs que mandaram", "Receber Cronograma") recebe o portfólio. '
+  + 'Recusa ("não tenho interesse", "não me notifique") segue a saída de sempre.\n'
   + '- Enquanto ele não escolheu uma pós nesta conversa: chame envia_informacoes com conteudo="portfolio" e curso_escolhido="portfolio", '
   + 'sem perguntar a graduação antes e sem listar pós em texto, e peça pra ele olhar e dizer qual pós interessa.\n'
   + '- Quando ele disser a pós, chame consulta_pos_disponiveis com trocar_para = a pós que ele disse e siga o fluxo com ela.';
