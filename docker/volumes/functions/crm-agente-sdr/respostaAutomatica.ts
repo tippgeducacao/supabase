@@ -106,3 +106,42 @@ export async function chaveDeEnsaioLigada(supabase: { from: (tabela: string) => 
 export function loteSoDeRespostaAutomatica(itens: readonly any[]): boolean {
   return itens.length > 0 && itens.every((i) => !i?.arquivo && !i?.clique && ehRespostaAutomatica(String(i?.mensagem ?? '')));
 }
+
+// Pedido do Gustavo (16/10/2026): a mensagem pronta do lead TEM resposta, "fico no aguardo", e o follow-up
+// desse lead segue uma sequência própria, sem pergunta genérica. A fala sai do código, uma vez só até o lead
+// escrever de verdade, para não virar conversa entre o João e o robô.
+export const FALA_PARA_ROBO = 'fico no aguardo';
+const SEQUENCIA_DO_ROBO = ['pode conversar agora?', 'temos uma condição promocional liberada hoje.', 'eu preciso falar com você.'];
+
+const ehFalaDeGente = (t: string) => Boolean(t.trim()) && !t.includes('AUTO_IGNORE') && !t.startsWith(ETIQUETA_RESPOSTA_AUTOMATICA)
+  && !ehRespostaAutomatica(t);
+
+/** Já mandamos "fico no aguardo" depois da última fala de gente do lead? */
+export function jaAguardandoRobo(history: readonly Msg[]): boolean {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const t = textoDe(history[i]?.content) ?? '';
+    if (history[i]?.role === 'assistant' && /fico no aguardo/i.test(t)) return true;
+    if (history[i]?.role === 'user' && ehFalaDeGente(t)) return false;
+  }
+  return false;
+}
+
+/** O lead só respondeu com mensagem pronta (nenhuma fala de gente no histórico, ao menos uma de robô)? */
+export function soRoboRespondeu(history: readonly Msg[]): boolean {
+  let robo = false;
+  for (const m of history) {
+    if (m?.role !== 'user') continue;
+    const t = textoDe(m.content);
+    if (t === null || !t.trim() || t.includes('AUTO_IGNORE') || t.startsWith('[início')) continue;
+    if (t.startsWith(ETIQUETA_RESPOSTA_AUTOMATICA) || ehRespostaAutomatica(t)) { robo = true; continue; }
+    return false;
+  }
+  return robo;
+}
+
+/** O toque `tentativa` (1, 2, 3) do follow-up de quem só tem robô; '' depois do 3º. */
+export function falaDoFollowupDoRobo(tentativa: number, nome: string): string {
+  const fala = SEQUENCIA_DO_ROBO[tentativa - 1];
+  if (!fala) return '';
+  return nome ? `${nome}, ${fala}` : fala.charAt(0).toUpperCase() + fala.slice(1);
+}

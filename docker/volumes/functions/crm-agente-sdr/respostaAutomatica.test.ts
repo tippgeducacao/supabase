@@ -68,3 +68,30 @@ describe('o lote do agente só com mensagem pronta', () => {
     expect(loteSoDeRespostaAutomatica([])).toBe(false);
   });
 });
+
+describe('o robô do lead: "fico no aguardo" e a sequência do follow-up', () => {
+  it('"fico no aguardo" sai uma vez até o lead escrever de verdade', async () => {
+    const { jaAguardandoRobo } = await import('./respostaAutomatica');
+    const robo = { role: 'user', content: AUTOMATICAS[3] } as any;
+    expect(jaAguardandoRobo([{ role: 'assistant', content: 'template' }, robo] as any)).toBe(false);
+    expect(jaAguardandoRobo([robo, { role: 'assistant', content: 'fico no aguardo' }, robo] as any)).toBe(true);
+    expect(jaAguardandoRobo([robo, { role: 'assistant', content: 'fico no aguardo' }, { role: 'user', content: 'oi, sou eu' }, robo] as any)).toBe(false);
+  });
+
+  it('só robô no histórico: sim; qualquer fala de gente: não', async () => {
+    const { soRoboRespondeu, ETIQUETA_RESPOSTA_AUTOMATICA } = await import('./respostaAutomatica');
+    const t = { role: 'assistant', content: 'template' };
+    expect(soRoboRespondeu([t, { role: 'user', content: `${ETIQUETA_RESPOSTA_AUTOMATICA} ${AUTOMATICAS[0]}` }] as any)).toBe(true);
+    expect(soRoboRespondeu([t, { role: 'user', content: AUTOMATICAS[2] }, { role: 'user', content: '[INTERNAL_MARKER_FOLLOWUP_AUTO_IGNORE]' }] as any)).toBe(true);
+    expect(soRoboRespondeu([t, { role: 'user', content: AUTOMATICAS[2] }, { role: 'user', content: 'tenho interesse' }] as any)).toBe(false);
+    expect(soRoboRespondeu([t] as any)).toBe(false);
+  });
+
+  it('a sequência é a do Gustavo, e para no 3º toque', async () => {
+    const { falaDoFollowupDoRobo } = await import('./respostaAutomatica');
+    expect(falaDoFollowupDoRobo(1, 'Adriana')).toBe('Adriana, pode conversar agora?');
+    expect(falaDoFollowupDoRobo(2, 'Adriana')).toBe('Adriana, temos uma condição promocional liberada hoje.');
+    expect(falaDoFollowupDoRobo(3, '')).toBe('Eu preciso falar com você.');
+    expect(falaDoFollowupDoRobo(4, 'Adriana')).toBe('');
+  });
+});

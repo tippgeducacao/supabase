@@ -36,7 +36,7 @@ import {
   dadosDaEscolha, dadosDoToque, escolhaDoToque, escopoDoMapa, falaDoToque, FOLLOWUP_MAPA_SYSTEM, followupMapaLigado, mapaDoLead, semContextoRepetido,
   semGenericasLigado, semRetomadasGenericas, soRetomadasConcretas, toqueDoMapa, usadosDoMapa,
 } from './followupMapa.ts';
-import { chaveDeEnsaioLigada, ETIQUETA_RESPOSTA_AUTOMATICA, marcarRespostasAutomaticas, respostaAutomaticaLigada } from './respostaAutomatica.ts';
+import { chaveDeEnsaioLigada, ETIQUETA_RESPOSTA_AUTOMATICA, falaDoFollowupDoRobo, marcarRespostasAutomaticas, respostaAutomaticaLigada, soRoboRespondeu } from './respostaAutomatica.ts';
 import { jaPerguntou } from './aberturaMapa.ts';
 import { cursoDaConversa } from './ganchoLote.ts';
 import { registrarNaJornada } from './fichaAtendimento.ts';
@@ -357,12 +357,21 @@ export async function gerarFollowup(
   tel: Telemetria,
   history: Msg[],
   contextoMateriais = '',
-  opcoes?: { provedor: ProvedorIA; contexto: string; mapa?: boolean; semGenericas?: boolean; semRepeticao?: boolean; semCatalogo?: boolean },
+  opcoes?: { provedor: ProvedorIA; contexto: string; mapa?: boolean; semGenericas?: boolean; semRepeticao?: boolean; semCatalogo?: boolean; roboSequencia?: boolean },
 ): Promise<{ message: string; final_answer: string; provedorResposta: 'openai' | 'anthropic'; perguntaCarreira?: { escopo: string; pergunta_id: string } }> {
   const remotejid = lead.remotejid;
   const tentativaAtual = (opcoes ? contarTentativasDoCiclo(history) : contarTentativas(history)) + 1;
 
   const nome = extrairPrimeiroNome(lead.nome);
+  // Quem só respondeu com mensagem pronta (16/10/2026, pedido do Gustavo): "pode conversar agora?",
+  // "temos uma condição promocional liberada hoje.", "eu preciso falar com você.", e depois silêncio.
+  if (opcoes && soRoboRespondeu(history)
+    && (opcoes.roboSequencia ?? await chaveDeEnsaioLigada(supabase, 'followup_robo_sequencia', lead.numero_formatado ?? remotejid))) {
+    const fala = falaDoFollowupDoRobo(tentativaAtual, nome);
+    tel.registrar('followup_robo_sequencia', { tentativa: tentativaAtual, silencio: !fala });
+    return { message: fala, final_answer: fala ? 'sequencia_do_robo' : 'sequencia_do_robo_fim',
+      provedorResposta: opcoes.provedor?.nome === 'openai' ? 'openai' : 'anthropic' };
+  }
   const curso = (lead.curso_interesse_original ?? '').trim();
   // Cadastro vazio pode ter resposta explícita no histórico humano. Sem essa resposta,
   // a instrução de memória manda OMITIR o dado (sem "e aí ," ou "a pós em ."). Os dados

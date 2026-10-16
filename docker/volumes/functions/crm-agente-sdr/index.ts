@@ -60,7 +60,7 @@ import {
 import { comGanchoDoLote, cursoDaConversa, TITULO_SECAO_GANCHO } from './ganchoLote.ts';
 import { aberturaMapaLigada, blocoDaAbertura, comPassoDoMapa, faseDaAbertura } from './aberturaMapa.ts';
 import { mapaDoLead } from './followupMapa.ts';
-import { chaveDeEnsaioLigada, loteSoDeRespostaAutomatica } from './respostaAutomatica.ts';
+import { chaveDeEnsaioLigada, FALA_PARA_ROBO, jaAguardandoRobo, loteSoDeRespostaAutomatica } from './respostaAutomatica.ts';
 import { ehComandoLimpar, ehTelefoneDeTeste, limparConversaDeTeste, limpoEm } from './limparTeste.ts';
 import { carregarDesvioN8n, type DesvioN8n, vaiParaN8n } from '../_shared/desvioN8n.ts';
 import {
@@ -364,12 +364,6 @@ async function prepararAntesDoRouter(remotejid: string, itensDoLote: any[], tel:
     arquivos: itens.filter((i: any) => i.arquivo).length,
     wa_account_id: [...itens].reverse().find((i: any) => i?.wa_account_id != null)?.wa_account_id ?? null,
   });
-  // Mensagem pronta do WhatsApp do lead (respostaAutomatica.ts, 16/10/2026): lote só de robô não tem
-  // resposta. A mensagem fica no histórico (o follow-up a lê etiquetada) e o relógio do lead não anda.
-  if (loteSoDeRespostaAutomatica(itens) && await chaveDeEnsaioLigada(supabase, 'agente_ignora_resposta_automatica', String(remotejid).split('@')[0])) {
-    tel.registrar('resposta_automatica_ignorada', { mensagens: itens.length });
-    return null;
-  }
   // Contexto da CONVERSA: conta/lead/oportunidade vêm do último item do buffer QUE
   // TEM o campo — o POST de drenagem do reconciliador (drenar_orfao) chegava SEM
   // wa_account_id e, sendo o último do lote, zerava o ctx: a resposta caía na 1ª
@@ -939,6 +933,27 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
     return true;
   };
   // Correções de silêncio (CORRECAO_SILENCIO) e de fala só de bastidor (CORRECAO_VAZIO): regrasDaRodada.ts.
+
+  // ▸ Mensagem pronta do WhatsApp do lead (respostaAutomatica.ts, 16/10/2026, pedido do Gustavo): a resposta
+  //   é "fico no aguardo", em código e uma vez só até o lead escrever de verdade. O modelo respondia ao robô
+  //   com "qual o melhor horário pra eu te chamar de novo?", que deixava o follow-up esperando para sempre.
+  if (loteSoDeRespostaAutomatica(itensDoLote) && await chaveDeEnsaioLigada(supabase, 'agente_robo_fico_no_aguardo', telefone)) {
+    const jaAguardando = jaAguardandoRobo(await carregarHistorico(supabase, remotejid));
+    tel.registrar('resposta_automatica_do_lead', { respondeu: !jaAguardando });
+    if (!jaAguardando) {
+      if (!aberturaControlada) await gravarMensagem(supabase, remotejid, { role: 'assistant', content: FALA_PARA_ROBO });
+      const enviada = await enviarComAberturaNumero({
+        banco: supabase, telefone, interacaoId: tel.rodadaId, texto: FALA_PARA_ROBO,
+        sinal: aberturaControlada && aplicarTroca ? sinalTroca : null,
+        registrar: (tipo, dados) => tel.registrar(tipo, dados),
+        enviar: (fala, controle) => enviarResposta(ctx, fala, renovar, tel, () => iaPausada(remotejid), undefined,
+          aberturaControlada ? 'codigo' : fracionamentoAtual(), controle),
+      });
+      if (aberturaControlada && enviada.envio.aceitos) await gravarMensagem(supabase, remotejid, { role: 'assistant', content: enviada.texto });
+    }
+    tel.registrar('rodada_fim', { voltas_llm: 0, respondeu: !jaAguardando, motivo: 'resposta_automatica' }, Date.now() - inicioRodada);
+    return;
+  }
 
   // ── RETENÇÃO PENDENTE ⇒ DESLIGA AS ESTEIRAS (2026-07-14) ──────────────────
   // Quando o lead demonstra desinteresse, o prompt manda fazer UMA pergunta de
