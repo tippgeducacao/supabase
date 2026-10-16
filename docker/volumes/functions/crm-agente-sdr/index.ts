@@ -60,6 +60,7 @@ import {
 import { comGanchoDoLote, cursoDaConversa, TITULO_SECAO_GANCHO } from './ganchoLote.ts';
 import { aberturaMapaLigada, blocoDaAbertura, comPassoDoMapa, faseDaAbertura } from './aberturaMapa.ts';
 import { mapaDoLead } from './followupMapa.ts';
+import { NOTA_SEM_POS, posDoCadastroDefinida } from './indicacaoPortfolio.ts';
 import { chaveDeEnsaioLigada, FALA_PARA_ROBO, jaAguardandoRobo, loteSoDeRespostaAutomatica } from './respostaAutomatica.ts';
 import { ehComandoLimpar, ehTelefoneDeTeste, limparConversaDeTeste, limpoEm } from './limparTeste.ts';
 import { carregarDesvioN8n, type DesvioN8n, vaiParaN8n } from '../_shared/desvioN8n.ts';
@@ -497,6 +498,15 @@ async function prepararAntesDoRouter(remotejid: string, itensDoLote: any[], tel:
     curso_com_artigo: cursoDaConversa(lead?.curso_interesse_original),
     pergunta_formacao: montarPerguntaFormacao(formacaoNormalizada),
   };
+  // Indicação/captação sem pós no cadastro (indicacaoPortfolio.ts, 16/10/2026): o campo do curso traz a
+  // origem ("Cadastrado por:Adones"). O curso sai do prompt e o material é o portfólio.
+  if (await chaveDeEnsaioLigada(supabase, 'indicacao_portfolio', telefone)
+    && !(await posDoCadastroDefinida(supabase, lead?.curso_interesse_original))) {
+    ctx.semPosDefinida = true;
+    vars.curso_interesse_original = '';
+    vars.curso_com_artigo = 'da pós';
+    tel.registrar('lead_sem_pos_definida', { cadastro: String(lead?.curso_interesse_original ?? '').slice(0, 80) });
+  }
   // PERSONA AULA (16/09/2026, PRD — Persona por disparo): o disparo grava `contexto_campanha`
   // no lead do SDR. Com persona 'aula' e aula cadastrada em crm_aulas, a ABERTURA usa o
   // prompt da aula com os dados dela (quando ocorre, link, pós vinculada); o fechamento
@@ -801,6 +811,7 @@ async function definirAgente(pre: PreRouter, provedor: ProvedorIA | null, tel: T
     promptAgente = gancho.prompt;
     tel.registrar('gancho_lote', gancho.trocas);
   }
+  if (ctx.semPosDefinida) contextoEfetivo += NOTA_SEM_POS;
   // Conhecer a pessoa antes do convite, pelo mapa do Wellinton (aberturaMapa.ts, 16/10/2026): só na
   // abertura de vendas da Luna, com a chave. Até duas perguntas do mapa; depois, a abertura do lote.
   if (agenteEfetivo === 'agente_validacao' && persona === 'qualificador' && !ehCampanha && !aulaPiloto && !regrasSubstitutas

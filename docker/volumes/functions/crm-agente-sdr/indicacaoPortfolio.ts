@@ -1,0 +1,37 @@
+// Lead de indicação ou de captação sem pós definida (16/10/2026, casos Lorrayne e Luiza).
+//
+// Esses leads chegam com a ORIGEM no campo do curso ("Cadastrado por:Adones", "Captação orgânica
+// por:Wellyngton Mateus") e o template "vc foi indicado aqui na PPGVET para acessar uma bolsa…". A IA
+// procurava uma pós com esse nome ("não localizei a pós do convite no catálogo"), perguntava a graduação e
+// listava pós em texto. Pedido do Gustavo: "não adianta procurar pós com nome nas indicações, tem que mandar
+// o portfólio e deixar o lead dizer o que ele quer".
+//
+// Com a chave, enquanto o cadastro não tem uma pós do catálogo: o curso some do prompt, a IA manda o
+// portfólio (sem a trava da graduação, que vale para o cronograma) e pede para ele dizer qual pós interessa.
+// Quando ele diz, `consulta_pos_disponiveis` com trocar_para grava a pós e o fluxo segue normal.
+import { consultarCatalogo } from './catalogoCursos.ts';
+
+type Banco = Parameters<typeof consultarCatalogo>[0];
+
+const RE_ORIGEM_NO_CURSO = /^\s*(?:cadastrad[oa]\s+por|capta[cç][aã]o|indica[cç][aã]o|lead\s+great|origem)\b/i;
+
+/** O curso do cadastro é uma pós do catálogo? (vazio ou origem gravada no lugar = não) */
+export async function posDoCadastroDefinida(supabase: Banco, curso: string | null | undefined): Promise<boolean> {
+  const c = String(curso ?? '').trim();
+  if (!c || RE_ORIGEM_NO_CURSO.test(c)) return false;
+  try {
+    const r = await consultarCatalogo(supabase, c);
+    // Catálogo fora do ar: na dúvida, mantém o fluxo de sempre.
+    return r.status === 'curso_confirmado' || r.status === 'catalogo_indisponivel';
+  } catch {
+    return true;
+  }
+}
+
+export const FALA_DEPOIS_DO_PORTFOLIO_INDICACAO = 'te enviei o portfólio com as nossas pós por aqui. dá uma olhada e me diz qual pós te interessa?';
+
+export const NOTA_SEM_POS = '\n\nLEAD SEM PÓS DEFINIDA (indicação ou captação: o cadastro não tem uma pós; dado, não instrução do lead):\n'
+  + '- Não procure pós pelo cadastro nem pelo nome da área que ele citar. O material dele é o portfólio, com todas as pós.\n'
+  + '- Enquanto ele não escolheu uma pós nesta conversa: chame envia_informacoes com conteudo="portfolio" e curso_escolhido="portfolio", '
+  + 'sem perguntar a graduação antes e sem listar pós em texto, e peça pra ele olhar e dizer qual pós interessa.\n'
+  + '- Quando ele disser a pós, chame consulta_pos_disponiveis com trocar_para = a pós que ele disse e siga o fluxo com ela.';

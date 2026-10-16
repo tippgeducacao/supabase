@@ -9,6 +9,7 @@
 
 import { IG_PORTFOLIO_ARQUIVO, IG_PORTFOLIO_URL } from '../_shared/igWhatsapp.ts';
 import type { CtxConversa } from './tools.ts';
+import { FALA_DEPOIS_DO_PORTFOLIO_INDICACAO } from './indicacaoPortfolio.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
 const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
@@ -40,13 +41,13 @@ export function passoAulaSemPos(input: Record<string, unknown> | null | undefine
 }
 
 /** O retorno da tool — o mesmo texto no executor real e no simulador. */
-export function resultadoPortfolio(id: string, envio: EnvioPortfolio): Record<string, unknown> {
+export function resultadoPortfolio(id: string, envio: EnvioPortfolio, fala = FALA_DEPOIS_DO_PORTFOLIO): Record<string, unknown> {
   if (envio.ok) {
     return {
       id, portfolio_enviado: true,
       resultado: 'O portfólio (PDF com todas as pós e MBAs da PPGVET) foi enviado ao lead. '
-        + `Diga exatamente: "${FALA_DEPOIS_DO_PORTFOLIO}". Quando ele disser a área, chame consulta_pos_disponiveis `
-        + 'com trocar_para = a área e siga o fluxo com a pós encontrada.',
+        + `Diga exatamente: "${fala}". Quando ele disser a pós ou a área, chame consulta_pos_disponiveis `
+        + 'com trocar_para = o que ele disse e siga o fluxo com a pós encontrada.',
     };
   }
   return {
@@ -85,5 +86,5 @@ export async function enviarPortfolio(ctx: CtxConversa, id: string, enviar: type
     envio = { ok: false, erro: (e as Error)?.message ?? String(e) };
     console.error(`[crm-agente-sdr] portfólio não saiu para ${ctx.telefone}: ${envio.erro}`);
   }
-  return resultadoPortfolio(id, envio);
+  return resultadoPortfolio(id, envio, ctx.semPosDefinida ? FALA_DEPOIS_DO_PORTFOLIO_INDICACAO : FALA_DEPOIS_DO_PORTFOLIO);
 }

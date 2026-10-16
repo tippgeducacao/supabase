@@ -76,6 +76,8 @@ export type CtxConversa = ContextoElegibilidade & {
   compatibilidadeIndisponivel?: boolean;
   /** A tool pediu confirmação real do lead; esta rodada termina fazendo a pergunta. */
   perguntaFormacaoPendente?: string;
+  /** Lead de indicação/captação sem pós no cadastro: o material é o portfólio, sem a trava da graduação (indicacaoPortfolio.ts). */
+  semPosDefinida?: boolean;
   /** Persona aula com aula SEM pós relacionada (aula MVP): o material é o portfólio (portfolio.ts). */
   aulaSemPos?: boolean;
   /**
@@ -1732,7 +1734,7 @@ export async function executarTool(
         // Ficha (canário, 19/09/2026): sem o dado da coleta o cronograma NÃO sai — a recusa diz o
         // que perguntar. Bloqueio em rodada ANTERIOR + lead insistiu ⇒ libera (decisão do usuário:
         // pergunta uma vez, não segura o material). Ficha indisponível ⇒ envia como sempre.
-        if (ctx.ficha) {
+        if (ctx.ficha && !(ehPortfolio && ctx.semPosDefinida)) {
           const ficha = await carregarFicha(supabase, ctx);
           if (ficha && !ficha.avaliacao.liberaCronograma) {
             const jaBloqueouNestaRodada = (ficha.entrada.jornada.cronograma?.bloqueado_em ?? '') >= ctx.ficha.inicioRodada;

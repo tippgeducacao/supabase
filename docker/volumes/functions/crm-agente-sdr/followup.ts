@@ -389,6 +389,12 @@ export async function gerarFollowup(
   const comMapa = opcoes && planoCarreira && lead.contexto_campanha?.persona !== 'aula' && lead.jornada?.coleta?.atua_na_area !== 'nao'
     && (opcoes.mapa ?? await followupMapaLigado(supabase, lead.numero_formatado ?? remotejid))
     ? await mapaDoLead(supabase, curso) : null;
+  // "conseguiu abrir o cronograma?" sem cronograma enviado (16/10/2026, caso Luiza): só com envio registrado
+  // (pela IA, na jornada, ou pelo vendedor, no histórico).
+  if (planoCarreira && !lead.jornada?.cronograma?.enviado_em
+    && !history.some((m) => m.role === 'assistant' && /solicitou o envio do documento|te enviei o cronograma/i.test(blocosParaTexto(m.content)))) {
+    planoCarreira = { ...planoCarreira, retomadas: planoCarreira.retomadas.filter((r) => r.id !== 'retomada:geral_material') };
+  }
   // Catálogo antigo de perguntas técnicas (16/10/2026): fora do mapa, ele dava "no crédito rural, a pós
   // aborda análise e concessão de crédito. que parte desse processo…?" (18 de 106 envios numa tarde depois
   // que as genéricas saíram). Com a chave, sobram a pendência, a agenda e o material.
