@@ -1,4 +1,6 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.4';
+import { autorDoAtor, resolverAtor } from './ator.ts';
+import { conteudoDoComentario, previaDoAviso } from './comentarioChat.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -11,12 +13,9 @@ Deno.serve(async (req) => {
 
   try {
     const body = await req.json();
+    // user_id do corpo NÃO é usado como identidade: só entra no resolverAtor, que só
+    // confia nele quando quem chama é o próprio motor (ver ator.ts).
     const { task_id, trigger_type, old_status_id, new_status_id, user_id, tag } = body;
-    // Encadeamento de automações: quando uma ação muda o status/lista da tarefa, o
-    // motor re-dispara a si mesmo com o evento status_changed para que as automações
-    // de "chegou no status X" também rodem. _depth limita a recursão e evita loops
-    // infinitos entre automações que se acionam em cadeia/ciclo.
-    const depth = Number(body._depth) || 0;
     const MAX_CHAIN_DEPTH = 5;
 
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
@@ -60,6 +59,29 @@ Deno.serve(async (req) => {
     if (!automations || automations.length === 0) {
       return new Response(JSON.stringify({ processed: 0 }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
+
+    // Quem disparou, conferido pelo token (o runtime não aplica verify_jwt e o corpo é
+    // livre). Uma consulta ao Auth por disparo que tem automação, ANTES das ações —
+    // ação lenta (webhook) não deixa o token vencer no meio. atorId é a única identidade
+    // usada daqui para baixo: ator de aviso, quem moveu, re-disparo encadeado.
+    const ator = await resolverAtor(req, user_id, {
+      chaveServico: serviceKey,
+      usuarioDoToken: async (token) => {
+        const { data, error } = await supabase.auth.getUser(token);
+        return error || !data.user || data.user.is_anonymous ? null : data.user.id;
+      },
+      perfilAtivo: async (id) => {
+        const { data } = await supabase.from('profiles').select('ativo').eq('id', id).maybeSingle();
+        return data?.ativo === true;
+      },
+    });
+    const atorId = autorDoAtor(ator);
+    // Encadeamento de automações: quando uma ação muda o status/lista da tarefa, o
+    // motor re-dispara a si mesmo com o evento status_changed para que as automações
+    // de "chegou no status X" também rodem. _depth limita a recursão e evita loops
+    // infinitos entre automações que se acionam em cadeia/ciclo. Só vale vindo do
+    // próprio motor: um _depth negativo mandado de fora desarmaria o limite.
+    const depth = ator.tipo === 'interno' ? Math.max(0, Number(body._depth) || 0) : 0;
 
     const autoIds = automations.map(a => a.id);
     const [triggersRes, conditionsRes, actionsRes] = await Promise.all([
@@ -156,6 +178,8 @@ Deno.serve(async (req) => {
       const autActions = allActions.filter(a => a.automation_id === auto.id).sort((a, b) => a.action_order - b.action_order);
       const executedActions: any[] = [];
       let notifiedThisAutomation = false;
+      // "Adicionar comentário" com @ já avisou alguém no sino (ver o aviso genérico abaixo).
+      let avisouPorMencao = false;
       // Uma tarefa vive em UMA lista só. Se a automação tem vários "Mover para
       // outro espaço/lista", o 1º move a tarefa original e os demais recebem uma
       // CÓPIA — senão cada move sobrescreve o anterior e só o último destino fica.
@@ -311,13 +335,18 @@ Deno.serve(async (req) => {
               break;
             }
             case 'add_comment': {
-              const text = replaceVariables(cfg.content || '', task, { user_id, type: trigger_type });
-              const posted = await postTaskChatComment(supabase, task, text, user_id || null, cfg.mention_user_id || null);
+              // Só com quem disparou conferido pelo token (ver ator.ts): chamada de fora
+              // sem sessão não escreve no chat — nem direto, nem pelo encadeamento, que
+              // repassa o ator verificado (null quando a origem não tinha sessão).
+              if (!atorId) {
+                executedActions.push({ type: 'add_comment', status: 'failed', error: 'chamada sem usuário verificado' });
+                break;
+              }
+              const text = replaceVariables(cfg.content || '', task, { user_id: atorId, type: trigger_type });
+              const posted = await postTaskChatComment(supabase, task, text, cfg.mention_user_id || null, atorId);
               if (posted.ok) {
-                // A menção já avisa a pessoa marcada (sino) — o aviso genérico
-                // "Automação executada" para todos os responsáveis seria ruído.
-                if (posted.mentioned) notifiedThisAutomation = true;
-                executedActions.push({ type: 'add_comment', status: 'success', label: posted.mentioned ? `${posted.mentioned} marcado(a) no chat` : undefined });
+                if (posted.avisou) avisouPorMencao = true;
+                executedActions.push({ type: 'add_comment', status: 'success', label: posted.mencionado ? `${posted.mencionado} marcado(a) no chat` : undefined });
               } else {
                 executedActions.push({ type: 'add_comment', status: 'failed', error: posted.error });
               }
@@ -325,9 +354,9 @@ Deno.serve(async (req) => {
             }
             case 'send_notification': {
               const recipients = await resolveRecipients(supabase, cfg, task);
-              const title = replaceVariables(cfg.title || auto.name || 'Automação executada', task, { user_id, type: trigger_type });
+              const title = replaceVariables(cfg.title || auto.name || 'Automação executada', task, { user_id: atorId, type: trigger_type });
               // Sem mensagem, ao menos o nome da tarefa — notificação só com título não diz qual foi.
-              const body = replaceVariables(cfg.message || `Tarefa "{{task.title}}"`, task, { user_id, type: trigger_type });
+              const body = replaceVariables(cfg.message || `Tarefa "{{task.title}}"`, task, { user_id: atorId, type: trigger_type });
               for (const rid of recipients) {
                 await supabase.from('gt_notifications').insert({
                   user_id: rid,
@@ -337,7 +366,7 @@ Deno.serve(async (req) => {
                   link: `/?gt=task:${task_id}`,
                   reference_type: 'task',
                   reference_id: task_id,
-                  actor_id: user_id || null,
+                  actor_id: atorId,
                   category: 'primary',
                 });
               }
@@ -348,11 +377,11 @@ Deno.serve(async (req) => {
             case 'create_task': {
               await supabase.from('gt_tasks').insert({
                 list_id: cfg.list_id || task.list_id,
-                title: replaceVariables(cfg.title || 'Nova tarefa', task, { user_id, type: trigger_type }),
+                title: replaceVariables(cfg.title || 'Nova tarefa', task, { user_id: atorId, type: trigger_type }),
                 assignee_id: cfg.assignee_id || null,
                 priority: cfg.priority || 'normal',
                 due_date: cfg.due_date_offset ? new Date(Date.now() + (cfg.due_date_offset) * 86400000).toISOString().slice(0, 10) : null,
-                description: replaceVariables(cfg.description || '', task, { user_id, type: trigger_type }),
+                description: replaceVariables(cfg.description || '', task, { user_id: atorId, type: trigger_type }),
                 created_by: null,
                 reporter_id: task.reporter_id,
                 source_task_id: task_id,
@@ -446,7 +475,7 @@ Deno.serve(async (req) => {
             case 'send_webhook': {
               const url = cfg.webhook_url;
               const method = cfg.webhook_method || 'POST';
-              const body = replaceVariables(cfg.webhook_body || '{}', task, { user_id, type: trigger_type });
+              const body = replaceVariables(cfg.webhook_body || '{}', task, { user_id: atorId, type: trigger_type });
               try {
                 const resp = await fetch(url, {
                   method,
@@ -561,8 +590,12 @@ Deno.serve(async (req) => {
         }
       }
 
-      // Auto-notify all assignees if no explicit send_notification action ran
-      if (!notifiedThisAutomation) {
+      // Auto-notify all assignees if no explicit send_notification action ran.
+      // Com "Adicionar comentário + @" que avisou alguém, o genérico "Automação
+      // executada" aos responsáveis seria ruído — MAS não quando a tarefa mudou de
+      // lista: aí o aviso com o Destino é o que impede a tarefa de "sumir" para quem moveu.
+      const moveuDeLista = executedActions.some((a: any) => a.type === 'move_to_list' && a.status === 'success');
+      if (!notifiedThisAutomation && !(avisouPorMencao && !moveuDeLista)) {
         try {
           const recipientSet = new Set<string>(
             await resolveRecipients(supabase, { recipient: 'all_assignees' }, task)
@@ -574,7 +607,7 @@ Deno.serve(async (req) => {
           if (moveActions.length > 0) {
             // Always notify whoever triggered the move — they may not have access
             // to the destination space and otherwise the task appears to vanish.
-            if (user_id) recipientSet.add(user_id);
+            if (atorId) recipientSet.add(atorId);
             try {
               const destListId = moveActions[0].list_id;
               const { data: destList } = await supabase
@@ -624,7 +657,7 @@ Deno.serve(async (req) => {
               link: `/?gt=task:${task_id}`,
               reference_type: 'task',
               reference_id: task_id,
-              actor_id: user_id || null,
+              actor_id: atorId,
               category: 'primary',
             });
           }
@@ -701,7 +734,9 @@ Deno.serve(async (req) => {
               trigger_type: 'status_changed',
               old_status_id: initialStatusId,
               new_status_id: newStatusId,
-              user_id: user_id || null,
+              // O verificado, não o do corpo: a chamada encadeada vai com a chave de
+              // serviço e confia nesse user_id (ver ator.ts).
+              user_id: atorId,
               _depth: depth + 1,
             }),
           });
@@ -815,65 +850,76 @@ async function copyTaskToList(
   }
 }
 
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-
 // "Adicionar comentário" = mensagem no CHAT da tarefa (canal `task-<id>`), que é o
 // que a aba Comentários do drawer mostra. Antes gravava em gt_task_comments, que
 // nenhuma tela lê — o comentário da automação nunca aparecia.
-// Autor = quem disparou a mudança (como se ele mesmo tivesse marcado a pessoa): o
-// trigger gt_notify_chat_mentions só notifica a menção quando a mensagem tem autor.
-// Sem autor (raro), a mensagem sai como "Usuário" e a notificação é gravada aqui.
+// Assinada pela AUTOMAÇÃO (user_id nulo, message_type 'automation'), não por quem
+// moveu a tarefa: o texto e a menção vêm da configuração da automação, que qualquer
+// logado edita (RLS ALL true em gt_automation_*), então pôr a mensagem na boca de quem
+// moveu seria falsificar autoria — o chat proíbe isso por RLS (gt_insert_messages exige
+// user_id = auth.uid()) e o motor, com a chave de serviço, passaria por cima (revisão de
+// 16/10/2026). Quem moveu aparece como ator do aviso no sino, conferido pelo token. O
+// trigger gt_notify_chat_mentions ignora mensagem sem autor, então o aviso é gravado aqui.
 async function postTaskChatComment(
   supabase: any,
   task: any,
   text: string,
-  authorId: string | null,
   mentionUserId: string | null,
-): Promise<{ ok: boolean; mentioned?: string; error?: string }> {
+  atorId: string,
+): Promise<{ ok: boolean; mencionado?: string; avisou?: boolean; error?: string }> {
   try {
-    let mentionHtml = '';
-    let mentionName = '';
+    let mencao: { id: string; nome: string } | null = null;
     if (mentionUserId) {
       const { data: prof } = await supabase.from('profiles').select('name').eq('id', mentionUserId).maybeSingle();
       if (!prof) return { ok: false, error: 'pessoa a marcar não encontrada' };
-      mentionName = prof.name || 'Usuário';
-      // Mesmo HTML que o editor do chat grava ao escolher alguém no "@".
-      mentionHtml = `<span class="gt-mention" data-type="mention" data-id="${mentionUserId}" data-label="${escapeHtml(mentionName)}" data-mention-suggestion-char="@">@${escapeHtml(mentionName)}</span>`;
+      mencao = { id: mentionUserId, nome: prof.name || 'Usuário' };
     }
-    const body = escapeHtml(text.trim()).replace(/\r?\n/g, '<br>');
-    if (!mentionHtml && !body) return { ok: false, error: 'comentário vazio' };
-    const content = `<p>${[mentionHtml, body].filter(Boolean).join(' ')}</p>`;
+    const content = conteudoDoComentario(text, mencao);
+    if (!content) return { ok: false, error: 'comentário vazio' };
 
-    // O canal nasce quando alguém abre a tarefa (gt_get_or_create_task_channel). Daqui
-    // não dá para criar: o trigger gt_set_chat_channel_created_by recusa insert sem
-    // auth.uid(), e a chave de serviço não tem. Tarefa nunca aberta ⇒ falha no log.
-    const { data: channel } = await supabase.from('gt_chat_channels').select('id').eq('slug', `task-${task.id}`).maybeSingle();
-    if (!channel) return { ok: false, error: 'tarefa ainda sem chat (ninguém a abriu)' };
+    // O canal costuma nascer quando alguém abre a tarefa (gt_get_or_create_task_channel,
+    // que exige auth.uid()). Tarefa nunca aberta (ex.: gatilho "Tarefa criada") ⇒ o
+    // motor cria no mesmo formato, sem criador (ninguém vira admin por causa do motor).
+    // O trigger gt_set_chat_channel_created_by aceita a chave de serviço SÓ para canal
+    // de tarefa (migration de 16/10/2026).
+    const slug = `task-${task.id}`;
+    let { data: channel } = await supabase.from('gt_chat_channels').select('id').eq('slug', slug).maybeSingle();
+    if (!channel) {
+      const { data: criado, error: chErr } = await supabase.from('gt_chat_channels')
+        .insert({ name: `Tarefa ${String(task.id).slice(0, 8)}`, slug, type: 'task', is_private: false, created_by: null })
+        .select('id').maybeSingle();
+      channel = criado;
+      // Corrida: alguém abriu a tarefa e criou o canal no meio (slug é único) — relê.
+      if (!channel) ({ data: channel } = await supabase.from('gt_chat_channels').select('id').eq('slug', slug).maybeSingle());
+      if (!channel) return { ok: false, error: `canal da tarefa não criado: ${chErr?.message || 'sem retorno'}` };
+    }
 
     const { error: msgErr } = await supabase.from('gt_chat_messages').insert({
       channel_id: channel.id,
-      user_id: authorId,
+      user_id: null,
       content,
-      message_type: 'text',
-      mentions: mentionUserId ? [mentionUserId] : [],
+      message_type: 'automation',
+      mentions: mencao ? [mencao.id] : [],
     });
     if (msgErr) return { ok: false, error: msgErr.message };
 
-    if (mentionUserId && !authorId) {
-      await supabase.rpc('gt_insert_mention_notification', {
-        _user_id: mentionUserId,
-        _actor_id: null,
+    // Quem moveu é o próprio marcado (ex.: o Marco levou o episódio para publicação):
+    // ninguém precisa ser avisado (a função também pula _user_id = _actor_id).
+    const avisou = !!mencao && mencao.id !== atorId;
+    if (avisou) {
+      const { error: avisoErr } = await supabase.rpc('gt_insert_mention_notification', {
+        _user_id: mencao!.id,
+        _actor_id: atorId,
         _type: 'task_mention',
         _title: `Automação mencionou você em "Tarefa: ${task.title || 'sem título'}"`,
-        _body: `@${mentionName} ${text.trim()}`.slice(0, 140),
+        _body: previaDoAviso(text, mencao),
         _link: `/gestor-tarefas?task=${task.id}`,
         _ref_type: 'task',
         _ref_id: task.id,
       });
+      if (avisoErr) return { ok: false, error: `mensagem gravada, aviso falhou: ${avisoErr.message}` };
     }
-    return { ok: true, mentioned: mentionUserId ? mentionName : undefined };
+    return { ok: true, mencionado: mencao?.nome, avisou };
   } catch (e) {
     return { ok: false, error: String(e) };
   }
