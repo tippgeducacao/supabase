@@ -244,10 +244,12 @@ async function processarItem(item: ItemFila): Promise<void> {
       ESFORCO_VARREDURA,
       abortar.signal,
     );
+    // Sem resumo não é "ok": a checagem rodou mas ninguém sabe o que ela achou.
+    const ok = resumo.terminou === "resposta" && !!resumo.textoFinal.trim();
     await concluir({
-      status: resumo.terminou === "resposta" ? "ok" : "erro",
+      status: ok ? "ok" : "erro",
       resumo: resumo.textoFinal.trim() || null,
-      erro: resumo.terminou === "resposta" ? null : `Terminou em: ${resumo.terminou}`,
+      erro: ok ? null : resumo.terminou === "resposta" ? "Terminou sem escrever o resumo." : `Terminou em: ${resumo.terminou}`,
       achados: resumo.achados.length,
       consultas: resumo.consultas,
       tokens_entrada: resumo.uso.entrada + resumo.uso.cacheLeitura + resumo.uso.cacheEscrita,

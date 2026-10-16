@@ -152,6 +152,29 @@ describe("rodarAgente (IA Administrativa)", () => {
     expect(chamadas).toHaveLength(1);
   });
 
+  it("terminou sem escrever (só pensou): pede o texto uma vez, sem ferramenta, e usa a resposta", async () => {
+    const { d, chamadas } = deps([
+      mensagem([usoFerramenta("t1", "consultar_banco", { sql: "select 1", objetivo: "a" })], "tool_use"),
+      mensagem([{ type: "thinking", thinking: "" }], "end_turn"),
+      mensagem([{ type: "text", text: "RESUMO: 0 casos." }], "end_turn"),
+    ]);
+    const r = await rodarAgente(entrada, d, { maxPassos: 2, prazoMs: 999_999 });
+    expect(r.textoFinal).toBe("RESUMO: 0 casos.");
+    expect(chamadas).toHaveLength(3);
+    expect(chamadas[2].tool_choice).toEqual({ type: "none" });
+    const ultima = (chamadas[2].messages as Json[]).at(-1);
+    expect(JSON.stringify(ultima)).toContain("terminou sem escrever");
+  });
+
+  it("texto que não veio pelo stream é lido dos blocos da mensagem", async () => {
+    const respostas = [mensagem([{ type: "text", text: "Direto." }], "end_turn")];
+    const { d } = deps(respostas);
+    // stream que não emite o evento de texto
+    d.abrirStream = () => ({ on() { return this; }, finalMessage: async () => respostas[0] });
+    const r = await rodarAgente(entrada, d, { maxPassos: 3, prazoMs: 60_000 });
+    expect(r.textoFinal).toBe("Direto.");
+  });
+
   it("recusa não roda ferramenta", async () => {
     const { d, executar } = deps([
       mensagem([usoFerramenta("t1", "consultar_banco", { sql: "select 1" })], "refusal"),

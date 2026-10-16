@@ -79,6 +79,8 @@ const MAX_REFAZER_JSON = 2;
 const AVISO_PRAZO =
   "[Tempo desta rodada esgotado. Não chame mais ferramentas: conclua AGORA com o que já apurou, " +
   "dizendo com clareza o que ficou confirmado, o que ficou sem verificar e o que o admin pode pedir em seguida.]";
+const PEDIDO_DE_TEXTO =
+  "[Você terminou sem escrever nada. Escreva AGORA a resposta final em texto, com o que já apurou.]";
 const avisoPrazoEntrega = (ferramenta: string) =>
   `[Tempo esgotado. Não consulte mais nada: chame ${ferramenta} AGORA com o que já apurou, ` +
   "deixando claro no prompt o que ficou confirmado e o que o desenvolvedor ainda precisa conferir.]";
@@ -157,6 +159,17 @@ export async function rodarAgente(
   };
   const inicio = opcoes.passoInicial ?? 0;
   let avisouPrazo = false;
+  let pediuTexto = false;
+
+  /** Acrescenta um recado ao fim da última mensagem do usuário (ou abre uma, se não houver). */
+  const anexarRecado = (texto: string) => {
+    const ultima = mensagens[mensagens.length - 1];
+    if (ultima?.role === "user" && Array.isArray(ultima.content)) {
+      mensagens[mensagens.length - 1] = { ...ultima, content: [...ultima.content, { type: "text", text: texto }] as never };
+    } else {
+      mensagens.push({ role: "user", content: texto });
+    }
+  };
 
   for (let rodada = 0; rodada < opcoes.maxPassos; rodada++) {
     if (deps.cancelado?.()) {
@@ -165,18 +178,14 @@ export async function rodarAgente(
     }
     const passo = inicio + rodada;
     const semTempo = agora() - inicioMs > opcoes.prazoMs;
-    const ultimoPasso = rodada === opcoes.maxPassos - 1 || semTempo;
+    const ultimoPasso = rodada === opcoes.maxPassos - 1 || semTempo || pediuTexto;
 
     // Sem tempo: avisa o modelo DENTRO da última mensagem (texto depois dos tool_result).
     if (semTempo && !avisouPrazo) {
       avisouPrazo = true;
       const ultima = mensagens[mensagens.length - 1];
       if (ultima?.role === "user" && Array.isArray(ultima.content)) {
-        const aviso = opcoes.ferramentaDeEntrega ? avisoPrazoEntrega(opcoes.ferramentaDeEntrega) : AVISO_PRAZO;
-        mensagens[mensagens.length - 1] = {
-          ...ultima,
-          content: [...ultima.content, { type: "text", text: aviso }] as never,
-        };
+        anexarRecado(opcoes.ferramentaDeEntrega ? avisoPrazoEntrega(opcoes.ferramentaDeEntrega) : AVISO_PRAZO);
       }
     }
 
@@ -224,7 +233,20 @@ export async function rodarAgente(
 
     const usos = msg.content.filter((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === "tool_use");
     if (!usos.length) {
-      resumo.textoFinal = textoDoPasso;
+      // O texto vem do stream; se não veio, dos blocos da mensagem.
+      const texto = textoDoPasso.trim() ||
+        msg.content.filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === "text").map((b) => b.text).join("").trim();
+      // Terminou só pensando, sem escrever (visto na 1ª varredura, 16/10, depois do prazo):
+      // pede o texto UMA vez, sem ferramentas, em vez de entregar uma resposta vazia.
+      if (!texto && !pediuTexto && msg.stop_reason !== "max_tokens") {
+        pediuTexto = true;
+        anexarRecado(opcoes.ferramentaDeEntrega
+          ? `[Você terminou sem entregar. Chame ${opcoes.ferramentaDeEntrega} AGORA com o que já apurou.]`
+          : PEDIDO_DE_TEXTO);
+        if (rodada === opcoes.maxPassos - 1) rodada--; // o pedido ganha a sua rodada mesmo no fim
+        continue;
+      }
+      resumo.textoFinal = texto;
       if (msg.stop_reason === "max_tokens") {
         deps.emitir({ tipo: "aviso", texto: "A resposta ficou longa demais e cortou no fim. Peça para continuar." });
       }
