@@ -41,15 +41,20 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-// Opus 5.5 por padrão (investigação com várias etapas, precisão acima de tudo). Troca sem
-// deploy de código: env IA_ADMIN_MODEL / IA_ADMIN_EFFORT_CHAT / IA_ADMIN_EFFORT_VARREDURA.
-const MODELO = Deno.env.get("IA_ADMIN_MODEL") ?? "claude-opus-5-5";
-const MODELO_RESERVA = "claude-sonnet-5-5";
+// Modelo por modo — decisão do usuário (16/10/2026, "não queria ter que gastar com isso"): o
+// Opus 5.5 custava ~US$ 0,20–0,60 por checagem. Varredura e prompts (tarefa guiada, com evidência
+// conferida por gente) no Haiku 5.5, ~20× mais barato; chat (alguém esperando uma investigação
+// boa) no Sonnet 5.5, metade do Opus. Troca sem deploy de código: env IA_ADMIN_MODEL_CHAT /
+// _VARREDURA / _PROMPT e IA_ADMIN_EFFORT_CHAT / _VARREDURA / _PROMPT.
+const MODELO_CHAT = Deno.env.get("IA_ADMIN_MODEL_CHAT") ?? "claude-sonnet-5-5";
+const MODELO_VARREDURA = Deno.env.get("IA_ADMIN_MODEL_VARREDURA") ?? "claude-haiku-5-5";
+const MODELO_PROMPT = Deno.env.get("IA_ADMIN_MODEL_PROMPT") ?? "claude-haiku-5-5";
+/** Reserva (modelo indisponível ou sobrecarregado): o outro modelo barato. */
+const reservaDe = (modelo: string) => (modelo.startsWith("claude-haiku") ? "claude-sonnet-5-5" : "claude-haiku-5-5");
 const ESFORCOS = ["low", "medium", "high", "xhigh", "max"];
 const esforco = (env: string, padrao: string) => (ESFORCOS.includes(Deno.env.get(env) ?? "") ? Deno.env.get(env)! : padrao);
-const ESFORCO_CHAT = esforco("IA_ADMIN_EFFORT_CHAT", "high");
-// A varredura roda sozinha todo dia: `medium` segura o custo; o chat, onde alguém espera a
-// resposta para decidir, fica em `high`.
+// `medium` em tudo: é o ponto de partida recomendado para trabalho com várias ferramentas.
+const ESFORCO_CHAT = esforco("IA_ADMIN_EFFORT_CHAT", "medium");
 const ESFORCO_VARREDURA = esforco("IA_ADMIN_EFFORT_VARREDURA", "medium");
 const ESFORCO_PROMPT = esforco("IA_ADMIN_EFFORT_PROMPT", "medium");
 const MAX_TOKENS = 32000;
@@ -90,7 +95,10 @@ async function chaveAnthropic(): Promise<string | null> {
 }
 
 function paramsDoModelo(modelo: string, esforcoUsado: string): Record<string, unknown> {
-  const comFallback = modelo.startsWith("claude-opus-5") || modelo.startsWith("claude-fable");
+  // Fallback do servidor (recusa → outro modelo na mesma chamada): Opus 5/5.5, Fable e Sonnet 5.5
+  // (este só na forma "default"). O Haiku 5.5 não tem — recusa nele termina como recusa.
+  const comFallback = modelo.startsWith("claude-opus-5") || modelo.startsWith("claude-fable") ||
+    modelo.startsWith("claude-sonnet-5-5");
   return {
     model: modelo,
     max_tokens: MAX_TOKENS,
@@ -142,8 +150,10 @@ async function rodarComReserva(
   opcoes: OpcoesAgente,
   esforcoUsado: string,
   sinal: AbortSignal,
+  modeloInicial: string,
 ): Promise<{ resumo: ResumoAgente; modelo: string }> {
-  let modelo = MODELO;
+  let modelo = modeloInicial;
+  const reserva = reservaDe(modeloInicial);
   let textoVisivel = false;
   let proximoPasso = 0;
   const deps = {
@@ -160,9 +170,9 @@ async function rodarComReserva(
     return { resumo: await rodarAgente(entrada, deps, opcoes), modelo };
   } catch (e) {
     const motivo = e instanceof Anthropic.APIError ? motivoDaReserva(e) : null;
-    if (!motivo || modelo === MODELO_RESERVA || textoVisivel || sinal.aborted) throw e;
-    console.warn("[ia-admin] usando reserva", motivo, modelo);
-    modelo = MODELO_RESERVA;
+    if (!motivo || modelo === reserva || textoVisivel || sinal.aborted) throw e;
+    console.warn("[ia-admin] usando reserva", motivo, modelo, "→", reserva);
+    modelo = reserva;
     return { resumo: await rodarAgente(entrada, deps, { ...opcoes, passoInicial: proximoPasso }), modelo };
   }
 }
@@ -243,6 +253,7 @@ async function processarItem(item: ItemFila): Promise<void> {
       OPCOES_VARREDURA,
       ESFORCO_VARREDURA,
       abortar.signal,
+      MODELO_VARREDURA,
     );
     // Sem resumo não é "ok": a checagem rodou mas ninguém sabe o que ela achou.
     const ok = resumo.terminou === "resposta" && !!resumo.textoFinal.trim();
@@ -257,7 +268,7 @@ async function processarItem(item: ItemFila): Promise<void> {
       consultas: resumo.consultas,
       tokens_entrada: resumo.uso.entrada + resumo.uso.cacheLeitura + resumo.uso.cacheEscrita,
       tokens_saida: resumo.uso.saida,
-      custo_usd: custoEstimado(modelo, resumo.uso),
+      custo_usd: custoEstimado(modelo, resumo.usoPorRodada),
       modelo,
     });
   } catch (e) {
@@ -327,6 +338,7 @@ async function processarPrompt(tarefa: TarefaParaPrompt): Promise<void> {
       OPCOES_PROMPT,
       ESFORCO_PROMPT,
       new AbortController().signal,
+      MODELO_PROMPT,
     );
 
     const e = entrega as EntregaPrompt | null;
@@ -350,7 +362,7 @@ async function processarPrompt(tarefa: TarefaParaPrompt): Promise<void> {
       modelo,
       tokens_entrada: resumo.uso.entrada + resumo.uso.cacheLeitura + resumo.uso.cacheEscrita,
       tokens_saida: resumo.uso.saida,
-      custo_usd: custoEstimado(modelo, resumo.uso),
+      custo_usd: custoEstimado(modelo, resumo.usoPorRodada),
     });
   } catch (e) {
     console.error("[ia-admin] prompt", tarefa.task_id, (e as Error)?.message);
@@ -450,7 +462,7 @@ async function chat(
       enviar({ tipo: "conversa", id: idConversa });
 
       let resumo: ResumoAgente | null = null;
-      let modelo = MODELO;
+      let modelo = MODELO_CHAT;
       try {
         const r = await rodarComReserva(
           cliente,
@@ -464,10 +476,11 @@ async function chat(
           OPCOES_CHAT,
           ESFORCO_CHAT,
           abortar.signal,
+          MODELO_CHAT,
         );
         resumo = r.resumo;
         modelo = r.modelo;
-        enviar({ tipo: "fim", modelo, passos: resumo.passos, custo_usd: custoEstimado(modelo, resumo.uso) });
+        enviar({ tipo: "fim", modelo, passos: resumo.passos, custo_usd: custoEstimado(modelo, resumo.usoPorRodada) });
       } catch (e) {
         if (!abortar.signal.aborted) {
           console.error("[ia-admin] chat", (e as Error)?.message);
@@ -485,7 +498,7 @@ async function chat(
             modelo,
             tokens_entrada: resumo.uso.entrada + resumo.uso.cacheLeitura + resumo.uso.cacheEscrita,
             tokens_saida: resumo.uso.saida,
-            custo_usd: custoEstimado(modelo, resumo.uso),
+            custo_usd: custoEstimado(modelo, resumo.usoPorRodada),
           });
         }
         await sb.from("ia_admin_conversas").update({ atualizado_em: new Date().toISOString() }).eq("id", idConversa);

@@ -70,6 +70,8 @@ export interface ResumoAgente {
   achados: string[];
   consultas: number;
   uso: UsoTokens;
+  /** Uso de cada rodada — o preço do Haiku 5.5 muda conforme o tamanho do pedido (> 100 mil tokens). */
+  usoPorRodada: UsoTokens[];
   /** Texto da última rodada (a resposta final). */
   textoFinal: string;
   terminou: "resposta" | "recusa" | "limite" | "cancelado" | "erro";
@@ -87,17 +89,35 @@ const avisoPrazoEntrega = (ferramenta: string) =>
   `[Tempo esgotado. Não consulte mais nada: chame ${ferramenta} AGORA com o que já apurou, ` +
   "deixando claro no prompt o que ficou confirmado e o que o desenvolvedor ainda precisa conferir.]";
 
-/** Preço por milhão de tokens (US$). Cache: leitura e escrita (5 min). */
-const PRECOS: Array<{ prefixo: string; entrada: number; saida: number; cacheLeitura: number; cacheEscrita: number }> = [
-  { prefixo: "claude-opus-5-5", entrada: 4, saida: 20, cacheLeitura: 0.2, cacheEscrita: 5 },
-  { prefixo: "claude-sonnet-5-5", entrada: 2, saida: 10, cacheLeitura: 0.2, cacheEscrita: 2.5 },
-  { prefixo: "claude-opus", entrada: 5, saida: 25, cacheLeitura: 0.5, cacheEscrita: 6.25 },
-  { prefixo: "claude-sonnet", entrada: 3, saida: 15, cacheLeitura: 0.3, cacheEscrita: 3.75 },
-];
+interface Tarifa { entrada: number; saida: number; cacheLeitura: number; cacheEscrita: number }
 
-export function custoEstimado(modelo: string, uso: UsoTokens): number {
-  const p = PRECOS.find((x) => modelo.startsWith(x.prefixo)) ?? PRECOS[0];
-  const usd = (uso.entrada * p.entrada + uso.saida * p.saida + uso.cacheLeitura * p.cacheLeitura + uso.cacheEscrita * p.cacheEscrita) / 1_000_000;
+/**
+ * Preço por milhão de tokens (US$). Cache: leitura e escrita (5 min). O Haiku 5.5 tem duas faixas:
+ * pedido de até 100 mil tokens de entrada, e acima disso (5×) — conta POR RODADA.
+ */
+const PRECOS: Array<{ prefixo: string; base: Tarifa; acima?: { tokens: number; tarifa: Tarifa } }> = [
+  {
+    prefixo: "claude-haiku-5-5",
+    base: { entrada: 0.1, saida: 0.5, cacheLeitura: 0.01, cacheEscrita: 0.125 },
+    acima: { tokens: 100_000, tarifa: { entrada: 0.5, saida: 2.5, cacheLeitura: 0.05, cacheEscrita: 0.625 } },
+  },
+  { prefixo: "claude-sonnet-5-5", base: { entrada: 2, saida: 10, cacheLeitura: 0.2, cacheEscrita: 2.5 } },
+  { prefixo: "claude-opus-5-5", base: { entrada: 4, saida: 20, cacheLeitura: 0.2, cacheEscrita: 5 } },
+  { prefixo: "claude-opus", base: { entrada: 5, saida: 25, cacheLeitura: 0.5, cacheEscrita: 6.25 } },
+  { prefixo: "claude-sonnet", base: { entrada: 3, saida: 15, cacheLeitura: 0.3, cacheEscrita: 3.75 } },
+];
+/** Modelo que não está na tabela: conta pelo mais caro da casa (melhor sobrar que faltar). */
+const PRECO_PADRAO = PRECOS.find((p) => p.prefixo === "claude-opus-5-5")!;
+
+/** Custo de uma ou várias rodadas (cada rodada escolhe a faixa pelo próprio tamanho). */
+export function custoEstimado(modelo: string, uso: UsoTokens | UsoTokens[]): number {
+  const p = PRECOS.find((x) => modelo.startsWith(x.prefixo)) ?? PRECO_PADRAO;
+  const rodadas = Array.isArray(uso) ? uso : [uso];
+  const usd = rodadas.reduce((soma, u) => {
+    const pedido = u.entrada + u.cacheLeitura + u.cacheEscrita;
+    const t = p.acima && pedido > p.acima.tokens ? p.acima.tarifa : p.base;
+    return soma + (u.entrada * t.entrada + u.saida * t.saida + u.cacheLeitura * t.cacheLeitura + u.cacheEscrita * t.cacheEscrita) / 1_000_000;
+  }, 0);
   return Math.round(usd * 10_000) / 10_000;
 }
 
@@ -156,6 +176,7 @@ export async function rodarAgente(
     achados: [],
     consultas: 0,
     uso: { entrada: 0, saida: 0, cacheLeitura: 0, cacheEscrita: 0 },
+    usoPorRodada: [],
     textoFinal: "",
     terminou: "limite",
     vazias: [],
@@ -223,10 +244,17 @@ export async function rodarAgente(
     }
 
     resumo.passos = rodada + 1;
-    resumo.uso.entrada += msg.usage?.input_tokens ?? 0;
-    resumo.uso.saida += msg.usage?.output_tokens ?? 0;
-    resumo.uso.cacheLeitura += msg.usage?.cache_read_input_tokens ?? 0;
-    resumo.uso.cacheEscrita += msg.usage?.cache_creation_input_tokens ?? 0;
+    const usoRodada: UsoTokens = {
+      entrada: msg.usage?.input_tokens ?? 0,
+      saida: msg.usage?.output_tokens ?? 0,
+      cacheLeitura: msg.usage?.cache_read_input_tokens ?? 0,
+      cacheEscrita: msg.usage?.cache_creation_input_tokens ?? 0,
+    };
+    resumo.usoPorRodada.push(usoRodada);
+    resumo.uso.entrada += usoRodada.entrada;
+    resumo.uso.saida += usoRodada.saida;
+    resumo.uso.cacheLeitura += usoRodada.cacheLeitura;
+    resumo.uso.cacheEscrita += usoRodada.cacheEscrita;
 
     if (msg.stop_reason === "refusal") {
       deps.emitir({ tipo: "erro", mensagem: "A IA recusou continuar esta investigação. Reformule o pedido?" });

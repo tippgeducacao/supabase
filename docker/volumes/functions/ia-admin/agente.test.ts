@@ -190,8 +190,18 @@ describe("custoEstimado", () => {
     // 1M entrada ($4) + 100k saída ($2) + 1M cache lido ($0,20) + 100k cache escrito ($0,50)
     expect(custoEstimado("claude-opus-5-5", { entrada: 1_000_000, saida: 100_000, cacheLeitura: 1_000_000, cacheEscrita: 100_000 })).toBe(6.7);
   });
-  it("modelo desconhecido cai no preço do padrão", () => {
+  it("modelo desconhecido conta pelo mais caro (Opus 5.5)", () => {
     expect(custoEstimado("x", { entrada: 1_000_000, saida: 0, cacheLeitura: 0, cacheEscrita: 0 })).toBe(4);
+  });
+  it("Haiku 5.5: cada rodada escolhe a faixa pelo próprio tamanho (> 100 mil tokens = 5×)", () => {
+    const pequena = { entrada: 50_000, saida: 2_000, cacheLeitura: 0, cacheEscrita: 0 }; // 0,005 + 0,001
+    const grande = { entrada: 20_000, saida: 2_000, cacheLeitura: 100_000, cacheEscrita: 0 }; // 0,01 + 0,005 + 0,005
+    expect(custoEstimado("claude-haiku-5-5", pequena)).toBe(0.006);
+    expect(custoEstimado("claude-haiku-5-5", [pequena, grande])).toBe(0.026);
+  });
+  it("Sonnet 5.5 custa metade do Opus 5.5", () => {
+    const uso = { entrada: 1_000_000, saida: 100_000, cacheLeitura: 0, cacheEscrita: 0 };
+    expect(custoEstimado("claude-sonnet-5-5", uso) * 2).toBe(custoEstimado("claude-opus-5-5", uso));
   });
 });
 
