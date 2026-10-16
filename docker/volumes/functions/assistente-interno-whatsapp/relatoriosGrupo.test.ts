@@ -5,7 +5,7 @@ import {
 } from './relatoriosGrupo';
 
 const bloco = (o: Partial<BlocoComercial> = {}): BlocoComercial => ({
-  comparecidas: 0, semResultado: 0, vendas: 0, vendasPos: 0, vendasRapidas: 0, ...o,
+  comparecidas: 0, semResultado: 0, vendas: 0, vendasPos: 0, vendasRapidas: 0, pendentes: 0, ...o,
 });
 
 const relato = (o: Partial<RelatoTi> = {}): RelatoTi => ({
@@ -36,12 +36,13 @@ describe('periodoComercial', () => {
 });
 
 describe('lerBloco', () => {
-  it('lê o jsonb do placar e das pendências', () => {
+  it('lê o jsonb do placar, das pendências de resultado e das vendas pendentes', () => {
     const b = lerBloco(
       { reunioes_comparecidas: 12, matriculas: 5, matriculas_pos: 4, matriculas_rapidas: 1, reunioes_avaliadas: 20 },
       { sem_resultado: 3, proximas: 9 },
+      { qtd: 2, faturamento: 30000 },
     );
-    expect(b).toEqual({ comparecidas: 12, semResultado: 3, vendas: 5, vendasPos: 4, vendasRapidas: 1 });
+    expect(b).toEqual({ comparecidas: 12, semResultado: 3, vendas: 5, vendasPos: 4, vendasRapidas: 1, pendentes: 2 });
   });
   it('resposta vazia vira zero, não NaN', () => {
     expect(lerBloco(null, undefined)).toEqual(bloco());
@@ -58,6 +59,8 @@ describe('textoComercial', () => {
     expect(t).toContain('✅ Reuniões comparecidas: *12*');
     expect(t).toContain('⏳ Reuniões sem resultado marcado: *3*');
     expect(t).toContain('💰 Vendas: *5* (4 pós · 1 curso/módulo)');
+    expect(t).toContain('🕓 Vendas pendentes (aguardando aprovação): *0*');
+    expect(t.split('Vendas pendentes').length).toBe(3); // no dia e na semana
     expect(t).toContain('qua 14/10 a ter 20/10 (parcial, até ontem)');
     expect(t.indexOf('Quarta, 14/10')).toBeLessThan(t.indexOf('Semana comercial'));
   });

@@ -42,14 +42,18 @@ async function rpc(admin: any, nome: string, args: Record<string, unknown>): Pro
   return data;
 }
 
-/** Um período do comercial, nas MESMAS funções da Torre/Placar (B2B e contas de teste fora). */
-async function blocoComercial(admin: any, de: string, ate: string): Promise<BlocoComercial> {
+/**
+ * Um período do comercial, nas MESMAS funções da Torre/Placar (B2B e contas de teste fora) + as
+ * vendas enviadas no período que ainda estão pendentes. Também usado pelo bot de comandos.
+ */
+export async function blocoComercial(admin: any, de: string, ate: string): Promise<BlocoComercial> {
   const args = { p_inicio: de, p_fim: ate, p_dept_b2b: null };
-  const [placar, pendencias] = await Promise.all([
+  const [placar, pendencias, vendasPendentes] = await Promise.all([
     rpc(admin, "placar_comercial_bloco", args),
     rpc(admin, "torre_sistema_pendencias", args),
+    rpc(admin, "assist_vendas_pendentes", { p_de: de, p_ate: ate }),
   ]);
-  return lerBloco(placar, pendencias);
+  return lerBloco(placar, pendencias, vendasPendentes);
 }
 
 /** O relatório comercial que sai `hoje` — null no domingo (não sai). */

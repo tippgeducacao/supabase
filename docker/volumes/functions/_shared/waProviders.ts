@@ -113,6 +113,8 @@ export interface WaProvider {
   sendText(serverUrl: string, token: string, numberDigits: string, text: string): Promise<WaSendResult>;
   /** Grupos de que a linha participa (o `jid` é o destino do sendText para o grupo). */
   listGroups(serverUrl: string, token: string): Promise<{ jid: string; nome: string }[]>;
+  /** Telefones (só dígitos, com DDI) dos participantes de um grupo de que a linha faz parte. */
+  listGroupParticipantPhones(serverUrl: string, token: string, groupJid: string): Promise<string[]>;
   /** Envia mídia por URL pública. */
   sendMedia(
     serverUrl: string,
@@ -159,6 +161,20 @@ function jidToDigits(jid: unknown): string {
   const s = String(jid ?? "");
   const at = s.indexOf("@");
   return onlyDigits(at >= 0 ? s.slice(0, at) : s);
+}
+
+/**
+ * Telefone BR comparável: DDD + 8 últimos dígitos. O mesmo número com ou sem DDI 55 e com ou sem
+ * o 9º dígito vira a mesma chave (DDD 46 não leva o 9 no id do WhatsApp). null = não é telefone BR.
+ * Mesma régua do `canon` do assistente interno.
+ */
+export function canonTelBr(raw: unknown): string | null {
+  let d = onlyDigits(String(raw ?? "")).replace(/^0+/, "");
+  if (d.length >= 12 && d.startsWith("55")) d = d.slice(2);
+  if (d.length < 10 || d.length > 11) return null;
+  const ddd = d.slice(0, 2);
+  if (Number(ddd) < 11) return null;
+  return ddd + d.slice(-8);
 }
 
 function isGroupJid(jid: unknown): boolean {
@@ -382,6 +398,20 @@ const uazapi: WaProvider = {
         nome: String(pick<string>(g, ["Name", "name", "subject", "Subject"]) ?? ""),
       }))
       .filter((g) => g.jid.endsWith("@g.us"));
+  },
+
+  async listGroupParticipantPhones(serverUrl, token, groupJid) {
+    const r = await uazFetch(serverUrl, "/group/info", "POST", { token }, { groupjid: groupJid }, { timeoutMs: 10000, retries: 1 });
+    if (!r.ok) throw new Error(`group/info HTTP ${r.status}`);
+    // Participants[].JID costuma vir como @lid; o telefone real está em PhoneNumber (…@s.whatsapp.net).
+    const lista: any[] = Array.isArray(r.json?.Participants) ? r.json.Participants : [];
+    return lista
+      .map((p) => {
+        const pn = String(p?.PhoneNumber ?? "");
+        const jid = String(p?.JID ?? "");
+        return jidToDigits(pn.includes("@s.whatsapp.net") ? pn : jid.includes("@s.whatsapp.net") ? jid : "");
+      })
+      .filter((d) => d.length >= 10);
   },
 
   async sendMedia(serverUrl, token, numberDigits, opts) {

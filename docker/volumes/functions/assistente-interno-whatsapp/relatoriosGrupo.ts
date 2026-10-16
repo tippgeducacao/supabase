@@ -58,17 +58,22 @@ export function periodoComercial(hoje: string): { ini: string; fim: string } | n
 
 // ── Comercial ────────────────────────────────────────────────────────────────
 
-/** Um período, já lido de placar_comercial_bloco + torre_sistema_pendencias. */
+/**
+ * Um período, já lido de placar_comercial_bloco + torre_sistema_pendencias + assist_vendas_pendentes.
+ * `pendentes` = vendas ENVIADAS no período que ainda esperam a aprovação da secretaria (pedido do
+ * usuário, 16/10/2026) — não entram em `vendas`, que é só matrícula aprovada.
+ */
 export interface BlocoComercial {
   comparecidas: number;
   semResultado: number;
   vendas: number;
   vendasPos: number;
   vendasRapidas: number; // curso livre + módulo prático
+  pendentes: number;
 }
 
-/** placar_comercial_bloco (jsonb) + torre_sistema_pendencias (jsonb) → bloco. */
-export function lerBloco(placar: any, pendencias: any): BlocoComercial {
+/** placar_comercial_bloco + torre_sistema_pendencias + assist_vendas_pendentes (jsonb) → bloco. */
+export function lerBloco(placar: any, pendencias: any, vendasPendentes?: any): BlocoComercial {
   const n = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : 0);
   return {
     comparecidas: n(placar?.reunioes_comparecidas),
@@ -76,10 +81,11 @@ export function lerBloco(placar: any, pendencias: any): BlocoComercial {
     vendas: n(placar?.matriculas),
     vendasPos: n(placar?.matriculas_pos),
     vendasRapidas: n(placar?.matriculas_rapidas),
+    pendentes: n(vendasPendentes?.qtd),
   };
 }
 
-function linhasBloco(b: BlocoComercial): string[] {
+export function linhasBloco(b: BlocoComercial): string[] {
   const quebra = b.vendasRapidas > 0
     ? ` (${b.vendasPos} pós · ${b.vendasRapidas} curso/módulo)`
     : "";
@@ -87,6 +93,7 @@ function linhasBloco(b: BlocoComercial): string[] {
     `✅ Reuniões comparecidas: *${b.comparecidas}*`,
     `⏳ Reuniões sem resultado marcado: *${b.semResultado}*`,
     `💰 Vendas: *${b.vendas}*${quebra}`,
+    `🕓 Vendas pendentes (aguardando aprovação): *${b.pendentes}*`,
   ];
 }
 

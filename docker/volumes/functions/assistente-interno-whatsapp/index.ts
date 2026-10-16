@@ -17,6 +17,7 @@ import { processarAlertaIa } from "./alertaIaTick.ts";
 import { processarRoteiroConteudo } from "./roteiroConteudoTick.ts";
 import { processarRelatoriosGrupo } from "./relatoriosGrupoTick.ts";
 import { processarAvisosTarefas } from "./avisosTarefasTick.ts";
+import { processarBotComandos } from "./botComandosTick.ts";
 import { pensar } from "./brain.ts";
 
 // Áudio maior que isto = REUNIÃO → pipeline Gemini em background. A fronteira é o teto do
@@ -49,11 +50,12 @@ Deno.serve(async (req) => {
   // alerta_ia = IA do João sem crédito/chave (a cada 2 min) → WhatsApp do TI;
   // roteiro = roteiro de conteúdo das 7h + lembrete do print na aula da noite (a cada 5 min);
   // relatorios_grupo = comercial das 8h + feedback do TI completo → grupo de WhatsApp (a cada 5 min);
-  // avisos_tarefas = tarefa criada/arrastada numa etapa vigiada → grupo (gatilho + a cada 5 min).
+  // avisos_tarefas = tarefa criada/arrastada numa etapa vigiada → grupo (gatilho + a cada 5 min);
+  // bot_comandos = responde os comandos da linha-bot (gatilho da fila + a cada 2 min).
   const cron = url.searchParams.get("cron");
   if (
     cron === "transcricao" || cron === "entrevistas" || cron === "alerta_ia" || cron === "roteiro"
-    || cron === "relatorios_grupo" || cron === "avisos_tarefas"
+    || cron === "relatorios_grupo" || cron === "avisos_tarefas" || cron === "bot_comandos"
   ) {
     const { data: cfg } = await admin.from("assistente_config").select("cron_secret").eq("id", 1).maybeSingle();
     if (!cfg?.cron_secret || req.headers.get("x-assist-cron") !== cfg.cron_secret) return json({ error: "não autorizado" }, 401);
@@ -69,6 +71,7 @@ Deno.serve(async (req) => {
           hoje: url.searchParams.get("hoje"),
         })
         : cron === "avisos_tarefas" ? await processarAvisosTarefas(admin)
+        : cron === "bot_comandos" ? await processarBotComandos(admin)
         : await processarTranscricoes(admin);
       return json({ ok: true, ...r });
     } catch (e) { return json({ ok: false, erro: String(e) }); }
@@ -79,7 +82,7 @@ Deno.serve(async (req) => {
 
   // ⚠️ BUMPE esta string a cada deploy: é o ÚNICO jeito de confirmar, de fora, que a versão
   // nova já está servindo (o edge-runtime serve o worker antigo por ~1 min após o push).
-  if (req.method === "GET") return new Response("assistente-interno ok · build 20261015b", { headers: cors });
+  if (req.method === "GET") return new Response("assistente-interno ok · build 20261016a", { headers: cors });
 
   // Autenticação do webhook (anti-spoofing): se ASSIST_WEBHOOK_SECRET estiver setado, exige ?k igual.
   // O número declarado no payload NÃO é autenticação (quem POSTa controla msg.fromDigits).

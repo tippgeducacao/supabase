@@ -13,7 +13,7 @@
 // SAC/Omnichat automaticamente. Eventos connection atualizam wa_conexoes.
 // ----------------------------------------------------------------------------
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
-import { getWaProvider } from "../_shared/waProviders.ts";
+import { canonTelBr, getWaProvider } from "../_shared/waProviders.ts";
 import { atualizarStatusWaConexao } from "../_shared/waConexaoStatus.ts";
 import { extensaoDoArquivo } from "../_shared/extensaoArquivo.ts";
 
@@ -168,10 +168,49 @@ Deno.serve(async (req) => {
       return typeof u === "string" && u.startsWith("http") ? u : null;
     })();
 
+    // ── Linha-bot (wa_bot_comandos, 16/10/2026) ───────────────────────────────
+    // Mensagem PRIVADA recebida de quem está no grupo autorizado da linha é COMANDO do bot
+    // "Monitor": vai para wa_bot_comandos_fila (o assistente-interno-whatsapp responde) e NÃO entra
+    // no CRM. Quem não é do grupo segue o fluxo normal. Qualquer falha aqui também segue o fluxo
+    // normal: o pior caso é uma mensagem interna virar atendimento, nunca uma mensagem perdida.
+    let botGrupo: string | null = null;
+    try {
+      const { data: bot } = await admin.from("wa_bot_comandos")
+        .select("grupo_autorizado_jid").eq("wa_conexao_id", conexaoId).eq("ativo", true).maybeSingle();
+      botGrupo = bot?.grupo_autorizado_jid ?? null;
+    } catch { botGrupo = null; }
+    let membrosBot: Set<string> | null = null; // lido da Uazapi 1x por chamada: entrou/saiu do grupo, vale na hora
+    const ehComandoDoBot = async (m: (typeof parsed.messages)[number], telefone: string): Promise<boolean> => {
+      if (!botGrupo || m.fromMe) return false;
+      try {
+        if (!membrosBot) {
+          const tok = await getToken();
+          if (!tok) return false;
+          const fones = await provider.listGroupParticipantPhones(conex.server_url, tok, botGrupo);
+          membrosBot = new Set(fones.map(canonTelBr).filter((c): c is string => !!c));
+        }
+        const c = canonTelBr(telefone);
+        if (!c || !membrosBot.has(c)) return false;
+        const { error } = await admin.from("wa_bot_comandos_fila").insert({
+          wa_conexao_id: conexaoId,
+          external_id: m.externalId || `syn:${telefone}:${(m.conteudo ?? "").slice(0, 60)}`,
+          de_telefone: telefone,
+          texto: m.tipo === "text" ? (m.conteudo ?? "") : null,
+          tipo: m.tipo,
+        });
+        if (error && error.code !== "23505") throw new Error(error.message); // 23505 = reentrega, já está na fila
+        return true;
+      } catch (e) {
+        console.error("[wa-uazapi-webhook] bot de comandos falhou; segue para o CRM:", e instanceof Error ? e.message : String(e));
+        return false;
+      }
+    };
+
     for (const m of parsed.messages) {
       if (m.isGroup) continue; // grupos fora do escopo
       const telefone = m.fromDigits;
       if (!telefone) continue;
+      if (await ehComandoDoBot(m, telefone)) { processed++; continue; }
 
       // baixa mídia -> storage. Uazapi manda a mídia criptografada (sem URL no webhook):
       // resolvemos a URL pública real via /message/download (provider.downloadMedia) e
