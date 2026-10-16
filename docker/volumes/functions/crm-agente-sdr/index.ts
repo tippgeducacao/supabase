@@ -60,6 +60,7 @@ import {
 import { comGanchoDoLote, cursoDaConversa, TITULO_SECAO_GANCHO } from './ganchoLote.ts';
 import { aberturaMapaLigada, blocoDaAbertura, comPassoDoMapa, faseDaAbertura } from './aberturaMapa.ts';
 import { mapaDoLead } from './followupMapa.ts';
+import { conviteSemAbertura, correcaoDaAbertura, cursoDaAbertura } from './travaAbertura.ts';
 import { fichaSemPos, NOTA_PORTFOLIO_ENVIADO, NOTA_SEM_POS, portfolioJaEnviado, posDoCadastroDefinida, recusaDaIndicacao, FALA_DEPOIS_DO_PORTFOLIO_INDICACAO } from './indicacaoPortfolio.ts';
 import { enviarPortfolio } from './portfolio.ts';
 import { chaveDeEnsaioLigada, FALA_PARA_ROBO, jaAguardandoRobo, loteSoDeRespostaAutomatica } from './respostaAutomatica.ts';
@@ -915,7 +916,7 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
   const levaSoReacao = ehLevaSoReacao(conteudo);
   if (levaSoReacao) tel.registrar('leva_so_reacao', { conteudo: conteudo.slice(0, 40) });
   let corrigiuHorario = false; // guarda de horário inventado: re-instrui só 1x
-  const corrigiuTrava = new Set<'valor' | 'reuniao'>(); // canário: travas de valor/reunião, 1x cada
+  const corrigiuTrava = new Set<'valor' | 'reuniao' | 'abertura'>(); // canário: travas de valor/reunião, 1x cada
   let corrigiuVazio = false;   // resposta 100% bastidor: pede de novo 1x antes de calar
   let corrigiuSilencio = false; // silêncio explícito com pergunta do lead no ar: pede a fala 1x
   // CONFIRMAÇÃO DE AGENDAMENTO EM CÓDIGO (24/09/2026): a reunião criada por confirmar_agendamento
@@ -1377,6 +1378,16 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
           const enviou = await enviarConfirmacaoEmCodigo('fala_descartada_apos_agendamento');
           tel.registrar('rodada_fim', { voltas_llm: rodada + 1, respondeu: enviou }, Date.now() - inicioRodada);
           return;
+        }
+        // Convite sem a abertura do lote (travaAbertura.ts, 16/10/2026, caso Antônio): volta UMA vez para a
+        // IA refazer começando pela abertura. Na reincidência a fala sai como está (melhor que silêncio).
+        if (!corrigiuTrava.has('abertura') && agenteEfetivo === 'agente_validacao' && !aulaPiloto && lead?.agendado !== true
+          && conviteSemAbertura(texto, messages) && await chaveDeEnsaioLigada(supabase, 'trava_abertura', telefone)) {
+          corrigiuTrava.add('abertura');
+          tel.registrar('trava_fala', { motivo: 'abertura', acao: 'reinstruido', texto: resumir(texto, 600) });
+          await gravarMensagem(supabase, remotejid, { role: 'user',
+            content: correcaoDaAbertura(texto, cursoDaAbertura(messages, lead?.curso_interesse_original)) });
+          continue;
         }
       }
       // Resposta que só existia como bastidor: pede de novo em vez de calar.
