@@ -145,3 +145,22 @@ export function falaDoFollowupDoRobo(tentativa: number, nome: string): string {
   if (!fala) return '';
   return nome ? `${nome}, ${fala}` : fala.charAt(0).toUpperCase() + fala.slice(1);
 }
+
+// Atendente falando com o lead (16/10/2026, caso Antônio). A pausa por prazo venceu às 16h54 enquanto a Amanda
+// conversava com ele (16h47 a 17h01); o lead respondeu a ela e a IA respondeu no lugar. Duas falas ou mais de
+// atendente nos últimos `minutos` = conversa em andamento, a vez é do atendente. Uma fala só não conta: o disparo
+// em massa de um vendedor (Welinton, 15:58 UTC de 16/10) deixaria sem IA todo lead que respondesse a ele.
+const RE_FALA_HUMANA = /^\[ATENDIMENTO_HUMANO\][^·\n]*·\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) UTC/;
+
+export function atendenteFalouHaPouco(history: readonly Msg[], agora: number, minutos = 30): boolean {
+  let falas = 0;
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i]?.role !== 'assistant') continue;
+    const m = (textoDe(history[i].content) ?? '').trimStart().match(RE_FALA_HUMANA);
+    if (!m) continue;
+    const quando = Date.parse(`${m[1].replace(' ', 'T')}Z`);
+    if (!Number.isFinite(quando) || agora - quando > minutos * 60_000) break;
+    if (++falas >= 2) return true;
+  }
+  return false;
+}

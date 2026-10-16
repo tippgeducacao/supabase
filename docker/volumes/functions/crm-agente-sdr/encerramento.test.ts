@@ -71,3 +71,11 @@ describe('despedida quando a pós pedida é exclusiva de médico veterinário', 
     expect(respostaDoEncerramento({ tool: 'pausa_ia', input: { tipo: 'sem_graduacao' } }, { posExclusiva: 'Sanidade Avícola' })).toContain('quando concluir');
   });
 });
+
+describe('pausa para remarcar a reunião (caso Antônio)', () => {
+  it('"mudar a reunião já agendada" é cancelamento/remarcação, não despedida', async () => {
+    const { motivoDoEncerramento } = await import('./encerramento');
+    expect(motivoDoEncerramento({ tool: 'pausa_ia', input: { tipo: 'pausa', motivo: 'Lead pediu para mudar a reunião já agendada de 17h para 17h30' } })).toBe('cancelamento');
+    expect(motivoDoEncerramento({ tool: 'pausa_ia', input: { tipo: 'pausa', motivo: 'quer trocar o horário' } })).toBe('cancelamento');
+  });
+});

@@ -149,3 +149,9 @@ export function semRaciocinioNoTexto(content: any): any {
     return limpo && limpo !== b.text ? { ...b, text: limpo } : b;
   });
 }
+
+// 16/10/2026 (caso Antônio): a pausa de PASSAGEM para o time (tipo "pausa": remarcar, falar com alguém) recebia a
+// mesma instrução da despedida, e saiu "agradeço sua preferência pelo Grupo PPG" para quem tinha reunião marcada.
+export const INSTRUCAO_POS_PASSAGEM = '[SISTEMA — você acabou de passar este atendimento para o time. NÃO relate isso e NÃO descreva o estado do atendimento.]\n'
+  + 'Isto NÃO é despedida: não agradeça a preferência e não se despeça. Se ele pediu algo (remarcar, falar com alguém, ligação), '
+  + 'diga numa frase curta que alguém do time já vai cuidar disso, por exemplo: "beleza, já peço pro time ajustar isso pra vc aqui."';

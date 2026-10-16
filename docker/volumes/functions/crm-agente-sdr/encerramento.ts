@@ -127,7 +127,8 @@ export function motivoDoEncerramento(e: Encerramento): MotivoEncerramento | null
   if (/human[oa]|atendente|pessoa de verdade/.test(motivo)) return 'humano';
   if (/liga(ç|c)(ã|a)o|telefon/.test(motivo)) return 'ligacao';
   if (/alun[oa]|matriculad|pagou a matr|paguei/.test(motivo)) return 'aluno';
-  if (/cancel|remarc|desmarc/.test(motivo)) return 'cancelamento';
+  // 16/10/2026 (caso Antônio): "mudar a reunião já agendada de 17h para 17h30" caía em null e saía a despedida.
+  if (/cancel|remarc|desmarc|(?:mudar|trocar|alterar|mudan[cç]a)[^.]{0,40}(?:reuni|hor[aá]rio)/.test(motivo)) return 'cancelamento';
   if (/incompat|forma(ç|c)(ã|a)o/.test(motivo)) return 'incompativel';
   if (/desinteress|sem interesse|n(ã|a)o quer|parar de/.test(motivo)) return 'desinteresse';
   return null;

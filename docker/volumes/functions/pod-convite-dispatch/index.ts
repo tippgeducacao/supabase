@@ -462,7 +462,7 @@ function corpoEmailAgendaFallback(nome: string, podcast: string, toque: number, 
   let corpo: string;
   if (toque === 1) {
     corpo = `<p>Que bom que você tem interesse em gravar com a gente! 🎙️</p>` +
-      `<p>Para seguir, é só me dizer um ou dois dias/horários que funcionem melhor para você que eu já reservo a sua gravação no <strong>${p} Podcast</strong>. É online, de 30 a 45 minutos, e nós cuidamos de toda a edição.</p>`;
+      `<p>Para seguir, é só me dizer um ou dois dias/horários que funcionem melhor para você que eu já reservo a sua gravação no <strong>${p} Podcast</strong>. É online, de 45 a 60 minutos, e nós cuidamos de toda a edição.</p>`;
   } else if (toque === 2) {
     corpo = `<p>Passando para saber se você conseguiu ver as datas para a sua gravação no <strong>${p} Podcast</strong>. Me diz o melhor dia/horário para você que a gente já deixa tudo reservado.</p>`;
   } else {
@@ -491,7 +491,7 @@ function corpoEmail(nome: string, podcast: string, youtube: string, toque: numbe
       `<p>Aqui é a Janaína, falo em nome da PPGVET e dos nossos podcasts (O Aviário, Suinocast, Mais Rúmen e PetFood).</p>` +
       `<p>O motivo do meu contato é um convite: eu gostaria de convidar você para uma gravação de episódio no <strong>${p} Podcast</strong>.</p>` +
       (youtube ? `<p>Caso ainda não conheça, deixo aqui o nosso canal: 🎬 <a href="${htmlEscape(youtube)}">${htmlEscape(youtube)}</a></p>` : "") +
-      `<p>É um bate-papo técnico de 30 a 45 minutos, gravado remotamente e sem necessidade de slides. Uma conversa leve com um host da área, focada em conteúdo prático e relevante para o setor.</p>`;
+      `<p>É um bate-papo técnico de 45 a 60 minutos, gravado remotamente e sem necessidade de slides. Uma conversa leve com um host da área, focada em conteúdo prático e relevante para o setor.</p>`;
   } else if (toque === 2) {
     corpo = `<p>Passando para saber se você teve a oportunidade de ver meu convite para participar do <strong>${p} Podcast</strong>. Acredito que sua experiência e atuação no setor agregariam muito ao nosso público.</p>`;
   } else {

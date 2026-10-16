@@ -95,3 +95,19 @@ describe('o robô do lead: "fico no aguardo" e a sequência do follow-up', () =>
     expect(falaDoFollowupDoRobo(3, 'Adriana')).toBe('');
   });
 });
+
+describe('atendente em conversa com o lead (caso Antônio)', () => {
+  const agora = Date.parse('2026-10-16T20:02:30Z');
+  const fala = (h: string, t: string) => ({ role: 'assistant', content: `[ATENDIMENTO_HUMANO] Amanda · 2026-10-16 ${h} UTC ${t}` });
+  it('duas falas do atendente nos últimos 30 min: a vez é dele', async () => {
+    const { atendenteFalouHaPouco } = await import('./respostaAutomatica');
+    const hist = [fala('19:59:10', 'consegue entrar ?'), fala('20:00:20', '?'), fala('20:01:05', 'pede dnvo para aceitar ?'), { role: 'user', content: 'Agora não' }] as any;
+    expect(atendenteFalouHaPouco(hist, agora)).toBe(true);
+  });
+  it('uma fala só (disparo do vendedor) ou falas antigas: não', async () => {
+    const { atendenteFalouHaPouco } = await import('./respostaAutomatica');
+    expect(atendenteFalouHaPouco([fala('20:00:00', 'seria bem interessante marcar essa conversa…'), { role: 'user', content: 'pode ser' }] as any, agora)).toBe(false);
+    expect(atendenteFalouHaPouco([fala('18:00:00', 'a'), fala('18:10:00', 'b')] as any, agora)).toBe(false);
+    expect(atendenteFalouHaPouco([{ role: 'assistant', content: 'oi' }] as any, agora)).toBe(false);
+  });
+});

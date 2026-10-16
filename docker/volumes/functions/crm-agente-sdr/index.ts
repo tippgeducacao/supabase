@@ -63,7 +63,7 @@ import { mapaDoLead } from './followupMapa.ts';
 import { conviteSemAbertura, correcaoDaAbertura, cursoDaAbertura } from './travaAbertura.ts';
 import { fichaSemPos, NOTA_PORTFOLIO_ENVIADO, NOTA_SEM_POS, portfolioJaEnviado, posDoCadastroDefinida, recusaDaIndicacao, FALA_DEPOIS_DO_PORTFOLIO_INDICACAO } from './indicacaoPortfolio.ts';
 import { enviarPortfolio } from './portfolio.ts';
-import { chaveDeEnsaioLigada, FALA_PARA_ROBO, jaAguardandoRobo, loteSoDeRespostaAutomatica } from './respostaAutomatica.ts';
+import { atendenteFalouHaPouco, chaveDeEnsaioLigada, FALA_PARA_ROBO, jaAguardandoRobo, loteSoDeRespostaAutomatica } from './respostaAutomatica.ts';
 import { ehComandoLimpar, ehTelefoneDeTeste, limparConversaDeTeste, limpoEm } from './limparTeste.ts';
 import { carregarDesvioN8n, type DesvioN8n, vaiParaN8n } from '../_shared/desvioN8n.ts';
 import {
@@ -106,7 +106,7 @@ import {
   agendamentoFeito, carregarReunioesDoLead, notaDasReunioes, reuniaoMarcadaNaAgenda, reunioesAgora, trocarNotaDasReunioes,
 } from './reunioesDoLead.ts';
 import {
-  CORRECAO_SILENCIO, CORRECAO_VAZIO, ehLevaSoReacao, instrucaoPosPausa, INSTRUCAO_POS_RETORNO, INSTRUCAO_REACAO, RE_RETENCAO,
+  CORRECAO_SILENCIO, CORRECAO_VAZIO, ehLevaSoReacao, instrucaoPosPausa, INSTRUCAO_POS_PASSAGEM, INSTRUCAO_POS_RETORNO, INSTRUCAO_REACAO, RE_RETENCAO,
   semRaciocinioNoTexto, TOOLS_QUE_ENCERRAM, TOOLS_QUE_PAUSAM,
 } from './regrasDaRodada.ts';
 
@@ -950,6 +950,15 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
   };
   // Correções de silêncio (CORRECAO_SILENCIO) e de fala só de bastidor (CORRECAO_VAZIO): regrasDaRodada.ts.
 
+  // ▸ Atendente falando com o lead nos últimos 30 min (respostaAutomatica.ts, 16/10/2026, caso Antônio): a vez
+  //   é dele, mesmo com a pausa por prazo vencida.
+  if (await chaveDeEnsaioLigada(supabase, 'agente_respeita_atendente', telefone)
+    && atendenteFalouHaPouco(await carregarHistorico(supabase, remotejid), Date.now())) {
+    tel.registrar('atendente_em_conversa', { minutos: 30 });
+    tel.registrar('rodada_fim', { voltas_llm: 0, respondeu: false, motivo: 'atendente_em_conversa' }, Date.now() - inicioRodada);
+    return;
+  }
+
   // ▸ Mensagem pronta do WhatsApp do lead (respostaAutomatica.ts, 16/10/2026, pedido do Gustavo): a resposta
   //   é "fico no aguardo", em código e uma vez só até o lead escrever de verdade. O modelo respondia ao robô
   //   com "qual o melhor horário pra eu te chamar de novo?", que deixava o follow-up esperando para sempre.
@@ -1124,7 +1133,8 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
     // Evidência vem das falas carregadas pelo servidor, nunca do motivo da tool.
     ctx.historicoConversa = historico;
     const contextoComMateriais = contextoEfetivo;
-    const instrucaoEncerramento = retornoPorFormatura ? INSTRUCAO_POS_RETORNO : INSTRUCAO_POS_PAUSA;
+    const instrucaoEncerramento = retornoPorFormatura ? INSTRUCAO_POS_RETORNO
+      : encerramento?.tool === 'pausa_ia' && String(encerramento.input?.tipo ?? '') === 'pausa' ? INSTRUCAO_POS_PASSAGEM : INSTRUCAO_POS_PAUSA;
     const inicioLlm = Date.now();
     tel.registrar('llm_inicio', { volta: rodada + 1, provedor: provedor?.nome ?? 'anthropic' });
     // ▸ Monta o PEDIDO para a IA: prompt da persona + contexto (relógio, ficha, avisos) + histórico + ferramentas.
