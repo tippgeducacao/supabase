@@ -16,6 +16,17 @@ export interface AvisoTarefa {
   autor: string | null; // profiles.name; null = automação ou sistema
   /** Sugestão de responsável (sugestaoResponsavel.ts); ausente = o aviso sai sem a linha. */
   sugestao?: { apelido: string; motivo: string; filas: { apelido: string; fila: number }[] } | null;
+  /**
+   * Aviso que gera prompt (gt_avisos_whatsapp.gerar_prompt): a linha com o link do prompt que a
+   * IA Administrativa escreve para resolver a demanda. O aviso sai NA HORA; o prompt fica pronto
+   * em 1–3 min e a página mostra o andamento (ou por que não dá para resolver por código).
+   */
+  comPrompt?: boolean;
+}
+
+/** A aba "Prompts do TI" da IA Administrativa, já aberta no prompt desta tarefa. */
+export function linkPromptTarefa(taskId: string): string {
+  return `${URL_APP}/ia-administrativa?aba=prompts&prompt=${taskId}`;
 }
 
 /** "💡 Sugestão: *Gabriel* — botão quebrado" + a fila de quem divide a área. */
@@ -52,5 +63,6 @@ export function textoAvisoTarefa(a: AvisoTarefa): string {
     linha,
     ...(a.sugestao ? [linhaSugestao(a.sugestao)] : []),
     `🔗 ${linkTarefa(a.taskId)}`,
+    ...(a.comPrompt ? [`🧠 Ideia de prompt para resolver: ${linkPromptTarefa(a.taskId)}`] : []),
   ].join("\n");
 }

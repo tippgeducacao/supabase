@@ -9,14 +9,18 @@
 //   * varredura_iniciar  — admin pede uma rodada (todas as checagens ativas ou uma só).
 //   * varredura_tick     — cron (service role) a cada 2 min: processa UM item da fila em
 //                          segundo plano (EdgeRuntime.waitUntil) e responde 202 na hora.
+//                          Também puxa a fila de prompts das demandas do TI.
+//   * prompt_tick        — cutucada do banco (service role) quando nasce um pedido de prompt
+//                          (demanda nova do TI, gt_tarefa_prompts): gera em segundo plano.
+//   * prompt_refazer     — admin pede (de novo) o prompt de uma tarefa.
 //
 // ⚠️ O worker vive no máximo 5 min: o laço tem PRAZO e conclui sozinho antes disso.
 // ⚠️ Chamada pelo navegador passa pelo Cloudflare (corta conexão parada em ~100 s): o stream
 //    manda `ping` a cada 15 s. Recusa antes do stream = JSON 401/403/422; depois, evento `erro`.
 import Anthropic from "npm:@anthropic-ai/sdk@0.128.0";
 import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
-import { executarFerramenta, FERRAMENTAS, type ContextoFerramentas } from "./ferramentas.ts";
-import { blocoContexto, blocoDocs, PROMPT_BASE, type ContextoPedido } from "./prompt.ts";
+import { executarFerramenta, FERRAMENTAS, FERRAMENTAS_PROMPT, type ContextoFerramentas, type EntregaPrompt } from "./ferramentas.ts";
+import { blocoContexto, blocoDocs, PROMPT_BASE, type ContextoPedido, type TarefaParaPrompt } from "./prompt.ts";
 import {
   custoEstimado,
   motivoDaReserva,
@@ -47,10 +51,15 @@ const ESFORCO_CHAT = esforco("IA_ADMIN_EFFORT_CHAT", "high");
 // A varredura roda sozinha todo dia: `medium` segura o custo; o chat, onde alguém espera a
 // resposta para decidir, fica em `high`.
 const ESFORCO_VARREDURA = esforco("IA_ADMIN_EFFORT_VARREDURA", "medium");
+const ESFORCO_PROMPT = esforco("IA_ADMIN_EFFORT_PROMPT", "medium");
 const MAX_TOKENS = 32000;
 
 const OPCOES_CHAT: OpcoesAgente = { maxPassos: 16, prazoMs: 200_000 };
 const OPCOES_VARREDURA: OpcoesAgente = { maxPassos: 18, prazoMs: 170_000 };
+// Prompt de demanda: rápido (o TI abre o link logo depois do aviso) e sempre fecha pela entrega.
+const OPCOES_PROMPT: OpcoesAgente = { maxPassos: 12, prazoMs: 150_000, ferramentaDeEntrega: "entregar_prompt" };
+/** Pedidos de prompt puxados por chamada (cada um roda em paralelo no mesmo worker). */
+const PROMPTS_POR_CHAMADA = 3;
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
@@ -58,6 +67,30 @@ const json = (data: unknown, status = 200) =>
 const admin = () => createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Chamada do banco (cron/cutucada). O banco manda a chave de serviço do Vault
+ * (`_get_service_role_key()`), que é OUTRO JWT de service_role — mesmo segredo, emitido em outra
+ * data. Comparar o texto com o env deu 403 no primeiro tick (16/10/2026, 13:50). Vale: igual ao
+ * env, ou um JWT com role=service_role cuja assinatura o PostgREST aceita (ia_admin_pode = true).
+ */
+async function ehServiceRole(token: string): Promise<boolean> {
+  if (!token) return false;
+  if (token === SERVICE_ROLE) return true;
+  try {
+    const parte = token.split(".")[1] ?? "";
+    const b64 = parte.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(parte.length / 4) * 4, "=");
+    if (JSON.parse(atob(b64))?.role !== "service_role") return false;
+    const sb = createClient(SUPABASE_URL, ANON_KEY, {
+      global: { headers: { Authorization: `Bearer ${token}` } },
+      auth: { persistSession: false },
+    });
+    const { data, error } = await sb.rpc("ia_admin_pode");
+    return !error && data === true;
+  } catch {
+    return false;
+  }
+}
 
 /** Mesma ordem das outras IAs: chave cadastrada no sistema, depois env. */
 async function chaveAnthropic(): Promise<string | null> {
@@ -148,7 +181,7 @@ async function rodarComReserva(
   }
 }
 
-function auditor(base: { origem: "chat" | "varredura"; usuario_id?: string | null; conversa_id?: string | null; rodada_item_id?: string | null }) {
+function auditor(base: { origem: "chat" | "varredura" | "prompt"; usuario_id?: string | null; conversa_id?: string | null; rodada_item_id?: string | null; task_id?: string | null }) {
   return async (log: { ferramenta: string; entrada: string; ok: boolean; linhas?: number; ms?: number; erro?: string }) => {
     try {
       await admin().from("ia_admin_consultas").insert({
@@ -242,6 +275,14 @@ async function processarItem(item: ItemFila): Promise<void> {
   }
 }
 
+/** Trabalho que continua depois da resposta (EdgeRuntime.waitUntil); sem o runtime, espera. */
+async function emSegundoPlano(trabalho: Promise<void>): Promise<void> {
+  // deno-lint-ignore no-explicit-any
+  const runtime = (globalThis as any).EdgeRuntime;
+  if (runtime?.waitUntil) runtime.waitUntil(trabalho);
+  else await trabalho;
+}
+
 /** Pega o próximo item da fila e o processa em segundo plano. */
 async function dispararProximo(): Promise<{ disparou: boolean; motivo?: string }> {
   const sb = admin();
@@ -250,12 +291,94 @@ async function dispararProximo(): Promise<{ disparou: boolean; motivo?: string }
   const { data, error } = await sb.rpc("ia_admin_varredura_proximo");
   if (error) throw new Error(error.message);
   if (!data) return { disparou: false, motivo: "fila vazia ou item em andamento" };
-  const trabalho = processarItem(data as ItemFila);
-  // deno-lint-ignore no-explicit-any
-  const runtime = (globalThis as any).EdgeRuntime;
-  if (runtime?.waitUntil) runtime.waitUntil(trabalho);
-  else await trabalho;
+  await emSegundoPlano(processarItem(data as ItemFila));
   return { disparou: true };
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════
+// Prompt das demandas novas do TI (gt_tarefa_prompts)
+// ════════════════════════════════════════════════════════════════════════════════════
+async function processarPrompt(tarefa: TarefaParaPrompt): Promise<void> {
+  const sb = admin();
+  const concluir = (dados: Record<string, unknown>) =>
+    sb.rpc("ia_admin_prompt_concluir", { p_task_id: tarefa.task_id, p_dados: dados }).then(({ error }) => {
+      if (error) console.error("[ia-admin] prompt concluir", error.message);
+    });
+
+  const chave = await chaveAnthropic();
+  if (!chave) {
+    await concluir({ status: "erro", erro: "Sem chave da Anthropic configurada (Configuração IA › APIs de IA)." });
+    return;
+  }
+
+  try {
+    let entrega = null as EntregaPrompt | null;
+    const ctx: ContextoFerramentas = {
+      cliente: sb,
+      modo: "prompt",
+      entregarPrompt: (e) => { entrega = e; },
+      auditar: auditor({ origem: "prompt", task_id: tarefa.task_id }),
+    };
+    const system = montarSystem(await carregarDocs(sb), { agora: new Date(), modo: "prompt", tarefa });
+    const cliente = new Anthropic({ apiKey: chave, maxRetries: 2, timeout: 150_000 });
+    const { resumo, modelo } = await rodarComReserva(
+      cliente,
+      {
+        system,
+        tools: FERRAMENTAS_PROMPT,
+        messages: [{ role: "user", content: "Analise a demanda e entregue o resultado com entregar_prompt." }],
+      },
+      {
+        executar: (nome, entrada) => executarFerramenta(ctx, nome, entrada),
+        emitir: () => {},
+        ehErroDaApi: (e) => e instanceof Anthropic.APIError,
+      },
+      OPCOES_PROMPT,
+      ESFORCO_PROMPT,
+      new AbortController().signal,
+    );
+
+    const e = entrega as EntregaPrompt | null;
+    const final = resumo.textoFinal.trim();
+    const resultado = e
+      ? {
+        status: (e.tipo === "codigo" || e.tipo === "operacao") && e.prompt ? "pronto" : "sem_prompt",
+        tipo: e.tipo,
+        entendimento: e.entendimento,
+        motivo: e.motivo,
+        prompt: e.prompt,
+        perguntas: e.perguntas,
+      }
+      : final
+        // Não chamou a entrega mas escreveu: guarda o texto (melhor que perder a análise).
+        ? { status: "pronto", prompt: final, motivo: "A IA não classificou a demanda; o texto é a análise dela." }
+        : { status: "erro", erro: `Terminou sem entregar o prompt (${resumo.terminou}).` };
+    await concluir({
+      ...resultado,
+      etapas: resumo.etapas,
+      modelo,
+      tokens_entrada: resumo.uso.entrada + resumo.uso.cacheLeitura + resumo.uso.cacheEscrita,
+      tokens_saida: resumo.uso.saida,
+      custo_usd: custoEstimado(modelo, resumo.uso),
+    });
+  } catch (e) {
+    console.error("[ia-admin] prompt", tarefa.task_id, (e as Error)?.message);
+    await concluir({ status: "erro", erro: `${mensagemDeErro(e)} (${String((e as Error)?.message ?? e).slice(0, 300)})` });
+  }
+}
+
+/** Puxa até PROMPTS_POR_CHAMADA pedidos de prompt e gera em segundo plano. */
+async function dispararPrompts(): Promise<{ prompts: number }> {
+  const sb = admin();
+  const trabalhos: Promise<void>[] = [];
+  for (let i = 0; i < PROMPTS_POR_CHAMADA; i++) {
+    const { data, error } = await sb.rpc("ia_admin_prompt_proximo");
+    if (error) throw new Error(error.message);
+    if (!data) break;
+    trabalhos.push(processarPrompt(data as TarefaParaPrompt));
+  }
+  if (trabalhos.length) await emSegundoPlano(Promise.all(trabalhos).then(() => {}));
+  return { prompts: trabalhos.length };
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════
@@ -406,10 +529,12 @@ Deno.serve(async (req) => {
 
   try {
     // ── Cron (service role) ───────────────────────────────────────────────────
-    if (acao === "varredura_tick") {
-      if (!token || token !== SERVICE_ROLE) return json({ erro: "não autorizado" }, 403);
-      const r = await dispararProximo();
-      return json({ ok: true, ...r }, r.disparou ? 202 : 200);
+    if (acao === "varredura_tick" || acao === "prompt_tick") {
+      if (!(await ehServiceRole(token))) return json({ erro: "não autorizado" }, 403);
+      // Prompt primeiro: alguém está esperando por ele no aviso do WhatsApp.
+      const p = await dispararPrompts();
+      const r = acao === "varredura_tick" ? await dispararProximo() : { disparou: false };
+      return json({ ok: true, ...p, ...r }, r.disparou || p.prompts ? 202 : 200);
     }
 
     // ── Diretor/admin logado ──────────────────────────────────────────────────
@@ -434,6 +559,15 @@ Deno.serve(async (req) => {
       if (error) return json({ erro: error.message }, 422);
       const r = await dispararProximo();
       return json({ ok: true, rodada_id: rodadaId, ...r }, 202);
+    }
+
+    if (acao === "prompt_refazer") {
+      const taskId = typeof body.task_id === "string" && UUID.test(body.task_id) ? body.task_id : null;
+      if (!taskId) return json({ erro: "Tarefa inválida." }, 422);
+      const { error } = await sbUsuario.rpc("ia_admin_prompt_refazer", { p_task_id: taskId });
+      if (error) return json({ erro: error.message.includes("não encontrada") ? "Tarefa não encontrada." : error.message }, 422);
+      const p = await dispararPrompts();
+      return json({ ok: true, ...p }, 202);
     }
 
     return json({ erro: "ação desconhecida" }, 422);

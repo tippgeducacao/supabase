@@ -25,6 +25,12 @@ describe('textoAvisoTarefa', () => {
     expect(textoAvisoTarefa({ evento: 'movida', taskId: ID, titulo: 'x', etapa: null, autor: null }))
       .toContain('*uma automação* arrastou para *nova demanda*');
   });
+  it('aviso que gera prompt: a linha do prompt vem por último, com o link da aba Prompts do TI', () => {
+    const t = textoAvisoTarefa({ evento: 'criada', taskId: ID, titulo: 'Erro no login', etapa: 'nova demanda', autor: 'José', comPrompt: true });
+    const linhas = t.split('\n');
+    expect(linhas.at(-1)).toBe(`🧠 Ideia de prompt para resolver: https://sistemappgvet.ppgeducacao.site/ia-administrativa?aba=prompts&prompt=${ID}`);
+    expect(linhas.at(-2)).toBe(`🔗 https://sistemappgvet.ppgeducacao.site/gestao-de-tarefas/tarefa/${ID}`);
+  });
   it('título vazio não vira linha em branco', () => {
     expect(textoAvisoTarefa({ evento: 'criada', taskId: ID, titulo: '   ', etapa: 'nova demanda', autor: 'José' }))
       .toContain('📌 *(sem título)*');

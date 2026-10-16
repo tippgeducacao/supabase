@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   dec2, encontrarPorNome, inicioSemanaComercial, lerSemanaPessoa, linhasPontosPremio, semanasDoMesPremiacao, semanasDoPeriodo, interpretarComando, interpretarPeriodo, lerItensPos, linhaDasFontes,
-  mesesDoPeriodo, textoCac, textoFaturamento, textoMenu, textoPendentes, textoRanking, textoResumoPessoa, textoResumoPos,
+  lerResumoTi, mesesDoPeriodo, textoCac, textoFaturamento, textoMenu, textoPendentes, textoRanking, textoResumoPessoa, textoResumoPos, textoTi,
   type ItemPos, type LinhaPessoa, type PessoaComercial,
 } from './botComandos';
 
@@ -150,7 +150,7 @@ describe('textos', () => {
   });
   it('menu lista os comandos', () => {
     const t = textoMenu();
-    for (const c of ['resumo <nome>', 'comercial', 'pendentes', 'menu']) expect(t).toContain(c);
+    for (const c of ['resumo <nome>', 'comercial', 'pendentes', '*ti*', 'menu']) expect(t).toContain(c);
   });
   it('pendentes: quantidade, quebra e valor em reais', () => {
     expect(textoPendentes({ qtd: 5, faturamento: 61234.5, quebra: { pos: { qtd: 5 }, cursos: { qtd: 0 }, modulos: { qtd: 0 } } }))
@@ -189,6 +189,38 @@ describe('meses pelo nome e comandos novos', () => {
     expect(interpretarComando('resumo do time mês', HOJE)).toMatchObject({ tipo: 'comercial', periodo: { de: '2026-10-01' } });
     expect(interpretarComando('resumo da pós sanidade', HOJE)).toMatchObject({ tipo: 'pos', nome: 'sanidade' });
     expect(interpretarComando('resumo adones mês', HOJE)).toMatchObject({ tipo: 'resumo', nome: 'adones' });
+  });
+  it('ti: período padrão = semana; "tarefas", "demandas" e "resumo do TI" são o mesmo comando', () => {
+    expect(interpretarComando('ti', HOJE)).toMatchObject({ tipo: 'ti', periodo: { de: '2026-10-14', ate: HOJE } });
+    expect(interpretarComando('TI mês', HOJE)).toMatchObject({ tipo: 'ti', periodo: { de: '2026-10-01' } });
+    expect(interpretarComando('tarefas setembro', HOJE)).toMatchObject({ tipo: 'ti', periodo: { de: '2026-09-01', ate: '2026-09-30' } });
+    expect(interpretarComando('demandas ontem', HOJE)).toMatchObject({ tipo: 'ti', periodo: { de: '2026-10-15' } });
+    expect(interpretarComando('Resumo do TI semana passada', HOJE)).toMatchObject({ tipo: 'ti', periodo: { de: '2026-10-07' } });
+    expect(interpretarComando('ti amanhã', HOJE)).toMatchObject({ tipo: 'periodo_invalido' });
+  });
+  it('ti: concluídas, criadas, abertas por coluna (sem as zeradas) e as novas demandas', () => {
+    const r = lerResumoTi({
+      concluidas: 22, criadas: 28, tempo_medio_dias: 3.5, abertas: 54, atrasadas: 5,
+      colunas: [{ nome: 'nova demanda', abertas: 7 }, { nome: 'RETORNAR RH', abertas: 0 }, { nome: 'Revisão', abertas: 14 }],
+      novas_total: 7, novas: [{ titulo: 'Erro no login', dias: 0 }, { titulo: 'Relatório de cobrança', dias: 13 }],
+    });
+    const t = textoTi(r, { de: '2026-10-14', ate: HOJE, rotulo: 'Semana comercial' });
+    expect(t).toContain('✅ Concluídas: *22*');
+    expect(t).toContain('🆕 Criadas: *28*');
+    expect(t).toContain('⏱️ Tempo médio até concluir: 3,50 dias');
+    expect(t).toContain('📋 *Para resolver agora: 54* · ⚠️ 5 com prazo vencido');
+    expect(t).toContain('• Revisão: 14');
+    expect(t).not.toContain('RETORNAR RH');
+    expect(t).toContain('1. Erro no login (hoje)');
+    expect(t).toContain('2. Relatório de cobrança (há 13 dias)');
+    expect(t).toContain('… e mais 5.');
+  });
+  it('ti: sem conclusão no período não inventa tempo médio; nada aberto vira festa', () => {
+    const t = textoTi(lerResumoTi({ concluidas: 0, criadas: 0, tempo_medio_dias: null, abertas: 0, colunas: [], novas_total: 0, novas: [] }),
+      { de: HOJE, ate: HOJE, rotulo: 'Hoje' });
+    expect(t).not.toContain('Tempo médio');
+    expect(t).toContain('Nada aberto. 🎉');
+    expect(t).toContain('📥 *Novas demandas esperando: 0*');
   });
   it('busca de pós ignora o "PÓS |" e acha por qualquer palavra', () => {
     const pos = [{ nome: 'PÓS | SANIDADE AVÍCOLA' }, { nome: 'PÓS | NUTRIÇÃO E GESTÃO DE BOVINOS' }, { nome: 'PÓS | CLÍNICA MÉDICA E CIRÚRGICA DE BOVINOS' }];

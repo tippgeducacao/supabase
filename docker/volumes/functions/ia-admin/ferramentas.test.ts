@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { compactarLinhas, executarFerramenta, FERRAMENTAS, redigirSegredos, type ContextoFerramentas } from "./ferramentas";
+import { compactarLinhas, executarFerramenta, FERRAMENTAS, FERRAMENTAS_PROMPT, redigirSegredos, type ContextoFerramentas } from "./ferramentas";
+import { blocoTarefa, textoDoHtml } from "./prompt";
 
 function contexto(resposta: { data: unknown; error: { message: string } | null }, modo: "chat" | "varredura" = "chat") {
   const rpc = vi.fn(async () => resposta);
@@ -65,6 +66,29 @@ describe("ferramentas da IA Administrativa", () => {
     expect(p).toMatchObject({ origem: "varredura", checagem_id: "c1", rodada_item_id: "i1", casos: 3 });
   });
 
+  it("modo prompt: só ferramentas de leitura + a entrega (sem fila de achados)", () => {
+    const nomes = FERRAMENTAS_PROMPT.map((f) => f.name);
+    expect(nomes).toContain("entregar_prompt");
+    expect(nomes).toContain("buscar_docs");
+    expect(nomes).not.toContain("registrar_achado");
+    expect(nomes).not.toContain("listar_achados");
+  });
+
+  it("entregar_prompt valida o tipo, exige prompt para código e encerra", async () => {
+    const entregue = vi.fn();
+    const ctx: ContextoFerramentas = { cliente: { rpc: vi.fn() }, modo: "prompt", entregarPrompt: entregue };
+    expect((await executarFerramenta(ctx, "entregar_prompt", { tipo: "mágica", entendimento: "x" })).erro).toBe(true);
+    expect((await executarFerramenta(ctx, "entregar_prompt", { tipo: "codigo", entendimento: "x" })).erro).toBe(true);
+    const ok = await executarFerramenta(ctx, "entregar_prompt", { tipo: "fora_do_sistema", entendimento: "Trocar o mouse.", motivo: "Equipamento." });
+    expect(ok).toMatchObject({ erro: false, encerra: true });
+    expect(entregue).toHaveBeenCalledWith({ tipo: "fora_do_sistema", entendimento: "Trocar o mouse.", motivo: "Equipamento.", prompt: null, perguntas: null });
+  });
+
+  it("entregar_prompt fora do modo prompt é recusado", async () => {
+    const { ctx } = contexto({ data: null, error: null });
+    expect((await executarFerramenta(ctx, "entregar_prompt", { tipo: "codigo", entendimento: "x", prompt: "y" })).erro).toBe(true);
+  });
+
   it("ferramenta desconhecida não lança", async () => {
     const { ctx } = contexto({ data: null, error: null });
     const r = await executarFerramenta(ctx, "apagar_tudo", {});
@@ -79,6 +103,27 @@ describe("compactarLinhas", () => {
     expect(texto.length).toBeLessThanOrEqual(20_000);
     expect(mostradas).toBeLessThan(200);
     expect(texto).toContain("(+600 caracteres)");
+  });
+});
+
+describe("demanda do TI no prompt", () => {
+  it("HTML do editor vira texto, imagem vira marcador", () => {
+    expect(textoDoHtml("<p>Botão <b>Salvar</b> não funciona</p><p><img src='x.png'></p><p>&nbsp;Urgente &amp; rápido</p>"))
+      .toBe("Botão Salvar não funciona\n[imagem]\nUrgente & rápido");
+  });
+  it("bloco da demanda: título, quem abriu, descrição, anexos e comentários dentro de <demanda>", () => {
+    const b = blocoTarefa({
+      task_id: "t", titulo: "Erro no login", descricao_html: "<p>Não entra</p>", tags: ["chamado:bug"], prioridade: "alta",
+      criada_em: "2026-10-16T12:00:00Z", etapa: "nova demanda", lista: "NOVAS TAREFAS",
+      criador: { nome: "Laura", cargo: "admin", departamento: "MARKETING" },
+      anexos: [{ nome: "print.png", tipo: "image/png" }], comentarios: [{ texto: "<p>Desde ontem</p>" }], subtarefas: null,
+    });
+    expect(b.startsWith("<demanda>")).toBe(true);
+    expect(b).toContain("Título: Erro no login");
+    expect(b).toContain("Aberta por: Laura (admin, MARKETING)");
+    expect(b).toContain("Não entra");
+    expect(b).toContain("print.png [image/png]");
+    expect(b).toContain("- Desde ontem");
   });
 });
 

@@ -49,6 +49,11 @@ export interface OpcoesAgente {
   /** Depois deste tempo (ms desde o início), a próxima rodada tem de concluir sem ferramenta. */
   prazoMs: number;
   passoInicial?: number;
+  /**
+   * Ferramenta que FECHA o trabalho (modo prompt: entregar_prompt). Na última rodada, em vez de
+   * proibir ferramentas, só ela fica disponível — o resultado tem de sair por ela.
+   */
+  ferramentaDeEntrega?: string;
 }
 
 export interface UsoTokens {
@@ -74,6 +79,9 @@ const MAX_REFAZER_JSON = 2;
 const AVISO_PRAZO =
   "[Tempo desta rodada esgotado. Não chame mais ferramentas: conclua AGORA com o que já apurou, " +
   "dizendo com clareza o que ficou confirmado, o que ficou sem verificar e o que o admin pode pedir em seguida.]";
+const avisoPrazoEntrega = (ferramenta: string) =>
+  `[Tempo esgotado. Não consulte mais nada: chame ${ferramenta} AGORA com o que já apurou, ` +
+  "deixando claro no prompt o que ficou confirmado e o que o desenvolvedor ainda precisa conferir.]";
 
 /** Preço por milhão de tokens (US$). Cache: leitura e escrita (5 min). */
 const PRECOS: Array<{ prefixo: string; entrada: number; saida: number; cacheLeitura: number; cacheEscrita: number }> = [
@@ -164,12 +172,20 @@ export async function rodarAgente(
       avisouPrazo = true;
       const ultima = mensagens[mensagens.length - 1];
       if (ultima?.role === "user" && Array.isArray(ultima.content)) {
+        const aviso = opcoes.ferramentaDeEntrega ? avisoPrazoEntrega(opcoes.ferramentaDeEntrega) : AVISO_PRAZO;
         mensagens[mensagens.length - 1] = {
           ...ultima,
-          content: [...ultima.content, { type: "text", text: AVISO_PRAZO }] as never,
+          content: [...ultima.content, { type: "text", text: aviso }] as never,
         };
       }
     }
+
+    // Última rodada: sem ferramenta — ou só com a de entrega, quando o trabalho fecha por ela.
+    const restricaoFinal = !ultimoPasso
+      ? {}
+      : opcoes.ferramentaDeEntrega
+        ? { tools: entrada.tools.filter((t) => (t as { name?: string })?.name === opcoes.ferramentaDeEntrega) }
+        : { tool_choice: { type: "none" } };
 
     let msg: Anthropic.Beta.BetaMessage | null = null;
     let textoDoPasso = "";
@@ -179,7 +195,7 @@ export async function rodarAgente(
         system: entrada.system,
         tools: entrada.tools,
         messages: comCacheNoFim(mensagens),
-        ...(ultimoPasso ? { tool_choice: { type: "none" } } : {}),
+        ...restricaoFinal,
       });
       stream.on("text", (delta) => {
         textoDoPasso += delta;
@@ -249,6 +265,12 @@ export async function rodarAgente(
         ...(r.erro ? { is_error: true } : {}),
       })),
     });
+
+    // Entregou (entregar_prompt): o trabalho acabou, não gasta mais uma rodada de modelo.
+    if (resultados.some(({ r }) => r.encerra && !r.erro)) {
+      resumo.terminou = "resposta";
+      break;
+    }
   }
 
   return resumo;

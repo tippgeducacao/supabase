@@ -49,7 +49,7 @@ async function reivindicar(admin: any, item: ItemFila): Promise<boolean> {
 
 async function enviarItem(admin: any, item: ItemFila): Promise<void> {
   const { data: aviso, error: e1 } = await admin.from("gt_avisos_whatsapp")
-    .select("status_id, grupo_jid, wa_conexao_id, ativo").eq("id", item.aviso_id).maybeSingle();
+    .select("status_id, grupo_jid, wa_conexao_id, ativo, gerar_prompt").eq("id", item.aviso_id).maybeSingle();
   if (e1) throw new Error(`gt_avisos_whatsapp: ${e1.message}`);
   if (!aviso?.ativo) throw new Error("aviso desligado");
 
@@ -81,6 +81,8 @@ async function enviarItem(admin: any, item: ItemFila): Promise<void> {
     etapa: etapa?.name ?? null,
     autor: autor?.name ?? null,
     sugestao,
+    // O pedido do prompt nasce junto com esta linha da fila (gatilho gt_avisos_whatsapp_pedir_prompt).
+    comPrompt: aviso.gerar_prompt === true,
   });
   const linha = await carregarLinhaDe(admin, aviso.wa_conexao_id);
   const r = await enviarTexto(linha, aviso.grupo_jid, texto);

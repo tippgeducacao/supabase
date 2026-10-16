@@ -122,6 +122,7 @@ export type Comando =
   | { tipo: "ranking"; periodo: Periodo }
   | { tipo: "faturamento"; periodo: Periodo }
   | { tipo: "cac"; periodo: Periodo }
+  | { tipo: "ti"; periodo: Periodo }
   | { tipo: "pendentes" }
   | { tipo: "periodo_invalido"; texto: string }
   | { tipo: "desconhecido" };
@@ -147,7 +148,7 @@ export function interpretarComando(texto: string, hoje: string): Comando {
   if (MENU.has(t)) return { tipo: "menu" };
 
   const [cabeca, ...resto] = t.split(" ");
-  const periodoDoResto = (tipo: "comercial" | "ranking" | "faturamento"): Comando => {
+  const periodoDoResto = (tipo: "comercial" | "ranking" | "faturamento" | "ti"): Comando => {
     const periodo = interpretarPeriodo(resto.join(" "), hoje);
     return periodo ? { tipo, periodo } : { tipo: "periodo_invalido", texto: resto.join(" ") };
   };
@@ -160,6 +161,10 @@ export function interpretarComando(texto: string, hoje: string): Comando {
   }
   if (cabeca === "resumo" && ["pos", "curso"].includes(resto[0] === "da" ? resto[1] : resto[0])) {
     return interpretarComando(`pos ${resto.slice(resto[0] === "da" ? 2 : 1).join(" ")}`, hoje);
+  }
+  // "resumo do TI" / "resumo ti semana passada" — sem isto viraria a pessoa chamada "ti".
+  if (cabeca === "resumo" && (resto[0] === "do" ? resto[1] : resto[0]) === "ti") {
+    return interpretarComando(`ti ${resto.slice(resto[0] === "do" ? 2 : 1).join(" ")}`, hoje);
   }
 
   if (cabeca === "resumo" || cabeca === "pessoa") {
@@ -181,6 +186,7 @@ export function interpretarComando(texto: string, hoje: string): Comando {
     return periodo ? { tipo: "cac", periodo } : { tipo: "periodo_invalido", texto: resto.join(" ") };
   }
   if (cabeca === "pendentes" || cabeca === "pendente") return { tipo: "pendentes" };
+  if (cabeca === "ti" || cabeca === "tarefas" || cabeca === "demandas") return periodoDoResto("ti");
   return { tipo: "desconhecido" };
 }
 
@@ -324,11 +330,14 @@ export function textoMenu(): string {
     "🕓 *pendentes*",
     "Vendas esperando a aprovação da secretaria agora.",
     "",
+    "🖥️ *ti* [período]",
+    "Tarefas do TI: concluídas e criadas no período, o que está aberto agora por coluna e as novas demandas esperando.",
+    "",
     "❓ *menu* — esta lista",
     "",
     "*Períodos:* hoje · ontem · semana (padrão: de quarta até hoje) · semana passada · mês · mês passado · 15/10 · 01/10 a 15/10",
     "",
-    "Exemplos: _resumo Aline_ · _pos sanidade mês_ · _ranking setembro_ · _cac mês passado_",
+    "Exemplos: _resumo Aline_ · _pos sanidade mês_ · _ranking setembro_ · _cac mês passado_ · _ti mês_",
   ].join("\n");
 }
 
@@ -692,6 +701,60 @@ export function textoCac(linhas: LinhaCac[], p: Periodo): string {
     ...canais,
     "",
     `_Mídia + salários e premiação dos times, com o comercial rateado por tempo (tela CAC e Payback). O CAC é mensal: o período vira os meses inteiros que ele toca.${aberto ? " Mês aberto: a premiação só entra quando o mês fecha." : ""}_`,
+  ].join("\n");
+}
+
+// ── TI (bot_ti_tarefas — migration 20261016235500) ────────────────────────────
+
+export interface ResumoTi {
+  concluidas: number;
+  criadas: number;
+  tempoMedioDias: number | null;
+  abertas: number;
+  atrasadas: number;
+  colunas: { nome: string; abertas: number }[];
+  novasTotal: number;
+  novas: { titulo: string; dias: number }[];
+}
+
+export function lerResumoTi(d: any): ResumoTi {
+  const n = (v: unknown) => Number(v) || 0;
+  return {
+    concluidas: n(d?.concluidas),
+    criadas: n(d?.criadas),
+    tempoMedioDias: d?.tempo_medio_dias == null ? null : Number(d.tempo_medio_dias),
+    abertas: n(d?.abertas),
+    atrasadas: n(d?.atrasadas),
+    colunas: (Array.isArray(d?.colunas) ? d.colunas : []).map((c: any) => ({ nome: String(c.nome ?? "?"), abertas: n(c.abertas) })),
+    novasTotal: n(d?.novas_total),
+    novas: (Array.isArray(d?.novas) ? d.novas : []).map((x: any) => ({ titulo: String(x.titulo ?? "(sem título)"), dias: n(x.dias) })),
+  };
+}
+
+function haDias(dias: number): string {
+  return dias <= 0 ? "hoje" : dias === 1 ? "há 1 dia" : `há ${dias} dias`;
+}
+
+/** Concluídas/criadas no período + a foto de AGORA (abertas por coluna e novas demandas). */
+export function textoTi(r: ResumoTi, p: Periodo): string {
+  const colunas = r.colunas.filter((c) => c.abertas > 0).map((c) => `• ${c.nome}: ${c.abertas}`);
+  const novas = r.novas.map((x, i) => `${i + 1}. ${x.titulo.length > 90 ? `${x.titulo.slice(0, 90)}…` : x.titulo} (${haDias(x.dias)})`);
+  return [
+    "🖥️ *TI — tarefas*",
+    `📅 ${p.rotulo}`,
+    "",
+    `✅ Concluídas: *${r.concluidas}*`,
+    `🆕 Criadas: *${r.criadas}*`,
+    ...(r.tempoMedioDias != null ? [`⏱️ Tempo médio até concluir: ${dec2(r.tempoMedioDias)} dias`] : []),
+    "",
+    `📋 *Para resolver agora: ${r.abertas}*${r.atrasadas ? ` · ⚠️ ${r.atrasadas} com prazo vencido` : ""}`,
+    ...(colunas.length ? colunas : ["Nada aberto. 🎉"]),
+    "",
+    `📥 *Novas demandas esperando: ${r.novasTotal}*`,
+    ...(novas.length ? novas : ["Nenhuma."]),
+    ...(r.novasTotal > novas.length && novas.length ? [`… e mais ${r.novasTotal - novas.length}.`] : []),
+    "",
+    "_Período vale para concluídas e criadas; o resto é a foto de agora. Quadro NOVAS TAREFAS do espaço do TI no Gestor._",
   ].join("\n");
 }
 

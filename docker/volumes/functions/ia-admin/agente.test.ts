@@ -129,6 +129,29 @@ describe("rodarAgente (IA Administrativa)", () => {
     expect(r.consultas).toBe(0);
   });
 
+  it("modo prompt: a última rodada fica só com a ferramenta de entrega (não proíbe todas)", async () => {
+    const entradaPrompt = { ...entrada, tools: [{ name: "consultar_banco" }, { name: "entregar_prompt" }] };
+    const { d, chamadas } = deps([
+      mensagem([usoFerramenta("t1", "consultar_banco", { sql: "select 1", objetivo: "a" })], "tool_use"),
+      mensagem([{ type: "text", text: "pronto" }], "end_turn"),
+    ]);
+    await rodarAgente(entradaPrompt, d, { maxPassos: 2, prazoMs: 999_999, ferramentaDeEntrega: "entregar_prompt" });
+    expect(chamadas[1].tool_choice).toBeUndefined();
+    expect(chamadas[1].tools).toEqual([{ name: "entregar_prompt" }]);
+  });
+
+  it("entrega (encerra) fecha o laço sem mais uma rodada", async () => {
+    const { d, chamadas } = deps([
+      mensagem([usoFerramenta("t1", "entregar_prompt", { tipo: "codigo", entendimento: "x", prompt: "y" })], "tool_use"),
+      mensagem([{ type: "text", text: "não devia chegar aqui" }], "end_turn"),
+    ], {
+      executar: async (nome) => ({ conteudo: "{\"ok\":true}", erro: false, etapa: { ferramenta: nome, rotulo: "Escrevendo o prompt" }, encerra: true }),
+    });
+    const r = await rodarAgente(entrada, d, { maxPassos: 5, prazoMs: 60_000, ferramentaDeEntrega: "entregar_prompt" });
+    expect(r.terminou).toBe("resposta");
+    expect(chamadas).toHaveLength(1);
+  });
+
   it("recusa não roda ferramenta", async () => {
     const { d, executar } = deps([
       mensagem([usoFerramenta("t1", "consultar_banco", { sql: "select 1" })], "refusal"),

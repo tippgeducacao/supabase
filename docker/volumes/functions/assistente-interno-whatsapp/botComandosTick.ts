@@ -13,7 +13,7 @@ import { carregarLinhaWeb, enviarTexto } from "./wa.ts";
 import { hojeSP } from "./datas.ts";
 import { blocoComercial } from "./relatoriosGrupoTick.ts";
 import {
-  ehPos, encontrarPorNome, interpretarComando, lerItensPos, lerSemanaPessoa, linhaDasFontes, linhasPontosPremio,
+  ehPos, encontrarPorNome, interpretarComando, lerItensPos, lerResumoTi, lerSemanaPessoa, linhaDasFontes, linhasPontosPremio, textoTi,
   mesesDoPeriodo, semanasDoMesPremiacao, semanasDoPeriodo, textoCac, type SemanaPessoa,
   textoComercialPeriodo, textoFaturamento, textoMenu, textoNaoAchei, textoNaoAcheiPos, textoPendentes, textoRanking,
   textoResumoPessoa, textoResumoPos, textoVarias, TEXTO_PERIODO_INVALIDO, TEXTO_RESUMO_SEM_NOME, TEXTO_SO_TEXTO,
@@ -174,6 +174,11 @@ async function responder(admin: any, cfg: ConfigBot, item: ItemFila): Promise<{ 
         texto: textoCac(await linhasCac(admin, cmd.periodo), cmd.periodo),
         comando: `cac ${cmd.periodo.de}..${cmd.periodo.ate}`,
       };
+    case "ti": {
+      const { data, error } = await admin.rpc("bot_ti_tarefas", { p_de: cmd.periodo.de, p_ate: cmd.periodo.ate });
+      if (error) throw new Error(`bot_ti_tarefas: ${error.message}`);
+      return { texto: textoTi(lerResumoTi(data), cmd.periodo), comando: `ti ${cmd.periodo.de}..${cmd.periodo.ate}` };
+    }
   }
 }
 

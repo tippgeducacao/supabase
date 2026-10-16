@@ -30,13 +30,28 @@ export interface ResultadoFerramenta {
   etapa: EtapaIa;
   /** Resumo compacto para o histórico do modelo nas próximas perguntas do chat. */
   memoria?: string;
+  /** A ferramenta fecha o trabalho (entregar_prompt): o laço para sem mais uma rodada. */
+  encerra?: boolean;
 }
+
+/** O que a IA entrega no modo "prompt" (demanda nova do TI → gt_tarefa_prompts). */
+export interface EntregaPrompt {
+  tipo: "codigo" | "operacao" | "fora_do_sistema" | "informacao_insuficiente";
+  entendimento: string;
+  motivo: string | null;
+  prompt: string | null;
+  perguntas: string | null;
+}
+
+export const TIPOS_ENTREGA = ["codigo", "operacao", "fora_do_sistema", "informacao_insuficiente"] as const;
 
 export interface ContextoFerramentas {
   cliente: ClienteRpc;
-  modo: "chat" | "varredura";
+  modo: "chat" | "varredura" | "prompt";
   checagemId?: string | null;
   rodadaItemId?: string | null;
+  /** Modo prompt: recebe a entrega da IA (a edge grava em gt_tarefa_prompts). */
+  entregarPrompt?: (e: EntregaPrompt) => void;
   /** Auditoria de cada chamada (tabela ia_admin_consultas). Nunca deve lançar. */
   auditar?: (log: { ferramenta: string; entrada: string; ok: boolean; linhas?: number; ms?: number; erro?: string }) => Promise<void>;
 }
@@ -177,6 +192,36 @@ export const FERRAMENTAS = [
   },
 ];
 
+/** Só no modo prompt: fecha a demanda do TI com o prompt (ou o motivo de não ter). */
+export const FERRAMENTA_ENTREGAR_PROMPT = {
+  name: "entregar_prompt",
+  description:
+    "Entrega o resultado da análise da demanda do TI. Chame UMA vez, no fim. tipo: 'codigo' (resolve mudando código/banco " +
+    "do sistema), 'operacao' (resolve pela própria tela do sistema, sem código), 'fora_do_sistema' (equipamento, conta " +
+    "externa, compra, treinamento…) ou 'informacao_insuficiente' (não dá para saber o que é pedido).",
+  input_schema: {
+    type: "object",
+    properties: {
+      tipo: { type: "string", enum: [...TIPOS_ENTREGA] },
+      entendimento: { type: "string", description: "Em 2 a 4 frases: o que a pessoa está pedindo e onde isso vive no sistema." },
+      motivo: { type: "string", description: "Para fora_do_sistema/informacao_insuficiente: por que não há prompt. Para os outros: opcional." },
+      prompt: {
+        type: "string",
+        description: "Para 'codigo': o prompt completo, em markdown, para colar no Claude Code (formato de prompt_dev). Para 'operacao': " +
+          "o passo a passo na tela e, se valer a pena automatizar, o prompt. Vazio nos outros tipos.",
+      },
+      perguntas: { type: "string", description: "O que perguntar a quem pediu para fechar o entendimento (lista curta). Opcional." },
+    },
+    required: ["tipo", "entendimento"],
+  },
+  eager_input_streaming: true,
+};
+
+const SO_LEITURA = new Set(["consultar_banco", "listar_tabelas", "descrever_tabela", "ver_funcao", "buscar_docs", "ler_doc"]);
+
+/** Modo prompt: investiga só lendo (sem fila de achados) e termina entregando o prompt. */
+export const FERRAMENTAS_PROMPT = [...FERRAMENTAS.filter((f) => SO_LEITURA.has(f.name)), FERRAMENTA_ENTREGAR_PROMPT];
+
 export class EntradaInvalida extends Error {}
 
 function texto(v: unknown, campo: string, opts: { obrigatorio?: boolean; max: number }): string | null {
@@ -230,6 +275,7 @@ const ROTULOS: Record<string, string> = {
   ler_doc: "Lendo a documentação",
   listar_achados: "Conferindo a fila de achados",
   registrar_achado: "Registrando achado",
+  entregar_prompt: "Escrevendo o prompt",
 };
 
 export function rotuloDaFerramenta(nome: string, entrada: Record<string, unknown>): string {
@@ -418,6 +464,27 @@ export async function executarFerramenta(
           ? (r.reapareceu ? "Achado registrado (este problema já tinha sido resolvido antes e VOLTOU)." : "Achado novo registrado.")
           : "Achado já estava aberto: atualizado com os dados de agora.";
         return { conteudo: JSON.stringify({ ok: true, id: r.id, mensagem: msg }), erro: false, etapa, memoria: `- Achado registrado: ${String(payload.titulo)} (${r.id})` };
+      }
+
+      case "entregar_prompt": {
+        if (ctx.modo !== "prompt" || !ctx.entregarPrompt) return await falhar("entregar_prompt só existe na análise de demanda do TI.");
+        const tipo = String(entrada.tipo ?? "");
+        if (!(TIPOS_ENTREGA as readonly string[]).includes(tipo)) throw new EntradaInvalida(`tipo inválido: use ${TIPOS_ENTREGA.join(", ")}.`);
+        const entrega: EntregaPrompt = {
+          tipo: tipo as EntregaPrompt["tipo"],
+          entendimento: texto(entrada.entendimento, "entendimento", { obrigatorio: true, max: 4000 })!,
+          motivo: texto(entrada.motivo, "motivo", { max: 4000 }),
+          prompt: texto(entrada.prompt, "prompt", { max: 30_000 }),
+          perguntas: texto(entrada.perguntas, "perguntas", { max: 4000 }),
+        };
+        if ((entrega.tipo === "codigo" || entrega.tipo === "operacao") && !entrega.prompt) {
+          throw new EntradaInvalida("tipo codigo/operacao precisa do prompt.");
+        }
+        entradaAuditoria = entrega.tipo;
+        etapa.detalhe = entrega.tipo;
+        ctx.entregarPrompt(entrega);
+        await ctx.auditar?.({ ferramenta: nome, entrada: entrega.tipo, ok: true, ms: Date.now() - inicio });
+        return { conteudo: JSON.stringify({ ok: true, mensagem: "Entregue. Pode encerrar." }), erro: false, etapa, encerra: true };
       }
 
       default:
