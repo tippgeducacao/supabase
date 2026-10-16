@@ -260,6 +260,35 @@ export function janelaDasMinhas(agora: Date): { de: string; ate: string } {
   };
 }
 
+// ── Captura das reuniões (avaliação) ─────────────────────────────────────────
+
+export type FalaCapturada = { motor: "parakeet" | "gemini"; ordem: number; quem: "lead" | "vendedor"; texto: string; falada_em: string };
+
+const MAX_FALAS_POR_ENVIO = 200;
+const MAX_TEXTO_FALA = 4000;
+
+/** O que o app mandou vira linhas válidas de `copiloto_reuniao_falas`; o resto é descartado. */
+export function limparFalas(v: unknown): FalaCapturada[] {
+  if (!Array.isArray(v)) return [];
+  const falas: FalaCapturada[] = [];
+  for (const f of v.slice(0, MAX_FALAS_POR_ENVIO)) {
+    const x = f as Record<string, unknown>;
+    const texto = typeof x?.texto === "string" ? x.texto.trim().slice(0, MAX_TEXTO_FALA) : "";
+    const ordem = Number(x?.ordem);
+    const quando = typeof x?.falada_em === "string" ? new Date(x.falada_em) : null;
+    if (!texto || !Number.isInteger(ordem) || ordem < 0) continue;
+    if (x?.motor !== "parakeet" && x?.motor !== "gemini") continue;
+    if (x?.quem !== "lead" && x?.quem !== "vendedor") continue;
+    falas.push({
+      motor: x.motor, ordem, quem: x.quem, texto,
+      falada_em: quando && !Number.isNaN(quando.getTime()) ? quando.toISOString() : new Date().toISOString(),
+    });
+  }
+  return falas;
+}
+
+export const MOTORES_SESSAO = ["local", "nuvem", "comparar"] as const;
+
 /** A reunião cujo horário está mais perto de agora (o mesmo link pode ter sido reusado). */
 export function maisProximaDeAgora<T extends { data_agendamento?: string | null; status?: string | null }>(
   reunioes: T[],

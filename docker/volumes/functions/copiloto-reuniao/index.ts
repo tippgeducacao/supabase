@@ -11,6 +11,10 @@
 //   * preparar — gera (uma vez por reunião) o RESUMO do lead: dados, o que foi registrado
 //               ao marcar e a conversa de WhatsApp. O vendedor lê no app e a IA das
 //               perguntas recebe junto. Guardado em `copiloto_reuniao_resumos`.
+//   * sessao_iniciar / falas / sessao_encerrar / avaliar — CAPTURA para avaliação: cada
+//               Iniciar vira uma sessão; as falas transcritas e as perguntas mostradas
+//               ficam em copiloto_reuniao_*; o vendedor marca 👍/👎 em cada pergunta.
+//               A pergunta é gravada aqui mesmo, na ação `dica` (não depende do app).
 //   * minhas  — as reuniões em que quem chama é o VENDEDOR, perto de agora (o app de
 //               Windows não lê a aba do Meet: o vendedor escolhe a reunião na lista).
 //
@@ -38,6 +42,8 @@ import {
   interpretarSaida,
   janelaDasMinhas,
   lerRespostaLuna,
+  limparFalas,
+  MOTORES_SESSAO,
   pedidoLuna,
   limparDicasDadas,
   limparTurnos,
@@ -305,6 +311,85 @@ async function minhas(sbUsuario: SupabaseClient, userId: string) {
   });
 }
 
+// ── Captura (avaliação) ──────────────────────────────────────────────────────
+
+// sessão → dono, para não ir ao banco a cada fala
+const donoDaSessao = new Map<string, string>();
+
+/** A sessão existe e é de quem chama? (escrita só na própria sessão) */
+async function sessaoDe(userId: string, sessaoId: unknown): Promise<string | null> {
+  if (typeof sessaoId !== "string" || !UUID.test(sessaoId)) return null;
+  const guardado = donoDaSessao.get(sessaoId);
+  if (guardado) return guardado === userId ? sessaoId : null;
+  const { data } = await admin().from("copiloto_reuniao_sessoes").select("vendedor_id").eq("id", sessaoId).maybeSingle();
+  if (!data) return null;
+  donoDaSessao.set(sessaoId, data.vendedor_id);
+  return data.vendedor_id === userId ? sessaoId : null;
+}
+
+async function sessaoIniciar(sbUsuario: SupabaseClient, userId: string, body: Record<string, unknown>) {
+  const motor = (MOTORES_SESSAO as readonly string[]).includes(String(body?.motor)) ? String(body.motor) : "local";
+  let agendamentoId: string | null = null;
+  if (typeof body?.agendamento_id === "string" && UUID.test(body.agendamento_id)) {
+    // RLS: só liga a sessão a uma reunião que quem chama pode ver
+    const { data } = await sbUsuario.from("agendamentos").select("id").eq("id", body.agendamento_id).maybeSingle();
+    agendamentoId = data?.id ?? null;
+  }
+  const { data, error } = await admin().from("copiloto_reuniao_sessoes").insert({
+    vendedor_id: userId, agendamento_id: agendamentoId, motor,
+    app_versao: typeof body?.app_versao === "string" ? body.app_versao.slice(0, 40) : null,
+  }).select("id").single();
+  if (error || !data) {
+    console.error("[copiloto-reuniao] sessão", error?.message);
+    return json({ erro: "Não consegui abrir a sessão de captura." }, 422);
+  }
+  donoDaSessao.set(data.id, userId);
+  return json({ sessao_id: data.id });
+}
+
+async function registrarFalas(userId: string, body: Record<string, unknown>) {
+  const sessaoId = await sessaoDe(userId, body?.sessao_id);
+  if (!sessaoId) return json({ erro: "sessão inválida" }, 422);
+  const falas = limparFalas(body?.falas);
+  if (!falas.length) return json({ gravadas: 0 });
+  const { error } = await admin().from("copiloto_reuniao_falas")
+    .upsert(falas.map((f) => ({ ...f, sessao_id: sessaoId })), { onConflict: "sessao_id,motor,ordem" });
+  if (error) {
+    console.error("[copiloto-reuniao] falas", error.message);
+    return json({ erro: "Não consegui gravar as falas." }, 422);
+  }
+  return json({ gravadas: falas.length });
+}
+
+async function sessaoEncerrar(userId: string, body: Record<string, unknown>) {
+  const sessaoId = await sessaoDe(userId, body?.sessao_id);
+  if (!sessaoId) return json({ erro: "sessão inválida" }, 422);
+  await admin().from("copiloto_reuniao_sessoes").update({ encerrada_em: new Date().toISOString() }).eq("id", sessaoId);
+  return json({ ok: true });
+}
+
+async function avaliar(userId: string, body: Record<string, unknown>) {
+  if (typeof body?.dica_id !== "string" || !UUID.test(body.dica_id) || typeof body?.util !== "boolean") {
+    return json({ erro: "avaliação inválida" }, 422);
+  }
+  const { data } = await admin().from("copiloto_reuniao_dicas").select("sessao_id").eq("id", body.dica_id).maybeSingle();
+  if (!data || !(await sessaoDe(userId, data.sessao_id))) return json({ erro: "pergunta não encontrada" }, 422);
+  await admin().from("copiloto_reuniao_dicas").update({ util: body.util, avaliada_em: new Date().toISOString() }).eq("id", body.dica_id);
+  return json({ ok: true });
+}
+
+/** Grava a pergunta mostrada (se o app mandou a sessão) e devolve o id para o 👍/👎. */
+async function guardarDica(userId: string, body: Record<string, unknown>, dicaMostrada: { tipo: string; texto: string } | null, modelo: string | undefined, ms: number, falaDoLead: string) {
+  if (!dicaMostrada) return null;
+  const sessaoId = await sessaoDe(userId, body?.sessao_id).catch(() => null);
+  if (!sessaoId) return null;
+  const { data, error } = await admin().from("copiloto_reuniao_dicas").insert({
+    sessao_id: sessaoId, tipo: dicaMostrada.tipo, texto: dicaMostrada.texto, modelo: modelo ?? null, ms, fala_do_lead: falaDoLead.slice(0, 2000),
+  }).select("id").single();
+  if (error) console.error("[copiloto-reuniao] gravar pergunta", error.message);
+  return data?.id ?? null;
+}
+
 async function dica(sbUsuario: SupabaseClient, userId: string, body: Record<string, unknown>) {
   const inicio = Date.now();
   const turnos = limparTurnos(body?.turnos);
@@ -337,7 +422,8 @@ async function dica(sbUsuario: SupabaseClient, userId: string, body: Record<stri
         fn: "copiloto-reuniao", usuario: userId, agendamento: agendamentoId, ms, mostrou: !!r.dica, modelo: r.modelo,
         entrada: r.uso.entrada, cache_lido: r.uso.cacheLido, saida: r.uso.saida, raciocinio: r.uso.raciocinio,
       }));
-      return json({ dica: r.dica, ms, modelo: r.modelo });
+      const dicaId = await guardarDica(userId, body, r.dica, r.modelo, ms, turnos[turnos.length - 1].texto);
+      return json({ dica: r.dica, ms, modelo: r.modelo, dica_id: dicaId });
     } catch (e) {
       console.error("[copiloto-reuniao] luna, indo para o haiku", (e as Error)?.message);
     }
@@ -368,7 +454,8 @@ async function dica(sbUsuario: SupabaseClient, userId: string, body: Record<stri
       entrada: resposta.usage.input_tokens, cache_lido: resposta.usage.cache_read_input_tokens,
       cache_escrito: resposta.usage.cache_creation_input_tokens, saida: resposta.usage.output_tokens, modelo: resposta.model,
     }));
-    return json({ dica: saida, ms, modelo: resposta.model });
+    const dicaId = await guardarDica(userId, body, saida, resposta.model, ms, turnos[turnos.length - 1].texto);
+    return json({ dica: saida, ms, modelo: resposta.model, dica_id: dicaId });
   } catch (e) {
     console.error("[copiloto-reuniao] ia", (e as Error)?.message);
     if (e instanceof Anthropic.AuthenticationError || e instanceof Anthropic.PermissionDeniedError) {
@@ -402,6 +489,10 @@ Deno.serve(async (req) => {
     if (body?.acao === "dica") return await dica(sbUsuario, user.id, body);
     if (body?.acao === "minhas") return await minhas(sbUsuario, user.id);
     if (body?.acao === "preparar") return await preparar(sbUsuario, user.id, body);
+    if (body?.acao === "sessao_iniciar") return await sessaoIniciar(sbUsuario, user.id, body);
+    if (body?.acao === "falas") return await registrarFalas(user.id, body);
+    if (body?.acao === "sessao_encerrar") return await sessaoEncerrar(user.id, body);
+    if (body?.acao === "avaliar") return await avaliar(user.id, body);
     return json({ erro: "ação desconhecida" }, 422);
   } catch (e) {
     console.error("[copiloto-reuniao] erro", (e as Error)?.message);

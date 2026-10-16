@@ -5,6 +5,7 @@ import {
   interpretarSaida,
   janelaDasMinhas,
   lerRespostaLuna,
+  limparFalas,
   pedidoLuna,
   limparDicasDadas,
   limparTurnos,
@@ -217,5 +218,28 @@ describe("Luna 6", () => {
     expect(lerRespostaLuna({ output: [{ type: "message", content: [{ type: "output_text", text: '{"mostrar":false,"tipo":"pergunta","texto":""}' }] }] }).dica).toBeNull();
     expect(lerRespostaLuna({ output: [{ type: "message", content: [{ type: "refusal", refusal: "não" }] }] }).dica).toBeNull();
     expect(lerRespostaLuna({}).dica).toBeNull();
+  });
+});
+
+describe("limparFalas (captura para avaliação)", () => {
+  it("aceita só fala com motor, quem, ordem e texto válidos", () => {
+    const r = limparFalas([
+      { motor: "parakeet", ordem: 0, quem: "lead", texto: " Trabalho na cooperativa. ", falada_em: "2026-10-16T13:00:00Z" },
+      { motor: "gemini", ordem: 0, quem: "lead", texto: "Trabalho na cooperativa.", falada_em: "2026-10-16T13:00:01Z" },
+      { motor: "whisper", ordem: 1, quem: "lead", texto: "motor desconhecido" },
+      { motor: "parakeet", ordem: -1, quem: "lead", texto: "ordem negativa" },
+      { motor: "parakeet", ordem: 2, quem: "robo", texto: "quem inválido" },
+      { motor: "parakeet", ordem: 3, quem: "vendedor", texto: "   " },
+    ]);
+    expect(r).toEqual([
+      { motor: "parakeet", ordem: 0, quem: "lead", texto: "Trabalho na cooperativa.", falada_em: "2026-10-16T13:00:00.000Z" },
+      { motor: "gemini", ordem: 0, quem: "lead", texto: "Trabalho na cooperativa.", falada_em: "2026-10-16T13:00:01.000Z" },
+    ]);
+  });
+
+  it("data inválida vira agora; lixo vira lista vazia", () => {
+    const [f] = limparFalas([{ motor: "parakeet", ordem: 5, quem: "vendedor", texto: "oi", falada_em: "ontem" }]);
+    expect(Number.isNaN(new Date(f.falada_em).getTime())).toBe(false);
+    expect(limparFalas("x")).toEqual([]);
   });
 });
