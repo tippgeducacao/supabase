@@ -56,14 +56,15 @@ describe('contrato de envio do cronograma', () => {
   it('envio aceito: a fala diz que o cronograma traz professores, módulos e o valor integral, e convida para a conversa', () => {
     const retorno = montarRetornoInformacoes(true, { data: { cronograma_enviado: true, cronograma_status: 'aceito', wa_message_id: 'wamid.teste' } }, 'tool-1');
     expect(retorno.resultado).toContain('"te enviei o cronograma da pós por aqui, com os professores, os módulos e o valor integral."');
-    expect(retorno.resultado).toContain('"e te chamo pra uma conversa rápida com o monitor pra te apresentar a condição do primeiro lote promocional, valor e parcelamento, a ementa completa e tirar suas dúvidas."');
+    expect(retorno.resultado).toContain('"a condição promocional exclusiva, totalmente diferente desse valor que eu te passei, é somente com o monitor no meet. são 10 minutos."');
+    expect(retorno.resultado).toContain('sem APROVADO, feche com "posso procurar um horário pra vc?"');
     expect(retorno.resultado).toContain('não escreva valor, parcela nem preço de matrícula na conversa');
     expect(retorno.resultado).toContain('ofereça até três horários reais');
   });
 
   it('o nome da condição no convite acompanha o prompt da conversa', () => {
     const retorno = montarRetornoInformacoes(true, { data: { cronograma_enviado: true } }, 'tool-1', { condicao: 'a condição especial que a secretaria liberou hoje' });
-    expect(retorno.resultado).toContain('pra te apresentar a condição especial que a secretaria liberou hoje, valor e parcelamento');
+    expect(retorno.resultado).toContain('"a condição especial que a secretaria liberou hoje, totalmente diferente desse valor que eu te passei');
   });
 
   it('IA de aula (só fatos): informa o envio e que o valor está no cronograma, sem roteiro de fala', () => {

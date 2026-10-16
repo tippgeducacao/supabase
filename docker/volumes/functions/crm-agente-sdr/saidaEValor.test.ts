@@ -60,7 +60,7 @@ describe('preço: o valor vai dentro do cronograma, não na conversa', () => {
   });
 
   it('os dois agentes da Luna trazem a fala do envio e o convite com as mesmas palavras da ferramenta', () => {
-    const convite = falaConviteDepoisDoCronograma('a condição do primeiro lote promocional');
+    const convite = falaConviteDepoisDoCronograma('a condição promocional exclusiva');
     for (const prompt of [LUNA_AGENTE_VALIDACAO, LUNA_AGENTE_QUALIFICADOR]) {
       expect(prompt).toContain(FALA_CRONOGRAMA_ENVIADO);
       expect(prompt).toContain(convite);
@@ -68,9 +68,10 @@ describe('preço: o valor vai dentro do cronograma, não na conversa', () => {
     }
   });
 
+  // 16/10/2026: o convite diz POR QUE ir ao meet (texto do Gustavo).
   it('a fala do envio e o convite são os que o Gustavo aprovou', () => {
     expect(FALA_CRONOGRAMA_ENVIADO).toBe('te enviei o cronograma da pós por aqui, com os professores, os módulos e o valor integral.');
-    expect(falaConviteDepoisDoCronograma('a condição do primeiro lote promocional'))
-      .toBe('e te chamo pra uma conversa rápida com o monitor pra te apresentar a condição do primeiro lote promocional, valor e parcelamento, a ementa completa e tirar suas dúvidas.');
+    expect(falaConviteDepoisDoCronograma('a condição promocional exclusiva'))
+      .toBe('a condição promocional exclusiva, totalmente diferente desse valor que eu te passei, é somente com o monitor no meet. são 10 minutos.');
   });
 });

@@ -54,9 +54,14 @@ export function interpretarEnvioMaterial(httpOk: boolean, valor: unknown, httpSt
 
 /** O que o João diz quando o cronograma sai (10/10/2026). O PDF traz professores, módulos e o valor integral. */
 export const FALA_CRONOGRAMA_ENVIADO = 'te enviei o cronograma da pós por aqui, com os professores, os módulos e o valor integral.';
-/** O convite que vem junto: a condição (valor e parcelamento) só na conversa com o monitor. */
+/**
+ * O convite que vem junto, dizendo POR QUE ir ao meet (16/10/2026, texto do Gustavo): a condição do meet é
+ * outra, diferente do valor integral que acabou de ir no PDF, e só o monitor apresenta.
+ */
 export const falaConviteDepoisDoCronograma = (condicao: string) =>
-  `e te chamo pra uma conversa rápida com o monitor pra te apresentar ${condicao}, valor e parcelamento, a ementa completa e tirar suas dúvidas.`;
+  `${condicao}, totalmente diferente desse valor que eu te passei, é somente com o monitor no meet. são 10 minutos.`;
+/** Sem compatibilidade aprovada ainda, o convite fecha com esta pergunta (com APROVADO, vão os horários). */
+export const PERGUNTA_CONVITE_SEM_HORARIO = 'posso procurar um horário pra vc?';
 
 export function instrucaoResultadoMaterial(status: StatusMaterial, reenvioAgendado = false,
   opcoes: { condicao?: string; soFatos?: boolean } = {}): string {
@@ -71,7 +76,7 @@ export function instrucaoResultadoMaterial(status: StatusMaterial, reenvioAgenda
       ? 'O WhatsApp aceitou o envio do cronograma; a entrega ainda não está confirmada.'
       : 'O WhatsApp registrou a entrega do cronograma; isso não comprova que o PDF foi aberto.') + semValor;
   }
-  const roteiro = ` Diga, com estas palavras: "${FALA_CRONOGRAMA_ENVIADO}" Em seguida, salvo se a formação ou o prazo dele já foram REPROVADOS nesta conversa (aí não convide): "${falaConviteDepoisDoCronograma(opcoes.condicao ?? 'a condição do primeiro lote promocional')}"`;
+  const roteiro = ` Diga, com estas palavras: "${FALA_CRONOGRAMA_ENVIADO}" Em seguida, salvo se a formação ou o prazo dele já foram REPROVADOS nesta conversa (aí não convide): "${falaConviteDepoisDoCronograma(opcoes.condicao ?? 'a condição promocional exclusiva')}"`;
   switch (status) {
     case 'nao_solicitado': return 'Nenhum cronograma foi solicitado ou enviado nesta chamada.';
     // 19/09/2026 (decisão do usuário, vale para todos): "te enviei o cronograma", não "solicitei o
@@ -81,9 +86,9 @@ export function instrucaoResultadoMaterial(status: StatusMaterial, reenvioAgenda
     // a conversa morria no "chegou?" (Luna: 22 aprovados, 1 agendamento em 08/10). Com a
     // compatibilidade aprovada, o envio já leva os horários.
     case 'aceito': return 'O WhatsApp aceitou o envio do cronograma, mas a entrega ainda NÃO está confirmada.' + semValor + roteiro
-      + ' Se a compatibilidade já está APROVADA nesta conversa, na mesma mensagem chame consulta_disponibilidade e ofereça até três horários reais pra essa conversa, sem esperar ele confirmar que abriu; sem APROVADO, pergunte se chegou e abriu. Não diga que foi entregue nem que está acima.';
+      + ` Se a compatibilidade já está APROVADA nesta conversa, na mesma mensagem chame consulta_disponibilidade e ofereça até três horários reais pra essa conversa, sem esperar ele confirmar que abriu; sem APROVADO, feche com "${PERGUNTA_CONVITE_SEM_HORARIO}". Não diga que foi entregue nem que está acima.`;
     case 'entregue': case 'lido': return 'O WhatsApp registrou a entrega desta mensagem. Isso NÃO comprova abertura do PDF.' + semValor + roteiro
-      + ' Se a compatibilidade já está APROVADA nesta conversa, na mesma mensagem chame consulta_disponibilidade e ofereça até três horários reais pra essa conversa; sem APROVADO, pergunte se ele conseguiu abrir. Se ele disser que não recebeu ou pedir novamente, reenvie pela ferramenta, sem contradizê-lo.';
+      + ` Se a compatibilidade já está APROVADA nesta conversa, na mesma mensagem chame consulta_disponibilidade e ofereça até três horários reais pra essa conversa; sem APROVADO, feche com "${PERGUNTA_CONVITE_SEM_HORARIO}". Se ele disser que não recebeu ou pedir novamente, reenvie pela ferramenta, sem contradizê-lo.`;
     case 'falhou': return 'O cronograma NÃO foi enviado nesta tentativa. Não diga que enviou ou que está acima. O valor integral vai dentro do cronograma: não escreva valor na conversa; se ele perguntou o preço, diga que valor e condição o monitor apresenta na conversa. '
       + (reenvioAgendado
         ? 'Uma nova tentativa ficou registrada. Diga de forma natural: "O envio do cronograma pelo WhatsApp não está funcionando agora. Assim que normalizar, tento enviar novamente pra você." Não dê prazo nem garanta entrega; a fila tenta novamente enquanto a janela permitir.'

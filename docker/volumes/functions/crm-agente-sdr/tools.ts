@@ -1353,7 +1353,7 @@ async function cursoDaOportunidade(supabase: any, ctx: CtxConversa): Promise<str
 
 /** O nome da condição no convite: o mesmo do prompt da conversa (gancho do lote no canário, ganchoLote.ts). */
 const condicaoDoConvite = (ctx: CtxConversa) =>
-  ctx.ficha ? 'a condição do primeiro lote promocional' : 'a condição especial que a secretaria liberou hoje';
+  ctx.ficha ? 'a condição promocional exclusiva' : 'a condição especial que a secretaria liberou hoje';
 
 async function enviaInformacoes(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
   // Sempre o cronograma: a sdr-api só devolve valor/matrícula/link nos outros modos, e eles não
