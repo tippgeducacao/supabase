@@ -7,6 +7,7 @@ import { telefoneEnviavel, digitosParaEnvio } from "../_shared/telefone.ts";
 import { phoneVariants, canonicalConversationPhone } from "./telefoneConversa.ts";
 import { autorDaMensagemAgendada, confirmarAutoriaAposEco } from "./autoria.ts";
 import { textoVozIaParaPersistir } from "./textoVozIa.ts";
+import { linhaDaMensagemReagida } from "./linhaDaReacao.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -628,8 +629,14 @@ Deno.serve(async (req) => {
     // (2) wa_account_id explícito → conta Meta (ex.: botão "Testar") — NUNCA sobreposto;
     // (3) nenhum → AUTO-DETECTA pela última mensagem (CRM/SAC/Omnichat respondem no canal
     // certo sem passar nada). Conta/linha explícita SEMPRE ganha do auto-detect.
-    let conexaoIdRota: string | null = wa_conexao_id ? String(wa_conexao_id) : null;
-    if (!conexaoIdRota && !wa_account_id) {
+    // ⚠️ REAÇÃO sem linha explícita: o número é o da conversa da mensagem REAGIDA — de outro
+    // número a Meta recusa (code 100). Ver linhaDaReacao.ts (16/10/2026).
+    const linhaReacao = tipo === "reaction" && !wa_conexao_id && !wa_account_id
+      ? await linhaDaMensagemReagida(admin, reaction_message_id)
+      : null;
+    const waAccountIdPedido = wa_account_id ?? linhaReacao?.waAccountId ?? null;
+    let conexaoIdRota: string | null = wa_conexao_id ? String(wa_conexao_id) : (linhaReacao?.waConexaoId ?? null);
+    if (!conexaoIdRota && !waAccountIdPedido) {
       let q = admin
         .from("crm_whatsapp_messages")
         .select("provider, wa_conexao_id")
@@ -658,7 +665,7 @@ Deno.serve(async (req) => {
 
     // Busca conta WA ativa do CRM
     const { data: waRow, error: waErr } = await admin.rpc("get_crm_wa_account", {
-      p_account_id: wa_account_id ?? null,
+      p_account_id: waAccountIdPedido,
     });
     if (waErr || !waRow || (Array.isArray(waRow) && waRow.length === 0)) {
       return json({ error: `Conta WhatsApp CRM não encontrada: ${waErr?.message ?? "nenhuma ativa"}` }, 500);
