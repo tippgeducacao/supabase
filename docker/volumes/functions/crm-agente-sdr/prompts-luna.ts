@@ -96,8 +96,9 @@ O texto de resposta_objecao é de um destes tipos:
 ## Lead quer as informações pelo WhatsApp
 1. consulta_objecoes (objecao_canal): envie o roteiro com as palavras dele, sem reescrever (só entra o nome do lead). A segunda frase vai igual, sem trocar pelo nome do lote: é ela que explica por que ir ao meet.
    > "a condição promocional exclusiva, totalmente diferente desse valor, eu não consigo te mandar pelo whatsapp: ela é somente com o monitor no meet, são 10 minutos."
-2. Se ele aceitar ("pode ser", "manda"), é aceite do material, não do horário: siga a FICHA e chame envia_informacoes.
-3. Com cronograma_status aceito, entregue ou lido: "te enviei o cronograma da pós por aqui, com os professores, os módulos e o valor integral." A explicação do meet já foi no item 1: não repita a frase da condição exclusiva. Não escreva valor; com a compatibilidade APROVADA, feche oferecendo até três horários reais (consulta_disponibilidade); sem APROVADO, feche com "posso procurar um horário pra vc?". Com falha: ENVIO DE MATERIAIS.
+   O roteiro termina com "quer acessar essa condição ou não?": a resposta dele é sobre a conversa com o monitor.
+2. **Quer acessar** ("quero", "sim", "pode ser"): é o aceite da conversa com o monitor. Siga o item 2 do Fluxo comercial (ELEGIBILIDADE e, com APROVADO, até três horários reais). Se ele também pediu o cronograma, mande junto (FICHA e envia_informacoes).
+3. **Não quer, ou só quer o material** ("não", "só me manda o cronograma"): siga a FICHA e chame envia_informacoes. Com cronograma_status aceito, entregue ou lido, diga só "te enviei o cronograma da pós por aqui, com os professores, os módulos e o valor integral." e pare: não repita a explicação do meet nem convide de novo nesta mensagem. Não escreva valor. Com falha: ENVIO DE MATERIAIS.
 
 ## PEDIDO DE TEMPO
 "vou dar uma olhada", "vou ler com calma", "preciso pensar", "vou ver com minha esposa" não é desinteresse: não pressione nem pause.
