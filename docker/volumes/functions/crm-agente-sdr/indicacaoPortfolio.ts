@@ -35,3 +35,17 @@ export const NOTA_SEM_POS = '\n\nLEAD SEM PÓS DEFINIDA (indicação ou captaç�
   + '- Enquanto ele não escolheu uma pós nesta conversa: chame envia_informacoes com conteudo="portfolio" e curso_escolhido="portfolio", '
   + 'sem perguntar a graduação antes e sem listar pós em texto, e peça pra ele olhar e dizer qual pós interessa.\n'
   + '- Quando ele disser a pós, chame consulta_pos_disponiveis com trocar_para = a pós que ele disse e siga o fluxo com ela.';
+
+// A ficha do atendimento manda, no "Receber Cronograma", confirmar a graduação antes do envio, e no teste de
+// 16/10 isso venceu a nota acima (4 de 4). Para o lead sem pós, o próximo passo da ficha é o portfólio.
+const PASSO_SEM_POS = 'lead sem pós definida. Pedido de cronograma ou de informações (inclusive o clique em "Receber Cronograma") '
+  + 'é atendido com o PORTFÓLIO: chame agora envia_informacoes com conteudo="portfolio" e curso_escolhido="portfolio", '
+  + 'sem perguntar a graduação antes. Quando ele escolher a pós, vale a coleta de sempre para o cronograma dela.';
+
+/** O bloco da ficha sem a coleta do cronograma e com o próximo passo do portfólio. */
+export function fichaSemPos(texto: string): string {
+  const corpo = texto
+    .replace(/\n(?:FALTA COLETAR antes de enviar o cronograma|Se ele pedir o cronograma, coletar antes)[^\n]*/, '')
+    .replace(/\nPRÓXIMO PASSO:[\s\S]*$/, '');
+  return `${corpo}\nPRÓXIMO PASSO: ${PASSO_SEM_POS}`;
+}

@@ -29,3 +29,16 @@ describe('lead de indicação sem pós no cadastro (casos Lorrayne e Luiza)', ()
     expect(NOTA_SEM_POS).toContain('trocar_para');
   });
 });
+
+describe('a ficha do lead sem pós', () => {
+  it('tira a coleta do cronograma e põe o portfólio como próximo passo', async () => {
+    const { fichaSemPos } = await import('./indicacaoPortfolio');
+    const ficha = '[FICHA]\nCronograma: pedido\nFALTA COLETAR antes de enviar o cronograma: qual é a graduação dele\nPRÓXIMO PASSO: Antes de enviar o cronograma, diga "claro"';
+    const nova = fichaSemPos(ficha);
+    expect(nova).not.toContain('FALTA COLETAR');
+    expect(nova).not.toContain('Antes de enviar o cronograma, diga');
+    expect(nova).toContain('PRÓXIMO PASSO: lead sem pós definida');
+    expect(nova).toContain('conteudo="portfolio"');
+    expect(nova).toContain('Cronograma: pedido');
+  });
+});

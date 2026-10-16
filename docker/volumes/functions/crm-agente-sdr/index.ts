@@ -60,7 +60,7 @@ import {
 import { comGanchoDoLote, cursoDaConversa, TITULO_SECAO_GANCHO } from './ganchoLote.ts';
 import { aberturaMapaLigada, blocoDaAbertura, comPassoDoMapa, faseDaAbertura } from './aberturaMapa.ts';
 import { mapaDoLead } from './followupMapa.ts';
-import { NOTA_SEM_POS, posDoCadastroDefinida } from './indicacaoPortfolio.ts';
+import { fichaSemPos, NOTA_SEM_POS, posDoCadastroDefinida } from './indicacaoPortfolio.ts';
 import { chaveDeEnsaioLigada, FALA_PARA_ROBO, jaAguardandoRobo, loteSoDeRespostaAutomatica } from './respostaAutomatica.ts';
 import { ehComandoLimpar, ehTelefoneDeTeste, limparConversaDeTeste, limpoEm } from './limparTeste.ts';
 import { carregarDesvioN8n, type DesvioN8n, vaiParaN8n } from '../_shared/desvioN8n.ts';
@@ -1104,7 +1104,8 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
     tel.registrar('llm_inicio', { volta: rodada + 1, provedor: provedor?.nome ?? 'anthropic' });
     // ▸ Monta o PEDIDO para a IA: prompt da persona + contexto (relógio, ficha, avisos) + histórico + ferramentas.
     // Aula v2: os DADOS COLETADOS já vão no contexto (contextoAulaV2), como no v9; sem ficha no pedido.
-    const baseFicha = regrasSubstitutas ? undefined : aulaPiloto ? `DADOS COLETADOS (não são um roteiro): ${JSON.stringify(ficha?.entrada ?? {})}` : ficha?.texto;
+    const baseFicha = regrasSubstitutas ? undefined : aulaPiloto ? `DADOS COLETADOS (não são um roteiro): ${JSON.stringify(ficha?.entrada ?? {})}`
+      : ctx.semPosDefinida && ficha?.texto ? fichaSemPos(ficha.texto) : ficha?.texto;
     const pedidoPrincipal = {
       promptAgente,
       contextoEntregaMateriais,
