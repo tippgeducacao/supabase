@@ -79,9 +79,16 @@ describe("ferramentas da IA Administrativa", () => {
     const ctx: ContextoFerramentas = { cliente: { rpc: vi.fn() }, modo: "prompt", entregarPrompt: entregue };
     expect((await executarFerramenta(ctx, "entregar_prompt", { tipo: "mágica", entendimento: "x" })).erro).toBe(true);
     expect((await executarFerramenta(ctx, "entregar_prompt", { tipo: "codigo", entendimento: "x" })).erro).toBe(true);
+    // Falta de informação também precisa do prompt (provisório) — decisão do usuário, 16/10.
+    const semProvisorio = await executarFerramenta(ctx, "entregar_prompt", { tipo: "informacao_insuficiente", entendimento: "x", perguntas: "a?" });
+    expect(semProvisorio.erro).toBe(true);
+    expect(semProvisorio.conteudo).toContain("PROVISÓRIO");
+    expect((await executarFerramenta(ctx, "entregar_prompt", {
+      tipo: "informacao_insuficiente", entendimento: "x", prompt: "## Decisões em aberto", perguntas: "a?",
+    })).erro).toBe(false);
     const ok = await executarFerramenta(ctx, "entregar_prompt", { tipo: "fora_do_sistema", entendimento: "Trocar o mouse.", motivo: "Equipamento." });
     expect(ok).toMatchObject({ erro: false, encerra: true });
-    expect(entregue).toHaveBeenCalledWith({ tipo: "fora_do_sistema", entendimento: "Trocar o mouse.", motivo: "Equipamento.", prompt: null, perguntas: null });
+    expect(entregue).toHaveBeenLastCalledWith({ tipo: "fora_do_sistema", entendimento: "Trocar o mouse.", motivo: "Equipamento.", prompt: null, perguntas: null });
   });
 
   it("entregar_prompt fora do modo prompt é recusado", async () => {

@@ -204,11 +204,12 @@ export const FERRAMENTA_ENTREGAR_PROMPT = {
     properties: {
       tipo: { type: "string", enum: [...TIPOS_ENTREGA] },
       entendimento: { type: "string", description: "Em 2 a 4 frases: o que a pessoa está pedindo e onde isso vive no sistema." },
-      motivo: { type: "string", description: "Para fora_do_sistema/informacao_insuficiente: por que não há prompt. Para os outros: opcional." },
+      motivo: { type: "string", description: "fora_do_sistema: por que não há prompt. informacao_insuficiente: em uma frase, o que falta definir. Para os outros: opcional." },
       prompt: {
         type: "string",
         description: "Para 'codigo': o prompt completo, em markdown, para colar no Claude Code (formato de prompt_dev). Para 'operacao': " +
-          "o passo a passo na tela e, se valer a pena automatizar, o prompt. Vazio nos outros tipos.",
+          "o passo a passo na tela e, se valer a pena automatizar, o prompt. Para 'informacao_insuficiente': o PROMPT PROVISÓRIO " +
+          "(com 'Suposições' e 'Decisões em aberto — confirmar antes de implementar'). Vazio só em 'fora_do_sistema'.",
       },
       perguntas: { type: "string", description: "O que perguntar a quem pediu para fechar o entendimento (lista curta). Opcional." },
     },
@@ -477,8 +478,11 @@ export async function executarFerramenta(
           prompt: texto(entrada.prompt, "prompt", { max: 30_000 }),
           perguntas: texto(entrada.perguntas, "perguntas", { max: 4000 }),
         };
-        if ((entrega.tipo === "codigo" || entrega.tipo === "operacao") && !entrega.prompt) {
-          throw new EntradaInvalida("tipo codigo/operacao precisa do prompt.");
+        // Só "fora do sistema" fica sem prompt; falta de informação gera prompt PROVISÓRIO.
+        if (entrega.tipo !== "fora_do_sistema" && !entrega.prompt) {
+          throw new EntradaInvalida(entrega.tipo === "informacao_insuficiente"
+            ? "informacao_insuficiente precisa do prompt PROVISÓRIO (com Suposições e Decisões em aberto)."
+            : "tipo codigo/operacao precisa do prompt.");
         }
         entradaAuditoria = entrega.tipo;
         etapa.detalhe = entrega.tipo;

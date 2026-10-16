@@ -345,7 +345,8 @@ async function processarPrompt(tarefa: TarefaParaPrompt): Promise<void> {
     const final = resumo.textoFinal.trim();
     const resultado = e
       ? {
-        status: (e.tipo === "codigo" || e.tipo === "operacao") && e.prompt ? "pronto" : "sem_prompt",
+        // Com prompt = pronto (inclusive o PROVISÓRIO de "falta informação"); sem = só "fora do sistema".
+        status: e.prompt ? "pronto" : "sem_prompt",
         tipo: e.tipo,
         entendimento: e.entendimento,
         motivo: e.motivo,
