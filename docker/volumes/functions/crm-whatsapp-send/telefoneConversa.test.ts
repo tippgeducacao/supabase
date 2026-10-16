@@ -46,6 +46,14 @@ describe('destino internacional do envio WhatsApp', () => {
     expect(phoneVariants('5546999746930')).toEqual(expect.arrayContaining(['46999746930', '5546999746930', '4699746930', '554699746930']));
   });
 
+  it('celular do Peru com "+" (forma de sac_contatos) sai sem o 55 — aluna de 16/10/2026', () => {
+    // 51 + 9xxxxxxxx tem a cara de um celular de Porto Alegre; só o "+" desfaz a dúvida.
+    expect(telefoneEnviavel('+51940203596')).toBe(true);
+    expect(digitosParaEnvio('+51940203596')).toBe('51940203596');
+    expect(phoneVariants('+51940203596')).toEqual(['51940203596']);
+    expect(canonicalConversationPhone('+51940203596')).toBe('51940203596');
+  });
+
   it('continua impedindo o destino impossível da LP', () => {
     expect(telefoneEnviavel('5553474634534')).toBe(false);
     expect(digitosParaEnvio('5553474634534')).toBeNull();
