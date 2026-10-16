@@ -69,27 +69,13 @@ const admin = () => createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSe
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
- * Chamada do banco (cron/cutucada). O banco manda a chave de serviço do Vault
- * (`_get_service_role_key()`), que é OUTRO JWT de service_role — mesmo segredo, emitido em outra
- * data. Comparar o texto com o env deu 403 no primeiro tick (16/10/2026, 13:50). Vale: igual ao
- * env, ou um JWT com role=service_role cuja assinatura o PostgREST aceita (ia_admin_pode = true).
+ * Chamada do banco (cron/cutucada): a chave de serviço ATUAL das edges, que o banco lê do Vault
+ * em `edge_service_role_key`. ⚠️ `_get_service_role_key()` (`app_service_role_key`) é a chave do
+ * PROJETO ANTIGO, assinada com outro segredo — com ela o primeiro tick levou 403 (16/10/2026,
+ * 13:50). Mesma armadilha do e-mail dos Fluxos (migration 20260928235900).
  */
 async function ehServiceRole(token: string): Promise<boolean> {
-  if (!token) return false;
-  if (token === SERVICE_ROLE) return true;
-  try {
-    const parte = token.split(".")[1] ?? "";
-    const b64 = parte.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(parte.length / 4) * 4, "=");
-    if (JSON.parse(atob(b64))?.role !== "service_role") return false;
-    const sb = createClient(SUPABASE_URL, ANON_KEY, {
-      global: { headers: { Authorization: `Bearer ${token}` } },
-      auth: { persistSession: false },
-    });
-    const { data, error } = await sb.rpc("ia_admin_pode");
-    return !error && data === true;
-  } catch {
-    return false;
-  }
+  return !!token && token === SERVICE_ROLE;
 }
 
 /** Mesma ordem das outras IAs: chave cadastrada no sistema, depois env. */
