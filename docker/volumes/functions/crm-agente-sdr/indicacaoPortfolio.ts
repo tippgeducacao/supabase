@@ -55,3 +55,27 @@ export function fichaSemPos(texto: string): string {
     .replace(/\nPRÓXIMO PASSO:[\s\S]*$/, '');
   return `${corpo}\nPRÓXIMO PASSO: ${PASSO_SEM_POS}`;
 }
+
+// No teste de 16/10 com as falas reais ("Que pós graduação?", "Não sei", "Vcs que mandaram mensagem") o modelo
+// falou do portfólio sem mandar (Simone, 2 de 2), disse que não conseguia mandar sem tentar e mandou duas vezes.
+// A 1ª resposta do lead que não é recusa recebe o portfólio pelo CÓDIGO; depois, o modelo conversa sabendo que
+// ele já foi.
+const RE_RECUSA = /\b(?:n[aã]o (?:me )?notifiqu|n[aã]o (?:tenho|tenho mais) interesse|n[aã]o quero|para de|pare de|sair|remov|descadastr|n[aã]o me (?:mande|chame|ligue))/i;
+
+/** A fala do lead é uma recusa (vai para a saída de sempre, sem portfólio)? */
+export function recusaDaIndicacao(fala: string): boolean {
+  return RE_RECUSA.test(String(fala ?? ''));
+}
+
+/** O portfólio já foi para este lead nesta conversa (pela IA ou por um vendedor)? */
+export function portfolioJaEnviado(historico: readonly { role?: string; content?: unknown }[]): boolean {
+  return historico.some((m) => {
+    if (m?.role !== 'assistant') return false;
+    const t = typeof m.content === 'string' ? m.content
+      : Array.isArray(m.content) ? m.content.map((b: any) => (b?.type === 'text' ? b.text : '')).join(' ') : '';
+    return /te enviei (?:aqui )?o portf[oó]lio|solicitou o envio do documento "portf[oó]lio/i.test(t);
+  });
+}
+
+export const NOTA_PORTFOLIO_ENVIADO = '\n- O portfólio JÁ FOI ENVIADO nesta conversa: não chame envia_informacoes com o portfólio de novo e não repita a apresentação. '
+  + 'Responda o que ele disse em uma frase e peça pra ele dizer qual pós do portfólio interessa.';

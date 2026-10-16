@@ -42,3 +42,18 @@ describe('a ficha do lead sem pós', () => {
     expect(nova).toContain('Cronograma: pedido');
   });
 });
+
+describe('o portfólio da indicação sai pelo código', () => {
+  it('recusa não recebe portfólio; dúvida e "não sei" recebem', async () => {
+    const { recusaDaIndicacao } = await import('./indicacaoPortfolio');
+    for (const f of ['Não me notifique', 'não tenho interesse', 'para de me mandar mensagem', 'Sair']) expect(recusaDaIndicacao(f)).toBe(true);
+    for (const f of ['Que pós graduação?', 'Não sei', 'Vcs que mandaram mensagem', 'quem é?', 'Receber Cronograma']) expect(recusaDaIndicacao(f)).toBe(false);
+  });
+
+  it('portfólio já enviado: pela fala da IA ou pelo vendedor', async () => {
+    const { portfolioJaEnviado, FALA_DEPOIS_DO_PORTFOLIO_INDICACAO } = await import('./indicacaoPortfolio');
+    expect(portfolioJaEnviado([{ role: 'assistant', content: FALA_DEPOIS_DO_PORTFOLIO_INDICACAO }])).toBe(true);
+    expect(portfolioJaEnviado([{ role: 'assistant', content: '[ATENDIMENTO_HUMANO] O atendente humano Flávia solicitou o envio do documento "Portfolio_2026.pdf"' }])).toBe(true);
+    expect(portfolioJaEnviado([{ role: 'assistant', content: 'oi' }, { role: 'user', content: 'te enviei o portfólio' }])).toBe(false);
+  });
+});

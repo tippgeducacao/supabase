@@ -60,7 +60,8 @@ import {
 import { comGanchoDoLote, cursoDaConversa, TITULO_SECAO_GANCHO } from './ganchoLote.ts';
 import { aberturaMapaLigada, blocoDaAbertura, comPassoDoMapa, faseDaAbertura } from './aberturaMapa.ts';
 import { mapaDoLead } from './followupMapa.ts';
-import { fichaSemPos, NOTA_SEM_POS, posDoCadastroDefinida } from './indicacaoPortfolio.ts';
+import { fichaSemPos, NOTA_PORTFOLIO_ENVIADO, NOTA_SEM_POS, portfolioJaEnviado, posDoCadastroDefinida, recusaDaIndicacao, FALA_DEPOIS_DO_PORTFOLIO_INDICACAO } from './indicacaoPortfolio.ts';
+import { enviarPortfolio } from './portfolio.ts';
 import { chaveDeEnsaioLigada, FALA_PARA_ROBO, jaAguardandoRobo, loteSoDeRespostaAutomatica } from './respostaAutomatica.ts';
 import { ehComandoLimpar, ehTelefoneDeTeste, limparConversaDeTeste, limpoEm } from './limparTeste.ts';
 import { carregarDesvioN8n, type DesvioN8n, vaiParaN8n } from '../_shared/desvioN8n.ts';
@@ -811,7 +812,10 @@ async function definirAgente(pre: PreRouter, provedor: ProvedorIA | null, tel: T
     promptAgente = gancho.prompt;
     tel.registrar('gancho_lote', gancho.trocas);
   }
-  if (ctx.semPosDefinida) contextoEfetivo += NOTA_SEM_POS;
+  if (ctx.semPosDefinida) {
+    contextoEfetivo += NOTA_SEM_POS;
+    if (portfolioJaEnviado(await carregarHistorico(supabase, remotejid))) contextoEfetivo += NOTA_PORTFOLIO_ENVIADO;
+  }
   // Conhecer a pessoa antes do convite, pelo mapa do Wellinton (aberturaMapa.ts, 16/10/2026): só na
   // abertura de vendas da Luna, com a chave. Até duas perguntas do mapa; depois, a abertura do lote.
   if (agenteEfetivo === 'agente_validacao' && persona === 'qualificador' && !ehCampanha && !aulaPiloto && !regrasSubstitutas
@@ -964,6 +968,26 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
     }
     tel.registrar('rodada_fim', { voltas_llm: 0, respondeu: !jaAguardando, motivo: 'resposta_automatica' }, Date.now() - inicioRodada);
     return;
+  }
+
+  // ▸ Indicação sem pós (indicacaoPortfolio.ts, 16/10/2026): a 1ª resposta do lead que não é recusa recebe o
+  //   portfólio e a apresentação pelo código. Falha no envio: segue o modelo, com a nota do portfólio.
+  if (ctx.semPosDefinida && !recusaDaIndicacao(conteudo) && !portfolioJaEnviado(await carregarHistorico(supabase, remotejid))) {
+    const envio = await enviarPortfolio(ctx, 'portfolio-indicacao');
+    tel.registrar('portfolio_indicacao', { enviado: envio.portfolio_enviado === true });
+    if (envio.portfolio_enviado === true) {
+      if (!aberturaControlada) await gravarMensagem(supabase, remotejid, { role: 'assistant', content: FALA_DEPOIS_DO_PORTFOLIO_INDICACAO });
+      const enviada = await enviarComAberturaNumero({
+        banco: supabase, telefone, interacaoId: tel.rodadaId, texto: FALA_DEPOIS_DO_PORTFOLIO_INDICACAO,
+        sinal: aberturaControlada && aplicarTroca ? sinalTroca : null,
+        registrar: (tipo, dados) => tel.registrar(tipo, dados),
+        enviar: (fala, controle) => enviarResposta(ctx, fala, renovar, tel, () => iaPausada(remotejid), undefined,
+          aberturaControlada ? 'codigo' : fracionamentoAtual(), controle),
+      });
+      if (aberturaControlada && enviada.envio.aceitos) await gravarMensagem(supabase, remotejid, { role: 'assistant', content: enviada.texto });
+      tel.registrar('rodada_fim', { voltas_llm: 0, respondeu: true, motivo: 'portfolio_indicacao' }, Date.now() - inicioRodada);
+      return;
+    }
   }
 
   // ── RETENÇÃO PENDENTE ⇒ DESLIGA AS ESTEIRAS (2026-07-14) ──────────────────
