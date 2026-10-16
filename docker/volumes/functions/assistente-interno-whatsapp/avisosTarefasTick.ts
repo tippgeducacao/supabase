@@ -25,6 +25,13 @@ interface ItemFila {
   sugestao: Sugestao | null;
 }
 
+/** Nome de quem abriu a tarefa (gt_tasks.created_by não tem vínculo declarado com profiles). */
+async function nomeDe(admin: any, userId: string | null): Promise<string | null> {
+  if (!userId) return null;
+  const { data } = await admin.from("profiles").select("name").eq("id", userId).maybeSingle();
+  return data?.name ?? null;
+}
+
 const dormir = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function reivindicar(admin: any, item: ItemFila): Promise<boolean> {
@@ -46,13 +53,14 @@ async function enviarItem(admin: any, item: ItemFila): Promise<void> {
   if (e1) throw new Error(`gt_avisos_whatsapp: ${e1.message}`);
   if (!aviso?.ativo) throw new Error("aviso desligado");
 
-  const [{ data: tarefa }, { data: etapa }, autor] = await Promise.all([
-    admin.from("gt_tasks").select("title, description, created_by, creator:created_by(name)").eq("id", item.task_id).maybeSingle(),
+  const [{ data: tarefa, error: eTarefa }, { data: etapa }, autor] = await Promise.all([
+    admin.from("gt_tasks").select("title, description, created_by").eq("id", item.task_id).maybeSingle(),
     admin.from("gt_list_statuses").select("name").eq("id", aviso.status_id).maybeSingle(),
     item.autor_id
       ? admin.from("profiles").select("name").eq("id", item.autor_id).maybeSingle().then((r: any) => r.data)
       : Promise.resolve(null),
   ]);
+  if (eTarefa) throw new Error(`gt_tasks: ${eTarefa.message}`); // erro de consulta tenta de novo
   if (!tarefa) throw new Error("tarefa apagada");
 
   // Sugestão de responsável: calculada uma vez e guardada na fila (nova tentativa de envio reaproveita).
@@ -61,7 +69,7 @@ async function enviarItem(admin: any, item: ItemFila): Promise<void> {
     sugestao = await sugerirResponsavel(admin, item.aviso_id, {
       titulo: tarefa.title ?? "",
       descricaoHtml: tarefa.description ?? null,
-      criador: (tarefa as any).creator?.name ?? null,
+      criador: await nomeDe(admin, tarefa.created_by),
     });
     if (sugestao) await admin.from("gt_avisos_whatsapp_fila").update({ sugestao }).eq("id", item.id);
   }
@@ -118,8 +126,9 @@ export async function processarAvisosTarefas(admin: any): Promise<Record<string,
  * sem enviar nada e sem mexer na fila — é como se testa a análise contra tarefas reais.
  */
 export async function sugerirParaTarefa(admin: any, taskId: string): Promise<Record<string, unknown>> {
-  const { data: tarefa } = await admin.from("gt_tasks")
-    .select("id, title, description, creator:created_by(name)").eq("id", taskId).maybeSingle();
+  const { data: tarefa, error } = await admin.from("gt_tasks")
+    .select("id, title, description, created_by").eq("id", taskId).maybeSingle();
+  if (error) return { erro: `gt_tasks: ${error.message}` };
   if (!tarefa) return { erro: "tarefa não encontrada" };
   const { data: resp } = await admin.from("gt_avisos_responsaveis")
     .select("aviso_id").eq("ativo", true).limit(1).maybeSingle();
@@ -127,7 +136,7 @@ export async function sugerirParaTarefa(admin: any, taskId: string): Promise<Rec
   const sugestao = await sugerirResponsavel(admin, resp.aviso_id, {
     titulo: tarefa.title ?? "",
     descricaoHtml: tarefa.description ?? null,
-    criador: (tarefa as any).creator?.name ?? null,
+    criador: await nomeDe(admin, tarefa.created_by),
   });
   return { titulo: tarefa.title, sugestao };
 }
