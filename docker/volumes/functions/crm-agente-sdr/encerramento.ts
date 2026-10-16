@@ -28,8 +28,10 @@ const DESPEDIDAS: Record<MotivoEncerramento, string> = {
   ligacao: 'beleza, já vou te ligar.',
   aluno: 'esse convite era pra quem ainda não é aluno, desculpa a confusão. '
     + 'vou te direcionar pra alguém do suporte, que cuida da sua turma.',
-  incompativel: 'nossas pós seguem o modelo lato sensu, que pede graduação completa compatível pra '
-    + 'matrícula. fica à vontade pra nos procurar futuramente, vai ser um prazer te ajudar.',
+  // 16/10/2026: "pede graduação completa compatível" fazia quem TEM graduação perguntar "o que seria
+  // compatível?" (2 leads no mesmo dia). A frase diz que a graduação dele não está entre as aceitas.
+  incompativel: 'essa pós aceita algumas formações específicas, e a sua graduação não está entre elas. '
+    + 'fica à vontade pra nos procurar futuramente, vai ser um prazer te ajudar.',
   proxima_turma: 'fechado, deixo anotado pra te chamar quando abrir a próxima turma. obrigado!',
   cancelamento: 'tranquilo, já vou verificar isso pra vc aqui.',
   desinteresse: 'tranquilo, agradeço sua preferência pelo Grupo PPG e fico à disposição se precisar. 🙌',
@@ -54,6 +56,16 @@ export function despedidaDe(e: Encerramento | null): string | null {
  * conferência de compatibilidade no histórico. null = a última conferência não foi esse caso.
  */
 export function posExclusivaDaConversa(historico: readonly { role?: string; content?: unknown }[] | null | undefined): string | null {
+  const r = ultimaReprovacao(historico);
+  return r?.exclusiva ? r.nome : null;
+}
+
+/** A pós que a conferência mais recente reprovou (exclusiva de vet ou não); null = a última não reprovou. */
+export function posReprovadaDaConversa(historico: readonly { role?: string; content?: unknown }[] | null | undefined): string | null {
+  return ultimaReprovacao(historico)?.nome ?? null;
+}
+
+function ultimaReprovacao(historico: readonly { role?: string; content?: unknown }[] | null | undefined): { nome: string; exclusiva: boolean } | null {
   for (let i = (historico?.length ?? 0) - 1; i >= 0; i--) {
     const conteudo = historico![i]?.content;
     if (!Array.isArray(conteudo)) continue;
@@ -62,9 +74,9 @@ export function posExclusivaDaConversa(historico: readonly { role?: string; cont
       if (bloco?.type !== 'tool_result' || typeof bloco.content !== 'string') continue;
       let r: Record<string, unknown> | null = null;
       try { r = JSON.parse(bloco.content); } catch { continue; }
-      if (!r || typeof r !== 'object' || !('curso_exclusivo_veterinario' in r)) continue;
+      if (!r || typeof r !== 'object' || !('pode_cursar' in r || 'curso_exclusivo_veterinario' in r)) continue;
       const nome = String(r.curso_solicitado ?? '').replace(/^\s*(?:P[ÓO]S|MBA)\s*\|\s*/i, '').trim();
-      return r.curso_exclusivo_veterinario === true && r.pode_cursar === false && nome ? nome : null;
+      return r.pode_cursar === false && nome ? { nome, exclusiva: r.curso_exclusivo_veterinario === true } : null;
     }
   }
   return null;
@@ -76,9 +88,14 @@ export function posExclusivaDaConversa(historico: readonly { role?: string; cont
  * recebeu "pede graduação completa compatível", que soa como se ela não tivesse formação. Quando a
  * pós pedida é exclusiva de veterinário, a despedida diz isso.
  */
-export function respostaDoEncerramento(e: Encerramento | null, opcoes: { posExclusiva?: string | null } = {}): string | null {
+export function respostaDoEncerramento(e: Encerramento | null,
+  opcoes: { posExclusiva?: string | null; posReprovada?: string | null } = {}): string | null {
   if (e && opcoes.posExclusiva && motivoDoEncerramento(e) === 'incompativel') {
     return `a pós de ${opcoes.posExclusiva.toLowerCase()} é exclusiva para médicos veterinários. `
+      + 'fica à vontade pra nos procurar futuramente, vai ser um prazer te ajudar.';
+  }
+  if (e && opcoes.posReprovada && motivoDoEncerramento(e) === 'incompativel') {
+    return `a pós de ${opcoes.posReprovada.toLowerCase()} aceita algumas formações específicas, e a sua graduação não está entre elas. `
       + 'fica à vontade pra nos procurar futuramente, vai ser um prazer te ajudar.';
   }
   if (e?.tool === 'agendar_retorno' && e.input.tipo === 'formatura') {

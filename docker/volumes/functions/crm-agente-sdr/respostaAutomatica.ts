@@ -84,3 +84,25 @@ export async function respostaAutomaticaLigada(supabase: { from: (tabela: string
     return fim.length === 8 && lista.some((t) => String(t).replace(/\D/g, '').slice(-8) === fim);
   } catch { return false; }
 }
+
+/** Chave de ensaio genérica: `coluna` ligada para todos, ou o telefone em `coluna_telefones`. Falha = desligada. */
+export async function chaveDeEnsaioLigada(supabase: { from: (tabela: string) => any }, coluna: string, telefone: string | null | undefined): Promise<boolean> {
+  try {
+    const { data, error } = await supabase.from('crm_agente_sdr_config').select(`${coluna}, ${coluna}_telefones`).eq('id', 1).maybeSingle();
+    if (error || !data) return false;
+    if (data[coluna] === true) return true;
+    const fim = String(telefone ?? '').replace(/\D/g, '').slice(-8);
+    const lista: unknown[] = Array.isArray(data[`${coluna}_telefones`]) ? data[`${coluna}_telefones`] : [];
+    return fim.length === 8 && lista.some((t) => String(t).replace(/\D/g, '').slice(-8) === fim);
+  } catch { return false; }
+}
+
+/**
+ * O lote do agente é só mensagem pronta (16/10/2026)? A IA respondia "fico no aguardo" ao robô (34 vezes
+ * em 28 leads numa tarde, às vezes duas seguidas) e, ao "não estamos disponíveis no momento", perguntava
+ * "qual o melhor horário pra eu te chamar de novo?", que deixava o follow-up esperando para sempre (13
+ * leads). Arquivo ou clique de botão nunca é mensagem pronta.
+ */
+export function loteSoDeRespostaAutomatica(itens: readonly any[]): boolean {
+  return itens.length > 0 && itens.every((i) => !i?.arquivo && !i?.clique && ehRespostaAutomatica(String(i?.mensagem ?? '')));
+}

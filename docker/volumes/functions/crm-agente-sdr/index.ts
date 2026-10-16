@@ -42,7 +42,7 @@ import { AGENTE_AULA, type AulaParaPrompt, montarVarsAula, semCertificadoAntesDo
 import { AULA_V2_ABERTURA, AULA_V2_REGRAS, varsAulaV2 } from './prompts-aula-v2.ts';
 import { aulaV2Ligada, contextoAulaV2, toolsDaAulaV2 } from './aulaV2.ts';
 import { comBlocoDaEscola, comLinkPedido, comPresenteNaDespedida, jaTemOPresente, LINK_ESCOLA_GRATUITA } from './escolaGratuita.ts';
-import { posExclusivaDaConversa, respostaDoEncerramento, toolConcluida, type Encerramento } from './encerramento.ts';
+import { posExclusivaDaConversa, posReprovadaDaConversa, respostaDoEncerramento, toolConcluida, type Encerramento } from './encerramento.ts';
 import { confirmacaoDoResultado, falaEntregaConfirmacao, textoConfirmacaoAgendamento, type ConfirmacaoAgendamento } from './confirmacaoAgendamento.ts';
 import { blocoPerguntasRecentes, falasDoLead } from './perguntasRecentes.ts';
 import { AVISO_CONSULTA_REPETIDA, MemoriaDeConsultas } from './consultaRepetida.ts';
@@ -60,6 +60,7 @@ import {
 import { comGanchoDoLote, cursoDaConversa, TITULO_SECAO_GANCHO } from './ganchoLote.ts';
 import { aberturaMapaLigada, blocoDaAbertura, comPassoDoMapa, faseDaAbertura } from './aberturaMapa.ts';
 import { mapaDoLead } from './followupMapa.ts';
+import { chaveDeEnsaioLigada, loteSoDeRespostaAutomatica } from './respostaAutomatica.ts';
 import { ehComandoLimpar, ehTelefoneDeTeste, limparConversaDeTeste, limpoEm } from './limparTeste.ts';
 import { carregarDesvioN8n, type DesvioN8n, vaiParaN8n } from '../_shared/desvioN8n.ts';
 import {
@@ -363,6 +364,12 @@ async function prepararAntesDoRouter(remotejid: string, itensDoLote: any[], tel:
     arquivos: itens.filter((i: any) => i.arquivo).length,
     wa_account_id: [...itens].reverse().find((i: any) => i?.wa_account_id != null)?.wa_account_id ?? null,
   });
+  // Mensagem pronta do WhatsApp do lead (respostaAutomatica.ts, 16/10/2026): lote só de robô não tem
+  // resposta. A mensagem fica no histórico (o follow-up a lê etiquetada) e o relógio do lead não anda.
+  if (loteSoDeRespostaAutomatica(itens) && await chaveDeEnsaioLigada(supabase, 'agente_ignora_resposta_automatica', String(remotejid).split('@')[0])) {
+    tel.registrar('resposta_automatica_ignorada', { mensagens: itens.length });
+    return null;
+  }
   // Contexto da CONVERSA: conta/lead/oportunidade vêm do último item do buffer QUE
   // TEM o campo — o POST de drenagem do reconciliador (drenar_orfao) chegava SEM
   // wa_account_id e, sendo o último do lote, zerava o ctx: a resposta caía na 1ª
@@ -1214,7 +1221,7 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
         // filtro retirava só algumas frases. Texto de tool_use NUNCA é resposta.
         // Encerramentos conhecidos têm despedida determinística, preservando o
         // adeus mesmo se o modelo escreveu só bastidor ou nenhum texto.
-        const despedida = respostaDoEncerramento(encerramento, { posExclusiva: posExclusivaDaConversa(messages) });
+        const despedida = respostaDoEncerramento(encerramento, { posExclusiva: posExclusivaDaConversa(messages), posReprovada: posReprovadaDaConversa(messages) });
         if (despedida) {
           const comPresente = comPresenteNaDespedida(despedida, encerramento, conversaTexto(messages), estaNaEscola);
           if (comPresente.anexou) tel.registrar('presente_escola_anexado', { onde: 'despedida_com_tool' });

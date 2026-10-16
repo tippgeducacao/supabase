@@ -57,3 +57,14 @@ describe('a mensagem pronta do WhatsApp do lead', () => {
     expect(await respostaAutomaticaLigada(banco(null, { message: 'x' }), '5546988166051')).toBe(false);
   });
 });
+
+describe('o lote do agente só com mensagem pronta', () => {
+  it('só robô: sim; robô junto de gente, arquivo ou clique: não', async () => {
+    const { loteSoDeRespostaAutomatica } = await import('./respostaAutomatica');
+    expect(loteSoDeRespostaAutomatica([{ mensagem: AUTOMATICAS[0] }, { mensagem: AUTOMATICAS[3] }])).toBe(true);
+    expect(loteSoDeRespostaAutomatica([{ mensagem: AUTOMATICAS[0] }, { mensagem: 'sou eu mesma, tenho interesse' }])).toBe(false);
+    expect(loteSoDeRespostaAutomatica([{ mensagem: AUTOMATICAS[2], arquivo: { tipo: 'image' } }])).toBe(false);
+    expect(loteSoDeRespostaAutomatica([{ mensagem: AUTOMATICAS[2], clique: { botao: 'Quero' } }])).toBe(false);
+    expect(loteSoDeRespostaAutomatica([])).toBe(false);
+  });
+});

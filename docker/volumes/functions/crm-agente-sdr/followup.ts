@@ -36,7 +36,8 @@ import {
   dadosDaEscolha, dadosDoToque, escolhaDoToque, escopoDoMapa, falaDoToque, FOLLOWUP_MAPA_SYSTEM, followupMapaLigado, mapaDoLead, semContextoRepetido,
   semGenericasLigado, semRetomadasGenericas, soRetomadasConcretas, toqueDoMapa, usadosDoMapa,
 } from './followupMapa.ts';
-import { ETIQUETA_RESPOSTA_AUTOMATICA, marcarRespostasAutomaticas, respostaAutomaticaLigada } from './respostaAutomatica.ts';
+import { chaveDeEnsaioLigada, ETIQUETA_RESPOSTA_AUTOMATICA, marcarRespostasAutomaticas, respostaAutomaticaLigada } from './respostaAutomatica.ts';
+import { jaPerguntou } from './aberturaMapa.ts';
 import { cursoDaConversa } from './ganchoLote.ts';
 import { registrarNaJornada } from './fichaAtendimento.ts';
 import { carregarAulaParaFollowup, contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from './contextoAulaPiloto.ts';
@@ -356,7 +357,7 @@ export async function gerarFollowup(
   tel: Telemetria,
   history: Msg[],
   contextoMateriais = '',
-  opcoes?: { provedor: ProvedorIA; contexto: string; mapa?: boolean; semGenericas?: boolean },
+  opcoes?: { provedor: ProvedorIA; contexto: string; mapa?: boolean; semGenericas?: boolean; semRepeticao?: boolean; semCatalogo?: boolean },
 ): Promise<{ message: string; final_answer: string; provedorResposta: 'openai' | 'anthropic'; perguntaCarreira?: { escopo: string; pergunta_id: string } }> {
   const remotejid = lead.remotejid;
   const tentativaAtual = (opcoes ? contarTentativasDoCiclo(history) : contarTentativas(history)) + 1;
@@ -379,6 +380,12 @@ export async function gerarFollowup(
   const comMapa = opcoes && planoCarreira && lead.contexto_campanha?.persona !== 'aula' && lead.jornada?.coleta?.atua_na_area !== 'nao'
     && (opcoes.mapa ?? await followupMapaLigado(supabase, lead.numero_formatado ?? remotejid))
     ? await mapaDoLead(supabase, curso) : null;
+  // Catálogo antigo de perguntas técnicas (16/10/2026): fora do mapa, ele dava "no crédito rural, a pós
+  // aborda análise e concessão de crédito. que parte desse processo…?" (18 de 106 envios numa tarde depois
+  // que as genéricas saíram). Com a chave, sobram a pendência, a agenda e o material.
+  if (planoCarreira && !comMapa && (opcoes?.semCatalogo ?? await chaveDeEnsaioLigada(supabase, 'followup_sem_catalogo', lead.numero_formatado ?? remotejid))) {
+    planoCarreira = { ...planoCarreira, perguntas: [] };
+  }
   const usados = comMapa ? usadosDoMapa(lead.jornada, comMapa.mapa.grupo) : new Set<string>();
   // Sem perfil registrado, o toque 2 leva a pergunta de cada perfil e o modelo escolhe pela conversa.
   const escolha = comMapa ? escolhaDoToque(comMapa.mapa, lead, tentativaAtual, usados) : null;
@@ -451,6 +458,16 @@ export async function gerarFollowup(
     if (motivo) {
       tel.registrar('followup_conteudo_recusado', { motivo, pergunta_id: out.pergunta_id });
       out = { message: '', final_answer: motivo, pergunta_id: '' };
+    }
+  }
+  // Pergunta que já fizemos, com outras palavras (16/10/2026, caso Yasmim): 16 min depois de "em que mês e
+  // ano vc pretende concluir…?", o toque 1 mandou "em que mês e ano você prevê concluir…?". A conferência de
+  // repetição da carreira exige 80% das palavras iguais; esta (jaPerguntou) tolera "vc"/"você" e sinônimo solto.
+  if (out.message && opcoes && (opcoes.semRepeticao ?? await chaveDeEnsaioLigada(supabase, 'followup_sem_repeticao', lead.numero_formatado ?? remotejid))) {
+    const pergunta = out.message.match(/[^.!?\n]*\?/g)?.at(-1) ?? '';
+    if (pergunta && jaPerguntou(pergunta, history)) {
+      tel.registrar('followup_conteudo_recusado', { motivo: 'pergunta_ja_feita', pergunta_id: out.pergunta_id || null });
+      out = { message: '', final_answer: 'pergunta_ja_feita', pergunta_id: '' };
     }
   }
   tel.registrar('llm_chamada', {

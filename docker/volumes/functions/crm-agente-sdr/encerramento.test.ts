@@ -63,7 +63,10 @@ describe('despedida quando a pós pedida é exclusiva de médico veterinário', 
   });
 
   it('sem pós exclusiva, ou em outro tipo de encerramento, nada muda', () => {
-    expect(respostaDoEncerramento(pausa)).toContain('graduação completa compatível');
+    expect(respostaDoEncerramento(pausa)).toContain('aceita algumas formações específicas, e a sua graduação não está entre elas');
+    // 16/10/2026: pós reprovada que não é exclusiva de vet vai pelo nome.
+    expect(respostaDoEncerramento(pausa, { posReprovada: 'Comportamento e Bem-estar Animal' }))
+      .toBe('a pós de comportamento e bem-estar animal aceita algumas formações específicas, e a sua graduação não está entre elas. fica à vontade pra nos procurar futuramente, vai ser um prazer te ajudar.');
     expect(respostaDoEncerramento({ tool: 'pausa_ia', input: { tipo: 'nao_perturbe' } }, { posExclusiva: 'Sanidade Avícola' })).toContain('agradeço sua preferência');
     expect(respostaDoEncerramento({ tool: 'pausa_ia', input: { tipo: 'sem_graduacao' } }, { posExclusiva: 'Sanidade Avícola' })).toContain('quando concluir');
   });

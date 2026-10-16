@@ -39,7 +39,7 @@ import { alertaSaudacao, garantirSaudacao } from './saudacao.ts';
 import { INSTRUCAO_AULA_PILOTO } from './contextoAulaPiloto.ts';
 import { PRAZO_MODELO_PILOTO_MS, RESPOSTA_MODELO_INDISPONIVEL } from './prazoModelo.ts';
 import { AVISO_CONSULTA_REPETIDA, MemoriaDeConsultas } from './consultaRepetida.ts';
-import { posExclusivaDaConversa, respostaDoEncerramento, toolConcluida, type Encerramento } from './encerramento.ts';
+import { posExclusivaDaConversa, posReprovadaDaConversa, respostaDoEncerramento, toolConcluida, type Encerramento } from './encerramento.ts';
 import { confirmacaoDoResultado, falaEntregaConfirmacao, textoConfirmacaoAgendamento, type ConfirmacaoAgendamento } from './confirmacaoAgendamento.ts';
 import { comLinkPedido, comPresenteNaDespedida, jaTemOPresente } from './escolaGratuita.ts';
 import { semCertificadoAntesDoFim } from './prompts-aula.ts';
@@ -646,7 +646,8 @@ export async function gravarResultados(
     const cFim = concluidas.find((c) => TOOLS_QUE_ENCERRAM.has(c.name));
     if (cFim) e.encerramento = { tool: cFim.name, input: (cFim.input ?? {}) as Record<string, unknown> };
     if (!outputs.some((o) => !toolConcluida(o))) {
-      const despedida = respostaDoEncerramento(e.encerramento, { posExclusiva: posExclusivaDaConversa(ctx.historicoConversa) });
+      const despedida = respostaDoEncerramento(e.encerramento, { posExclusiva: posExclusivaDaConversa(ctx.historicoConversa),
+        posReprovada: posReprovadaDaConversa(ctx.historicoConversa) });
       if (despedida) {
         guardarCtx(e, ctx);
         return { acao: 'enviar', estado: e, tipo: 'despedida', texto: despedida };

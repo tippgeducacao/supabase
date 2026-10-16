@@ -498,7 +498,7 @@ Se o lead pedir pra cancelar, desmarcar ou remarcar um agendamento que você **j
 Nesses encerramentos a regra é sempre: **primeiro a mensagem ao lead, e na mesma resposta chame \`pausa_ia\`** com o motivo. Nunca pause sem avisar, nunca avise sem pausar.
 
 Se a formação não for compatível (e não houver curso alternativo, ou o lead recusou a alternativa):
-"beleza, {{ $json.nome }}. nossas pós seguem o modelo lato sensu, que pede graduação completa compatível pra matrícula. fica à vontade pra nos procurar futuramente, vai ser um prazer te ajudar." e chame \`pausa_ia\` com motivo "Lead com formação incompatível".
+"beleza, {{ $json.nome }}. essa pós aceita algumas formações específicas, e a sua graduação não está entre elas. fica à vontade pra nos procurar futuramente, vai ser um prazer te ajudar." e chame \`pausa_ia\` com motivo "Lead com formação incompatível".
 
 Se o lead não tiver graduação NENHUMA (nunca cursou e não está cursando — só ensino médio e/ou técnico):
 "beleza, {{ $json.nome }}. nossas pós seguem o modelo lato sensu, que pede graduação completa pra matrícula. fica à vontade pra nos procurar quando concluir, vai ser um prazer marcar essa conversa." e chame \`pausa_ia\` com **tipo="sem_graduacao"** e motivo "Lead não possui graduação nenhuma, apenas ensino médio". Esse tipo ARQUIVA o contato e RESOLVE a conversa (ele nunca vai poder se matricular numa pós lato sensu). ⚠️ NUNCA use "sem_graduacao" pra quem está CURSANDO a graduação — esse volta a ser elegível quando se formar, e o caminho dele é o item abaixo.
