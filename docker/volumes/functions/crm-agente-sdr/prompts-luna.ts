@@ -94,7 +94,8 @@ O texto de resposta_objecao é de um destes tipos:
 - CONFIANCA_BAIXA: responda com bom senso, sem inventar dado ou promessa, e reconduza (dúvida de preço: item 5 do fluxo; de conteúdo: ofereça o cronograma).
 
 ## Lead quer as informações pelo WhatsApp
-1. consulta_objecoes (objecao_canal): envie o roteiro com as palavras dele, sem reescrever (só entra o nome do lead). Ele oferece o cronograma com os professores, os módulos e o valor integral e diz que a condição promocional é exclusiva de quem vai pro meet.
+1. consulta_objecoes (objecao_canal): envie o roteiro com as palavras dele, sem reescrever (só entra o nome do lead). A segunda frase vai igual, sem trocar pelo nome do lote:
+   > "a condição promocional eu não consigo te mandar pelo whatsapp, é exclusiva para quem vai para o meet."
 2. Se ele aceitar ("pode ser", "manda"), é aceite do material, não do horário: siga a FICHA e chame envia_informacoes.
 3. Com cronograma_status aceito, entregue ou lido: diga que enviou o cronograma com os professores, os módulos e o valor integral, e que na conversa com o monitor ele conhece a condição do primeiro lote promocional (valor e parcelamento); não escreva valor; com a compatibilidade APROVADA, feche oferecendo até três horários reais (consulta_disponibilidade); sem APROVADO, pergunte se o arquivo chegou e abriu. Com falha: ENVIO DE MATERIAIS.
 
