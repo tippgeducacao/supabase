@@ -48,6 +48,20 @@ describe('resposta e escolha', () => {
       apelido: 'Gabriel', user_id: 'gabriel', filas: [{ apelido: 'Gabriel', fila: 2 }, { apelido: 'Carlos', fila: 8 }],
     });
   });
+  it('folga: "Carlos principal" — com folga 5 ele recebe até ter 5 a mais que o Gabriel', () => {
+    const comFolga = (carlos: number) => PESSOAS.map((p) => (p.apelido === 'Carlos' ? { ...p, fila: carlos, folga: 5 } : p));
+    expect(escolherPessoa('ajustes', '', comFolga(6))).toMatchObject({
+      apelido: 'Carlos', filas: [{ apelido: 'Carlos', fila: 6 }, { apelido: 'Gabriel', fila: 2 }],
+    });
+    expect(escolherPessoa('ajustes', '', comFolga(7))?.apelido).toBe('Carlos'); // 7 − 5 = 2 × 2: empate, ordem
+    expect(escolherPessoa('ajustes', '', comFolga(8))?.apelido).toBe('Gabriel'); // 6 a mais: passa a vez
+  });
+  it('folga vem de folga_fila; ausente ou negativa = 0', () => {
+    const [c, g, x] = lerPessoas([
+      { user_id: 'c', area: 'ajustes', folga_fila: 5 }, { user_id: 'g', area: 'ajustes' }, { user_id: 'x', area: 'ia', folga_fila: -3 },
+    ]);
+    expect([c.folga, g.folga, x.folga]).toEqual([5, 0, 0]);
+  });
   it('empate de fila = a ordem cadastrada', () => {
     const iguais = PESSOAS.map((p) => (p.area === 'ajustes' ? { ...p, fila: 3 } : p));
     expect(escolherPessoa('ajustes', '', iguais)?.apelido).toBe('Carlos');

@@ -1,7 +1,8 @@
 // Sugestão de responsável no aviso de tarefa (pedido do usuário, 16/10/2026): a IA lê a tarefa e
 // escolhe a ÁREA do TI (ajustes · criação · IA), com a descrição de cada área e os últimos títulos que
 // cada pessoa pegou como exemplo (gt_avisos_sugestao_contexto). Área com mais de uma pessoa (ajustes =
-// Carlos e Gabriel) vai para quem tem MENOS tarefas abertas na própria coluna do quadro.
+// Carlos e Gabriel) vai para quem tem a menor fila (tarefas abertas na própria coluna do quadro) DESCONTADA
+// a folga: "Carlos principal" (16/10/2026) = folga 5, ele recebe até ter 6 ou mais a mais que o Gabriel.
 // A régua (quem pega o quê) mora em gt_avisos_responsaveis — mudar é UPDATE, sem deploy.
 // Régua pura (vitest); a chamada à IA mora em sugestaoResponsavelIa.ts.
 /** O modelo padrão atual. A classificação é curta: esforço baixo. */
@@ -16,6 +17,8 @@ export interface PessoaSugestao {
   descricao: string;
   ordem: number;
   fila: number;
+  /** Quantas tarefas a mais a pessoa aguenta antes de passar a vez (gt_avisos_responsaveis.folga_fila). */
+  folga: number;
   exemplos: string[];
 }
 
@@ -37,6 +40,7 @@ export function lerPessoas(j: any): PessoaSugestao[] {
     descricao: String(p?.descricao ?? ""),
     ordem: Number(p?.ordem) || 0,
     fila: Number(p?.fila) || 0,
+    folga: Math.max(0, Number(p?.folga_fila) || 0),
     exemplos: Array.isArray(p?.exemplos) ? p.exemplos.map(String) : [],
   })).filter((p) => p.user_id && p.area);
 }
@@ -100,9 +104,10 @@ export function montarPedido(tarefa: { titulo: string; descricao: string; criado
   return { system: SISTEMA_SUGESTAO, user, schema };
 }
 
-/** Na área escolhida, quem tem MENOS tarefas abertas na coluna; empate = a ordem cadastrada. */
+/** Na área escolhida, a menor fila − folga; empate = a ordem cadastrada. A fila mostrada é a real. */
 export function escolherPessoa(area: string, motivo: string, pessoas: PessoaSugestao[], modelo = MODELO_SUGESTAO): Sugestao | null {
-  const daArea = pessoas.filter((p) => p.area === area).sort((a, b) => a.fila - b.fila || a.ordem - b.ordem);
+  const daArea = pessoas.filter((p) => p.area === area)
+    .sort((a, b) => (a.fila - a.folga) - (b.fila - b.folga) || a.ordem - b.ordem);
   if (!daArea.length) return null;
   const [p] = daArea;
   return {
