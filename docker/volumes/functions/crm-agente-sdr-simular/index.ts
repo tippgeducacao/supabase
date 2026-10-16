@@ -179,7 +179,7 @@ async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimula
       }
       // Mesma instrução do executor real depois do aceite ("te enviei o cronograma por aqui"…):
       // sem ela o modelo escrevia "solicitei o envio" só no harness.
-      return `Cronograma enviado ao lead no WhatsApp (conteudo="${input?.conteudo ?? '?'}"). ${instrucaoResultadoMaterial('aceito', false, { soFatos: soInformar, condicao: ficha ? 'a condição do primeiro lote promocional' : 'a condição especial que a secretaria liberou hoje' })}`;
+      return `Cronograma enviado ao lead no WhatsApp (conteudo="${input?.conteudo ?? '?'}"). ${instrucaoResultadoMaterial('aceito', false, { soFatos: soInformar, condicao: ficha ? 'a condição promocional exclusiva' : 'a condição especial que a secretaria liberou hoje' })}`;
     case 'verificar_compatibilidade_curso': {
       // Espelho do executor (tools.ts, 13/10/2026): com a ficha, a conclusão sem confirmação devolve
       // a pergunta em vez de avaliar. Sem isto o simulador aprovava e não reproduzia a pergunta repetida.
