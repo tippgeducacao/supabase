@@ -16,7 +16,7 @@ import { processarAgendaEntrevistas } from "./entrevistas.ts";
 import { processarAlertaIa } from "./alertaIaTick.ts";
 import { processarRoteiroConteudo } from "./roteiroConteudoTick.ts";
 import { processarRelatoriosGrupo } from "./relatoriosGrupoTick.ts";
-import { processarAvisosTarefas } from "./avisosTarefasTick.ts";
+import { processarAvisosTarefas, sugerirParaTarefa } from "./avisosTarefasTick.ts";
 import { processarBotComandos } from "./botComandosTick.ts";
 import { pensar } from "./brain.ts";
 
@@ -70,7 +70,10 @@ Deno.serve(async (req) => {
           conexao: url.searchParams.get("conexao"),
           hoje: url.searchParams.get("hoje"),
         })
-        : cron === "avisos_tarefas" ? await processarAvisosTarefas(admin)
+        : cron === "avisos_tarefas"
+          ? (url.searchParams.get("sugerir")
+            ? await sugerirParaTarefa(admin, url.searchParams.get("sugerir")!)
+            : await processarAvisosTarefas(admin))
         : cron === "bot_comandos" ? await processarBotComandos(admin)
         : await processarTranscricoes(admin);
       return json({ ok: true, ...r });
@@ -82,7 +85,7 @@ Deno.serve(async (req) => {
 
   // ⚠️ BUMPE esta string a cada deploy: é o ÚNICO jeito de confirmar, de fora, que a versão
   // nova já está servindo (o edge-runtime serve o worker antigo por ~1 min após o push).
-  if (req.method === "GET") return new Response("assistente-interno ok · build 20261016d", { headers: cors });
+  if (req.method === "GET") return new Response("assistente-interno ok · build 20261016e", { headers: cors });
 
   // Autenticação do webhook (anti-spoofing): se ASSIST_WEBHOOK_SECRET estiver setado, exige ?k igual.
   // O número declarado no payload NÃO é autenticação (quem POSTa controla msg.fromDigits).

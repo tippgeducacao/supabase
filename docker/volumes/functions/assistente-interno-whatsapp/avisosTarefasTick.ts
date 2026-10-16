@@ -7,6 +7,7 @@
 // Envio falhou → solta a linha com o erro; até 5 tentativas, só avisos das últimas 24 h.
 import { carregarLinhaDe, enviarTexto } from "./wa.ts";
 import { textoAvisoTarefa, type EventoTarefa } from "./avisosTarefas.ts";
+import { sugerirResponsavel, type Sugestao } from "./sugestaoResponsavelIa.ts";
 
 const MAX_TENTATIVAS = 5;
 const POR_RODADA = 20;
@@ -21,6 +22,7 @@ interface ItemFila {
   evento: EventoTarefa;
   autor_id: string | null;
   tentativas: number;
+  sugestao: Sugestao | null;
 }
 
 const dormir = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -45,7 +47,7 @@ async function enviarItem(admin: any, item: ItemFila): Promise<void> {
   if (!aviso?.ativo) throw new Error("aviso desligado");
 
   const [{ data: tarefa }, { data: etapa }, autor] = await Promise.all([
-    admin.from("gt_tasks").select("title").eq("id", item.task_id).maybeSingle(),
+    admin.from("gt_tasks").select("title, description, created_by, creator:created_by(name)").eq("id", item.task_id).maybeSingle(),
     admin.from("gt_list_statuses").select("name").eq("id", aviso.status_id).maybeSingle(),
     item.autor_id
       ? admin.from("profiles").select("name").eq("id", item.autor_id).maybeSingle().then((r: any) => r.data)
@@ -53,12 +55,24 @@ async function enviarItem(admin: any, item: ItemFila): Promise<void> {
   ]);
   if (!tarefa) throw new Error("tarefa apagada");
 
+  // Sugestão de responsável: calculada uma vez e guardada na fila (nova tentativa de envio reaproveita).
+  let sugestao: Sugestao | null = item.sugestao ?? null;
+  if (!sugestao) {
+    sugestao = await sugerirResponsavel(admin, item.aviso_id, {
+      titulo: tarefa.title ?? "",
+      descricaoHtml: tarefa.description ?? null,
+      criador: (tarefa as any).creator?.name ?? null,
+    });
+    if (sugestao) await admin.from("gt_avisos_whatsapp_fila").update({ sugestao }).eq("id", item.id);
+  }
+
   const texto = textoAvisoTarefa({
     evento: item.evento,
     taskId: item.task_id,
     titulo: tarefa.title,
     etapa: etapa?.name ?? null,
     autor: autor?.name ?? null,
+    sugestao,
   });
   const linha = await carregarLinhaDe(admin, aviso.wa_conexao_id);
   const r = await enviarTexto(linha, aviso.grupo_jid, texto);
@@ -68,7 +82,7 @@ async function enviarItem(admin: any, item: ItemFila): Promise<void> {
 
 export async function processarAvisosTarefas(admin: any): Promise<Record<string, unknown>> {
   const { data, error } = await admin.from("gt_avisos_whatsapp_fila")
-    .select("id, aviso_id, task_id, evento, autor_id, tentativas")
+    .select("id, aviso_id, task_id, evento, autor_id, tentativas, sugestao")
     .is("enviado_em", null)
     .lt("tentativas", MAX_TENTATIVAS)
     .gte("criado_em", new Date(Date.now() - JANELA_MS).toISOString())
@@ -97,4 +111,23 @@ export async function processarAvisosTarefas(admin: any): Promise<Record<string,
     }
   }
   return { enviados, ...(erros.length ? { erros } : {}) };
+}
+
+/**
+ * Conferência (`?cron=avisos_tarefas&sugerir=<task_id>`): a sugestão de responsável para uma tarefa,
+ * sem enviar nada e sem mexer na fila — é como se testa a análise contra tarefas reais.
+ */
+export async function sugerirParaTarefa(admin: any, taskId: string): Promise<Record<string, unknown>> {
+  const { data: tarefa } = await admin.from("gt_tasks")
+    .select("id, title, description, creator:created_by(name)").eq("id", taskId).maybeSingle();
+  if (!tarefa) return { erro: "tarefa não encontrada" };
+  const { data: resp } = await admin.from("gt_avisos_responsaveis")
+    .select("aviso_id").eq("ativo", true).limit(1).maybeSingle();
+  if (!resp?.aviso_id) return { erro: "nenhum aviso com responsáveis cadastrados" };
+  const sugestao = await sugerirResponsavel(admin, resp.aviso_id, {
+    titulo: tarefa.title ?? "",
+    descricaoHtml: tarefa.description ?? null,
+    criador: (tarefa as any).creator?.name ?? null,
+  });
+  return { titulo: tarefa.title, sugestao };
 }

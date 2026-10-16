@@ -14,6 +14,17 @@ export interface AvisoTarefa {
   titulo: string | null;
   etapa: string | null; // a etapa vigiada (gt_list_statuses.name)
   autor: string | null; // profiles.name; null = automação ou sistema
+  /** Sugestão de responsável (sugestaoResponsavel.ts); ausente = o aviso sai sem a linha. */
+  sugestao?: { apelido: string; motivo: string; filas: { apelido: string; fila: number }[] } | null;
+}
+
+/** "💡 Sugestão: *Gabriel* — botão quebrado" + a fila de quem divide a área. */
+export function linhaSugestao(s: NonNullable<AvisoTarefa["sugestao"]>): string {
+  const motivo = s.motivo ? ` — ${s.motivo}` : "";
+  const filas = s.filas.length > 1
+    ? `\n   fila agora: ${s.filas.map((f) => `${f.apelido} ${f.fila}`).join(" · ")}`
+    : "";
+  return `💡 Sugestão: *${s.apelido}*${motivo}${filas}`;
 }
 
 export function linkTarefa(taskId: string): string {
@@ -39,6 +50,7 @@ export function textoAvisoTarefa(a: AvisoTarefa): string {
     "",
     `📌 *${titulo}*`,
     linha,
+    ...(a.sugestao ? [linhaSugestao(a.sugestao)] : []),
     `🔗 ${linkTarefa(a.taskId)}`,
   ].join("\n");
 }
