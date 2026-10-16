@@ -13,7 +13,8 @@ import { carregarLinhaWeb, enviarTexto } from "./wa.ts";
 import { hojeSP } from "./datas.ts";
 import { blocoComercial } from "./relatoriosGrupoTick.ts";
 import {
-  ehPos, encontrarPorNome, interpretarComando, lerItensPos, linhaDasFontes, mesesDoPeriodo, textoCac,
+  ehPos, encontrarPorNome, interpretarComando, lerItensPos, lerSemanaPessoa, linhaDasFontes, linhasPontosPremio,
+  mesesDoPeriodo, semanasDoMesPremiacao, semanasDoPeriodo, textoCac, type SemanaPessoa,
   textoComercialPeriodo, textoFaturamento, textoMenu, textoNaoAchei, textoNaoAcheiPos, textoPendentes, textoRanking,
   textoResumoPessoa, textoResumoPos, textoVarias, TEXTO_PERIODO_INVALIDO, TEXTO_RESUMO_SEM_NOME, TEXTO_SO_TEXTO,
   type ItemPos, type LinhaCac, type PessoaComercial, type Periodo,
@@ -82,6 +83,30 @@ async function linhasCac(admin: any, p: Periodo): Promise<LinhaCac[]> {
   }));
 }
 
+/**
+ * Pontos/atingimento das semanas do período + prêmio do mês (semanas que fecham no mês do fim do
+ * período), pela assist_comissao_semana — a régua da Premiação 2.0. Falhou: o resumo sai sem o
+ * bloco, com o aviso (nunca derruba o resto).
+ */
+async function blocoPontosPremio(admin: any, pessoaId: string, p: Periodo): Promise<string[]> {
+  try {
+    const doPeriodo = semanasDoPeriodo(p);
+    const doMes = semanasDoMesPremiacao(p.ate, hojeSP());
+    const todas = [...new Set([...doPeriodo, ...doMes])];
+    const porSemana = new Map<string, SemanaPessoa | null>();
+    await Promise.all(todas.map(async (w) => {
+      const { data, error } = await admin.rpc("assist_comissao_semana", { p_ref: w });
+      if (error) throw new Error(`assist_comissao_semana: ${error.message}`);
+      porSemana.set(w, lerSemanaPessoa(data, pessoaId));
+    }));
+    const pega = (ws: string[]) => ws.map((w) => porSemana.get(w)).filter((s): s is SemanaPessoa => !!s);
+    return linhasPontosPremio(pega(doPeriodo), p.ate, pega(doMes));
+  } catch (e) {
+    console.error("[bot-comandos] pontos/prêmio falhou:", e);
+    return ["🏅 Pontos e prêmio: não consegui buscar agora."];
+  }
+}
+
 /** O texto da resposta e o nome do comando (gravado na fila, para auditoria). */
 async function responder(admin: any, cfg: ConfigBot, item: ItemFila): Promise<{ texto: string; comando: string }> {
   if (item.tipo && item.tipo !== "text") return { texto: TEXTO_SO_TEXTO, comando: "nao_texto" };
@@ -115,7 +140,8 @@ async function responder(admin: any, cfg: ConfigBot, item: ItemFila): Promise<{ 
       if (error) throw new Error(`bot_comercial_fontes_pessoa: ${error.message}`);
       if (fontes?.erro) return { texto: `Não consegui montar o resumo de ${busca.item.nome}: ${fontes.erro}.`, comando: "resumo" };
       return {
-        texto: textoResumoPessoa(linhaDasFontes(fontes, busca.item.id), cmd.periodo),
+        texto: textoResumoPessoa(linhaDasFontes(fontes, busca.item.id), cmd.periodo,
+          await blocoPontosPremio(admin, busca.item.id, cmd.periodo)),
         comando: `resumo ${busca.item.nome} ${cmd.periodo.de}..${cmd.periodo.ate}`,
       };
     }

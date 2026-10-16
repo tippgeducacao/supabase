@@ -332,26 +332,24 @@ export function textoMenu(): string {
   ].join("\n");
 }
 
-export function textoResumoPessoa(l: LinhaPessoa, p: Periodo): string {
-  const avaliadas = l.comparecimentos + l.naoCompareceram;
-  const linhas = [
-    `👤 *${l.nome}* · ${l.papel === "sdr" ? "SDR" : "Vendedor(a)"}`,
-    `📅 ${p.rotulo}`,
-    "",
-    `📥 Leads recebidos: *${l.leads}*`,
-    `📆 Reuniões ${l.papel === "sdr" ? "marcadas" : "agendadas"}: *${l.agendamentos}*`,
-    `✅ Reuniões comparecidas: *${l.comparecimentos}*`,
-    `❌ Não compareceram: *${l.naoCompareceram}*`,
-    `💰 Vendas: *${l.matriculas}*`,
-    "",
-    "📊 *Taxas*",
-    `• Vendas ÷ leads: *${pct(l.matriculas, l.leads)}*`,
-    `• Vendas ÷ comparecidas: *${pct(l.matriculas, l.comparecimentos)}*`,
-    `• Comparecimento: *${pct(l.comparecimentos, avaliadas)}* _(das reuniões que já têm resultado)_`,
-    `• Comparecidas ÷ leads: *${pct(l.comparecimentos, l.leads)}*`,
-    `• Reuniões ÷ leads: *${pct(l.agendamentos, l.leads)}*`,
-    "",
-  ];
+/**
+ * As metas que o sistema já cobra no Feedback Diário (docs/Feedback Diário.md). O bot só
+ * compara — quem define meta é o Feedback; mudou lá, mude aqui.
+ */
+export const META_COMPARECIMENTO_SDR = 70; // % das reuniões que ele marcou
+export const META_CONVERSAO_VENDEDOR = 30; // % vendas ÷ comparecidas
+export const META_INDICACOES_POR_COMPARECIDA = 2;
+
+/** " ✅" bateu · " ⚠️" abaixo · "" sem base para comparar. */
+function sinal(valor: number | null, meta: number): string {
+  if (valor === null) return "";
+  return valor >= meta ? " ✅" : " ⚠️";
+}
+const razao = (n: number, d: number): number | null => (d > 0 ? (n / d) * 100 : null);
+
+function linhasAtividade(l: LinhaPessoa): string[] {
+  const linhas: string[] = [];
+  linhas.push(`📞 Tempo falando no 3C: ${l.ligacaoSegundos === null ? "—" : `*${duracao(l.ligacaoSegundos)}*`}`);
   if (l.interacoes === null) {
     linhas.push("💬 Interações no WhatsApp: —");
   } else {
@@ -360,12 +358,129 @@ export function textoResumoPessoa(l: LinhaPessoa, p: Periodo): string {
       : "";
     linhas.push(`💬 Interações no WhatsApp: *${l.interacoes}*${media}`);
   }
-  linhas.push(`📞 Tempo em ligação (3C): ${l.ligacaoSegundos === null ? "—" : `*${duracao(l.ligacaoSegundos)}*`}`);
-  if (l.indicacoes !== null || l.organicos !== null) {
-    linhas.push(`🤝 Captações: *${l.indicacoes ?? 0}* indicações · *${l.organicos ?? 0}* orgânicos`);
+  return linhas;
+}
+
+/**
+ * Resumo da pessoa, por PAPEL (pedido do usuário, 16/10/2026: "quando é SDR as informações têm
+ * que ser diferentes"). SDR é cobrado por transformar lead em reunião que acontece: agendamento,
+ * comparecimento das reuniões que ELE marcou e orgânicos. Vendedor, por transformar reunião em
+ * venda: conversão e indicações por comparecida. `semana` = o bloco de pontos/prêmio (opcional).
+ */
+export function textoResumoPessoa(l: LinhaPessoa, p: Periodo, semana: string[] = []): string {
+  const avaliadas = l.comparecimentos + l.naoCompareceram;
+  const comparecimento = razao(l.comparecimentos, avaliadas);
+  const cabecalho = [`👤 *${l.nome}* · ${l.papel === "sdr" ? "SDR" : "Vendedor(a)"}`, `📅 ${p.rotulo}`, ""];
+  let corpo: string[];
+  if (l.papel === "sdr") {
+    corpo = [
+      `📥 Leads recebidos: *${l.leads}*`,
+      `📆 Reuniões marcadas: *${l.agendamentos}* · agendamento *${pct(l.agendamentos, l.leads)}* dos leads`,
+      `✅ Comparecidas: *${l.comparecimentos}* · ❌ não compareceram: *${l.naoCompareceram}*`,
+      `🎯 Comparecimento: *${pct(l.comparecimentos, avaliadas)}*${sinal(comparecimento, META_COMPARECIMENTO_SDR)} (meta ${dec2(META_COMPARECIMENTO_SDR)}%, das que já têm resultado)`,
+      `💰 Vendas das reuniões dele(a): *${l.matriculas}* · *${pct(l.matriculas, l.comparecimentos)}* das comparecidas`,
+      `🌱 Captações: *${l.organicos ?? 0}* orgânicos · *${l.indicacoes ?? 0}* indicações`,
+      "",
+      ...linhasAtividade(l),
+    ];
+  } else {
+    const conversao = razao(l.matriculas, l.comparecimentos);
+    const indPorComp = l.comparecimentos > 0 && l.indicacoes !== null ? l.indicacoes / l.comparecimentos : null;
+    corpo = [
+      `📥 Leads recebidos: *${l.leads}*`,
+      `📆 Reuniões agendadas: *${l.agendamentos}*`,
+      `✅ Comparecidas: *${l.comparecimentos}* · ❌ não compareceram: *${l.naoCompareceram}*`,
+      `🎯 Comparecimento: *${pct(l.comparecimentos, avaliadas)}* (das que já têm resultado)`,
+      `💰 Vendas: *${l.matriculas}*`,
+      `📊 Conversão (vendas ÷ comparecidas): *${pct(l.matriculas, l.comparecimentos)}*${sinal(conversao, META_CONVERSAO_VENDEDOR)} (meta ${dec2(META_CONVERSAO_VENDEDOR)}%)`,
+      `• Vendas ÷ leads: *${pct(l.matriculas, l.leads)}* · comparecidas ÷ leads: *${pct(l.comparecimentos, l.leads)}*`,
+      `🤝 Indicações: *${l.indicacoes ?? 0}*${indPorComp === null ? "" : ` · *${dec2(indPorComp)}* por comparecida${sinal(indPorComp, META_INDICACOES_POR_COMPARECIDA)} (meta ${dec2(META_INDICACOES_POR_COMPARECIDA)})`}`,
+      "",
+      ...linhasAtividade(l),
+    ];
   }
-  linhas.push("", "_Mesma conta da planilha de desempenho (Métricas do Time): reuniões e vendas pela data do fato, leads pela carteira atual. Vendas podem passar das comparecidas (venda de reunião antiga)._");
-  return linhas.join("\n");
+  const rodape = ["", "_Mesma conta da planilha de desempenho (Métricas do Time): reuniões e vendas pela data do fato, leads pela carteira atual. Vendas podem passar das comparecidas (venda de reunião antiga)._"];
+  return [...cabecalho, ...corpo, ...(semana.length ? ["", ...semana] : []), ...rodape].join("\n");
+}
+
+// ── Pontos, atingimento e prêmio (assist_comissao_semana = régua da Premiação 2.0) ──
+
+/** A linha de uma pessoa numa semana de assist_comissao_semana. */
+export interface SemanaPessoa {
+  inicio: string; // quarta
+  fim: string; // terça
+  emAndamento: boolean;
+  pontos: number;
+  meta: number;
+  atingimento: number;
+  variavel: number;
+  multiplicador: number;
+  premio: number;
+}
+
+/** Acha a pessoa na semana (vendedores ou SDRs — o cargo DAQUELA semana). null = fora da coorte. */
+export function lerSemanaPessoa(j: any, pessoaId: string): SemanaPessoa | null {
+  const e = [...(j?.vendedores ?? []), ...(j?.sdrs ?? [])].find((x: any) => x?.profile_id === pessoaId);
+  if (!e || !j?.semana) return null;
+  return {
+    inicio: String(j.semana.inicio),
+    fim: String(j.semana.fim),
+    emAndamento: j.semana.em_andamento === true,
+    pontos: num(e.pontos),
+    meta: num(e.meta),
+    atingimento: num(e.atingimento_pct),
+    variavel: num(e.variavel),
+    multiplicador: num(e.multiplicador),
+    premio: num(e.premio),
+  };
+}
+
+/** Teto de semanas listadas no resumo (um período de 120 dias tem ~18). */
+export const MAX_SEMANAS_PONTOS = 6;
+
+/** As quartas das semanas comerciais que o período toca, da mais antiga à mais nova (as últimas 6). */
+export function semanasDoPeriodo(p: Periodo): string[] {
+  const out: string[] = [];
+  for (let w = inicioSemanaComercial(p.de); w <= p.ate; w = addDias(w, 7)) out.push(w);
+  return out.slice(-MAX_SEMANAS_PONTOS);
+}
+
+/**
+ * As semanas cujo PRÊMIO é do mês: as que FECHAM (terça) dentro do mês — a régua de
+ * getWeeksOfMonth da Premiação 2.0 —, sem as que ainda não começaram.
+ */
+export function semanasDoMesPremiacao(ymd: string, hoje: string): string[] {
+  const mes = ymd.slice(0, 7);
+  const out: string[] = [];
+  // A semana que contém o dia 1 fecha (terça) sempre dentro do mês: é a primeira.
+  for (let w = inicioSemanaComercial(`${mes}-01`); addDias(w, 6).slice(0, 7) === mes; w = addDias(w, 7)) {
+    if (w <= hoje) out.push(w);
+  }
+  return out;
+}
+
+/**
+ * O bloco "Pontos e prêmio" do resumo. Pontos e atingimento são SEMPRE da semana — nunca somados
+ * no mês (pedido do usuário, 16/10/2026: "nunca acumulado por mês porque não faz sentido") —; o
+ * prêmio do mês, sim (soma dos prêmios das semanas que fecham no mês).
+ */
+export function linhasPontosPremio(semanas: SemanaPessoa[], mesYmd: string, premiosMes: SemanaPessoa[]): string[] {
+  if (!semanas.length && !premiosMes.length) return [];
+  const linhas = ["🏅 *Pontos e prêmio*"];
+  for (const s of semanas) {
+    const andamento = s.emAndamento ? " (em andamento)" : "";
+    linhas.push(
+      `• ${diaCurto(s.inicio)} a ${diaCurto(s.fim)}${andamento}: *${dec2(s.pontos)}* de ${dec2(s.meta)} pts · *${dec2(s.atingimento)}%* · prêmio *${reais(s.premio)}*`,
+    );
+  }
+  if (premiosMes.length) {
+    const total = premiosMes.reduce((t, s) => t + s.premio, 0);
+    const mes = MESES_ROTULO[Number(mesYmd.slice(5, 7)) - 1].toLowerCase();
+    const parcial = premiosMes.some((s) => s.emAndamento) ? " até agora" : "";
+    linhas.push(`💵 Prêmio de ${mes}${parcial}: *${reais(total)}* (${premiosMes.length} ${premiosMes.length === 1 ? "semana" : "semanas"})`);
+  }
+  linhas.push("_Pontos e atingimento são da semana (qua a ter), nunca somados no mês. Prêmio = variável × multiplicador da faixa, a régua da Premiação 2.0; não inclui o prêmio coletivo de campanha. Semana em andamento ainda muda._");
+  return linhas;
 }
 
 export function textoComercialPeriodo(p: Periodo, b: BlocoComercial): string {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  dec2, encontrarPorNome, inicioSemanaComercial, interpretarComando, interpretarPeriodo, lerItensPos, linhaDasFontes,
+  dec2, encontrarPorNome, inicioSemanaComercial, lerSemanaPessoa, linhasPontosPremio, semanasDoMesPremiacao, semanasDoPeriodo, interpretarComando, interpretarPeriodo, lerItensPos, linhaDasFontes,
   mesesDoPeriodo, textoCac, textoFaturamento, textoMenu, textoPendentes, textoRanking, textoResumoPessoa, textoResumoPos,
   type ItemPos, type LinhaPessoa, type PessoaComercial,
 } from './botComandos';
@@ -115,21 +115,38 @@ describe('textos', () => {
     interacoes: 201, interacoesComLead: 201, leadsInteragidos: 72, ligacaoSegundos: 749, indicacoes: 0, organicos: 0,
   };
   const periodo = { de: '2026-10-14', ate: '2026-10-16', rotulo: 'Semana comercial · qua 14/10 a sex 16/10' };
-  it('resumo: números, taxas com 2 casas e comparecimento só sobre reuniões com resultado', () => {
+  it('vendedor: conversão contra a meta de 30%, indicações por comparecida, comparecimento só sobre reuniões com resultado', () => {
     const t = textoResumoPessoa(linha, periodo);
     expect(t).toContain('👤 *Erika Costa* · Vendedor(a)');
     expect(t).toContain('📥 Leads recebidos: *58*');
-    expect(t).toContain('• Vendas ÷ leads: *3,45%*');
-    expect(t).toContain('• Vendas ÷ comparecidas: *200,00%*');
-    expect(t).toContain('• Comparecimento: *50,00%*'); // 1 ÷ (1 + 1), não 1 ÷ 6
-    expect(t).toContain('• Comparecidas ÷ leads: *1,72%*');
+    expect(t).toContain('🎯 Comparecimento: *50,00%*'); // 1 ÷ (1 + 1), não 1 ÷ 6
+    expect(t).toContain('📊 Conversão (vendas ÷ comparecidas): *200,00%* ✅ (meta 30,00%)');
+    expect(t).toContain('• Vendas ÷ leads: *3,45%* · comparecidas ÷ leads: *1,72%*');
+    expect(t).toContain('🤝 Indicações: *0* · *0,00* por comparecida ⚠️ (meta 2,00)');
     expect(t).toContain('💬 Interações no WhatsApp: *201* · média *2,79* por lead (72 leads)');
-    expect(t).toContain('📞 Tempo em ligação (3C): *12min*');
+    expect(t).toContain('📞 Tempo falando no 3C: *12min*');
+    expect(t).not.toContain('agendamento');
   });
-  it('sem denominador = "—", não 0,00%', () => {
+  it('SDR: taxa de agendamento, comparecimento contra a meta de 70%, vendas das reuniões dele e orgânicos', () => {
+    const sdr: LinhaPessoa = { ...linha, nome: 'Flávia', papel: 'sdr', leads: 24, agendamentos: 4, comparecimentos: 1, naoCompareceram: 1, matriculas: 2, organicos: 6, indicacoes: 0 };
+    const t = textoResumoPessoa(sdr, periodo);
+    expect(t).toContain('👤 *Flávia* · SDR');
+    expect(t).toContain('📆 Reuniões marcadas: *4* · agendamento *16,67%* dos leads');
+    expect(t).toContain('🎯 Comparecimento: *50,00%* ⚠️ (meta 70,00%, das que já têm resultado)');
+    expect(t).toContain('💰 Vendas das reuniões dele(a): *2* · *200,00%* das comparecidas');
+    expect(t).toContain('🌱 Captações: *6* orgânicos · *0* indicações');
+    expect(t).not.toContain('Conversão (vendas ÷ comparecidas)');
+  });
+  it('sem denominador = "—" e sem sinal de meta, nunca 0,00%', () => {
     const t = textoResumoPessoa({ ...linha, leads: 0, comparecimentos: 0, naoCompareceram: 0 }, periodo);
     expect(t).toContain('• Vendas ÷ leads: *—*');
-    expect(t).toContain('• Comparecimento: *—*');
+    expect(t).toContain('🎯 Comparecimento: *—*');
+    expect(t).toContain('📊 Conversão (vendas ÷ comparecidas): *—* (meta 30,00%)');
+  });
+  it('o bloco da semana entra antes do rodapé', () => {
+    const t = textoResumoPessoa(linha, periodo, ['🏅 *Pontos da semana*']);
+    expect(t.indexOf('🏅 *Pontos da semana*')).toBeGreaterThan(t.indexOf('Interações'));
+    expect(t.indexOf('🏅 *Pontos da semana*')).toBeLessThan(t.indexOf('Mesma conta da planilha'));
   });
   it('menu lista os comandos', () => {
     const t = textoMenu();
@@ -253,5 +270,39 @@ describe('CAC', () => {
   it('o período vira os meses inteiros que ele toca', () => {
     expect(mesesDoPeriodo({ de: '2026-09-28', ate: '2026-10-02', rotulo: '' })).toEqual({ ini: '2026-09-01', fim: '2026-10-31' });
     expect(mesesDoPeriodo({ de: '2026-12-10', ate: '2026-12-11', rotulo: '' })).toEqual({ ini: '2026-12-01', fim: '2026-12-31' });
+  });
+});
+
+describe('pontos e prêmio da semana', () => {
+  // assist_comissao_semana da semana 40 (07–13/10/2026), régua da Premiação 2.0 — dado real.
+  const s40 = { semana: { inicio: '2026-10-07', fim: '2026-10-13', em_andamento: false },
+    vendedores: [], sdrs: [{ profile_id: 'flavia', pontos: 59.3, meta: 50, atingimento_pct: 118.6, variavel: 550, multiplicador: 1, premio: 550 }] };
+  const s41 = { semana: { inicio: '2026-10-14', fim: '2026-10-20', em_andamento: true },
+    vendedores: [], sdrs: [{ profile_id: 'flavia', pontos: 3.4, meta: 50, atingimento_pct: 6.8, variavel: 550, multiplicador: 0, premio: 0 }] };
+  it('acha a pessoa em vendedores ou SDRs; fora da coorte = null', () => {
+    expect(lerSemanaPessoa(s40, 'flavia')).toMatchObject({ pontos: 59.3, premio: 550, emAndamento: false });
+    expect(lerSemanaPessoa(s40, 'outra')).toBeNull();
+  });
+  it('semanas do período: as quartas que ele toca, no máximo 6', () => {
+    expect(semanasDoPeriodo({ de: '2026-10-14', ate: '2026-10-16', rotulo: '' })).toEqual(['2026-10-14']);
+    expect(semanasDoPeriodo({ de: '2026-10-01', ate: '2026-10-16', rotulo: '' })).toEqual(['2026-09-30', '2026-10-07', '2026-10-14']);
+    expect(semanasDoPeriodo({ de: '2026-06-01', ate: '2026-09-30', rotulo: '' })).toHaveLength(6);
+  });
+  it('semanas do prêmio do mês = as que FECHAM (terça) no mês e já começaram', () => {
+    // Outubro/2026: terças 06, 13, 20, 27 → quartas 30/09, 07/10, 14/10, 21/10.
+    expect(semanasDoMesPremiacao('2026-10-16', '2026-10-16')).toEqual(['2026-09-30', '2026-10-07', '2026-10-14']);
+    // Setembro/2026: 01/09 é terça — a semana 26/08–01/09 fecha em setembro (5 semanas).
+    expect(semanasDoMesPremiacao('2026-09-30', '2026-10-16')).toEqual(['2026-08-26', '2026-09-02', '2026-09-09', '2026-09-16', '2026-09-23']);
+  });
+  it('texto: pontos e atingimento por semana, nunca somados; prêmio do mês somado', () => {
+    const a = lerSemanaPessoa(s40, 'flavia')!;
+    const b = lerSemanaPessoa(s41, 'flavia')!;
+    const t = linhasPontosPremio([b], '2026-10-16', [a, b]).join('\n');
+    expect(t).toContain('• qua 14/10 a ter 20/10 (em andamento): *3,40* de 50,00 pts · *6,80%* · prêmio *R$ 0,00*');
+    expect(t).toContain('💵 Prêmio de outubro até agora: *R$ 550,00* (2 semanas)');
+    expect(t).not.toMatch(/pontos do mês|total de pontos/i);
+  });
+  it('sem nenhuma semana, sem bloco', () => {
+    expect(linhasPontosPremio([], '2026-10-16', [])).toEqual([]);
   });
 });
