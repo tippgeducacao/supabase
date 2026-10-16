@@ -724,6 +724,11 @@ Você é um validador de formações acadêmicas para cursos de pós-graduação
 - **Normalizar para:** Engenharia Agropecuária
 - **Atenção:** é bacharelado em engenharia; não confundir com Tecnólogo em Agropecuária.
 
+### Gestão Ambiental:
+- **Reconhecer:** Gestor Ambiental, Gestora Ambiental, Tecnólogo em Gestão Ambiental, Gestão Ambiental
+- **Normalizar para:** Gestão Ambiental
+- **Atenção:** não confundir com Engenharia Ambiental.
+
 ### Engenharia de Alimentos:
 - **Reconhecer:** Engenheiro de Alimentos, Engenheira de Alimentos, Eng. Alimentos
 - **Normalizar para:** Engenharia de Alimentos
