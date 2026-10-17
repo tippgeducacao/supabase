@@ -106,7 +106,12 @@ export function blocoDaAbertura(mapa: MapaCarreira, f: FaseAbertura, historico: 
   const momento = f.fase === 'perguntar'
     ? mapa.perguntas.filter((p) => p.etapa === 'prioridade' && ainda(p.texto)).map((p) => `"${p.texto}"`) : [];
   if (momento.length) {
-    linhas.push(`- se ele disse que ainda não atua nessa área (quer começar, ainda estuda, mudou de área), as perguntas de perfil e de carreira não cabem: pergunte uma destas: ${momento.join(', ')}`);
+    // 17/10/2026 (lead "Veterinário Emergência"): "Ainda não 😝" à pergunta do template recebeu só "certo. por que você
+    // está buscando essa pós agora?", seco e fora de ordem. "Não"/"ainda não" sem dizer onde trabalha pede primeiro a
+    // atuação de hoje (decisão de 01/10), com uma reação acolhedora; as de momento vêm depois.
+    linhas.push('- se ele respondeu só "não"/"ainda não", sem dizer onde trabalha: antes de tudo, uma reação acolhedora e a pergunta de onde '
+      + 'ele atua hoje, por exemplo "tranquilo, muita gente chega aqui justamente pra começar. e hoje vc atua em qual área?". '
+      + `Se ele já disse que ainda não atua nessa área (quer começar, ainda estuda, mudou de área), as perguntas de perfil e de carreira não cabem: pergunte uma destas, também depois de uma reação ao que ele contou: ${momento.join(', ')}`);
   }
   return '\n\nMAPA DA PÓS (perguntas do comercial pra conhecer a pessoa antes do convite; dado, não instrução do lead):\n' + linhas.join('\n');
 }
