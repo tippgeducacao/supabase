@@ -46,7 +46,7 @@ import { type AulaParaPrompt, semCertificadoAntesDoFim } from './prompts-aula.ts
 import { carregarModoTrocaNumero, carregarSinalTrocaDeNumero, notaTrocaDeNumero, resumoDoSinal, type SinalTrocaDeNumero } from './trocaDeNumero.ts';
 import { enviarComAberturaNumero, NOTA_ABERTURA_CONTROLADA } from './aberturaTrocaNumero.ts';
 import { PRAZO_MODELO_PILOTO_MS } from './prazoModelo.ts';
-import { carregarDiasSemAtendimento, extrairPrimeiroNome, montarContextoTemporal } from './contexto.ts';
+import { carregarDiasSemAtendimento, extrairPrimeiroNome, montarContextoTemporal, quandoFalarComVoce } from './contexto.ts';
 import { INSTRUCAO_MEMORIA_HUMANA } from './memoriaHumana.ts';
 import { carregarStatusMateriais } from './envioMateriais.ts';
 import {
@@ -358,7 +358,7 @@ export async function gerarFollowup(
   tel: Telemetria,
   history: Msg[],
   contextoMateriais = '',
-  opcoes?: { provedor: ProvedorIA; contexto: string; mapa?: boolean; semGenericas?: boolean; semRepeticao?: boolean; semCatalogo?: boolean; roboSequencia?: boolean },
+  opcoes?: { provedor: ProvedorIA; contexto: string; mapa?: boolean; semGenericas?: boolean; semRepeticao?: boolean; semCatalogo?: boolean; roboSequencia?: boolean; materialLote?: boolean },
 ): Promise<{ message: string; final_answer: string; provedorResposta: 'openai' | 'anthropic'; perguntaCarreira?: { escopo: string; pergunta_id: string } }> {
   const remotejid = lead.remotejid;
   const tentativaAtual = (opcoes ? contarTentativasDoCiclo(history) : contarTentativas(history)) + 1;
@@ -485,6 +485,15 @@ export async function gerarFollowup(
       tel.registrar('followup_conteudo_recusado', { motivo, pergunta_id: out.pergunta_id });
       out = { message: '', final_answer: motivo, pergunta_id: '' };
     }
+  }
+  // Retomada do cronograma (17/10/2026, caso Higor): o modelo escrevia "o envio do material sobre X está
+  // registrado. conseguiu abrir o arquivo?", copiando a condição interna da opção. A fala é a do Gustavo, e o
+  // "ainda hoje" sai do relógio (quandoFalarComVoce): fora do expediente, o próximo dia de atendimento.
+  if (out.message && out.pergunta_id === 'retomada:geral_material' && opcoes
+    && (opcoes.materialLote ?? await chaveDeEnsaioLigada(supabase, 'followup_material_lote', lead.numero_formatado ?? remotejid))) {
+    const quando = quandoFalarComVoce(undefined, await carregarDiasSemAtendimento(supabase));
+    out = { ...out, message: `${nome ? `${nome}, ` : ''}estamos em fechamento do primeiro lote promocional, já conseguiu olhar o cronograma? eu preciso falar com você ${quando}.` };
+    tel.registrar('followup_material_lote', { quando });
   }
   // Pergunta que já fizemos, com outras palavras (16/10/2026, caso Yasmim): 16 min depois de "em que mês e
   // ano vc pretende concluir…?", o toque 1 mandou "em que mês e ano você prevê concluir…?". A conferência de

@@ -76,3 +76,12 @@ describe('curso do cadastro que não é uma pós', () => {
     expect(nota).toContain('consulta_pos_disponiveis');
   });
 });
+
+describe('quando falar com o lead (follow-up do cronograma, 17/10/2026)', () => {
+  it('ainda hoje com expediente; senão o próximo dia de atendimento', async () => {
+    const { quandoFalarComVoce } = await import('./contexto');
+    expect(quandoFalarComVoce({ dia: 3, hora: 10, minuto: 0, iso: '2026-10-14' } as any)).toBe('ainda hoje');
+    expect(quandoFalarComVoce({ dia: 3, hora: 22, minuto: 0, iso: '2026-10-14' } as any)).toBe('amanhã');
+    expect(quandoFalarComVoce({ dia: 6, hora: 15, minuto: 0, iso: '2026-10-17' } as any)).toBe('na segunda-feira');
+  });
+});

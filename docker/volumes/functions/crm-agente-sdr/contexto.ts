@@ -484,3 +484,18 @@ export function montarPerguntaFormacao(formacaoNormalizada: string): string {
 export function renderPrompt(prompt: string, vars: Record<string, string>): string {
   return prompt.replace(/\{\{\s*\$json\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g, (m, chave) => vars[chave] ?? m);
 }
+
+/**
+ * "ainda hoje" só com expediente pela frente; senão o próximo dia de atendimento ("amanhã", "na segunda").
+ * Pedido do Gustavo (17/10/2026) para o follow-up do cronograma: "eu preciso falar com você ainda hoje".
+ */
+export function quandoFalarComVoce(agora: Agora = agoraBrasilia(), fechados: DiaSemAtendimento[] = []): string {
+  const hojeIso = agora.iso ?? hojeIsoBrasilia();
+  const status = verificarDisponibilidade(agora.dia, agora.hora, agora.minuto, fechados, hojeIso);
+  if (status.disponivel || status.mensagem.startsWith('⏰')) return 'ainda hoje';
+  const proximo = proximoDiaAtendimento(agora.dia, fechados, hojeIso);
+  if (proximo === 'no próximo dia útil') return 'no próximo dia de atendimento';
+  if (proximo.startsWith('amanhã')) return 'amanhã';
+  const dia = proximo.split(' a partir')[0].replace(/,\s*$/, '');
+  return `${/^sábado/i.test(dia) ? 'no' : 'na'} ${dia}`;
+}
