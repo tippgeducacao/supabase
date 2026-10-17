@@ -39,6 +39,7 @@ import {
 import { chaveDeEnsaioLigada, ETIQUETA_RESPOSTA_AUTOMATICA, falaDoFollowupDoRobo, marcarRespostasAutomaticas, respostaAutomaticaLigada, soRoboRespondeu } from './respostaAutomatica.ts';
 import { jaPerguntou } from './aberturaMapa.ts';
 import { followupDosHorarios, ultimaFalaOfereceuHorario } from './agendaEscolhida.ts';
+import { conviteFeito, followupDaPendencia } from './followupPendencia.ts';
 import { cursoDaConversa } from './ganchoLote.ts';
 import { registrarNaJornada } from './fichaAtendimento.ts';
 import { carregarAulaParaFollowup, contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from './contextoAulaPiloto.ts';
@@ -383,6 +384,17 @@ export async function gerarFollowup(
       return { message: fala, final_answer: 'horarios_ofertados', provedorResposta: opcoes.provedor?.nome === 'openai' ? 'openai' : 'anthropic' };
     }
   }
+  // Antes do convite (followupPendencia.ts, 17/10/2026, caso José): quem parou numa pergunta nossa recebe a
+  // pergunta de novo com o gancho do lote; as retomadas de agenda só valem depois do convite (abaixo).
+  const antesDoConvite = opcoes && lead.contexto_campanha?.persona !== 'aula'
+    && await chaveDeEnsaioLigada(supabase, 'followup_antes_do_convite', lead.numero_formatado ?? remotejid);
+  if (antesDoConvite && tentativaAtual === 1) {
+    const fala = followupDaPendencia(history, nome, String(lead.curso_interesse_original ?? ''));
+    if (fala) {
+      tel.registrar('followup_pendencia_lote', { tentativa: tentativaAtual });
+      return { message: fala, final_answer: 'pendencia_com_lote', provedorResposta: opcoes!.provedor?.nome === 'openai' ? 'openai' : 'anthropic' };
+    }
+  }
   const curso = (lead.curso_interesse_original ?? '').trim();
   // Cadastro vazio pode ter resposta explícita no histórico humano. Sem essa resposta,
   // a instrução de memória manda OMITIR o dado (sem "e aí ," ou "a pós em ."). Os dados
@@ -390,6 +402,9 @@ export async function gerarFollowup(
   const nomeCtx = nome || '(ausente no cadastro; use apenas autoidentificação explícita do lead no histórico)';
   const cursoCtx = curso || '(ausente no cadastro; use apenas curso explicitamente escolhido pelo lead no histórico)';
   let planoCarreira = opcoes ? planejarFollowupCarreira(curso, lead.jornada?.followup_carreira) : null;
+  if (planoCarreira && antesDoConvite && !conviteFeito(history)) {
+    planoCarreira = { ...planoCarreira, retomadas: planoCarreira.retomadas.filter((r) => r.tipo !== 'agenda') };
+  }
   if (planoCarreira && (opcoes?.semGenericas ?? await semGenericasLigado(supabase, lead.numero_formatado ?? remotejid))) {
     planoCarreira = semRetomadasGenericas(planoCarreira);
   }
