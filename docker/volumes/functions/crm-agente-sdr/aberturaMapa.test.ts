@@ -69,7 +69,7 @@ describe('a fase antes do convite', () => {
 
   it('convite já feito ou vendedor na conversa: o mapa sai de cena', () => {
     expect(faseDaAbertura(MAPA, h(['assistant', TEMPLATE], ['user', 'oi'],
-      ['assistant', 'a gente tá fechando o primeiro lote promocional da pós em cannabis'], ['user', 'ok']), {})).toBeNull();
+      ['assistant', 'a gente tá fechando o primeiro lote promocional da pós em cannabis… é uma conversa rápida no meet com um monitor especialista'], ['user', 'ok']), {})).toBeNull();
     expect(faseDaAbertura(MAPA, h(['assistant', TEMPLATE], ['assistant', '[ATENDIMENTO_HUMANO] Welinton · podemos falar agora?']), {})).toBeNull();
     expect(faseDaAbertura(MAPA, [], {})).toBeNull();
   });

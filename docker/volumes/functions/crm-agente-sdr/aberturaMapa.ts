@@ -24,8 +24,9 @@ export const MAX_PERGUNTAS_ANTES_DO_CONVITE = 2;
 const textoDe = (m: Msg): string => typeof m.content === 'string' ? m.content
   : Array.isArray(m.content) ? m.content.filter((b: any) => b?.type === 'text' && typeof b.text === 'string').map((b: any) => b.text).join('\n') : '';
 
-// A abertura do lote ou um convite pro meet já saiu: daqui em diante vale o fluxo de sempre.
-const RE_CONVITE_FEITO = /primeiro lote promocional|conversa r[áa]pida (?:no meet|com o monitor)|monitor especialista/i;
+// A abertura do lote ou um convite pro meet já saiu: daqui em diante vale o fluxo de sempre. "primeiro lote" sozinho
+// não conta: o toque da pendência do follow-up (followupPendencia.ts, 17/10/2026) fala dele sem convidar.
+const RE_CONVITE_FEITO = /conversa r[áa]pida (?:no meet|com o monitor)|monitor especialista|\bno meet\b/i;
 
 // A pergunta do mapa já foi feita? O modelo escreve com "vc", no feminino, com reação na frente: compara
 // as palavras de conteúdo (sem acento, sem a desinência a/o/s) de cada pergunta nossa.

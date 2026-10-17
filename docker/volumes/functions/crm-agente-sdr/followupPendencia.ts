@@ -14,7 +14,8 @@ import { cursoDaConversa } from './ganchoLote.ts';
 const textoDe = (m: Msg): string => typeof m?.content === 'string' ? m.content
   : Array.isArray(m?.content) ? m.content.filter((b: any) => b?.type === 'text' && typeof b.text === 'string').map((b: any) => b.text).join('\n') : '';
 
-const RE_CONVITE = /primeiro lote promocional|condi[cç][aã]o promocional exclusiva|conversa (?:r[aá]pida |individual )?(?:no meet|com o monitor)|\b\d{1,2}(?::\d{2})?h(?:\d{2})?\b[^?]*\?/i;
+// "primeiro lote" sozinho não é convite: o próprio toque da pendência fala dele. Convite = meet, monitor ou horário.
+const RE_CONVITE = /\bno meet\b|monitor especialista|conversa (?:r[aá]pida |individual )?com o monitor|\b\d{1,2}(?::\d{2})?h(?:\d{2})?\b[^?]*\?/i;
 
 /** Já houve convite pro meet nesta conversa (lote apresentado, conversa com o monitor ou horário oferecido)? */
 export function conviteFeito(historico: readonly Msg[]): boolean {

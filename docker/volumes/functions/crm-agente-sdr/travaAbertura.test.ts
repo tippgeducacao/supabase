@@ -13,10 +13,13 @@ describe('convite sem a abertura do lote (caso Antônio)', () => {
 
   it('com a abertura na própria fala ou já feita na conversa: passa', () => {
     const hist = h(['assistant', TEMPLATE], ['user', 'Sim']);
-    expect(conviteSemAbertura('a gente tá fechando o primeiro lote promocional da pós em x… tenho 17h. qual fica melhor?', hist)).toBe(false);
-    const comAbertura = h(['assistant', TEMPLATE], ['assistant', 'a gente tá fechando o primeiro lote promocional da pós em x'], ['user', 'pode ser']);
+    expect(conviteSemAbertura('a gente tá fechando o primeiro lote promocional da pós em x… é uma conversa rápida no meet com um monitor. tenho 17h. qual fica melhor?', hist)).toBe(false);
+    const comAbertura = h(['assistant', TEMPLATE], ['assistant', 'a gente tá fechando o primeiro lote promocional da pós em x… é uma conversa rápida no meet com um monitor especialista'], ['user', 'pode ser']);
     expect(conviteSemAbertura('tenho 17h ou 17h30 hoje. qual fica melhor?', comAbertura)).toBe(false);
     expect(conviteSemAbertura('vc já se formou em medicina veterinária?', hist)).toBe(false);
+    // O toque da pendência (17/10) fala do lote sem explicar o meet: não vale como abertura.
+    const soLote = h(['assistant', TEMPLATE], ['assistant', 'josé, estamos em fechamento do primeiro lote promocional do MBA. me conta, vc trabalha onde?'], ['user', 'numa integradora']);
+    expect(conviteSemAbertura('tenho 17h ou 17h30 hoje. qual fica melhor?', soLote)).toBe(true);
   });
 
   it('o curso da abertura é a alternativa aprovada', () => {

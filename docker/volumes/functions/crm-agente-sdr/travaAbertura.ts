@@ -15,14 +15,17 @@ import { cursoDaConversa } from './ganchoLote.ts';
 const textoDe = (m: Msg): string => typeof m.content === 'string' ? m.content
   : Array.isArray(m.content) ? m.content.filter((b: any) => b?.type === 'text' && typeof b.text === 'string').map((b: any) => b.text).join('\n') : '';
 
-const RE_ABERTURA_FEITA = /primeiro lote promocional|condi[cç][aã]o promocional exclusiva/i;
 const RE_CONVITE = /\b(?:monitor|meet|reuni[aã]o)\b|\b(?:[01]?\d|2[0-3])h(?:[0-5]\d)?\b/i;
+// Abertura feita = o lote E o porquê do meet. Só "estamos em fechamento do primeiro lote promocional" (o toque da
+// pendência do follow-up, 17/10/2026) não explica o meet e não conta.
+const aberturaFeita = (t: string) => /condi[cç][aã]o promocional exclusiva/i.test(t)
+  || (/primeiro lote promocional/i.test(t) && /\b(?:meet|monitor)\b/i.test(t));
 
 /** A fala convida pro meet (ou oferece horário) sem que a abertura do lote tenha sido feita na conversa? */
 export function conviteSemAbertura(resposta: string, historico: readonly Msg[]): boolean {
-  if (!RE_CONVITE.test(resposta) || RE_ABERTURA_FEITA.test(resposta)) return false;
+  if (!RE_CONVITE.test(resposta) || aberturaFeita(resposta)) return false;
   // A 1ª fala nossa é o template; o vendedor humano também conta (se ele já apresentou, não repetimos).
-  return !historico.some((m) => m?.role === 'assistant' && RE_ABERTURA_FEITA.test(textoDe(m)));
+  return !historico.some((m) => m?.role === 'assistant' && aberturaFeita(textoDe(m)));
 }
 
 /** O curso da abertura: o último APROVADO da conversa (a alternativa aceita) ou o do cadastro. */
