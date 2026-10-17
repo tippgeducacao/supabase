@@ -60,6 +60,7 @@ import {
 import { comGanchoDoLote, cursoDaConversa, TITULO_SECAO_GANCHO } from './ganchoLote.ts';
 import { aberturaMapaLigada, blocoDaAbertura, comPassoDoMapa, faseDaAbertura } from './aberturaMapa.ts';
 import { mapaDoLead } from './followupMapa.ts';
+import { aprovadoNaConversa, escolheuHorarioOfertado } from './agendaEscolhida.ts';
 import { conviteSemAbertura, correcaoDaAbertura, cursoDaAbertura } from './travaAbertura.ts';
 import { fichaSemPos, NOTA_PORTFOLIO_ENVIADO, NOTA_SEM_POS, portfolioJaEnviado, posDoCadastroDefinida, recusaDaIndicacao, FALA_DEPOIS_DO_PORTFOLIO_INDICACAO } from './indicacaoPortfolio.ts';
 import { enviarPortfolio } from './portfolio.ts';
@@ -748,8 +749,17 @@ async function definirAgente(pre: PreRouter, provedor: ProvedorIA | null, tel: T
     // Router (em erro, mantém o agente atual — não derruba a conversa).
     // Sem decisão (o router falhou): mantém o agente atual — não derruba a conversa.
     const routerFallback = !decisao?.agente;
-    const proximo: AgenteRouter = decisao?.agente
+    let proximo: AgenteRouter = decisao?.agente
       ?? (agenteAnterior === 'agente_qualificador' ? 'agente_qualificador' : 'agente_validacao');
+    // Escolheu um horário oferecido, com a formação aprovada (agendaEscolhida.ts, 17/10/2026, caso Manu): vai
+    // para o agente que agenda, mesmo que o router tenha mantido a abertura (que não tem a ferramenta).
+    if (proximo === 'agente_validacao' && persona !== 'aula' && await chaveDeEnsaioLigada(supabase, 'agenda_escolha_fechamento', pre.telefone)) {
+      const historicoAgenda = await carregarHistorico(supabase, remotejid);
+      if (aprovadoNaConversa(historicoAgenda) && escolheuHorarioOfertado(historicoAgenda, pre.conteudo, Date.now())) {
+        proximo = 'agente_qualificador';
+        tel.registrar('router_corrigido', { motivo: 'escolheu_horario_ofertado', router: decisao?.agente ?? null });
+      }
+    }
     const agenteAtual = await atualizarAgenteComRatchet(supabase, remotejid, agenteAnterior, proximo);
     agenteEfetivo = agenteAtual;
     tel.registrar('router_decisao', {

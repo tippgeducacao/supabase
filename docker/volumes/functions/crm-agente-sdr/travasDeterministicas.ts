@@ -127,7 +127,7 @@ function horarios(texto: string): Set<string> {
 // e a trava barrou como inventado. Só vale para a fala do LEAD — a oferta da IA segue exigindo o "h".
 // Sem \b: ele não enxerga "à" como letra e "às 9" não casava. As bordas usam \p{L} (flag u).
 const RE_HORA_DO_LEAD = /(?<![\p{L}\d])(?:às|as|pras|pra|para as|das|umas|depois das|antes das|lá pelas|la pelas)\s+(\d{1,2})(?:\s*(?:horas|hrs|hs))?(?![\p{L}\d])(?!\s*(?:min|dias|semanas|meses|anos|vezes|op[cç]))|(?<![\p{L}\d])(\d{1,2})\s*(?:horas|hrs|hs)(?![\p{L}\d])/giu;
-function horariosDoLead(texto: string): Set<string> {
+export function horariosDoLead(texto: string): Set<string> {
   const out = horarios(texto);
   for (const m of texto.matchAll(RE_HORA_DO_LEAD)) {
     const h = parseInt(m[1] ?? m[2], 10);

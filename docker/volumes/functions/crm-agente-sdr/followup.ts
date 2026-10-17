@@ -38,6 +38,7 @@ import {
 } from './followupMapa.ts';
 import { chaveDeEnsaioLigada, ETIQUETA_RESPOSTA_AUTOMATICA, falaDoFollowupDoRobo, marcarRespostasAutomaticas, respostaAutomaticaLigada, soRoboRespondeu } from './respostaAutomatica.ts';
 import { jaPerguntou } from './aberturaMapa.ts';
+import { followupDosHorarios, ultimaFalaOfereceuHorario } from './agendaEscolhida.ts';
 import { cursoDaConversa } from './ganchoLote.ts';
 import { registrarNaJornada } from './fichaAtendimento.ts';
 import { carregarAulaParaFollowup, contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from './contextoAulaPiloto.ts';
@@ -371,6 +372,16 @@ export async function gerarFollowup(
     tel.registrar('followup_robo_sequencia', { tentativa: tentativaAtual, silencio: !fala });
     return { message: fala, final_answer: fala ? 'sequencia_do_robo' : 'sequencia_do_robo_fim',
       provedorResposta: opcoes.provedor?.nome === 'openai' ? 'openai' : 'anthropic' };
+  }
+  // Horários oferecidos que ainda valem (agendaEscolhida.ts, 17/10/2026, caso Manu): o 1º toque oferece os
+  // mesmos horários de novo, em vez de "ainda faz sentido procurar um horário…?".
+  if (opcoes && tentativaAtual === 1 && ultimaFalaOfereceuHorario(history)
+    && await chaveDeEnsaioLigada(supabase, 'followup_horarios_ofertados', lead.numero_formatado ?? remotejid)) {
+    const fala = followupDosHorarios(history, nome, Date.now());
+    if (fala) {
+      tel.registrar('followup_horarios_ofertados', { tentativa: tentativaAtual });
+      return { message: fala, final_answer: 'horarios_ofertados', provedorResposta: opcoes.provedor?.nome === 'openai' ? 'openai' : 'anthropic' };
+    }
   }
   const curso = (lead.curso_interesse_original ?? '').trim();
   // Cadastro vazio pode ter resposta explícita no histórico humano. Sem essa resposta,
