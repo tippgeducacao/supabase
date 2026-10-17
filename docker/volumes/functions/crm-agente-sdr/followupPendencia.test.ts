@@ -16,7 +16,9 @@ describe('follow-up antes do convite (caso José)', () => {
   });
 
   it('com convite feito, lead que respondeu, só o template ou vendedor: nada', () => {
-    const convite = [...hist, { role: 'assistant', content: 'a gente tá fechando o primeiro lote promocional do MBA…' }] as any;
+    const convite = [...hist, { role: 'assistant', content: 'a gente tá fechando o primeiro lote promocional do MBA… é uma conversa rápida no meet com um monitor especialista' }] as any;
+    // O próprio toque da pendência fala do lote e não é convite.
+    expect(conviteFeito([...hist, { role: 'assistant', content: 'José, estamos em fechamento do primeiro lote promocional do MBA em postura comercial. me conta, vc trabalha onde?' }] as any)).toBe(false);
     expect(conviteFeito(convite)).toBe(true);
     expect(followupDaPendencia(convite, 'José', 'MBA | POSTURA COMERCIAL')).toBe('');
     expect(perguntaPendente([...hist, { role: 'user', content: 'trabalho numa integradora' }] as any)).toBe('');
