@@ -53,6 +53,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { CAMPOS_RASTREAMENTO, complementarPrimeiraAtribuicao, extrairRastreamento, limparValorRastreamento, podeComplementarAtribuicao } from "../_shared/utmCaptura.ts";
 import { telefoneEnviavel } from "../_shared/telefone.ts";
+import { normalizeWhatsapp } from "./normalizaWhatsapp.ts";
 import { aplicarFiltrosToken, parseTokenWebhook } from "./tokenFiltros.ts";
 import { processarWebhookModulosPraticos } from "./modulosPraticos.ts";
 import { receberModulosPraticosHttp } from "./modulosPraticosHttp.ts";
@@ -101,13 +102,6 @@ function normalizeEmail(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
   const trimmed = raw.trim().toLowerCase();
   return trimmed.includes("@") ? trimmed : null;
-}
-
-function normalizeWhatsapp(raw: unknown): string | null {
-  if (typeof raw !== "string" && typeof raw !== "number") return null;
-  const digits = String(raw).replace(/\D/g, "");
-  if (!digits || digits.length < 8) return null;
-  return digits.startsWith("55") ? digits : `55${digits}`;
 }
 
 // Canonicaliza celular BR para 13 dígitos (55 + DDD + 9 + 8), espelhando a normalização
