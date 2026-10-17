@@ -17,6 +17,7 @@
 import type { MapaCarreira, RamoMapa } from './carreiraPos.ts';
 import { ramoDoLead } from './followupMapa.ts';
 import { MARCADOR_ATENDIMENTO_HUMANO, type Msg } from './historico.ts';
+import { ehRespostaAutomatica } from './respostaAutomatica.ts';
 
 export const MAX_PERGUNTAS_ANTES_DO_CONVITE = 2;
 
@@ -44,6 +45,27 @@ export function jaPerguntou(pergunta: string, historico: readonly Msg[]): boolea
   }));
 }
 
+// Só conta a pergunta que respondeu a uma fala de gente do lead (17/10/2026, caso Franciele). O follow-up
+// ("pode conversar agora?"), o template, os disparos e o "fico no aguardo" ao robô entravam na conta: com o
+// follow-up somado, a pergunta que divide o perfil já fechava as duas e a de carreira ("os tutores já te
+// perguntaram se você prescreve?") nunca saía.
+function perguntasEmResposta(historico: readonly Msg[]): number {
+  let respondendo = false;
+  let n = 0;
+  for (const m of historico) {
+    const t = textoDe(m).trim();
+    if (m?.role === 'user') {
+      if (!t) continue;                                   // resultado de ferramenta: segue a mesma vez
+      respondendo = !ehRespostaAutomatica(t) && !t.includes('AUTO_IGNORE') && !t.startsWith('[RESPOSTA AUTOMÁTICA') && !t.startsWith('[início');
+      continue;
+    }
+    if (m?.role !== 'assistant' || !t || t.startsWith(MARCADOR_ATENDIMENTO_HUMANO)) continue;
+    if (respondendo && t.includes('?')) n++;
+    respondendo = false;                                  // uma pergunta por vez do lead
+  }
+  return n;
+}
+
 export type FaseAbertura = { fase: 'perguntar' | 'abertura'; feitas: number; perfil: RamoMapa | null };
 
 /** Em que ponto a conversa está antes do convite; null = o convite já saiu (ou um vendedor assumiu). */
@@ -53,7 +75,7 @@ export function faseDaAbertura(mapa: MapaCarreira, historico: readonly Msg[], le
   if (nossas.some((t) => t.trimStart().startsWith(MARCADOR_ATENDIMENTO_HUMANO))) return null;
   // A 1ª mensagem nossa é o template (pode trazer a própria pergunta); o convite conta dali em diante.
   if (nossas.slice(1).some((t) => RE_CONVITE_FEITO.test(t))) return null;
-  const perguntasNossas = nossas.slice(1).filter((t) => t.includes('?')).length;
+  const perguntasNossas = perguntasEmResposta(historico);
   const doMapa = mapa.perguntas.filter((p) => (p.etapa === 'divide' || p.etapa === 'carreira') && jaPerguntou(p.texto, historico)).length;
   const feitas = Math.max(perguntasNossas, doMapa);
   return { fase: feitas >= MAX_PERGUNTAS_ANTES_DO_CONVITE ? 'abertura' : 'perguntar', feitas, perfil: ramoDoLead(mapa, lead) };

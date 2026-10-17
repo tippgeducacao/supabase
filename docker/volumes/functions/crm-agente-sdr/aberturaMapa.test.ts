@@ -97,3 +97,15 @@ describe('o passo 1 do prompt da Luna', () => {
     expect(await aberturaMapaLigada(banco(null, { message: 'x' }), '5546988166051')).toBe(false);
   });
 });
+
+describe('a contagem de perguntas antes do convite (caso Franciele)', () => {
+  it('follow-up, robô e "fico no aguardo" não contam; só a pergunta que respondeu ao lead', () => {
+    const hist = h(['assistant', TEMPLATE],
+      ['user', 'Olá, agradeço o seu contato. Sua mensagem será respondida assim que possível, deixe uma mensagem resumindo como posso te ajudar'],
+      ['assistant', 'fico no aguardo'],
+      ['user', '[INTERNAL_MARKER_FOLLOWUP_AUTO_IGNORE]'], ['assistant', 'Franciele, pode conversar agora?'],
+      ['user', 'Bom dia, tudo bem?'], ['assistant', 'bom dia, tudo bem por aqui. hoje vc é contratado de uma clínica, tem sua própria clínica ou faz atendimento a domicílio?'],
+      ['user', 'Eu sou plantonista. Faço atendimento domiciliar tbm']);
+    expect(faseDaAbertura(MAPA, hist, { jornada: {} })).toMatchObject({ fase: 'perguntar', feitas: 1 });
+  });
+});
