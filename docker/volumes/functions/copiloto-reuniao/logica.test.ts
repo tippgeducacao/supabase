@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   codigoDoMeet,
+  lerUso,
+  limparEventos,
+  montarPedidoUso,
   ESQUEMA_SAIDA,
   interpretarSaida,
   janelaDasMinhas,
@@ -276,5 +279,60 @@ describe("freios (reunião da Ana Ligia, 19/10/2026)", () => {
     const ja = ["Antes de encerrar, descubra o que fez você buscar essa pós agora e o que espera que ela mude na sua carreira."];
     expect(repetida("Antes de encerrar, pergunte: além de ler o contrato, o que fez você buscar essa pós agora e o que espera que ela mude na sua carreira?", ja)).toBe(true);
     expect(repetida("Como o conhecimento de comportamento poderia agregar à hospedagem que você faz hoje?", ja)).toBe(false);
+  });
+});
+
+describe("pergunta usada (análise ao encerrar)", () => {
+  const dicas = [
+    { id: "d1", texto: "Que próximo passo você quer dar na carreira?", criada_em: "2026-10-19T18:35:00Z" },
+    { id: "d2", texto: "A empresa tem plano de carreira?", criada_em: "2026-10-19T18:40:00Z" },
+  ];
+  const falas = [
+    { quem: "lead" as const, texto: "Trabalho no laboratório.", falada_em: "2026-10-19T18:34:00Z" },
+    { quem: "vendedor" as const, texto: "E o que você quer pra sua carreira daqui pra frente?", falada_em: "2026-10-19T18:35:40Z" },
+  ];
+
+  it("transcrição com tempo relativo e perguntas numeradas", () => {
+    const p = montarPedidoUso(dicas, falas);
+    expect(p).toContain("[00:00] LEAD: Trabalho no laboratório.");
+    expect(p).toContain("[01:40] VENDEDOR: E o que você quer");
+    expect(p).toContain("1. [apareceu em 01:00] Que próximo passo");
+    expect(p).toContain("2. [apareceu em 06:00] A empresa tem plano");
+  });
+
+  it("lê a resposta por número; fora da lista é ignorado e o que faltou é não usada", () => {
+    const uso = lerUso({ perguntas: [
+      { numero: 1, usada: true, trecho: "E o que você quer pra sua carreira daqui pra frente?" },
+      { numero: 9, usada: true, trecho: "x" },
+    ] }, dicas);
+    expect(uso.get("d1")).toEqual({ usada: true, trecho: "E o que você quer pra sua carreira daqui pra frente?" });
+    expect(uso.get("d2")).toEqual({ usada: false, trecho: null });
+    expect(uso.size).toBe(2);
+  });
+
+  it("resposta torta vira tudo não usada", () => {
+    const uso = lerUso("lixo", dicas);
+    expect([...uso.values()].every((u) => !u.usada)).toBe(true);
+  });
+});
+
+describe("eventos do app", () => {
+  it("aceita só os eventos conhecidos e corta o detalhe", () => {
+    const e = limparEventos([
+      { evento: "abriu", em: new Date().toISOString() },
+      { evento: "apagou_tudo" },
+      { evento: "erro", detalhe: "x".repeat(900) },
+    ]);
+    expect(e.map((x) => x.evento)).toEqual(["abriu", "erro"]);
+    expect(e[1].detalhe?.length).toBe(500);
+  });
+
+  it("hora do computador muito errada vira a hora de chegada", () => {
+    const [e] = limparEventos([{ evento: "abriu", em: "2020-01-01T00:00:00Z" }]);
+    expect(Date.now() - Date.parse(e.criado_em)).toBeLessThan(5000);
+  });
+
+  it("não é lista: nada", () => {
+    expect(limparEventos({ evento: "abriu" })).toEqual([]);
   });
 });

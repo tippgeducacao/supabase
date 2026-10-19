@@ -15,6 +15,10 @@
 //               Iniciar vira uma sessão; as falas transcritas e as perguntas mostradas
 //               ficam em copiloto_reuniao_*; o vendedor marca 👍/👎 em cada pergunta.
 //               A pergunta é gravada aqui mesmo, na ação `dica` (não depende do app).
+//   * analisar_uso — (também sozinha ao encerrar) a IA lê a transcrição e marca quais
+//               perguntas o vendedor USOU (`usada`, `usada_trecho`). A tela de avaliação
+//               do sistema chama para sessões que ficaram sem análise.
+//   * evento  — uso e erros do app (`copiloto_app_eventos`).
 //   * minhas  — as reuniões em que quem chama é o VENDEDOR, perto de agora (o app de
 //               Windows não lê a aba do Meet: o vendedor escolhe a reunião na lista).
 //
@@ -53,6 +57,13 @@ import {
   maisProximaDeAgora,
   montarContexto,
   montarPedido,
+  type DicaParaUso,
+  ESQUEMA_USO,
+  type FalaParaUso,
+  lerUso,
+  limparEventos,
+  montarPedidoUso,
+  PROMPT_USO,
 } from "./logica.ts";
 import { PROMPT_BASE, SEM_REUNIAO } from "./prompt.ts";
 import { MAX_MENSAGENS, type Mensagem, montarEntradaResumo, PROMPT_RESUMO } from "./resumo.ts";
@@ -368,7 +379,81 @@ async function sessaoEncerrar(userId: string, body: Record<string, unknown>) {
   const sessaoId = await sessaoDe(userId, body?.sessao_id);
   if (!sessaoId) return json({ erro: "sessão inválida" }, 422);
   await admin().from("copiloto_reuniao_sessoes").update({ encerrada_em: new Date().toISOString() }).eq("id", sessaoId);
+  // a análise de uso leva alguns segundos: o app não espera por ela
+  const analise = analisarUso(sessaoId).catch((e) => console.error("[copiloto-reuniao] análise de uso", (e as Error)?.message));
+  // deno-lint-ignore no-explicit-any
+  (globalThis as any).EdgeRuntime?.waitUntil?.(analise);
   return json({ ok: true });
+}
+
+// ── Pergunta usada? ──────────────────────────────────────────────────────────
+const MODELO_USO = Deno.env.get("COPILOTO_REUNIAO_MODELO_USO") ?? "claude-haiku-5-5";
+
+/** Marca `usada` em todas as perguntas da sessão (refaz se `forcar`). */
+async function analisarUso(sessaoId: string, forcar = false): Promise<{ analisadas: number; usadas: number }> {
+  const db = admin();
+  const { data: sessao } = await db.from("copiloto_reuniao_sessoes").select("motor").eq("id", sessaoId).maybeSingle();
+  if (!sessao) return { analisadas: 0, usadas: 0 };
+  let consulta = db.from("copiloto_reuniao_dicas").select("id, texto, criada_em").eq("sessao_id", sessaoId).order("criada_em");
+  if (!forcar) consulta = consulta.is("uso_analisado_em", null);
+  const { data: dicas } = await consulta;
+  if (!dicas?.length) return { analisadas: 0, usadas: 0 };
+  const motor = sessao.motor === "nuvem" ? "gemini" : "parakeet";
+  const { data: falas } = await db.from("copiloto_reuniao_falas").select("quem, texto, falada_em")
+    .eq("sessao_id", sessaoId).eq("motor", motor).order("ordem").limit(3000);
+  const agora = new Date().toISOString();
+  if (!falas?.some((f) => f.quem === "vendedor")) {
+    // sem fala do vendedor não há o que conferir: não usada
+    await db.from("copiloto_reuniao_dicas").update({ usada: false, usada_trecho: null, uso_analisado_em: agora }).in("id", dicas.map((d) => d.id));
+    return { analisadas: dicas.length, usadas: 0 };
+  }
+  const chave = await chaveAnthropic();
+  if (!chave) throw new Error("sem chave da Anthropic");
+  const ia = new Anthropic({ apiKey: chave });
+  const r = await ia.messages.create({
+    model: MODELO_USO,
+    max_tokens: 4000,
+    system: PROMPT_USO,
+    tools: [{ name: "resultado", description: "Uso de cada pergunta sugerida", input_schema: ESQUEMA_USO as unknown as Anthropic.Tool.InputSchema }],
+    tool_choice: { type: "tool", name: "resultado" },
+    messages: [{ role: "user", content: montarPedidoUso(dicas as DicaParaUso[], falas as FalaParaUso[]) }],
+  });
+  const bloco = r.content.find((b) => b.type === "tool_use");
+  const uso = lerUso(bloco && "input" in bloco ? bloco.input : null, dicas as DicaParaUso[]);
+  let usadas = 0;
+  for (const [id, u] of uso) {
+    if (u.usada) usadas++;
+    await db.from("copiloto_reuniao_dicas").update({ usada: u.usada, usada_trecho: u.trecho, uso_analisado_em: agora }).eq("id", id);
+  }
+  console.log(JSON.stringify({ fn: "copiloto-reuniao", acao: "analisar_uso", sessao: sessaoId, perguntas: dicas.length, usadas, entrada: r.usage.input_tokens, saida: r.usage.output_tokens }));
+  return { analisadas: dicas.length, usadas };
+}
+
+/** A tela de avaliação pede a análise de uma sessão que ela pode ver (RLS de quem chama). */
+async function analisarUsoPedido(sbUsuario: SupabaseClient, body: Record<string, unknown>) {
+  if (typeof body?.sessao_id !== "string" || !UUID.test(body.sessao_id)) return json({ erro: "sessão inválida" }, 422);
+  const { data } = await sbUsuario.from("copiloto_reuniao_sessoes").select("id").eq("id", body.sessao_id).maybeSingle();
+  if (!data) return json({ erro: "Sessão não encontrada." }, 422);
+  try {
+    return json(await analisarUso(data.id, body?.forcar === true));
+  } catch (e) {
+    console.error("[copiloto-reuniao] análise de uso", (e as Error)?.message);
+    return json({ erro: "Não consegui analisar agora. Tente de novo em instantes." }, 422);
+  }
+}
+
+// ── Eventos do app ───────────────────────────────────────────────────────────
+async function registrarEventos(userId: string, body: Record<string, unknown>) {
+  const eventos = limparEventos(body?.eventos);
+  if (!eventos.length) return json({ gravados: 0 });
+  const versao = typeof body?.app_versao === "string" ? body.app_versao.slice(0, 40) : null;
+  const { error } = await admin().from("copiloto_app_eventos")
+    .insert(eventos.map((e) => ({ ...e, vendedor_id: userId, app_versao: versao })));
+  if (error) {
+    console.error("[copiloto-reuniao] eventos", error.message);
+    return json({ erro: "Não consegui gravar os eventos." }, 422);
+  }
+  return json({ gravados: eventos.length });
 }
 
 async function avaliar(userId: string, body: Record<string, unknown>) {
@@ -532,6 +617,8 @@ Deno.serve(async (req) => {
     if (body?.acao === "falas") return await registrarFalas(user.id, body);
     if (body?.acao === "sessao_encerrar") return await sessaoEncerrar(user.id, body);
     if (body?.acao === "avaliar") return await avaliar(user.id, body);
+    if (body?.acao === "analisar_uso") return await analisarUsoPedido(sbUsuario, body);
+    if (body?.acao === "evento") return await registrarEventos(user.id, body);
     return json({ erro: "ação desconhecida" }, 422);
   } catch (e) {
     console.error("[copiloto-reuniao] erro", (e as Error)?.message);

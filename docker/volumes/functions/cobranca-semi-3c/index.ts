@@ -14,6 +14,12 @@
 //                          Idempotente: com a campanha criada, so confere os agentes.
 //
 // Vai para o 3C: nome, numero, e-mail, etapa e funil onde o card esta.
+//
+// CONTA PROPRIA DA COBRANCA (19/10/2026): a campanha vive numa conta 3C separada,
+// de plano por minuto, sem o filtro inteligente obrigatorio do plano ilimitado (que
+// derrubava boa parte da lista). Por isso o token e OUTRO: `3C_TOKEN_API_COBRANCA`.
+// O `3C_TOKEN_API` continua sendo o do comercial (Dash Ligacao, TV, mailing SDR,
+// discador antigo) e NAO muda. Sem a variavel nova, cai no token antigo.
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0'
 
@@ -25,6 +31,7 @@ const corsHeaders = {
 
 const THREEC_BASE = Deno.env.get('THREEC_BASE_URL') ?? 'https://app.3c.plus/api/v1'
 const THREEC_TOKEN =
+  Deno.env.get('3C_TOKEN_API_COBRANCA') ??
   Deno.env.get('3C_TOKEN_API') ??
   Deno.env.get('THREEC_API_TOKEN') ??
   Deno.env.get('THREEC_TOKEN') ??
@@ -40,6 +47,9 @@ const POR_LOTE = 100
 const PREFIXO_LISTA = 'Cobrança Semi'
 // A campanha nova nasce com a rota, o horario-base e a lista de qualificacao da
 // campanha de cobranca que ja disca na casa. So LEITURA dela — nada la e alterado.
+// O molde so existe na conta ANTIGA. Na conta propria da cobranca a campanha foi
+// criada a mao no painel (327644) e o id entra em cob_semi_3c_config.campanha_id:
+// com o id preenchido, `preparar` pula a criacao e so confere os agentes.
 const CAMPANHA_MOLDE = '282311'
 // Atualizacao presa (edge morta no meio) nao pode travar o botao para sempre.
 const TRAVA_MINUTOS = 4

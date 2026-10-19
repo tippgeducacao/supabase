@@ -351,3 +351,99 @@ export function maisProximaDeAgora<T extends { data_agendamento?: string | null;
   const base = validas.length ? validas : reunioes;
   return base.reduce<T | null>((melhor, r) => (!melhor || distancia(r) < distancia(melhor) ? r : melhor), null);
 }
+
+// ── Pergunta usada? (19/10/2026) ─────────────────────────────────────────────
+// Ao encerrar, a IA lê a transcrição e diz quais perguntas o vendedor fez de fato (mesma
+// intenção, outras palavras) logo depois de aparecerem. Palavra igual não serve: nas
+// reuniões reais o vendedor reformula e quase nenhuma palavra bate.
+
+export type DicaParaUso = { id: string; texto: string; criada_em: string };
+export type FalaParaUso = { quem: "lead" | "vendedor"; texto: string; falada_em: string };
+export type UsoDaDica = { usada: boolean; trecho: string | null };
+
+const MAX_TRANSCRICAO_USO = 60_000;
+export const JANELA_USO_S = 240;
+
+/** mm:ss desde o começo da sessão (a IA compara tempos sem fuso nem data). */
+function relogio(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+}
+
+/** Transcrição com tempos + perguntas numeradas, para a IA responder por número. */
+export function montarPedidoUso(dicas: DicaParaUso[], falas: FalaParaUso[]): string {
+  const inicio = Math.min(...[...falas.map((f) => Date.parse(f.falada_em)), ...dicas.map((d) => Date.parse(d.criada_em))]);
+  let transcricao = falas
+    .map((f) => `[${relogio(Date.parse(f.falada_em) - inicio)}] ${f.quem === "lead" ? "LEAD" : "VENDEDOR"}: ${f.texto}`)
+    .join("\n");
+  if (transcricao.length > MAX_TRANSCRICAO_USO) transcricao = transcricao.slice(0, MAX_TRANSCRICAO_USO);
+  const perguntas = dicas.map((d, i) => `${i + 1}. [apareceu em ${relogio(Date.parse(d.criada_em) - inicio)}] ${d.texto}`).join("\n");
+  return `TRANSCRIÇÃO DA REUNIÃO\n${transcricao}\n\nPERGUNTAS QUE O PAINEL SUGERIU AO VENDEDOR\n${perguntas}`;
+}
+
+export const PROMPT_USO = `Você confere se um vendedor usou as perguntas que um painel sugeriu durante uma reunião de venda.
+
+Para cada pergunta sugerida, responda se o VENDEDOR fez uma pergunta com a MESMA INTENÇÃO nos ${JANELA_USO_S / 60} minutos depois de ela aparecer. Vale com outras palavras e vale resumida; não vale se ele só falou do mesmo assunto sem perguntar, nem se a pergunta dele foi feita antes de a sugestão aparecer.
+
+Quando usou, copie o trecho do VENDEDOR, literal da transcrição (até 200 caracteres). A transcrição automática tem erros de palavra: julgue pela intenção.`;
+
+export const ESQUEMA_USO = {
+  type: "object",
+  properties: {
+    perguntas: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          numero: { type: "integer" },
+          usada: { type: "boolean" },
+          trecho: { type: ["string", "null"] },
+        },
+        required: ["numero", "usada", "trecho"],
+      },
+    },
+  },
+  required: ["perguntas"],
+} as const;
+
+/** Resposta da IA → uso por id da pergunta. Número fora da lista é ignorado; faltou = não usada. */
+export function lerUso(saida: unknown, dicas: DicaParaUso[]): Map<string, UsoDaDica> {
+  const uso = new Map<string, UsoDaDica>(dicas.map((d) => [d.id, { usada: false, trecho: null }]));
+  const lista = (saida as { perguntas?: unknown })?.perguntas;
+  if (!Array.isArray(lista)) return uso;
+  for (const item of lista) {
+    const x = item as Record<string, unknown>;
+    const dica = dicas[Number(x?.numero) - 1];
+    if (!dica || x?.usada !== true) continue;
+    const trecho = typeof x.trecho === "string" && x.trecho.trim() ? x.trecho.trim().slice(0, 300) : null;
+    uso.set(dica.id, { usada: true, trecho });
+  }
+  return uso;
+}
+
+// ── Eventos do app (uso e erros) ─────────────────────────────────────────────
+
+export const EVENTOS_APP = [
+  "abriu", "iniciou", "encerrou", "erro", "meet_detectado", "meet_aceito", "meet_recusado", "chamada_terminou",
+] as const;
+const MAX_EVENTOS_POR_ENVIO = 50;
+
+/** Eventos válidos para `copiloto_app_eventos`; o resto é descartado. */
+export function limparEventos(v: unknown): Array<{ evento: string; detalhe: string | null; criado_em: string }> {
+  if (!Array.isArray(v)) return [];
+  const agora = Date.now();
+  const saida: Array<{ evento: string; detalhe: string | null; criado_em: string }> = [];
+  for (const e of v.slice(0, MAX_EVENTOS_POR_ENVIO)) {
+    const x = e as Record<string, unknown>;
+    if (!(EVENTOS_APP as readonly string[]).includes(String(x?.evento))) continue;
+    const quando = typeof x?.em === "string" ? Date.parse(x.em) : NaN;
+    // relógio do computador torto ou evento velho demais: vale a hora de chegada
+    const valido = Number.isFinite(quando) && quando <= agora + 60_000 && quando >= agora - 7 * 86_400_000;
+    saida.push({
+      evento: String(x.evento),
+      detalhe: typeof x?.detalhe === "string" && x.detalhe.trim() ? x.detalhe.trim().slice(0, 500) : null,
+      criado_em: new Date(valido ? quando : agora).toISOString(),
+    });
+  }
+  return saida;
+}
