@@ -260,6 +260,55 @@ export function janelaDasMinhas(agora: Date): { de: string; ate: string } {
   };
 }
 
+// ── Freios (19/10/2026, reunião da Ana Ligia: 47 perguntas em 40 min) ─────────
+
+// Palavras que o Parakeet inventa em inglês quando ouve "hum", "aham", riso ou ruído
+// ("Thank you", "Yeah", "So much", "It's gonna be easy"). Fala curta feita disso é ruído.
+const RUIDO = new Set([
+  "thank", "thanks", "you", "yeah", "yes", "okay", "ok", "oh", "uh", "huh", "um", "mm", "hmm", "mhm",
+  "so", "much", "wait", "right", "is", "it", "its", "it's", "i", "we", "they", "the", "a", "that", "this",
+  "what", "are", "be", "should", "there", "one", "love", "easy", "gonna", "going", "just", "like", "bit",
+  "and", "to", "of", "for", "in", "on", "me", "my", "your", "all", "not", "no", "fire", "east", "said",
+  "aham", "hum", "uhum", "ahn", "ã", "é", "tá", "ah", "eh", "uh-huh", "mm-hmm",
+]);
+
+/** Fala curta só de interjeição ou de inglês inventado pelo transcritor. */
+export function ehRuido(texto: string): boolean {
+  const palavras = texto.toLowerCase().replace(/[^\p{L}\s'-]/gu, " ").split(/\s+/).filter(Boolean);
+  if (!palavras.length) return true;
+  if (palavras.length > 6) return false;
+  return palavras.filter((p) => RUIDO.has(p)).length / palavras.length >= 0.6;
+}
+
+// Negociação e fechamento: parcela, cartão, contrato, link de pagamento. Nessa hora o lead
+// já está comprando e pergunta de carreira atrapalha.
+const FECHAMENTO = /\b(parcel\w*|cart[aã]o|limite|boleto|pix|contrato|assin\w*|matr[ií]cula|[aà] vista|desconto|bolsa|pagamento|comprovante|vencimento)\b/gi;
+
+/** As últimas falas (dos dois lados) estão em negociação/fechamento? */
+export function emFechamento(turnos: Turno[], quantas = 6): boolean {
+  const texto = turnos.slice(-quantas).map((t) => t.texto).join(" ");
+  return (texto.match(FECHAMENTO) ?? []).length >= 2;
+}
+
+function palavrasChave(texto: string): Set<string> {
+  return new Set(
+    texto.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/).filter((p) => p.length > 3),
+  );
+}
+
+/** A pergunta nova diz o mesmo que alguma já mostrada (mesmas palavras, outra ordem)? */
+export function repetida(nova: string, anteriores: string[], limiar = 0.5): boolean {
+  const a = palavrasChave(nova);
+  if (!a.size) return false;
+  return anteriores.some((x) => {
+    const b = palavrasChave(x);
+    const comuns = [...a].filter((p) => b.has(p)).length;
+    const uniao = new Set([...a, ...b]).size;
+    return uniao > 0 && comuns / uniao >= limiar;
+  });
+}
+
 // ── Captura das reuniões (avaliação) ─────────────────────────────────────────
 
 export type FalaCapturada = { motor: "parakeet" | "gemini"; ordem: number; quem: "lead" | "vendedor"; texto: string; falada_em: string };

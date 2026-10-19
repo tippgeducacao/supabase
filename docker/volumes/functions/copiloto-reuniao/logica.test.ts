@@ -4,7 +4,10 @@ import {
   ESQUEMA_SAIDA,
   interpretarSaida,
   janelaDasMinhas,
+  ehRuido,
+  emFechamento,
   lerRespostaLuna,
+  repetida,
   limparFalas,
   pedidoLuna,
   limparDicasDadas,
@@ -241,5 +244,37 @@ describe("limparFalas (captura para avaliação)", () => {
     const [f] = limparFalas([{ motor: "parakeet", ordem: 5, quem: "vendedor", texto: "oi", falada_em: "ontem" }]);
     expect(Number.isNaN(new Date(f.falada_em).getTime())).toBe(false);
     expect(limparFalas("x")).toEqual([]);
+  });
+});
+
+describe("freios (reunião da Ana Ligia, 19/10/2026)", () => {
+  it("ruído do transcritor sai; fala curta de verdade fica", () => {
+    for (const r of ["Thank you.", "Yeah.", "So much.", "Mm-hmm.", "It's gonna be easy.", "Yeah, we're easy for it.", "Uh-huh."]) {
+      expect(ehRuido(r)).toBe(true);
+    }
+    for (const ok of ["Parcelado.", "Anúncio.", "Para agregar a hospedagem.", "Não, a princípio não.", "Mais ou menos."]) {
+      expect(ehRuido(ok)).toBe(false);
+    }
+  });
+
+  it("negociação de parcelas e contrato = fechamento; apresentação do curso não", () => {
+    const negociando = [
+      { quem: "vendedor" as const, texto: "A bolsa que eu tenho pro parcelado é uma bolsa de 10% de desconto." },
+      { quem: "lead" as const, texto: "E pagaria quanto mesmo a parcela de 18?" },
+    ];
+    expect(emFechamento(negociando)).toBe(true);
+    const contrato = [{ quem: "lead" as const, texto: "Eu não posso ler com calma o contrato e assinar depois?" }];
+    expect(emFechamento(contrato)).toBe(true);
+    const apresentando = [
+      { quem: "vendedor" as const, texto: "As aulas ao vivo acontecem toda segunda-feira, das 19h às 22h." },
+      { quem: "lead" as const, texto: "Faz muitos anos que eu não atuo, eu só faço hospedagem agora." },
+    ];
+    expect(emFechamento(apresentando)).toBe(false);
+  });
+
+  it("a mesma pergunta com outras palavras conta como repetida", () => {
+    const ja = ["Antes de encerrar, descubra o que fez você buscar essa pós agora e o que espera que ela mude na sua carreira."];
+    expect(repetida("Antes de encerrar, pergunte: além de ler o contrato, o que fez você buscar essa pós agora e o que espera que ela mude na sua carreira?", ja)).toBe(true);
+    expect(repetida("Como o conhecimento de comportamento poderia agregar à hospedagem que você faz hoje?", ja)).toBe(false);
   });
 });

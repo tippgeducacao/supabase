@@ -41,7 +41,10 @@ import {
   ESQUEMA_SAIDA,
   interpretarSaida,
   janelaDasMinhas,
+  ehRuido,
+  emFechamento,
   lerRespostaLuna,
+  repetida,
   limparFalas,
   MOTORES_SESSAO,
   pedidoLuna,
@@ -390,10 +393,43 @@ async function guardarDica(userId: string, body: Record<string, unknown>, dicaMo
   return data?.id ?? null;
 }
 
+// ── Freios (19/10/2026) ──────────────────────────────────────────────────────
+// No máximo uma pergunta a cada INTERVALO_MS por reunião, nunca uma parecida com outra já
+// mostrada. Em memória do worker: se o worker reciclar, no pior caso sai uma pergunta antes.
+const INTERVALO_MS = Number(Deno.env.get("COPILOTO_REUNIAO_INTERVALO_S") ?? "90") * 1000;
+// fechou = a reunião já entrou em negociação/fechamento: dali em diante o painel fica calado
+// (medido na reunião da Ana: no meio da negociação o assunto muda por um instante e a
+// janela das últimas falas deixava passar 5 perguntas)
+const mostradas = new Map<string, { em: number; textos: string[]; fechou?: boolean }>();
+
+function chaveDaReuniao(userId: string, body: Record<string, unknown>) {
+  const ref = typeof body?.sessao_id === "string" ? body.sessao_id : typeof body?.agendamento_id === "string" ? body.agendamento_id : "avulsa";
+  return `${userId}:${ref}`;
+}
+
+/** Só passa a pergunta que não repete nenhuma anterior; a que passa marca o relógio. */
+function aplicarFreio(chave: string, dicaNova: { tipo: string; texto: string } | null, dadas: string[]) {
+  if (!dicaNova) return null;
+  const memoria = mostradas.get(chave) ?? { em: 0, textos: [] };
+  if (repetida(dicaNova.texto, [...dadas, ...memoria.textos])) return null;
+  mostradas.set(chave, { ...memoria, em: Date.now(), textos: [...memoria.textos, dicaNova.texto].slice(-20) });
+  return dicaNova;
+}
+
 async function dica(sbUsuario: SupabaseClient, userId: string, body: Record<string, unknown>) {
   const inicio = Date.now();
-  const turnos = limparTurnos(body?.turnos);
+  // ruído do transcritor ("Thank you", "Yeah", "hum") nem entra na conversa
+  const turnos = limparTurnos(body?.turnos).filter((t) => !ehRuido(t.texto));
   if (!turnos.length || turnos[turnos.length - 1].quem !== "lead") return json({ dica: null });
+  // negociação/fechamento: o lead já está comprando, o painel fica quieto
+  const chaveFreio = chaveDaReuniao(userId, body);
+  const memoriaFreio = mostradas.get(chaveFreio);
+  if (memoriaFreio?.fechou) return json({ dica: null, motivo: "fechamento" });
+  if (emFechamento(turnos)) {
+    mostradas.set(chaveFreio, { em: memoriaFreio?.em ?? 0, textos: memoriaFreio?.textos ?? [], fechou: true });
+    return json({ dica: null, motivo: "fechamento" });
+  }
+  if (inicio - (mostradas.get(chaveFreio)?.em ?? 0) < INTERVALO_MS) return json({ dica: null, motivo: "intervalo" });
   if (passouDoTeto(userId, inicio)) return json({ dica: null, aviso: "Muitas falas seguidas: segurando as dicas por um minuto." });
 
   const agendamentoId = typeof body?.agendamento_id === "string" && UUID.test(body.agendamento_id) ? body.agendamento_id : null;
@@ -411,7 +447,8 @@ async function dica(sbUsuario: SupabaseClient, userId: string, body: Record<stri
     }
   }
 
-  const pedido = montarPedido(turnos, limparDicasDadas(body?.dicas_dadas));
+  const dadas = limparDicasDadas(body?.dicas_dadas);
+  const pedido = montarPedido(turnos, dadas);
 
   // 1º a Luna 6 (decisão do Gustavo, 14/10/2026); falhou, o Haiku responde no lugar
   if (PROVEDOR_DICA === "openai" && CHAVE_OPENAI) {
@@ -422,8 +459,9 @@ async function dica(sbUsuario: SupabaseClient, userId: string, body: Record<stri
         fn: "copiloto-reuniao", usuario: userId, agendamento: agendamentoId, ms, mostrou: !!r.dica, modelo: r.modelo,
         entrada: r.uso.entrada, cache_lido: r.uso.cacheLido, saida: r.uso.saida, raciocinio: r.uso.raciocinio,
       }));
-      const dicaId = await guardarDica(userId, body, r.dica, r.modelo, ms, turnos[turnos.length - 1].texto);
-      return json({ dica: r.dica, ms, modelo: r.modelo, dica_id: dicaId });
+      const final = aplicarFreio(chaveFreio, r.dica, dadas);
+      const dicaId = await guardarDica(userId, body, final, r.modelo, ms, turnos[turnos.length - 1].texto);
+      return json({ dica: final, ms, modelo: r.modelo, dica_id: dicaId });
     } catch (e) {
       console.error("[copiloto-reuniao] luna, indo para o haiku", (e as Error)?.message);
     }
@@ -454,8 +492,9 @@ async function dica(sbUsuario: SupabaseClient, userId: string, body: Record<stri
       entrada: resposta.usage.input_tokens, cache_lido: resposta.usage.cache_read_input_tokens,
       cache_escrito: resposta.usage.cache_creation_input_tokens, saida: resposta.usage.output_tokens, modelo: resposta.model,
     }));
-    const dicaId = await guardarDica(userId, body, saida, resposta.model, ms, turnos[turnos.length - 1].texto);
-    return json({ dica: saida, ms, modelo: resposta.model, dica_id: dicaId });
+    const final = aplicarFreio(chaveFreio, saida, dadas);
+    const dicaId = await guardarDica(userId, body, final, resposta.model, ms, turnos[turnos.length - 1].texto);
+    return json({ dica: final, ms, modelo: resposta.model, dica_id: dicaId });
   } catch (e) {
     console.error("[copiloto-reuniao] ia", (e as Error)?.message);
     if (e instanceof Anthropic.AuthenticationError || e instanceof Anthropic.PermissionDeniedError) {
