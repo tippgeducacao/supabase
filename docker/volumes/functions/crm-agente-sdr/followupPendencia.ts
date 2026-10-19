@@ -29,7 +29,9 @@ const ehFalaDoLead = (t: string) => Boolean(t.trim()) && !t.includes('AUTO_IGNOR
  * '' quando a última fala nossa não é uma pergunta assim.
  */
 export function perguntaPendente(historico: readonly Msg[]): string {
-  if (conviteFeito(historico)) return '';
+  // 19/10/2026 (caso Mariela): um disparo com horário ANTES da conversa contava como convite e calava a pendência;
+  // o follow-up mandou "faz sentido procurar um horário…?" no meio das perguntas do mapa. O que vale é a última
+  // pergunta nossa: se ela mesma é o convite (meet, monitor, horário), não é pendência.
   for (let i = historico.length - 1; i >= 0; i--) {
     const m = historico[i];
     const t = textoDe(m).trim();
@@ -38,7 +40,7 @@ export function perguntaPendente(historico: readonly Msg[]): string {
       return '';                                          // o lead falou depois da nossa pergunta
     }
     if (m?.role !== 'assistant' || !t) continue;
-    if (t.startsWith(MARCADOR_ATENDIMENTO_HUMANO) || !t.includes('?')) return '';
+    if (t.startsWith(MARCADOR_ATENDIMENTO_HUMANO) || !t.includes('?') || RE_CONVITE.test(t)) return '';
     // A pergunta precisa ter sido a resposta a uma fala de gente do lead (não o template nem um disparo).
     let respondeuAoLead = false;
     for (let j = i - 1; j >= 0; j--) {
@@ -48,7 +50,10 @@ export function perguntaPendente(historico: readonly Msg[]): string {
     }
     if (!respondeuAoLead) return '';
     const ultima = (t.match(/[^.!?\n]*\?/g) ?? []).at(-1)?.trim() ?? '';
-    return ultima.replace(/^(?:bacana|certo|legal|beleza|tranquilo|show|perfeito)[,.!]?\s*/i, '');
+    // Sem a reação e sem o eco do que o lead acabou de dizer ("como nutricionista,", "trabalhando contratada no
+    // frigorífico,"): repetir o óbvio no toque soa robótico (Gustavo, 19/10/2026).
+    return ultima.replace(/^(?:bacana|certo|legal|beleza|tranquilo|show|perfeito)[,.!]?\s*/i, '')
+      .replace(/^(?:como|trabalhando|atuando|sendo)\s+[^,?]{1,45},\s*/i, '');
   }
   return '';
 }
