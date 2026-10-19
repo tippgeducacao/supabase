@@ -220,7 +220,18 @@ function renderTemplate(corpo: string, components: unknown): string {
  * Cache em `crm_whatsapp_template_bodies` por (template_name, wa_account_id): só o 1º envio
  * de cada template por conta bate na Meta; os demais leem do banco.
  * `header_format`: NULL = desconhecido · 'NONE' = sem cabeçalho · TEXT/IMAGE/VIDEO/DOCUMENT.
+ *
+ * ⚠️ O cache VENCE (CACHE_TEMPLATE_TTL_MS). Template editado na Meta mantém o NOME: sem
+ * validade, o chat (e o histórico do agente) seguia gravando o corpo antigo para sempre —
+ * `dia24` da cobrança editado em 15/10 e o chat mostrando o texto de 09/09 em 19/10, como se a
+ * mensagem velha tivesse sido enviada. A Meta sempre entrega a versão aprovada atual.
  */
+const CACHE_TEMPLATE_TTL_MS = 30 * 60 * 1000;
+function cacheTemplateVencido(atualizadoEm: unknown): boolean {
+  const t = atualizadoEm ? new Date(String(atualizadoEm)).getTime() : NaN;
+  return !Number.isFinite(t) || Date.now() - t > CACHE_TEMPLATE_TTL_MS;
+}
+
 async function formaDoTemplateNaConta(
   admin: any,
   wa: { id: string; waba_id?: string | null },
@@ -232,12 +243,13 @@ async function formaDoTemplateNaConta(
 
   const { data: cache } = await admin
     .from("crm_whatsapp_template_bodies")
-    .select("body_text, header_format")
+    .select("body_text, header_format, atualizado_em")
     .eq("template_name", templateName)
     .eq("wa_account_id", wa.id)
     .maybeSingle();
   // Só serve se a FORMA já está gravada — linha antiga (só corpo) ainda precisa da Meta.
-  if (cache?.header_format) {
+  // Vencido ⇒ rebusca; se a Meta falhar, o cache velho segue valendo (catch abaixo).
+  if (cache?.header_format && !cacheTemplateVencido(cache.atualizado_em)) {
     return { body_text: cache.body_text ?? null, header_format: String(cache.header_format).toUpperCase() };
   }
   if (!wa.waba_id) return { body_text: cache?.body_text ?? null, header_format: null };
@@ -265,6 +277,7 @@ async function formaDoTemplateNaConta(
         template_name: templateName,
         wa_account_id: wa.id,
         header_format: fmt,
+        atualizado_em: new Date().toISOString(),
         ...(bodyText ? { body_text: bodyText } : {}),
       },
       { onConflict: "template_name,wa_account_id" },
@@ -1090,6 +1103,7 @@ Deno.serve(async (req) => {
     let templateTexto: string | null = null;
     if (tipo === "template") {
       let corpo: string | null = null;
+      let corpoVencido: string | null = null;
       const { data: tpl } = await admin
         .from("crm_mensagem_templates")
         .select("conteudo")
@@ -1105,12 +1119,17 @@ Deno.serve(async (req) => {
         // lembrete_1_hora_antes_utility: cache do Wellinton [4 vars] × template novo [3 vars]).
         const { data: cache } = await admin
           .from("crm_whatsapp_template_bodies")
-          .select("body_text")
+          .select("body_text, atualizado_em")
           .eq("template_name", template_name)
           .eq("wa_account_id", wa.id)
           .maybeSingle();
-        if (cache?.body_text) corpo = String(cache.body_text);
+        if (cache?.body_text) {
+          corpo = String(cache.body_text);
+          // Vencido ⇒ tenta a Meta abaixo; se ela falhar, fica o corpo do cache.
+          if (cacheTemplateVencido(cache.atualizado_em)) corpoVencido = corpo;
+        }
       }
+      if (corpoVencido) corpo = null;
       if (!corpo && wa.waba_id) {
         // Busca o corpo aprovado na Meta (1x) e cacheia para os próximos envios.
         try {
@@ -1138,6 +1157,7 @@ Deno.serve(async (req) => {
                   wa_account_id: wa.id,
                   body_text: bodyText,
                   header_format: headerComp ? String(headerComp?.format ?? "TEXT").toUpperCase() : "NONE",
+                  atualizado_em: new Date().toISOString(),
                 },
                 { onConflict: "template_name,wa_account_id" },
               );
@@ -1146,6 +1166,7 @@ Deno.serve(async (req) => {
           console.log("[crm-whatsapp-send] fetch corpo template falhou:", e?.message);
         }
       }
+      if (!corpo && corpoVencido) corpo = corpoVencido;
       // Renderiza com os componentes JÁ saneados, p/ o texto persistido bater com o enviado.
       if (corpo) templateTexto = renderTemplate(corpo, sanitizarComponentsTemplate(template_components));
     }
