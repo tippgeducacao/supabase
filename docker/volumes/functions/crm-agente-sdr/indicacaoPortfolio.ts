@@ -16,16 +16,11 @@ type Banco = Parameters<typeof consultarCatalogo>[0];
 const RE_ORIGEM_NO_CURSO = /^\s*(?:cadastrad[oa]\s+por|capta[cç][aã]o|indica[cç][aã]o|lead\s+great|origem)\b/i;
 
 /** O curso do cadastro é uma pós do catálogo? (vazio ou origem gravada no lugar = não) */
-export async function posDoCadastroDefinida(supabase: Banco, curso: string | null | undefined): Promise<boolean> {
-  const c = String(curso ?? '').trim();
-  if (!c || RE_ORIGEM_NO_CURSO.test(c)) return false;
-  try {
-    const r = await consultarCatalogo(supabase, c);
-    // Catálogo fora do ar: na dúvida, mantém o fluxo de sempre.
-    return r.status === 'curso_confirmado' || r.status === 'catalogo_indisponivel';
-  } catch {
-    return true;
-  }
+// 19/10/2026 (caso Júlia): curso VAZIO ou nome fora do catálogo ("Cooperativas") também contava como indicação, e
+// 21 leads que vieram de template de pós receberam o portfólio com "um colega seu passou o seu contato". Indicação é
+// só quando o campo traz a origem; o resto segue o fluxo de sempre.
+export async function posDoCadastroDefinida(_supabase: Banco, curso: string | null | undefined): Promise<boolean> {
+  return !RE_ORIGEM_NO_CURSO.test(String(curso ?? '').trim());
 }
 
 // Contato frio (Gustavo, 16/10): a pessoa não se inscreveu e nunca ouviu falar da PPGVET; um colega passou o

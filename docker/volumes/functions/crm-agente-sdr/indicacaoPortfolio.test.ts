@@ -14,13 +14,14 @@ describe('lead de indicação sem pós no cadastro (casos Lorrayne e Luiza)', ()
   it('a origem gravada no lugar do curso não é pós', async () => {
     expect(await posDoCadastroDefinida(banco, 'Cadastrado por:Adones')).toBe(false);
     expect(await posDoCadastroDefinida(banco, 'Captação orgânica por:Wellyngton Mateus')).toBe(false);
-    expect(await posDoCadastroDefinida(banco, '')).toBe(false);
-    expect(await posDoCadastroDefinida(banco, null)).toBe(false);
   });
 
-  it('pós do catálogo é pós; nome que não existe, não', async () => {
+  // 19/10/2026 (caso Júlia): curso vazio ou fora do catálogo não é indicação; segue o fluxo de sempre.
+  it('curso vazio, pós do catálogo ou nome fora do catálogo: não é indicação', async () => {
     expect(await posDoCadastroDefinida(banco, 'PÓS | CANNABIS MEDICINAL VETERINÁRIA')).toBe(true);
-    expect(await posDoCadastroDefinida(banco, 'Bovinocultura de corte avançada')).toBe(false);
+    expect(await posDoCadastroDefinida(banco, 'Cooperativas')).toBe(true);
+    expect(await posDoCadastroDefinida(banco, '')).toBe(true);
+    expect(await posDoCadastroDefinida(banco, null)).toBe(true);
   });
 
   it('a nota manda o portfólio sem perguntar a graduação e espera a escolha dele', () => {
