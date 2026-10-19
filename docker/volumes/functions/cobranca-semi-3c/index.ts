@@ -283,7 +283,8 @@ async function atualizar(cfg: Record<string, unknown>, execId: string, dry: bool
   const canonsDeAgora = new Set(elegiveis.map((p) => p.canon))
   const novos = elegiveis
   const jaEstavam = 0
-  // quem estava na lista anterior e nao volta nesta (quitou, saiu do funil, bloqueou)
+  // O espelho guarda submissões anteriores, não aceite nominal: o 3C só devolve
+  // contagem agregada. Aqui contamos enviados antes que saíram da seleção local.
   const sairam = [...naAnterior].filter((c) => !canonsDeAgora.has(c)).length
 
   if (dry) {
@@ -317,6 +318,8 @@ async function atualizar(cfg: Record<string, unknown>, execId: string, dry: bool
   let entraram = 0
   let recusados = 0
   let processados = 0
+  let falhasEnvio = 0
+  let importacaoDesconhecida = 0
   const lotes: Array<Record<string, unknown>> = []
   await marcar(execId, { fase: 'Enviando para o 3C' })
   for (let i = 0; i < novos.length; i += POR_LOTE) {
@@ -333,40 +336,66 @@ async function atualizar(cfg: Record<string, unknown>, execId: string, dry: bool
         data: dados, // o cartao "Ligacao Discador" so enumera mailing.data
       }
     })
-    const r = await api('POST', `/campaigns/${campanha}/lists/${listaId}/mailing`, { header: HEADER, mailing })
+    let r: Awaited<ReturnType<typeof api>> | null = null
+    try {
+      r = await api('POST', `/campaigns/${campanha}/lists/${listaId}/mailing`, { header: HEADER, mailing })
+    } catch {
+      // Falha de transporte pode acontecer depois do aceite remoto. Não repetir
+      // o lote nem registrar a exceção, que pode conter URL com token e telefone.
+    }
     processados += fatia.length
-    if (r.ok) {
-      // 2xx NAO significa "importou tudo": imported_lines traz o numero real.
-      const imp = typeof r.json?.imported_lines === 'number' ? (r.json.imported_lines as number) : fatia.length
-      entraram += imp
-      recusados += fatia.length - imp
-      lotes.push({ enviados: fatia.length, importados: imp, sem_imported_lines: typeof r.json?.imported_lines !== 'number' })
+    const transacao = r?.json?.transaction_id
+    // O identificador documentado é UUID. Não copiar corpo arbitrário do 3C
+    // para o histórico, nem aceitar texto livre no campo de rastreio.
+    const transactionId = typeof transacao === 'string' && UUID.test(transacao) ? transacao : null
+    const detalheLote = { enviados: fatia.length, status: r?.status ?? null, transaction_id: transactionId }
+    if (r?.ok) {
+      // 2xx confirma a submissão. Só uma contagem inteira dentro do lote confirma
+      // o aceite agregado; ausência/valor inválido não significa aceite nem recusa.
+      const bruto = r.json?.imported_lines
+      const imp = typeof bruto === 'number' && Number.isInteger(bruto) && bruto >= 0 && bruto <= fatia.length ? bruto : null
+      if (imp === null) {
+        importacaoDesconhecida += fatia.length
+        avisos.push(`Lote ${lotes.length + 1}: o 3C não confirmou a quantidade importada de ${fatia.length} contatos. Confira o relatório de importação antes de atualizar novamente.`)
+      } else {
+        entraram += imp
+        recusados += fatia.length - imp
+      }
+      lotes.push({ ...detalheLote, importados: imp, contagem_desconhecida: imp === null,
+        resultado: imp === null ? 'contagem_desconhecida' : 'confirmado' })
+      // Espelho das submissões com HTTP 2xx, inclusive quando o aceite é parcial
+      // ou desconhecido. Não há informação nominal para separar os importados.
       const { error } = await supabase.from('cob_semi_3c_itens').upsert(fatia.map((p) => ({
         canon: p.canon, telefone: p.telefone, nome: p.nome, email: p.email, funil: p.funil, etapa: p.etapa,
         lead_id: p.lead_id, oportunidade_id: p.oportunidade_id, lista_id: listaId,
       })), { onConflict: 'canon' })
       if (error) avisos.push(`espelho local: ${error.message}`)
     } else {
-      avisos.push(`envio: HTTP ${r.status} ${r.texto.slice(0, 150)}`)
-      lotes.push({ enviados: fatia.length, status: r.status })
+      falhasEnvio += fatia.length
+      avisos.push(`Lote ${lotes.length + 1} (${fatia.length} contatos): ${r ? `envio falhou (HTTP ${r.status})` : 'envio sem resposta confirmada'}. O lote não foi reenviado automaticamente.`)
+      lotes.push({ ...detalheLote, importados: null, resultado: 'falha_envio' })
     }
     await marcar(execId, { processados, entraram, recusados_3c: recusados })
   }
 
-  const falhouTudo = novos.length > 0 && lotes.every((l) => l.status !== undefined)
+  const temPendencia = falhasEnvio > 0 || importacaoDesconhecida > 0
+  const fase = !temPendencia ? 'Lista atualizada'
+    : falhasEnvio === novos.length ? 'O envio ao 3C falhou'
+      : importacaoDesconhecida === novos.length ? 'Importação sem contagem confirmada'
+        : 'Atualização parcial: confira as pendências'
+  const erro = avisos.length ? avisos.join(' | ') : null
   const resultado = {
     ...contagem, entraram, sairam, ja_estavam: jaEstavam, recusados_3c: recusados,
     na_lista: jaEstavam + entraram, lista_id: listaId, lista_nome: nomeLista,
   }
   await marcar(execId, {
     ...resultado, processados,
-    status: falhouTudo ? 'erro' : 'ok',
-    fase: falhouTudo ? 'O 3C recusou o envio' : 'Lista atualizada',
-    erro: avisos.length ? avisos.join(' | ') : null,
-    detalhe: { cards: regua.cards, pessoas: regua.pessoas, listas_apagadas: listas.length, lotes },
+    status: temPendencia ? 'erro' : 'ok', fase, erro,
+    detalhe: { cards: regua.cards, pessoas: regua.pessoas, listas_apagadas: listas.length,
+      falhas_envio: falhasEnvio, importacao_desconhecida: importacaoDesconhecida, lotes },
     terminado_em: new Date().toISOString(),
   })
-  return resultado
+  return { ...resultado, ok: !temPendencia, ...(temPendencia ? { error: erro } : {}) }
 }
 
 async function handler(req: Request): Promise<Response> {
