@@ -285,6 +285,52 @@ async function sincronizarConta(
   return { campanhas: linhasCamp.length + faltando.length, dias_x_campanha: insights.length };
 }
 
+/**
+ * ALCANCE DO PERÍODO, ao vivo (modo "alcance", 20/10/2026). O `reach` gravado em
+ * `tiktok_insights` é por campanha × DIA, e alcance NÃO soma: quem viu o anúncio em 10 dias
+ * conta 10 vezes. Em 01–20/10/2026 a soma deu 203.081 contra 125.517 pessoas que o próprio
+ * TikTok informava nas duas contas. Sem `stat_time_day` o relatório aceita o período inteiro
+ * (testado com 293 dias) e devolve pessoas únicas por conta — o mesmo desenho do
+ * `ig-period-metrics` do Instagram, que tinha o mesmo defeito. Somente leitura: não grava nada.
+ * ⚠️ Pessoas únicas valem POR CONTA: o TikTok não cruza contas, então com duas contas entregando
+ * o total é a soma das duas (quem viu anúncio das duas conta duas vezes) — a tela diz isso.
+ */
+async function alcanceDoPeriodo(contas: Record<string, string>[], de: string, ate: string) {
+  const porConta: Array<{ conta: string; alcance: number; impressoes: number; ok: boolean; erro?: string }> = [];
+  for (const conta of contas) {
+    const advertiserId = String(conta.advertiser_id);
+    try {
+      const d = await ttGet<{ list?: LinhaRelatorio[] }>(
+        "/report/integrated/get/",
+        {
+          advertiser_id: advertiserId,
+          report_type: "BASIC",
+          data_level: "AUCTION_ADVERTISER",
+          dimensions: JSON.stringify(["advertiser_id"]),
+          metrics: JSON.stringify(["reach", "impressions"]),
+          start_date: de,
+          end_date: ate,
+          page_size: "10",
+        },
+        String(conta.access_token || ""),
+      );
+      const m = d.list?.[0]?.metrics ?? {};
+      porConta.push({ conta: advertiserId, alcance: inteiro(m.reach), impressoes: inteiro(m.impressions), ok: true });
+    } catch (e) {
+      porConta.push({ conta: advertiserId, alcance: 0, impressoes: 0, ok: false, erro: err(e) });
+    }
+  }
+  const comEntrega = porConta.filter((c) => c.ok && c.impressoes > 0);
+  return {
+    // Uma conta que falhou deixa o total MENOR que o real sem avisar: a tela só mostra com ok.
+    ok: porConta.every((c) => c.ok),
+    periodo: { date_from: de, date_to: ate },
+    alcance: comEntrega.reduce((s, c) => s + c.alcance, 0),
+    contas_com_entrega: comEntrega.length,
+    por_conta: porConta,
+  };
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
@@ -296,6 +342,22 @@ Deno.serve(async (req) => {
     const date_from = body.date_from || iso(new Date(hojeSP.getTime() - 30 * 86400000));
 
     const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+
+    if (body.modo === "alcance") {
+      // Leitura sob demanda da tela TikTok Ads: exige usuário logado (o token das contas é usado
+      // para falar com o TikTok). A sincronização de sempre, abaixo, não mudou.
+      const jwt = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "");
+      const { data: quem } = jwt ? await supabase.auth.getUser(jwt) : { data: { user: null } };
+      if (!quem?.user) return json({ error: "Entre no sistema para consultar o alcance." }, 401);
+      const dia = /^\d{4}-\d{2}-\d{2}$/;
+      if (!dia.test(String(body.date_from || "")) || !dia.test(String(body.date_to || "")) || body.date_from > body.date_to) {
+        return json({ error: "Informe date_from e date_to (AAAA-MM-DD), com o início antes do fim." }, 400);
+      }
+      const { data: contasAlc, error: contasAlcErr } = await supabase
+        .from("tiktok_ad_accounts").select("advertiser_id, access_token").eq("ativo", true);
+      if (contasAlcErr) throw contasAlcErr;
+      return json(await alcanceDoPeriodo((contasAlc ?? []) as Record<string, string>[], body.date_from, body.date_to));
+    }
 
     let q = supabase.from("tiktok_ad_accounts").select("*").eq("ativo", true);
     if (body.advertiser_id) q = q.eq("advertiser_id", String(body.advertiser_id));
