@@ -103,10 +103,10 @@ async function dicaPelaLuna(contexto: string, pedido: string) {
 }
 
 // Resumo do lead: uma vez por reunião, antes de começar — aqui vale mais acertar que ser
-// rápido. Sonnet 5.5 com esforço médio (20/10/2026, decisão do Gustavo: mais barato que o
-// Opus); troca pelos secrets COPILOTO_REUNIAO_MODELO_RESUMO e _ESFORCO_RESUMO.
-const MODELO_RESUMO = Deno.env.get("COPILOTO_REUNIAO_MODELO_RESUMO") ?? "claude-sonnet-5-5";
-const ESFORCO_RESUMO = Deno.env.get("COPILOTO_REUNIAO_ESFORCO_RESUMO") ?? "medium";
+// rápido. Opus 5.5 com esforço baixo. O Sonnet 5.5 médio foi testado em 20/10/2026 e voltou no
+// mesmo dia (Gustavo: texto ruim). Troca pelos secrets COPILOTO_REUNIAO_MODELO_RESUMO e _ESFORCO_RESUMO.
+const MODELO_RESUMO = Deno.env.get("COPILOTO_REUNIAO_MODELO_RESUMO") ?? "claude-opus-5-5";
+const ESFORCO_RESUMO = Deno.env.get("COPILOTO_REUNIAO_ESFORCO_RESUMO") ?? "low";
 const PRAZO_RESUMO_MS = 50_000;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
