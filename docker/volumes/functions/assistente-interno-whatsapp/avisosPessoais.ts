@@ -69,6 +69,8 @@ function cabecalho(a: AvisoPessoal): string {
   if (a.tipo === "chat_dm") return `✉️ Mensagem direta de *${quem ?? (titulo || "alguém")}*`;
   if (a.tipo === "task_mention" || a.tipo === "chat_mention") return `🔔 *${titulo || "Você foi mencionado"}*`;
   if (a.tipo === "reply") return `↩️ *${titulo || "Nova resposta"}*`;
+  // Colocaram a pessoa como responsável (20/10/2026). Título do sino: 'Você é responsável por "X"'.
+  if (a.tipo === "task_assigned") return `📌 *${titulo || "Você é responsável por uma tarefa"}*`;
   return `🔔 *${titulo || "Notificação do Gestor"}*`;
 }
 

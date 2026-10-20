@@ -72,6 +72,18 @@ describe('textoAvisoPessoal', () => {
     expect(textoAvisoPessoal({ tipo: 'reply', titulo: 'Laura respondeu em "MARKETING X PEDAGÓGICO"', conteudo: 'feito' }))
       .toMatch(/^↩️ \*Laura respondeu em "MARKETING X PEDAGÓGICO"\*/);
   });
+  it('colocaram a pessoa como responsável: 📌, quem fez e o link da tarefa', () => {
+    expect(textoAvisoPessoal({
+      tipo: 'task_assigned',
+      titulo: 'Você é responsável por "SQUAD 07 - Marisa - CAMPANHA DE COBRANÇAS"',
+      conteudo: 'Bruno Barreta colocou você como responsável.',
+      link: `/gestor-tarefas?task=${TAREFA}`,
+    })).toBe(
+      '📌 *Você é responsável por "SQUAD 07 - Marisa - CAMPANHA DE COBRANÇAS"*\n\n'
+      + 'Bruno Barreta colocou você como responsável.\n\n'
+      + `🔗 ${APP}/gestor-tarefas?task=${TAREFA}`,
+    );
+  });
   it('tipo do sino sem régua própria usa o título', () => {
     expect(textoAvisoPessoal({ tipo: 'task_status_change', titulo: 'Status alterado: Ajuste X', link: null }))
       .toBe('🔔 *Status alterado: Ajuste X*');
