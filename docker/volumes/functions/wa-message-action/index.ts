@@ -7,12 +7,22 @@
 //
 // Só mensagens OUTBOUND de uma linha web (wa_conexao_id) — o WhatsApp só deixa editar/
 // apagar as próprias mensagens, e dentro do prazo dele (edição ~15 min).
+//
+// PORTÃO (20/10/2026): até aqui o único teste era o header COMEÇAR com "Bearer " — o runtime
+// self-hosted não confere JWT por função, então "Bearer qualquer-coisa" passava e, com o
+// wa_message_id de uma mensagem enviada por linha Web, qualquer um editava ou "apagava para
+// todos" no WhatsApp do cliente e no CRM. Agora: a sessão é validada no Auth (getUser) e vale
+// a MESMA régua da wa-uazapi-admin — usuário ATIVO (`pode_gerenciar_wa_conexoes()`), que é
+// também quem vê os botões Editar/Apagar no chat. Único chamador: o chat do CRM/SAC
+// (`useWaMessageAction` → `functions.invoke`, com o JWT da sessão). Nenhuma edge, cron ou n8n
+// chama esta função, então chave de serviço NÃO é aceita (nem a anon).
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { corsHeaders } from "../_shared/cors.ts";
 import { getWaProvider } from "../_shared/waProviders.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 const TOMBSTONE = "🚫 Mensagem apagada";
 
 function json(data: unknown, status = 200) {
@@ -22,9 +32,34 @@ function json(data: unknown, status = 200) {
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return json({ error: "use POST" }, 405);
-  if (!req.headers.get("Authorization")?.startsWith("Bearer ")) return json({ error: "não autenticado" }, 401);
+  const jwt = (req.headers.get("Authorization") ?? "").match(/^Bearer\s+(\S+)$/i)?.[1];
+  if (!jwt) return json({ error: "não autenticado" }, 401);
 
   const admin = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
+
+  // ── Gate: sessão de verdade + usuário ATIVO, antes de ler qualquer mensagem ou token ──
+  // getUser recusa texto qualquer, JWT vencido/forjado e também as chaves anon/serviço
+  // (não têm usuário). Falha de rede no Auth = 500 (o Cloudflare repassa; 502/504 não).
+  let usuarioId: string;
+  try {
+    const { data: quem, error: quemErr } = await admin.auth.getUser(jwt);
+    if (quemErr || !quem?.user?.id || quem.user.is_anonymous) {
+      return json({ error: "sessão inválida — entre de novo no sistema" }, 401);
+    }
+    usuarioId = quem.user.id;
+  } catch {
+    return json({ error: "não foi possível verificar sua sessão — tente de novo" }, 500);
+  }
+  // A régua mora no banco (a mesma da wa-uazapi-admin): chamada COMO o usuário, porque é
+  // `auth.uid()` que ela confere.
+  const userClient = createClient(SUPABASE_URL, ANON_KEY, {
+    global: { headers: { Authorization: `Bearer ${jwt}` } },
+    auth: { persistSession: false },
+  });
+  const { data: podeAgir, error: gateErr } = await userClient.rpc("pode_gerenciar_wa_conexoes");
+  if (gateErr) return json({ error: "não foi possível verificar sua permissão — tente de novo" }, 500);
+  if (podeAgir !== true) return json({ error: "acesso restrito a usuários ativos do sistema" }, 403);
+
   const body = await req.json().catch(() => ({}));
   const action = String(body?.action ?? "");
   const waMessageId = String(body?.wa_message_id ?? "").trim();
@@ -58,6 +93,7 @@ Deno.serve(async (req) => {
       if (!r.ok) return json({ error: "provider recusou a edição", provider_response: r.raw }, 422);
       await admin.from("crm_whatsapp_messages").update({ conteudo: text }).eq("wa_message_id", waMessageId);
       await admin.from("sac_mensagens").update({ conteudo: text }).eq("wa_message_id", waMessageId);
+      console.log(`[wa-message-action] edit por ${usuarioId} em ${waMessageId}`);
       return json({ ok: true, action, conteudo: text });
     }
 
@@ -68,6 +104,7 @@ Deno.serve(async (req) => {
       .update({ conteudo: TOMBSTONE, anexos: [] }).eq("wa_message_id", waMessageId);
     await admin.from("sac_mensagens")
       .update({ conteudo: TOMBSTONE, anexos: [] }).eq("wa_message_id", waMessageId);
+    console.log(`[wa-message-action] delete por ${usuarioId} em ${waMessageId}`);
     return json({ ok: true, action, conteudo: TOMBSTONE });
   } catch (e) {
     const m = e instanceof Error ? e.message : String(e);

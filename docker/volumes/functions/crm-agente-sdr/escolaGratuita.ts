@@ -199,7 +199,7 @@ export function comBlocoDaEscola(promptRenderizado: string, jaEstaNaEscola: bool
 //
 // Quando dispara — as duas condições juntas:
 //   1. a mensagem do lead pede link/acesso/site/endereço (verbo de pedir + "link", ou
-//      ⚠️ depois do verbo vai lookahead de espaço/pontuação, não : em JS \w é ASCII e
+//      ⚠️ depois do verbo vai lookahead de espaço/pontuação, não \b: em JS \w é ASCII e
 //      "cadê "/"me dá " não formam fronteira de palavra;
 //      "perdi/não acho o acesso", ou "qual o site/link", ou "link de novo");
 //   2. o pedido é sobre a ESCOLA: ou a mensagem cita escola/biblioteca/curso gratuito, ou o
@@ -235,7 +235,7 @@ export function pediuLinkDaEscola(mensagemDoLead: string | null | undefined, con
 // depois que a gente fechar um horário") — e aí grudar o endereço da Escola seria errado.
 // Se a resposta fala de reunião/horário e NÃO fala de acesso/escola, o pedido era do Meet.
 const RE_RESPOSTA_ESCOLA = /acesso|escola|biblioteca|cadastro|cursos? gratuit/i;
-const RE_RESPOSTA_REUNIAO = /reuni[ãa]o|meet|call|hor[áa]rio|encaixe|agendar|fechar um/i;
+const RE_RESPOSTA_REUNIAO = /reuni[ãa]o|meet|\bcall\b|hor[áa]rio|encaixe|agendar|fechar um/i;
 
 /** Garante o endereço na resposta a quem pediu. Só acrescenta; se o modelo já pôs, nada muda. */
 export function comLinkPedido(

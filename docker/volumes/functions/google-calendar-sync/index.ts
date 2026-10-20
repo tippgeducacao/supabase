@@ -3,6 +3,7 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { atualizacaoAgendaDescoberta } from '../_shared/atualizacaoAgendaDescoberta.ts';
+import { erroDeTokenDaAgenda, type ErroDeTokenAgenda } from './erroDeToken.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -26,6 +27,34 @@ interface Integration {
   scope?: string | null;
   scopes?: string | null;
   is_primary?: boolean | null;
+  calendar_token_error?: string | null;
+}
+
+// Colunas que o sync lê (tokens incluídos: só service role chega aqui).
+const COLUNAS_SYNC =
+  'id, external_calendar_id, oauth_access_token, oauth_refresh_token, oauth_token_expires_at, account_email, owner_user_id, scope, scopes, is_primary, calendar_token_error';
+
+/**
+ * Grava o erro de TOKEN na linha (ver erroDeToken.ts) — só quando ele MUDA. Cada escrita mexe
+ * no `updated_at`, e o polling da reconexão (`use-reconectar-google`) lê "escrita nova na
+ * linha" como "a pessoa autorizou": regravar a cada 15 min a linha que está sendo reconectada
+ * podia encerrar a reconexão antes da hora. Falha aqui não derruba o sync das outras agendas.
+ */
+async function marcarErroDeToken(
+  admin: ReturnType<typeof createClient>,
+  integ: Integration,
+  codigo: ErroDeTokenAgenda,
+) {
+  if (integ.calendar_token_error === codigo) return;
+  try {
+    const { error } = await admin
+      .from('calendar_integrations')
+      .update({ calendar_token_error: codigo })
+      .eq('id', integ.id);
+    if (error) console.error('[calendar] falha ao gravar calendar_token_error', integ.id, error);
+  } catch (e) {
+    console.error('[calendar] falha ao gravar calendar_token_error', integ.id, e);
+  }
 }
 
 async function upsertCalendarIntegrations(
@@ -303,10 +332,10 @@ async function syncIntegration(admin: any, integ: Integration) {
     console.error('reconcile failed', integ.id, e);
   }
 
-  // Mark synced
+  // Mark synced — e limpa o erro de token: se chegou aqui, o token renovou e leu a agenda.
   await admin
     .from('calendar_integrations')
-    .update({ last_synced_at: new Date().toISOString() })
+    .update({ last_synced_at: new Date().toISOString(), calendar_token_error: null })
     .eq('id', integ.id);
 
   return { events: events.length, upserted, removidos };
@@ -330,7 +359,7 @@ Deno.serve(async (req) => {
   if (integrationId) {
     const { data: base, error: bErr } = await admin
       .from('calendar_integrations')
-      .select('id, external_calendar_id, oauth_access_token, oauth_refresh_token, oauth_token_expires_at, owner_user_id, account_email, scope, scopes, is_primary')
+      .select(COLUNAS_SYNC)
       .eq('id', integrationId)
       .maybeSingle();
     if (bErr || !base) {
@@ -343,7 +372,7 @@ Deno.serve(async (req) => {
     // Demais sub-agendas SELECTED da mesma conta
     const { data: siblings } = await admin
       .from('calendar_integrations')
-      .select('id, external_calendar_id, oauth_access_token, oauth_refresh_token, oauth_token_expires_at, account_email, owner_user_id, scope, scopes, is_primary')
+      .select(COLUNAS_SYNC)
       .eq('is_active', true)
       .eq('selected', true)
       .eq('account_email', (base as any).account_email)
@@ -354,7 +383,7 @@ Deno.serve(async (req) => {
   } else {
     const { data, error } = await admin
       .from('calendar_integrations')
-      .select('id, external_calendar_id, oauth_access_token, oauth_refresh_token, oauth_token_expires_at, account_email, owner_user_id, scope, scopes, is_primary')
+      .select(COLUNAS_SYNC)
       .eq('is_active', true)
       .eq('selected', true)
       .not('oauth_refresh_token', 'is', null);
@@ -375,7 +404,16 @@ Deno.serve(async (req) => {
       results.push({ integration_id: integ.id, ok: true, ...r });
     } catch (e) {
       console.error('sync error', integ.id, e);
-      results.push({ integration_id: integ.id, ok: false, error: (e as Error).message });
+      // Erro de token vai para a LINHA (calendar_token_error), não só para esta resposta —
+      // antes ele morria aqui e a agenda ficava parada sem ninguém saber. Transitório não grava.
+      const codigo = erroDeTokenDaAgenda(e);
+      if (codigo) await marcarErroDeToken(admin, integ, codigo);
+      results.push({
+        integration_id: integ.id,
+        ok: false,
+        error: (e as Error).message,
+        ...(codigo ? { calendar_token_error: codigo } : {}),
+      });
     }
   }
 

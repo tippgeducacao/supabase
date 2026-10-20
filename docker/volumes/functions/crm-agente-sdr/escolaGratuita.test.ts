@@ -179,6 +179,22 @@ describe('quem pede o link da Escola recebe o link', () => {
     expect(r.anexou).toBe(false);
   });
 
+  // 20/10/2026: de 11/09 até aqui o "call" da régua da resposta tinha dois BACKSPACE (byte 0x08)
+  // no lugar da fronteira de palavra e nunca casava — "confirmar a call" levava a Escola grudada.
+  it('NÃO anexa quando a resposta fala da call (regressão do byte 0x08 na régua)', () => {
+    const texto = 'assim que a gente confirmar a call eu te passo';
+    const r = comLinkPedido(texto, 'Me manda o link', true);
+    expect(r.anexou).toBe(false);
+    expect(r.texto).toBe(texto);
+  });
+
+  // Controle: a mesma frase, falando do CADASTRO em vez da call, é a Escola ⇒ o link sai.
+  it('anexa na mesma frase quando ela fala do cadastro, não da call', () => {
+    const r = comLinkPedido('assim que a gente confirmar o cadastro eu te passo', 'Me manda o link', true);
+    expect(r.anexou).toBe(true);
+    expect(r.texto).toBe(`assim que a gente confirmar o cadastro eu te passo\n${LINK_ESCOLA_GRATUITA}`);
+  });
+
   // Caso Leandro real: a resposta fala do ACESSO (e também de horário) ⇒ é a Escola, anexa.
   it('anexa quando a resposta fala do acesso, mesmo citando horário junto', () => {
     const r = comLinkPedido(
