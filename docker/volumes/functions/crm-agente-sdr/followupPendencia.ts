@@ -17,12 +17,33 @@ const textoDe = (m: Msg): string => typeof m?.content === 'string' ? m.content
 // "primeiro lote" sozinho não é convite: o próprio toque da pendência fala dele. Convite = meet, monitor ou horário.
 const RE_CONVITE = /\bno meet\b|monitor especialista|conversa (?:r[aá]pida |individual )?com o monitor|\b\d{1,2}(?::\d{2})?h(?:\d{2})?\b[^?]*\?/i;
 
-/** Já houve convite pro meet nesta conversa (lote apresentado, conversa com o monitor ou horário oferecido)? */
-export function conviteFeito(historico: readonly Msg[]): boolean {
-  return historico.some((m) => m?.role === 'assistant' && RE_CONVITE.test(textoDe(m)));
+const ehFalaDoLead = (t: string) => Boolean(t.trim()) && !t.includes('AUTO_IGNORE') && !t.startsWith('[RESPOSTA AUTOM') && !t.startsWith('[início');
+
+/** A fala `i` (nossa) veio em resposta a uma fala de gente do lead, e não de um disparo ou de um toque do follow-up? */
+function respondeAoLead(historico: readonly Msg[], i: number): boolean {
+  for (let j = i - 1; j >= 0; j--) {
+    if (historico[j]?.role !== 'user') continue;            // outros pedaços da mesma resposta
+    const u = textoDe(historico[j]).trim();
+    if (!u) continue;                                        // resultado de ferramenta
+    return ehFalaDoLead(u);
+  }
+  return false;
 }
 
-const ehFalaDoLead = (t: string) => Boolean(t.trim()) && !t.includes('AUTO_IGNORE') && !t.startsWith('[RESPOSTA AUTOM') && !t.startsWith('[início');
+/**
+ * Já houve convite pro meet nesta conversa (conversa com o monitor, meet ou horário oferecido)?
+ * Só vale o convite feito NA conversa: em resposta ao lead ou pelo vendedor. 20/10/2026 (caso Márcia): o disparo
+ * "Podemos conversar 16h30 ou às 19h30?", mandado antes de ela responder, contava como convite, e o 2º toque mandou
+ * "faz sentido procurar um horário para sua conversa com o monitor…?" sem a IA ter feito a abertura.
+ */
+export function conviteFeito(historico: readonly Msg[]): boolean {
+  return historico.some((m, i) => {
+    if (m?.role !== 'assistant') return false;
+    const t = textoDe(m);
+    if (!RE_CONVITE.test(t)) return false;
+    return t.trim().startsWith(MARCADOR_ATENDIMENTO_HUMANO) || respondeAoLead(historico, i);
+  });
+}
 
 /**
  * A pergunta nossa que ficou sem resposta, se ela foi a resposta a uma fala do lead e veio antes do convite.
