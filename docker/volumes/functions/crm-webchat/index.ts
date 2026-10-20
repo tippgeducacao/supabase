@@ -30,6 +30,8 @@ import { semearHistoricoWhatsApp } from "./continuidade.ts";
 import { WEBCHAT_TEMPLATE_CONTINUIDADE, WEBCHAT_WA_ACCOUNT_ID, WHATSAPP_REENVIO_COOLDOWN_MIN } from "./agente.ts";
 import { fraseConviteWhatsapp } from "./frases.ts";
 import { pushParaSessao } from "../_shared/webchatPush.ts";
+// A MESMA régua de UTM do crm-lead-webhook: o contato do chat nasce com a marca do anúncio.
+import { extrairRastreamento } from "../_shared/utmCaptura.ts";
 // Transcrição de áudio: o MESMO módulo Gemini do botão do SAC e da fila do SDR.
 import { transcreverGemini } from "../crm-transcrever-audio/gemini.ts";
 import { resolverGemini } from "../crm-transcrever-audio/configuracao.ts";
@@ -47,6 +49,8 @@ const MAX_SESSOES_POR_IP_HORA = 20;
 const MAX_SESSOES_POR_TELEFONE_DIA = Number(Deno.env.get("WEBCHAT_MAX_SESSOES_TELEFONE_DIA") ?? 5);
 const MAX_MSGS_POR_SESSAO_MIN = 15;
 const MAX_CONTEUDO = 2000;
+// URL da LP: comporta o ttclid do TikTok inteiro (o body todo já tem teto de 16 KB).
+const MAX_ORIGEM_URL = 2000;
 const MAX_BODY_BYTES = 16_384;
 const MAX_AUDIOS_POR_CHAT = 4; // teto de áudios por conversa (decisão diretor)
 // Áudio inbound chega inline (base64) → cap próprio, maior (o de texto é DoS guard).
@@ -377,6 +381,10 @@ async function acaoIniciar(body: Record<string, unknown>, req: Request) {
   // ou 'pos' (LPs de pós-graduação, comportamento de sempre). Valor desconhecido → 'pos'.
   const produto = texto(body.produto, 20).toLowerCase() === "escola" ? "escola" : "pos";
 
+  // URL da LP com as UTMs do anúncio. Até 03/10/2026 era cortada em 500 caracteres e o
+  // ttclid do TikTok (último parâmetro, ~300 chars) chegava pela metade em 25 de 36 sessões.
+  const origemUrl = texto(body.origem_url, MAX_ORIGEM_URL) || null;
+
   const { data, error } = await supabase
     .from("webchat_sessoes")
     .insert({
@@ -385,7 +393,7 @@ async function acaoIniciar(body: Record<string, unknown>, req: Request) {
       produto,
       pagina: texto(body.pagina, 200) || null,
       curso: texto(body.curso, 120) || null,
-      origem_url: texto(body.origem_url, 500) || null,
+      origem_url: origemUrl,
       ip,
       user_agent: texto(req.headers.get("user-agent"), 300) || null,
       // CONSENTIMENTO (LGPD art. 8º §2: o ônus de provar é do controlador).
@@ -406,13 +414,28 @@ async function acaoIniciar(body: Record<string, unknown>, req: Request) {
 
   // Fase 2: cria/vincula o LEAD real no CRM (find-or-create por telefone canônico).
   // Best-effort — falha aqui não impede o chat de abrir.
+  // p_rastreamento: UTMs + cliques da URL da LP. Só entram no contato NOVO (o RPC não toca
+  // em quem já existe — a origem dele é a da primeira aquisição). Sem isso o contato do
+  // anúncio caía em SEM UTM › Webchat: 36 do TikTok em 90 dias (diagnóstico de 03/10/2026).
+  const rastreamento = extrairRastreamento({ urls: [origemUrl] });
   try {
-    const { data: leadId } = await supabase.rpc("webchat_lead_upsert", {
+    const args = {
       p_nome: nome,
       p_telefone: telefone,
       p_pagina: texto(body.pagina, 200) || null,
       p_curso: texto(body.curso, 120) || null,
+    };
+    let { data: leadId, error: erroUpsert } = await supabase.rpc("webchat_lead_upsert", {
+      ...args,
+      p_rastreamento: Object.keys(rastreamento).length ? rastreamento : null,
     });
+    // Banco ainda sem o 5º parâmetro (migration 20261020161226 não aplicada): cria o
+    // contato como antes. Sem isto a edge nova, subindo antes da migration, deixaria
+    // TODO visitante do chat sem contato.
+    if (erroUpsert) {
+      console.error(`[crm-webchat] lead_upsert com rastreamento: ${erroUpsert.message}`);
+      ({ data: leadId } = await supabase.rpc("webchat_lead_upsert", args));
+    }
     if (leadId) {
       await supabase.from("webchat_sessoes").update({ lead_id: leadId }).eq("id", data.id);
     }

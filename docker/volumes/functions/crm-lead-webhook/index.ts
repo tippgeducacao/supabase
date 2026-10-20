@@ -177,6 +177,15 @@ function pickUrlAuto(dados: Record<string, unknown>): string | undefined {
   return undefined;
 }
 
+// URL de origem da captação do chat das LPs (crm-webchat → dispararCaptacao). Até 03/10/2026
+// ninguém lia esta chave e a captação do chat chegava sem UTM (23 do TikTok em 90 dias).
+function pickOrigemUrl(dados: Record<string, unknown>): string | undefined {
+  for (const [k, v] of Object.entries(dados)) {
+    if (k.toLowerCase() === "origem_url" && typeof v === "string" && v.trim()) return v.trim();
+  }
+  return undefined;
+}
+
 // ── Builder (config JSONB): execução ADITIVA das abas avançadas ──────────────
 // IMPORTANTE: tudo aqui é opt-in. Config vazio (webhooks antigos) => comportamento
 // idêntico ao anterior. Cada bloco é defensivo (try/catch) e nunca derruba o core.
@@ -761,7 +770,10 @@ Deno.serve(async (req) => {
   }
   const inUtm: Record<string, string> = extrairRastreamento({
     campos: [utmMapeadas, utmDasAcoes, payload as Record<string, unknown>, queryParams],
-    urls: [paginaRecebida, pickUrlAuto(dados)],
+    // `origem_url` = URL da LP onde o chat foi aberto (captação do crm-webchat, que manda
+    // em `pagina` só o nome da página). Entra SÓ como fonte de UTM, por último: virar
+    // pagina_nome aplicaria o segmento da página ao contato (trg_apply_pagina_segmento).
+    urls: [paginaRecebida, pickUrlAuto(dados), pickOrigemUrl(dados)],
   });
   if (!inUtm.utm_campaign && inMeta.meta_campaign_name) inUtm.utm_campaign = inMeta.meta_campaign_name;
   if (!inUtm.utm_content  && inMeta.meta_ad_name)       inUtm.utm_content  = inMeta.meta_ad_name;

@@ -104,7 +104,10 @@ export function podeComplementarAtribuicao(atual: Record<string, unknown>, entra
     if (canalAnterior && canalAnterior !== canalNovo && !idEmComum) return false;
     if (!Object.keys(anterior).length && !canalAnterior) {
       const fonteDeclarada = normalizar(atual.fonte_referencia) ?? normalizar(atual.fonte);
-      if (fonteDeclarada && !["greatpages", "sprinthub", "utm com erro", "acesso direto", "a revisar"].includes(fonteDeclarada)) return false;
+      // 'Webchat LP' é o CANAL de captura (o chat da LP cria o contato antes de qualquer
+      // formulário), não uma origem de aquisição: até 03/10/2026 ele travava a UTM do
+      // formulário enviado logo depois e o contato do anúncio ficava em SEM UTM.
+      if (fonteDeclarada && !["greatpages", "sprinthub", "utm com erro", "acesso direto", "a revisar", "webchat lp", "webchat"].includes(fonteDeclarada)) return false;
     }
   }
   return true;

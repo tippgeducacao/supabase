@@ -88,6 +88,18 @@ describe("primeira atribuição do contato", () => {
     expect(podeComplementarAtribuicao({ fonte_referencia: "Indicação" }, { utm_source: "tiktok" })).toBe(false);
   });
 
+  it.each(["Webchat LP", "Webchat"])("contato criado pelo chat da LP (%s) aceita a UTM do formulário enviado depois", fonte => {
+    const entrada = { utm_source: "tiktok", utm_medium: "paid", utm_campaign: "LP_LEAD_POS-CLINICACIRURGIA-COMERCIAL-mensal", utm_id: "1876", ttclid: "clique" };
+    expect(complementarPrimeiraAtribuicao({ fonte, origem_criacao: "webchat" }, entrada)).toEqual(entrada);
+  });
+
+  it("URL da sessão do chat devolve a atribuição do anúncio, decodificada como o navegador faz", () => {
+    const url = "https://www.ppgvet.com.br/pos-clinica-e-cirurgia?utm_source=tiktok_ppgvet&utm_medium=paid&utm_campaign=%E2%9C%85+LP_LEAD_POS-QUALI&utm_content=auto+carousel&utm_id=1876&ttclid=E_C_P_123";
+    expect(extrairRastreamento({ urls: [url] })).toEqual({
+      utm_source: "tiktok_ppgvet", utm_medium: "paid", utm_campaign: "✅ LP_LEAD_POS-QUALI", utm_content: "auto carousel", utm_id: "1876", ttclid: "E_C_P_123",
+    });
+  });
+
   it("contato ainda sem origem aceita os sinais recebidos", () => {
     expect(complementarPrimeiraAtribuicao({ fonte: "UTM COM ERRO" }, { utm_source: "linkedin_ppgvet", utm_campaign: "sanidade" })).toEqual({ utm_source: "linkedin_ppgvet", utm_campaign: "sanidade" });
   });
