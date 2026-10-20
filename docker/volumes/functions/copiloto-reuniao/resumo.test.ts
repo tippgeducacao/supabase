@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { linhaDaMensagem, montarConversa, montarEntradaResumo } from "./resumo";
+import { linhaDaMensagem, montarConversa, montarEntradaResumo, PROMPT_RESUMO } from "./resumo";
 
 const em = (iso: string) => ({ created_at: iso });
 
@@ -64,5 +64,13 @@ describe("montarEntradaResumo", () => {
 
   it("sem conversa, diz que não há mensagem (o modelo não inventa uma)", () => {
     expect(montarEntradaResumo({ contexto: "x", mensagens: [] })).toContain("(nenhuma mensagem registrada)");
+  });
+});
+
+describe("O que ainda não sabemos (20/10/2026)", () => {
+  // Gustavo: "por que pediu para não ser notificada" não é coisa de perguntar na reunião
+  it("só lacunas de carreira; logística e pagamento ficam de fora", () => {
+    expect(PROMPT_RESUMO).toContain("lacunas sobre a CARREIRA");
+    expect(PROMPT_RESUMO).toMatch(/notificações, aparelho, horário, pagamento\) não é lacuna de carreira/);
   });
 });

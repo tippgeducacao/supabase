@@ -12,7 +12,7 @@ Use estas quatro partes, cada uma com o rótulo em negrito e frases curtas:
 **Quem é:** formação, onde e como trabalha (autônomo, contratado, servidor, dono do negócio), região.
 **O que ele quer:** o objetivo ou a dor. Use as palavras dele entre aspas quando houver.
 **O que já foi conversado:** o que ele perguntou, o que foi respondido, objeções ou dúvidas, e o que ficou combinado para a reunião.
-**O que ainda não sabemos:** o que vale o vendedor descobrir (por exemplo como ele trabalha, por que agora, se é prioridade, quem decide junto).
+**O que ainda não sabemos:** até três lacunas sobre a CARREIRA do lead que o vendedor deve descobrir na reunião: onde ele quer chegar profissionalmente, em que área quer atuar ou crescer, o que hoje o impede de ganhar mais, o que muda na carreira se fizer a pós, por que isso pesa agora. Detalhe de logística ou de atendimento (notificações, aparelho, horário, pagamento) não é lacuna de carreira e fica de fora.
 
 Só o que está nos dados. O que não aparece não se deduz: vai para "O que ainda não sabemos". Mensagem automática só conta se o lead reagiu a ela. Não repita preço, valor nem condição de pagamento: se ele perguntou de valor, diga apenas que perguntou. No máximo 180 palavras, sem título geral e sem comentário fora das quatro partes.`;
 
