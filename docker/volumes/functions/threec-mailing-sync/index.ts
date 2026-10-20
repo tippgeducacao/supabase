@@ -219,6 +219,41 @@ async function expurgar(campanhaId: string, limite: number, dry: boolean, signal
   return json({ ok: true, total_candidatos: linhas.length, removidos_no_3c: removidos, marcados, por_motivo: porMotivo })
 }
 
+// Diz no lote POR QUE ele ficou pendente. 15 min depois, `threec_sdr_fechar_lotes_orfaos`
+// (chamada pelo `threec_sdr_travar`) confirma o lote quando o 3C tinha respondido OK e devolve
+// os leads à fila nos outros casos. Melhor esforço: sem a anotação, o lote é devolvido.
+async function anotarPendencia(token: string, loteId: string, situacao: string): Promise<void> {
+  try {
+    const r = await supabase.rpc('threec_sdr_lote_anotar', { p_token: token, p_lote_id: loteId, p_situacao: situacao })
+    if (r.error) console.error('[threec-mailing-sync] falha ao anotar a pendência do lote')
+  } catch {
+    console.error('[threec-mailing-sync] falha ao anotar a pendência do lote')
+  }
+}
+
+// O 3C já aceitou a fatia: falha aqui é do NOSSO banco. Em 05/10/2026, minutos depois de
+// erros de memória compartilhada no Postgres, um lote ficou pendente e travou a SDR por
+// 15 dias. A confirmação é idempotente (repetir não marca ninguém duas vezes), então vale
+// tentar de novo antes de deixar o lote para o fechamento automático.
+const ESPERAS_CONFIRMAR_MS = [300, 900]
+async function confirmarLote(token: string, loteId: string, contagem: number | null, signal?: AbortSignal): Promise<number | null> {
+  for (let tentativa = 0; tentativa <= ESPERAS_CONFIRMAR_MS.length; tentativa++) {
+    if (tentativa > 0) {
+      if (signal?.aborted) return null
+      await new Promise((pronto) => setTimeout(pronto, ESPERAS_CONFIRMAR_MS[tentativa - 1]))
+    }
+    try {
+      const { data: n, error } = await supabase.rpc('threec_sdr_lote_confirmar', {
+        p_token: token, p_lote_id: loteId, p_importados: contagem,
+      })
+      if (!error && Number.isInteger(n) && (n as number) >= 0) return n as number
+    } catch {
+      // erro de transporte com o banco: conta como tentativa
+    }
+  }
+  return null
+}
+
 async function sincronizar(cfg: ConfigSDR, lista: string, limite: number, desde: string | null, dry: boolean, token: string, signal?: AbortSignal): Promise<Response> {
   if (!cfg.ativo) return json({ ok: true, skip: 'pipeline pausado (threec_mailing_config.ativo=false)' })
   const listaId = lista === 'base' ? cfg.lista_base_id : cfg.lista_quente_id
@@ -262,7 +297,8 @@ async function sincronizar(cfg: ConfigSDR, lista: string, limite: number, desde:
         body: JSON.stringify({ header: HEADER, mailing: fatia }),
       }, signal)
     } catch {
-      return json({ ok: false, alerta: 'resultado do envio desconhecido; reconciliar lote antes de repetir',
+      await anotarPendencia(token, loteId, 'sem_resposta')
+      return json({ ok: false, alerta: 'resultado do envio desconhecido; o lote se fecha sozinho em 15 min',
         ...resumo(), lote_id: loteId, retry_bloqueado: true }, 502)
     }
     if (!resp.ok) {
@@ -274,6 +310,8 @@ async function sincronizar(cfg: ConfigSDR, lista: string, limite: number, desde:
           p_token: token, p_lote_id: loteId, p_detalhe: `HTTP ${resp.status}`,
         })
         liberado = !r.error && r.data === true
+      } else {
+        await anotarPendencia(token, loteId, `http_${resp.status}`)
       }
       return json({ ok: false, error: '3C não confirmou o envio', status_3c: resp.status,
         ...resumo(), lote_id: loteId, retry_bloqueado: !liberado }, recusado ? 422 : 502)
@@ -292,18 +330,20 @@ async function sincronizar(cfg: ConfigSDR, lista: string, limite: number, desde:
       }
     } catch {
       importados = null
-      return json({ ok: false, alerta: 'resposta de importação inválida; reconciliar lote antes de repetir',
+      await anotarPendencia(token, loteId, '3c_ok_resposta_invalida')
+      return json({ ok: false, alerta: 'resposta de importação inválida; o lote se fecha sozinho em 15 min',
         ...resumo(), lote_id: loteId, retry_bloqueado: true }, 502)
     }
     importados = importados === null || contagem === null ? null : importados + contagem
     // Confirma submissões e conclui o lote atomicamente, sem alegar aceite individual.
-    const { data: n, error: eMarcar } = await supabase.rpc('threec_sdr_lote_confirmar', {
-      p_token: token, p_lote_id: loteId, p_importados: contagem,
-    })
-    if (eMarcar || !Number.isInteger(n) || (n as number) < 0) return json({ ok: false,
-      alerta: 'enviado ao 3C mas falhou ao confirmar no banco; reconciliar lote antes de repetir',
-      ...resumo(), lote_id: loteId, retry_bloqueado: true }, 500)
-    marcados += n as number
+    const n = await confirmarLote(token, loteId, contagem, signal)
+    if (n === null) {
+      await anotarPendencia(token, loteId, '3c_ok_falha_ao_confirmar')
+      return json({ ok: false,
+        alerta: 'enviado ao 3C mas falhou ao confirmar no banco; o lote se fecha sozinho em 15 min',
+        ...resumo(), lote_id: loteId, retry_bloqueado: true }, 500)
+    }
+    marcados += n
   }
   return json({ ok: true, lista, lista_id: listaId, ...resumo(), com_curso: mailing.filter((m) => m.data.curso).length })
 }
@@ -349,7 +389,9 @@ async function handler(req: Request): Promise<Response> {
   if (!dry) {
     const lease = await supabase.rpc('threec_sdr_travar', { p_token: token, p_segundos: 180 })
     if (lease.error) return json({ ok: false, error: 'falha ao adquirir trava SDR' }, 500)
-    if (lease.data !== true) return json({ ok: false, ocupado: true, error: 'SDR ocupada ou com lote pendente de reconciliação' }, 409)
+    // Lote pendente há mais de 15 min é fechado pelo próprio threec_sdr_travar
+    // (threec_sdr_fechar_lotes_orfaos): este 409 não dura mais que isso.
+    if (lease.data !== true) return json({ ok: false, ocupado: true, error: 'SDR ocupada ou com lote pendente (lote órfão fecha sozinho em 15 min)' }, 409)
   }
   const rodada = new AbortController()
   const timerRodada = dry ? null : setTimeout(() => rodada.abort(), TIMEOUT_RODADA_MS)

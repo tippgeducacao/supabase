@@ -40,6 +40,13 @@ interface Bloqueio {
 const HORA = 3_600_000
 const MAX_PAGINAS = 200
 const MAX_POR_RPC = 500
+// Teto de janelas de 6 h por rodada. Com o cursor em dia são ~9 (as 48 h de sobreposição +
+// o intervalo do cron). Depois de uma parada longa — 15 dias em 20/10/2026, com a SDR
+// travada por um lote pendente — varrer tudo numa rodada só estoura o prazo de 80 s, e o
+// cursor, que só anda no fim, nunca andaria: a entrada ficaria suspensa para sempre. Com o
+// teto, a rodada grava o cursor no fim da última janela lida e recupera 96 h − 48 h = 48 h
+// de atraso por rodada.
+const MAX_JANELAS = 16
 // Apenas configuração, nunca estado de blacklist por telefone. Falha ao renovar
 // não reutiliza configuração vencida. O overlap recupera eventos das regras novas.
 let cacheRegras: { base: string; token: string; ate: number; regras: Map<string, Registro> } | null = null
@@ -177,7 +184,11 @@ export async function atualizarBloqueios3C({ supabase, base, token, signal }: Op
     }
 
     const chamadas = new Map<string, Registro>()
+    // Até onde esta rodada leu. Fica em `agora` quando tudo coube; com o teto de janelas,
+    // vira o fim da última janela lida e é o que vai para o cursor.
+    let lidoAte = agora.getTime()
     if (regras.size) {
+      let janelas = 0
       for (let inicio = inicioMs; inicio <= agora.getTime();) {
         // Janelas de 6 h evitam o timeout observado na consulta única de 48 h.
         // Cada janela fica também abaixo do teto documentado de 31 dias.
@@ -194,9 +205,11 @@ export async function atualizarBloqueios3C({ supabase, base, token, signal }: Op
           chamadas.set(chamadaId, chamada)
         }
         if (ate === agora.getTime()) break
+        if (++janelas >= MAX_JANELAS) { lidoAte = ate; break }
         inicio = ate + 1000
       }
     }
+    const cursorAte = lidoAte === agora.getTime() ? fim : new Date(lidoAte).toISOString()
 
     const registros = new Map<string, Bloqueio>()
     const nativos = new Map<string, Promise<Bloqueio>>()
@@ -292,13 +305,15 @@ export async function atualizarBloqueios3C({ supabase, base, token, signal }: Op
       if (gravar.error) falhar('ESPELHO_GRAVACAO')
     }
     if (controle.signal.aborted) falhar('PRAZO_EXCEDIDO')
-    const checkpoint = await supabase.rpc('threec_sdr_bloqueios_checkpoint', { p_ate: fim })
+    const checkpoint = await supabase.rpc('threec_sdr_bloqueios_checkpoint', { p_ate: cursorAte })
     if (checkpoint.error) falhar('CURSOR_GRAVACAO')
     return {
       ok: true as const, qualificacoes_bloqueadoras: regras.size, paginas,
       chamadas: chamadas.size, registros: itens.length, consultas_nativas: consultasNativas, revalidados: antigos.length,
       chamadas_sem_identidade: chamadasSemIdentidade,
-      inicio_utc: new Date(inicioMs).toISOString(), fim_utc: fim,
+      inicio_utc: new Date(inicioMs).toISOString(), fim_utc: fim, cursor_utc: cursorAte,
+      // true = ainda há atraso; a próxima rodada continua de onde esta parou.
+      parcial: cursorAte !== fim,
     }
   } catch (erro) {
     // Não propagamos erro de fetch/PostgREST: pode conter token, URL ou telefone.

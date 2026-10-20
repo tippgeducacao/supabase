@@ -16,6 +16,8 @@ let eventos: string[]
 let preparado: boolean
 let ocupado: boolean
 let falhaConfirmar: boolean
+// Falhas transitórias: as N primeiras confirmações falham e as seguintes passam.
+let falhasConfirmar: number
 let ativo: boolean
 let itensPreparados: number
 
@@ -36,7 +38,7 @@ beforeEach(() => {
   linhas = [lead, { ...lead, lead_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', canon: '2199990002', telefone: '21999990002' }]
   expurgo = []
   eventos = []
-  preparado = false; ocupado = false; falhaConfirmar = false; ativo = true; itensPreparados = 0
+  preparado = false; ocupado = false; falhaConfirmar = false; falhasConfirmar = 0; ativo = true; itensPreparados = 0
   fronteiras.bloqueios.mockImplementation(async () => { eventos.push('bloqueios'); return { ok: true } })
   fronteiras.from.mockReturnValue({ select: () => ({ maybeSingle: async () => ({ data: {
     campanha_id: '272970', lista_quente_id: 'quente', lista_base_id: 'base', ativo, limite_por_rodada: 300,
@@ -54,10 +56,12 @@ beforeEach(() => {
     }
     if (nome === 'threec_sdr_lote_confirmar') {
       if (falhaConfirmar) return { data: null, error: { message: 'banco indisponível' } }
+      if (falhasConfirmar > 0) { falhasConfirmar--; return { data: null, error: { message: 'could not resize shared memory segment' } } }
       preparado = false
       return { data: itensPreparados, error: null }
     }
     if (nome === 'threec_sdr_lote_recusar') { preparado = false; return { data: true, error: null } }
+    if (nome === 'threec_sdr_lote_anotar') return { data: preparado, error: null }
     throw new Error(`RPC inesperada: ${nome}`)
   })
   fronteiras.fetch.mockImplementation(async (_url: string, init: RequestInit) => {
@@ -115,7 +119,20 @@ describe('manutenção da Novo Lead SDR', () => {
     expect(preparado).toBe(true)
     expect((await chamar()).status).toBe(409)
     expect(fronteiras.fetch).toHaveBeenCalledOnce()
-    expect(rpcChamadas('threec_sdr_lote_confirmar')).toHaveLength(1)
+    // 1 tentativa + 2 repetições (a confirmação é idempotente); depois, o motivo vai para o lote
+    // e o threec_sdr_fechar_lotes_orfaos o confirma em 15 min, porque o 3C tinha aceitado.
+    expect(rpcChamadas('threec_sdr_lote_confirmar')).toHaveLength(3)
+    expect(rpcChamadas('threec_sdr_lote_anotar')[0][1]).toMatchObject({ p_lote_id: loteId, p_situacao: '3c_ok_falha_ao_confirmar' })
+  })
+
+  it('repete a confirmação que falhou por um soluço do banco e conclui a rodada', async () => {
+    falhasConfirmar = 1
+    const r = await chamar()
+    expect(r.status).toBe(200)
+    expect(await r.json()).toMatchObject({ ok: true, marcados: 2 })
+    expect(preparado).toBe(false)
+    expect(rpcChamadas('threec_sdr_lote_confirmar')).toHaveLength(2)
+    expect(rpcChamadas('threec_sdr_lote_anotar')).toHaveLength(0)
   })
 
   it('conta submissões e importação parcial sem atribuir o descarte a duplicidade', async () => {
@@ -136,9 +153,9 @@ describe('manutenção da Novo Lead SDR', () => {
     expect(rpcChamadas('threec_sdr_lote_confirmar')[0][1].p_importados).toBeNull()
   })
 
-  it.each([['5xx', () => new Response('falha', { status: 503 })],
-    ['2xx sem JSON', () => new Response('resposta inesperada')],
-    ['contagem impossível', () => Response.json({ imported_lines: 900 })]] as const)('preserva pendência em %s', async (_nome, resposta) => {
+  it.each([['5xx', () => new Response('falha', { status: 503 }), 'http_503'],
+    ['2xx sem JSON', () => new Response('resposta inesperada'), '3c_ok_resposta_invalida'],
+    ['contagem impossível', () => Response.json({ imported_lines: 900 }), '3c_ok_resposta_invalida']] as const)('preserva pendência em %s e anota o motivo', async (_nome, resposta, situacao) => {
     fronteiras.fetch.mockImplementation(async () => resposta())
     const r = await chamar()
     expect(r.status).toBe(502)
@@ -146,6 +163,7 @@ describe('manutenção da Novo Lead SDR', () => {
     expect(preparado).toBe(true)
     expect(rpcChamadas('threec_sdr_lote_confirmar')).toHaveLength(0)
     expect(rpcChamadas('threec_sdr_lote_recusar')).toHaveLength(0)
+    expect(rpcChamadas('threec_sdr_lote_anotar')[0][1]).toMatchObject({ p_lote_id: loteId, p_situacao: situacao })
   })
 
   it('libera a pendência somente quando o 3C recusa explicitamente com 4xx', async () => {
@@ -153,6 +171,7 @@ describe('manutenção da Novo Lead SDR', () => {
     expect((await chamar()).status).toBe(422)
     expect(preparado).toBe(false)
     expect(rpcChamadas('threec_sdr_lote_recusar')[0][1]).toMatchObject({ p_lote_id: loteId, p_detalhe: 'HTTP 422' })
+    expect(rpcChamadas('threec_sdr_lote_anotar')).toHaveLength(0)
   })
 
   it('aborta transporte aos 20 segundos e preserva lote para reconciliação', async () => {
@@ -166,6 +185,7 @@ describe('manutenção da Novo Lead SDR', () => {
     expect(body).toMatchObject({ ok: false, retry_bloqueado: true })
     expect(JSON.stringify(body)).not.toContain('URL privada')
     expect(preparado).toBe(true)
+    expect(rpcChamadas('threec_sdr_lote_anotar')[0][1]).toMatchObject({ p_lote_id: loteId, p_situacao: 'sem_resposta' })
   })
 
   it('simula manter sem lease, lotes duráveis ou chamadas externas', async () => {

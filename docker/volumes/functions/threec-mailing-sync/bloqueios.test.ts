@@ -200,16 +200,34 @@ describe('espelho dos bloqueios expressos 3C', () => {
     expect(rpc.mock.calls.every(([n]) => n !== 'threec_sdr_bloqueios_checkpoint')).toBe(true)
   })
 
-  it('cursor atrasado mantém overlap48h e consulta cada janela de no máximo6horas', async () => {
+  it('cursor atrasado mantém overlap48h, janelas de no máximo6horas e para no teto de 16 por rodada', async () => {
+    // 20/10/2026: 15 dias de atraso numa rodada só estouravam o prazo de 80 s, e o cursor —
+    // que só anda no fim — nunca andava. Agora a rodada lê 16 janelas e grava onde parou.
     ultimo = '2026-07-01T19:00:00Z'
     chamadas = []
-    await executar()
+    await expect(executar()).resolves.toMatchObject({ ok: true, parcial: true, cursor_utc: '2026-07-03T19:00:15.000Z' })
     const urls = fetchMock.mock.calls.map(([u]) => new URL(u)).filter(u => u.pathname.endsWith('/calls'))
-    expect(urls).toHaveLength(288)
+    expect(urls).toHaveLength(16)
     expect(urls[0].searchParams.get('start_date')).toBe('2026-06-29 16:00:00')
-    expect(urls.at(-1)!.searchParams.get('end_date')).toBe('2026-09-09 16:00:00')
+    expect(urls.at(-1)!.searchParams.get('end_date')).toBe('2026-07-03 16:00:15')
     expect(itens()).toHaveLength(0)
     expect(rpc.mock.calls.map(([n]) => n)).toEqual(['threec_sdr_bloqueios_revalidar', 'threec_sdr_bloqueios_checkpoint'])
+    expect(rpc.mock.calls.at(-1)).toEqual(['threec_sdr_bloqueios_checkpoint', { p_ate: '2026-07-03T19:00:15.000Z' }])
+  })
+
+  it('a rodada seguinte retoma do cursor parcial menos 48 h e recupera 48 h de atraso', async () => {
+    ultimo = '2026-07-03T19:00:15Z'
+    chamadas = []
+    await expect(executar()).resolves.toMatchObject({ parcial: true, cursor_utc: '2026-07-05T19:00:30.000Z' })
+    const urls = fetchMock.mock.calls.map(([u]) => new URL(u)).filter(u => u.pathname.endsWith('/calls'))
+    expect(urls[0].searchParams.get('start_date')).toBe('2026-07-01 16:00:15')
+  })
+
+  it('cursor em dia lê tudo numa rodada e grava o cursor em agora', async () => {
+    ultimo = new Date(agora.getTime() - 2 * 60_000).toISOString()
+    chamadas = []
+    await expect(executar()).resolves.toMatchObject({ parcial: false, cursor_utc: agora.toISOString() })
+    expect(rpc.mock.calls.at(-1)).toEqual(['threec_sdr_bloqueios_checkpoint', { p_ate: agora.toISOString() }])
   })
 
   it('revalida um permanente antigo e registra desbloqueio nativo sem depender de nova chamada', async () => {
