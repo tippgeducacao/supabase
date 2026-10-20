@@ -133,7 +133,7 @@ export const FERRAMENTAS_CONSULTA = [
   {
     name: "consultar_leads",
     description:
-      "Leads (chegada de demanda). recorte: 'total' (quantos chegaram), 'por_fonte' (quebra por fonte: Meta Ads/Formulário/Google/Orgânico/Indicação), 'pago_organico' (mídia × orgânico + CPL/CAC), 'por_curso' (leads por curso/página, ex.: Sanidade Avícola). Mídia = Meta Ads + Formulário Direto + Google.",
+      "Leads (chegada de demanda). recorte: 'total' (quantos chegaram), 'por_fonte' (quebra por fonte: Meta Ads/Formulário/Google/TikTok/Orgânico/Indicação), 'pago_organico' (mídia × orgânico + CPL/CAC), 'por_curso' (leads por curso/página, ex.: Sanidade Avícola). Mídia = Meta Ads + Formulário Direto + Google + TikTok Ads.",
     input_schema: {
       type: "object",
       properties: {
@@ -371,7 +371,7 @@ async function cVendasPorOrigem(input: any, ctx: Ctx) {
       origem: r.origem, matriculas: Number(r.qtd_total || 0), faturamento: r2(r.fat_total),
       pos: Number(r.qtd_pos || 0), curso: Number(r.qtd_curso || 0), modulo: Number(r.qtd_modulo || 0),
     })),
-    _nota: "Origem = fonte do lead que converteu (Meta/mídia, Google, Indicação, Orgânico, Formulário direto, GreatPages…). 'Origem desconhecida' = matrícula sem lead casado. Formulário direto = sem UTM de mídia (não é mídia paga).",
+    _nota: "Origem = fonte do lead que converteu (Meta/mídia, Google, TikTok, Indicação, Orgânico, Formulário direto, GreatPages…). 'Origem desconhecida' = matrícula sem lead casado. Formulário direto = sem UTM de mídia (não é mídia paga).",
   };
 }
 
@@ -535,7 +535,7 @@ async function cLeads(input: any, ctx: Ctx) {
     if (error) throw new Error(error.message);
     return {
       periodo: p.label, fontes: data,
-      _nota: "Mídia = Meta Ads (METAADS/metaads/meta+) + Formulário Direto + Google. 'Importação CRM' é disparo por planilha, não demanda de mídia.",
+      _nota: "Mídia = Meta Ads (METAADS/metaads/meta+) + Formulário Direto + Google + TikTok Ads (fonte 'TikTok'). 'Importação CRM' é disparo por planilha, não demanda de mídia.",
     };
   }
 
