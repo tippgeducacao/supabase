@@ -8,7 +8,7 @@
 // Duas ações, sempre com o login do vendedor:
 //   * iniciar — acha a reunião pelo código do Meet (`agendamentos.link_reuniao`).
 //   * dica    — lê as informações da reunião e devolve UMA dica curta, ou nada.
-//   * preparar — gera (uma vez por reunião) o RESUMO do lead: dados, o que foi registrado
+//   * preparar — gera (uma vez por reunião; de novo só com `forcar`) o RESUMO do lead: dados, o que foi registrado
 //               ao marcar e a conversa de WhatsApp. O vendedor lê no app e a IA das
 //               perguntas recebe junto. Guardado em `copiloto_reuniao_resumos`.
 //   * sessao_iniciar / falas / sessao_encerrar / avaliar — CAPTURA para avaliação: cada
@@ -103,8 +103,10 @@ async function dicaPelaLuna(contexto: string, pedido: string) {
 }
 
 // Resumo do lead: uma vez por reunião, antes de começar — aqui vale mais acertar que ser
-// rápido. Opus 5.5 com esforço baixo; troca pelo secret COPILOTO_REUNIAO_MODELO_RESUMO.
-const MODELO_RESUMO = Deno.env.get("COPILOTO_REUNIAO_MODELO_RESUMO") ?? "claude-opus-5-5";
+// rápido. Sonnet 5.5 com esforço médio (20/10/2026, decisão do Gustavo: mais barato que o
+// Opus); troca pelos secrets COPILOTO_REUNIAO_MODELO_RESUMO e _ESFORCO_RESUMO.
+const MODELO_RESUMO = Deno.env.get("COPILOTO_REUNIAO_MODELO_RESUMO") ?? "claude-sonnet-5-5";
+const ESFORCO_RESUMO = Deno.env.get("COPILOTO_REUNIAO_ESFORCO_RESUMO") ?? "medium";
 const PRAZO_RESUMO_MS = 50_000;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -232,7 +234,7 @@ async function preparar(sbUsuario: SupabaseClient, userId: string, body: Record<
   const leadId = (dados.agendamento as { lead_id?: string }).lead_id ?? null;
 
   const [guardadoR, mensagensR, analiseR] = await Promise.all([
-    admin().from("copiloto_reuniao_resumos").select("resumo, mensagens_ate, gerado_em").eq("agendamento_id", agendamentoId).maybeSingle(),
+    admin().from("copiloto_reuniao_resumos").select("resumo, mensagens_ate, gerado_em, modelo").eq("agendamento_id", agendamentoId).maybeSingle(),
     leadId
       ? admin().from("crm_whatsapp_messages")
         .select("direcao, tipo, conteudo, template_name, created_at, audio:metadata->>audio_transcricao, audio_sdr:metadata->>sdr_audio_transcricao")
@@ -246,9 +248,13 @@ async function preparar(sbUsuario: SupabaseClient, userId: string, body: Record<
   const ultima = mensagens[0]?.created_at ?? null; // veio da mais nova para a mais antiga
   const guardado = guardadoR.data;
 
-  // já resumido e nenhuma mensagem nova desde então: devolve o que tem
-  if (guardado && (!ultima || (guardado.mensagens_ate && new Date(guardado.mensagens_ate) >= new Date(ultima)))) {
-    return json({ resumo: guardado.resumo, gerado_em: guardado.gerado_em, novo: false });
+  // Já resumido: devolve o guardado, mesmo com mensagem nova (20/10/2026). Antes, qualquer
+  // mensagem nova (lead respondendo, boas-vindas automática, áudio do vendedor) refazia o
+  // resumo a cada clique — Opus, 20–40 s. Agora só refaz quando o vendedor pede (`forcar`).
+  const desde = guardado?.mensagens_ate ? new Date(guardado.mensagens_ate).getTime() : null;
+  const novas = desde === null ? 0 : mensagens.filter((m) => new Date(m.created_at).getTime() > desde).length;
+  if (guardado && body?.forcar !== true) {
+    return json({ resumo: guardado.resumo, gerado_em: guardado.gerado_em, modelo: guardado.modelo, mensagens_novas: novas, novo: false });
   }
 
   const chave = await chaveAnthropic();
@@ -263,17 +269,19 @@ async function preparar(sbUsuario: SupabaseClient, userId: string, body: Record<
   const cliente = new Anthropic({ apiKey: chave, maxRetries: 1, timeout: PRAZO_RESUMO_MS });
   const comFallback = MODELO_RESUMO.startsWith("claude-opus-5") || MODELO_RESUMO.startsWith("claude-fable");
   let resumo: string | undefined;
+  let modeloUsado = MODELO_RESUMO;
   try {
     const resposta = await cliente.beta.messages.create({
       model: MODELO_RESUMO,
       max_tokens: 4000,
-      output_config: { effort: "low" },
+      output_config: { effort: ESFORCO_RESUMO },
       ...(comFallback ? { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" } : {}),
       system: PROMPT_RESUMO,
       messages: [{ role: "user", content: entrada }],
     } as never) as Anthropic.Beta.BetaMessage;
     if (resposta.stop_reason !== "refusal") {
       resumo = resposta.content.filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === "text").map((b) => b.text).join("\n").trim();
+      modeloUsado = resposta.model ?? MODELO_RESUMO; // com o fallback do servidor pode vir outro
     }
     console.log(JSON.stringify({
       fn: "copiloto-reuniao", acao: "preparar", agendamento: agendamentoId, mensagens: mensagens.length,
@@ -285,19 +293,19 @@ async function preparar(sbUsuario: SupabaseClient, userId: string, body: Record<
   // falhou agora, mas havia um resumo antigo: melhor ele que nada
   if (!resumo) {
     return guardado
-      ? json({ resumo: guardado.resumo, gerado_em: guardado.gerado_em, novo: false, aviso: "Não consegui atualizar o resumo; este é o anterior." })
+      ? json({ resumo: guardado.resumo, gerado_em: guardado.gerado_em, modelo: guardado.modelo, mensagens_novas: novas, novo: false, aviso: "Não consegui atualizar o resumo; este é o anterior." })
       : json({ erro: "Não consegui preparar o resumo do lead agora. As perguntas seguem funcionando." }, 422);
   }
 
   const agora = new Date().toISOString();
   const { error } = await admin().from("copiloto_reuniao_resumos").upsert({
     agendamento_id: agendamentoId, lead_id: leadId, resumo, mensagens_usadas: mensagens.length,
-    mensagens_ate: ultima, modelo: MODELO_RESUMO, gerado_por: userId, gerado_em: agora,
+    mensagens_ate: ultima, modelo: modeloUsado, gerado_por: userId, gerado_em: agora,
   });
   if (error) console.error("[copiloto-reuniao] gravar resumo", error.message);
   // o contexto das perguntas guardado em memória ficou velho: o próximo pedido relê com o resumo
   for (const k of contextos.keys()) if (k.endsWith(`:${agendamentoId}`)) contextos.delete(k);
-  return json({ resumo, gerado_em: agora, novo: true });
+  return json({ resumo, gerado_em: agora, modelo: modeloUsado, mensagens_novas: 0, novo: true });
 }
 
 async function minhas(sbUsuario: SupabaseClient, userId: string) {
