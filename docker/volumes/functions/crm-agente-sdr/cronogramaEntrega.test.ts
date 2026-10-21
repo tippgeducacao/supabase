@@ -32,7 +32,7 @@ function chamar(conteudo = 'cronograma') {
 }
 function semEntregaOuPromessa(resposta: Record<string, unknown>) {
   expect(resposta.cronograma_entregue).toBe(false);
-  expect(resposta.resultado).not.toContain('registrou a entrega');
+  expect(resposta.resultado).not.toContain('a entrega foi registrada');
   expect(resposta.resultado).not.toMatch(/Diga (?:ao lead )?que vai (?:enviar|mandar)|material já está com ele e siga/i);
 }
 
@@ -40,7 +40,7 @@ describe('tool envia_informacoes: fala proporcional à evidência', () => {
   it('o booleano legado true significa aceite pendente, não entregue', async () => {
     const resposta = await chamar();
     expect(resposta).toMatchObject({ cronograma_enviado: true, cronograma_status: 'aceito' });
-    expect(resposta.resultado).toContain('entrega ainda NÃO está confirmada');
+    expect(resposta.resultado).toContain('a entrega ainda não tem confirmação');
     semEntregaOuPromessa(resposta);
   });
 
@@ -49,7 +49,7 @@ describe('tool envia_informacoes: fala proporcional à evidência', () => {
       cronograma_wa_message_id: 'wamid-teste', cronograma_wa_account_id: 'conta-teste' });
     const resposta = await chamar();
     expect(resposta).toMatchObject({ cronograma_entregue: true, cronograma_status: status === 'read' ? 'lido' : 'entregue', cronograma_wa_message_id: 'wamid-teste' });
-    expect(resposta.resultado).toContain('registrou a entrega');
+    expect(resposta.resultado).toContain('a entrega foi registrada');
     expect(resposta.resultado).toContain('reenvie pela ferramenta');
   });
 

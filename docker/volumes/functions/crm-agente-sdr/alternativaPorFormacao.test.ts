@@ -58,11 +58,20 @@ describe('reprovado numa pós, aceito em outra: a ferramenta oferece em vez de e
     }
   });
 
-  it('a tabela lista a formação na própria pós pedida: a matriz errou, a ferramenta não afirma "não aceita"', () => {
-    const vet = reprovado('Medicina Veterinária', 'Produção de Suínos');
-    expect(T.alternativasPelaTabela(vet, TABELA)).toBe(vet);
+  it('a tabela lista a formação na própria pós pedida: a matriz errou e quem decide é a tabela', () => {
+    const r = T.alternativasPelaTabela(reprovado('Medicina Veterinária', 'Produção de Suínos'), TABELA);
+    expect(r).toMatchObject({ pode_cursar: true, compativel: true, output: 'APROVADO', mensagem_para_lead: null, aprovado_pela_tabela: true });
     const semCurso = reprovado('Zootecnia', null as unknown as string);
     expect(T.alternativasPelaTabela(semCurso, TABELA)).toBe(semCurso);
+  });
+
+  it('caso Gustavo (21/10): nome do catálogo ≠ nome da tabela não reprova veterinário nem oferece a própria pós', () => {
+    const COM_COMPORTAMENTO = [...TABELA, { pos_graduacao: 'Comportamento e Bem-Estar Animal', pode_fazer: 'Medicina Veterinária; Zootecnia; Biologia', parcialmente_aceitas: '—' }];
+    const vet = reprovado('Medicina Veterinária', 'PÓS | PRODUÇÃO DE SUÍNOS');
+    expect(T.alternativasPelaTabela(vet, COM_COMPORTAMENTO).output).toBe('APROVADO');
+    const r = T.alternativasPelaTabela(reprovado('Biomedicina', 'Comportamento e Bem-Estar Animal'), COM_COMPORTAMENTO);
+    expect(r.curso_alternativo).toBe('Saúde Única e Zoonoses');
+    expect(r.outras_pos_compativeis).toBeUndefined();
   });
 
   it('no máximo quatro pós na lista', () => {

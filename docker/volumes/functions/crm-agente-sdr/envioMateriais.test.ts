@@ -10,8 +10,17 @@ describe('contrato de envio do cronograma', () => {
     const envio = interpretarEnvioMaterial(true, { success: true, wa_message_id: 'wamid.teste' });
     expect(envio).toMatchObject({ cronograma_status: 'aceito', cronograma_enviado: true, wa_message_id: 'wamid.teste' });
     const retorno = montarRetornoInformacoes(true, { data: envio }, 'tool-1');
-    expect(retorno.resultado).toContain('entrega ainda NÃO está confirmada');
+    expect(retorno.resultado).toContain('a entrega ainda não tem confirmação');
     expect(retorno.resultado).not.toContain('enviado com sucesso');
+  });
+
+  it.each(['aceito', 'entregue', 'lido'])('caso Ellen (21/10): com %s a fala ao lead vem primeiro e o status é nota interna', (status) => {
+    const retorno = montarRetornoInformacoes(true, { data: { cronograma_enviado: true, cronograma_status: status, wa_message_id: 'wamid.teste', cronograma_wa_account_id: 'conta-teste' } }, 'tool-1');
+    expect(retorno.resultado.startsWith('FALA AO LEAD')).toBe(true);
+    expect(retorno.resultado).not.toContain('O WhatsApp aceitou');
+    expect(retorno.resultado).toContain('NOTA INTERNA (não vai para o lead)');
+    expect(retorno.resultado).toContain('Status técnico do envio é assunto interno');
+    expect(retorno.resultado.indexOf('NOTA INTERNA')).toBeGreaterThan(retorno.resultado.indexOf('FALA AO LEAD'));
   });
 
   it.each([
@@ -69,9 +78,10 @@ describe('contrato de envio do cronograma', () => {
 
   it('IA de aula (só fatos): informa o envio e que o valor está no cronograma, sem roteiro de fala', () => {
     const retorno = montarRetornoInformacoes(true, { data: { cronograma_enviado: true } }, 'tool-1', { soFatos: true });
-    expect(retorno.resultado).toContain('O WhatsApp aceitou o envio do cronograma');
+    expect(retorno.resultado).toContain('Cronograma enviado ao lead.');
+    expect(retorno.resultado).toContain('Status técnico do envio é assunto interno');
     expect(retorno.resultado).toContain('não escreva valor');
-    expect(retorno.resultado).not.toContain('Diga, com estas palavras');
+    expect(retorno.resultado).not.toContain('FALA AO LEAD');
     expect(retorno.resultado).not.toContain('te chamo pra uma conversa');
   });
 
@@ -94,7 +104,7 @@ describe('contrato de envio do cronograma', () => {
   });
   it.each(['entregue', 'lido'])('receipt %s não invalida pedido de reenvio', (status) => {
     const retorno = montarRetornoInformacoes(true, { data: { cronograma_enviado: true, cronograma_status: status, wa_message_id: 'wamid.teste', cronograma_wa_account_id: 'conta-teste' } }, 'tool-1');
-    expect(retorno.resultado).toContain('NÃO comprova abertura');
+    expect(retorno.resultado).toContain('não comprova que o PDF abriu');
     expect(retorno.resultado).toContain('reenvie pela ferramenta');
   });
   it('booleano em string não confirma envio', () => {

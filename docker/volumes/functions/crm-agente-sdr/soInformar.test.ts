@@ -1,4 +1,4 @@
-// IA de aula v2 (01/10/2026): com `soInformar`, as ferramentas dizem o fato e não mandam o próximo passo.
+﻿// IA de aula v2 (01/10/2026): com `soInformar`, as ferramentas dizem o fato e não mandam o próximo passo.
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { fatoDaColeta, proximoPassoDaColeta } from './proximoPassoColeta';
 import { montarRetornoInformacoes } from './envioMateriais';
@@ -52,8 +52,8 @@ describe('agenda, preço e ficha', () => {
       expect(saida).not.toContain('12.730');
       expect(saida).not.toContain('492,50');
     }
-    expect(com).toContain('Diga, com estas palavras');
-    expect(sem).not.toContain('Diga, com estas palavras');
+    expect(com).toContain('FALA AO LEAD, com estas palavras');
+    expect(sem).not.toContain('FALA AO LEAD, com estas palavras');
     expect(sem).toContain('O cronograma já traz os professores, os módulos e o valor integral');
     expect(sem.length).toBeLessThan(com.length);
   });

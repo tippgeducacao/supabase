@@ -70,13 +70,20 @@ export function instrucaoResultadoMaterial(status: StatusMaterial, reenvioAgenda
   // cronograma (página de investimento, por modalidade), e a fala do envio diz isso. O convite vem na
   // mesma mensagem: a condição do lote, com valor e parcelamento, só na conversa com o monitor.
   const semValor = ' O cronograma já traz os professores, os módulos e o valor integral: não escreva valor, parcela nem preço de matrícula na conversa.';
+  // 21/10/2026 (caso Ellen): o texto abria com o status técnico ("O WhatsApp aceitou o envio do
+  // cronograma, mas a entrega ainda NÃO está confirmada") e a Luna repassou isso ao lead em vez da fala
+  // pronta: "o WhatsApp aceitou o envio…, mas ainda não consigo confirmar que chegou". Agora a fala vem
+  // primeiro e o status é NOTA INTERNA, com a ordem de não narrá-lo. A trava segue: aceito não é
+  // entrega, e a IA não diz "foi entregue" nem "está acima".
+  const naoNarre = ' Status técnico do envio é assunto interno: com o lead não fale em WhatsApp aceitar, entrega confirmada ou não confirmada, nem "não consigo confirmar". Para o lead, você enviou o cronograma.';
+  const notaInterna = status === 'aceito'
+    ? ' NOTA INTERNA (não vai para o lead): o envio saiu e a entrega ainda não tem confirmação; não diga que foi entregue nem que está acima.'
+    : ' NOTA INTERNA (não vai para o lead): a entrega foi registrada, o que não comprova que o PDF abriu.';
   // IA de aula v2 (`soInformar`): só o fato, sem roteiro de fala.
   if (opcoes.soFatos && (status === 'aceito' || status === 'entregue' || status === 'lido')) {
-    return (status === 'aceito'
-      ? 'O WhatsApp aceitou o envio do cronograma; a entrega ainda não está confirmada.'
-      : 'O WhatsApp registrou a entrega do cronograma; isso não comprova que o PDF foi aberto.') + semValor;
+    return 'Cronograma enviado ao lead.' + notaInterna + naoNarre + semValor;
   }
-  const roteiro = ` Diga, com estas palavras: "${FALA_CRONOGRAMA_ENVIADO}" Em seguida, salvo se a formação ou o prazo dele já foram REPROVADOS nesta conversa (aí não convide) ou se essa explicação da condição exclusiva já foi dita nesta conversa (aí não repita): "${falaConviteDepoisDoCronograma(opcoes.condicao ?? 'a condição promocional exclusiva')}"`;
+  const roteiro = `FALA AO LEAD, com estas palavras: "${FALA_CRONOGRAMA_ENVIADO}" Em seguida, salvo se a formação ou o prazo dele já foram REPROVADOS nesta conversa (aí não convide) ou se essa explicação da condição exclusiva já foi dita nesta conversa (aí não repita): "${falaConviteDepoisDoCronograma(opcoes.condicao ?? 'a condição promocional exclusiva')}"`;
   switch (status) {
     case 'nao_solicitado': return 'Nenhum cronograma foi solicitado ou enviado nesta chamada.';
     // 19/09/2026 (decisão do usuário, vale para todos): "te enviei o cronograma", não "solicitei o
@@ -85,10 +92,12 @@ export function instrucaoResultadoMaterial(status: StatusMaterial, reenvioAgenda
     // 09/10/2026: "aguarde a confirmação de acesso antes de retomar a agenda" segurava o convite e
     // a conversa morria no "chegou?" (Luna: 22 aprovados, 1 agendamento em 08/10). Com a
     // compatibilidade aprovada, o envio já leva os horários.
-    case 'aceito': return 'O WhatsApp aceitou o envio do cronograma, mas a entrega ainda NÃO está confirmada.' + semValor + roteiro
-      + ` Se ele acabou de recusar a conversa com o monitor (respondeu "não" ao convite e só quis o material), diga só a fala do envio e pare: não convide nem ofereça horários. Senão, se a compatibilidade já está APROVADA nesta conversa, na mesma mensagem chame consulta_disponibilidade e ofereça até três horários reais pra essa conversa, sem esperar ele confirmar que abriu; sem APROVADO, feche com "${PERGUNTA_CONVITE_SEM_HORARIO}". Não diga que foi entregue nem que está acima.`;
-    case 'entregue': case 'lido': return 'O WhatsApp registrou a entrega desta mensagem. Isso NÃO comprova abertura do PDF.' + semValor + roteiro
-      + ` Se ele acabou de recusar a conversa com o monitor (respondeu "não" ao convite e só quis o material), diga só a fala do envio e pare: não convide nem ofereça horários. Senão, se a compatibilidade já está APROVADA nesta conversa, na mesma mensagem chame consulta_disponibilidade e ofereça até três horários reais pra essa conversa; sem APROVADO, feche com "${PERGUNTA_CONVITE_SEM_HORARIO}". Se ele disser que não recebeu ou pedir novamente, reenvie pela ferramenta, sem contradizê-lo.`;
+    case 'aceito': return roteiro
+      + ` Se ele acabou de recusar a conversa com o monitor (respondeu "não" ao convite e só quis o material), diga só a fala do envio e pare: não convide nem ofereça horários. Senão, se a compatibilidade já está APROVADA nesta conversa, na mesma mensagem chame consulta_disponibilidade e ofereça até três horários reais pra essa conversa, sem esperar ele confirmar que abriu; sem APROVADO, feche com "${PERGUNTA_CONVITE_SEM_HORARIO}".`
+      + semValor + notaInterna + naoNarre;
+    case 'entregue': case 'lido': return roteiro
+      + ` Se ele acabou de recusar a conversa com o monitor (respondeu "não" ao convite e só quis o material), diga só a fala do envio e pare: não convide nem ofereça horários. Senão, se a compatibilidade já está APROVADA nesta conversa, na mesma mensagem chame consulta_disponibilidade e ofereça até três horários reais pra essa conversa; sem APROVADO, feche com "${PERGUNTA_CONVITE_SEM_HORARIO}". Se ele disser que não recebeu ou pedir novamente, reenvie pela ferramenta, sem contradizê-lo.`
+      + semValor + notaInterna + naoNarre;
     case 'falhou': return 'O cronograma NÃO foi enviado nesta tentativa. Não diga que enviou ou que está acima. O valor integral vai dentro do cronograma: não escreva valor na conversa; se ele perguntou o preço, diga que valor e condição o monitor apresenta na conversa. '
       + (reenvioAgendado
         ? 'Uma nova tentativa ficou registrada. Diga de forma natural: "O envio do cronograma pelo WhatsApp não está funcionando agora. Assim que normalizar, tento enviar novamente pra você." Não dê prazo nem garanta entrega; a fila tenta novamente enquanto a janela permitir.'

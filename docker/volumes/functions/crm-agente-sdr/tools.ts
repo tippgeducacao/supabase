@@ -875,6 +875,19 @@ const soParaVeterinario = (linha: LinhaDaMatriz) => {
 };
 const semPontuacao = (s: unknown) => chaveFormacao(String(s ?? '').replace(/^\s*(?:P[ÓO]S|MBA)\s*\|\s*/i, ''))
   .replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+/**
+ * A linha da tabela para o curso pedido. O catálogo e a tabela escrevem o nome diferente ("Cannabis
+ * Medicinal Veterinária" × "Cannabis Medicinal"): vale a linha de nome mais longo contida no pedido,
+ * ou que o contém.
+ */
+const linhaDoCurso = (cursos: LinhaDaMatriz[] | null | undefined, curso: unknown): LinhaDaMatriz | undefined => {
+  const pedido = semPontuacao(curso);
+  if (!pedido) return undefined;
+  return (cursos ?? [])
+    .map((c) => ({ c, nome: semPontuacao(c.pos_graduacao) }))
+    .filter((x) => x.nome && (pedido === x.nome || pedido.includes(x.nome) || x.nome.includes(pedido)))
+    .sort((a, b) => b.nome.length - a.nome.length)[0]?.c;
+};
 
 /**
  * A reprovação NÃO depende de ele ter concluído a graduação? Vale quando a pós é exclusiva de médico
@@ -887,14 +900,7 @@ export function reprovacaoIndependeDaConclusao(
   const f = semPontuacao(formacao);
   if (f.length < 4 || /veterin/.test(f) || /veterin/.test(semPontuacao(cadastro))) return false;
   if (/^(formad[oa]?|graduad[oa]?|superior|outra|nao|sim)( |$)/.test(f)) return false;
-  const pedido = semPontuacao(cursoInteresse);
-  if (!pedido) return false;
-  // O catálogo e a tabela escrevem o nome diferente ("Cannabis Medicinal Veterinária" × "Cannabis
-  // Medicinal"): vale a linha de nome mais longo contida no pedido, ou que o contém.
-  const linha = (cursos ?? [])
-    .map((c) => ({ c, nome: semPontuacao(c.pos_graduacao) }))
-    .filter((x) => x.nome && (pedido === x.nome || pedido.includes(x.nome) || x.nome.includes(pedido)))
-    .sort((a, b) => b.nome.length - a.nome.length)[0]?.c;
+  const linha = linhaDoCurso(cursos, cursoInteresse);
   return Boolean(linha && soParaVeterinario(linha));
 }
 
@@ -910,9 +916,19 @@ export function alternativasPelaTabela(resultado: any, cursos: LinhaDaMatriz[] |
   if (!formacao || !pedida) return resultado;
   const aceitaInteira = (c: LinhaDaMatriz) => formacoesDaLista(c.pode_fazer).includes(formacao);
   // A tabela lista a formação na PRÓPRIA pós pedida: a reprovação contradiz a tabela (a matriz errou
-  // o nome do curso ou da formação). Não afirme "não aceita" em cima disso.
-  const linhaPedida = (cursos ?? []).find((c) => chaveFormacao(c.pos_graduacao) === pedida);
-  if (linhaPedida && (aceitaQualquerFormacao(linhaPedida) || aceitaInteira(linhaPedida))) return resultado;
+  // o nome do curso ou da formação). 21/10/2026 (caso Gustavo): a matriz não ligou "Comportamento e
+  // Bem-Estar de Animais de Companhia e Silvestres" (catálogo) a "Comportamento e Bem-Estar Animal"
+  // (tabela) e reprovou médico veterinário formado; a busca era por nome idêntico e também não ligou,
+  // e ainda ofereceu a própria pós como "alternativa". Agora a linha é achada pelo nome tolerante e,
+  // se ela lista a formação por inteiro, quem decide é a tabela: aprovado.
+  const linhaPedida = linhaDoCurso(cursos, resultado.curso_solicitado);
+  if (linhaPedida && aceitaInteira(linhaPedida)) {
+    return {
+      ...resultado, pode_cursar: true, compativel: true, output: 'APROVADO', mensagem_para_lead: null,
+      curso_alternativo: null, curso_alternativo_recomendado: false, aprovado_pela_tabela: true,
+    };
+  }
+  if (linhaPedida && aceitaQualquerFormacao(linhaPedida)) return resultado;
   // 13/10/2026 (caso Leandro, agrônomo em Cannabis Medicinal): pós que a tabela só aceita de médico
   // veterinário e que não tem alternativa no mapa fixo. O retorno diz que ela é EXCLUSIVA (a despedida
   // fixa passa a dizer isso) e não lista outras pós: quem quer cannabis não está atrás de suínos.
@@ -926,7 +942,7 @@ export function alternativasPelaTabela(resultado: any, cursos: LinhaDaMatriz[] |
   }
   const outras = (cursos ?? []).filter((c) => {
     const nome = chaveFormacao(c.pos_graduacao);
-    return nome && nome !== pedida && !pedida.includes(nome) && !nome.includes(pedida) && !aceitaQualquerFormacao(c);
+    return nome && c !== linhaPedida && nome !== pedida && !pedida.includes(nome) && !nome.includes(pedida) && !aceitaQualquerFormacao(c);
   });
   // Aceita por inteiro vem antes de "parcialmente aceita"; só cai na parcial se não houver nenhuma inteira.
   const inteiras = outras.filter(aceitaInteira);

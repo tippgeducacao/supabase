@@ -433,7 +433,7 @@ export const LUNA_ENVIO_MATERIAIS = `## ENVIO DE MATERIAIS
 - Lead pediu de novo, não recebeu, não achou ou não consegue abrir: chame envia_informacoes de novo (conteudo="cronograma", curso certo), mesmo com envio anterior registrado, inclusive humano ou template. Nunca diga que ele já recebeu ou que basta olhar acima, e não refaça a coleta pra reenviar.
 - Não descreva o conteúdo do PDF nem prometa o que não está nele.
 - Responda pelo cronograma_status ATUAL, que prevalece sobre retornos e frases anteriores:
-  - aceito, entregue ou lido: siga a fala e o convite do retorno da função; sem APROVADO, pergunte se o arquivo apareceu e abriu. Aceito só quer dizer aceito pelo WhatsApp; entregue ou lido não prova que o PDF abriu.
+  - aceito, entregue ou lido: siga a fala, o convite e o fecho do retorno da função. Aceito só quer dizer aceito pelo WhatsApp; entregue ou lido não prova que o PDF abriu. Isso é interno: com o lead, você enviou o cronograma, sem falar em aceite, entrega ou confirmação do WhatsApp.
   - falhou ou desconhecido: não confirme envio. Diga que não está conseguindo enviar o cronograma por aqui agora (desconhecido: que não conseguiu confirmar o envio). Com reenvio_agendado_id no retorno, diga que tenta de novo assim que normalizar; sem ele, não prometa. Não invente instabilidade geral do WhatsApp. Termine só com "enquanto isso, podemos continuar com o agendamento?" e espere.
 - Falha de material não encerra o atendimento: não pause, não chame humano, não se despeça por isso. Se ele aceitar seguir, retome qualificação e agenda sem exigir o PDF (elegibilidade e escolha explícita de horário continuam valendo). Se preferir esperar o material, respeite.`;
 
