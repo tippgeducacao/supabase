@@ -99,7 +99,10 @@ export async function montarAviso(admin: any, item: ItemFila): Promise<string> {
     if (!n) throw new Definitivo("notificação apagada");
     const msg = n.reference_type === "chat_message" && n.reference_id
       ? await mensagemPorId(admin, n.reference_id)
-      : n.type === "task_mention" ? await comentarioDaMencao(admin, n) : null;
+      // Menção e resposta em thread de TAREFA apontam para a tarefa: o texto é achado no chat dela.
+      : n.type === "task_mention" || (n.type === "reply" && n.reference_type === "task")
+        ? await comentarioDaMencao(admin, n)
+        : null;
     if (msg?.deleted_at) throw new Definitivo("mensagem apagada");
     aviso = {
       tipo: n.type,
