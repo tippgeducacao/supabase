@@ -8,7 +8,8 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { ensureToken, base64UrlEncode, encodeHeaderUtf8, encodeDisplayName } from "../_shared/gmail.ts";
 import { logPodcastConversaSac } from "../_shared/podcastSac.ts";
 import {
-  enviarModeloPodcast, formatPhone, linkAgendaDoCandidato, modeloAprovadoPorUso, parametrosDoModelo, resolverVarPodcast, usosDoAgendamento,
+  dentroDaJanelaAgenda, enviarModeloPodcast, formatPhone, linkAgendaDoCandidato, modeloAprovadoPorUso, parametrosDoModelo,
+  resolverVarPodcast, usosDoAgendamento,
 } from "../_shared/podcastEnvio.ts";
 
 const corsHeaders = {
@@ -23,9 +24,10 @@ const TOQUE_TEMPLATE: Record<number, string> = {
   2: "podcast_followup_1",
   3: "podcast_followup_2",
 };
-// FASE DE AGENDAMENTO (Interessado): os follow-ups 1/2/3 usam `podcast_agenda_N` — ou, se há
+// FASE DE AGENDAMENTO (Interessado): os follow-ups 1/2 usam `podcast_agenda_N` — ou, se há
 // link da agenda (o único do podcast ou o Calendly do host sorteado para o convidado),
-// `podcast_agenda_N_link` (ver usosDoAgendamento e linkAgendaDoCandidato).
+// `podcast_agenda_N_link` (ver usosDoAgendamento e linkAgendaDoCandidato). O 2 sai sozinho
+// desde 21/10/2026 (passo 3 do cron, abaixo).
 
 function primeiroNome(nome?: string | null): string {
   return String(nome ?? "").trim().split(/\s+/)[0] || "Professor(a)";
@@ -125,15 +127,17 @@ async function handler(req: Request): Promise<Response> {
     let mode = "off";
     let intervaloH = 48;
     let caixaId: string | null = null;
+    let agendaAuto = "off";
     {
       const { data: cfg } = await admin
         .from("ped_configuracoes")
         .select("chave, valor")
-        .in("chave", ["podcast_dispatch_mode", "podcast_toque_intervalo_horas", "podcast_email_caixa_id"]);
+        .in("chave", ["podcast_dispatch_mode", "podcast_toque_intervalo_horas", "podcast_email_caixa_id", "podcast_agenda_auto"]);
       const map = new Map((cfg ?? []).map((c: any) => [c.chave, c.valor]));
       mode = (map.get("podcast_dispatch_mode") as string) || "off";
       intervaloH = parseInt((map.get("podcast_toque_intervalo_horas") as string) || "48", 10) || 48;
       caixaId = (map.get("podcast_email_caixa_id") as string) || null;
+      agendaAuto = (map.get("podcast_agenda_auto") as string) || "off";
     }
     const proximaEm = () => new Date(Date.now() + intervaloH * 3600_000).toISOString();
 
@@ -280,18 +284,55 @@ async function handler(req: Request): Promise<Response> {
       }
     }
 
-    return json({ ok: true, mode, enviados, silenciados, pulados, erros, processados: fila.length });
+    // 3) AGENDA AUTOMÁTICA (21/10/2026 — documento do Pedagógico: "agenda_1 → (2 a 3 dias, sem
+    //    agendamento) agenda_2 → fim"). O follow-up 2 sai sozinho podcast_agenda_intervalo_horas
+    //    (72h) depois do 1, entre 8h e 20h de Brasília. Quem agendou já saiu de 'respondeu' (o
+    //    registro da gravação — à mão ou pelo aviso do Calendly — põe 'confirmou'). Quem RESPONDEU
+    //    algo depois do 1 (WhatsApp ou e-mail) fica com o atendente: pode estar no meio de uma conversa.
+    const agenda = { enviados: 0, com_atendente: 0, erros: 0, fora_do_horario: false, ligada: agendaAuto === "on" };
+    if (agendaAuto === "on") {
+      if (!dentroDaJanelaAgenda(new Date())) {
+        agenda.fora_do_horario = true;
+      } else {
+        const { data: filaAgenda, error: filaErr } = await admin.rpc("pod_agenda_auto_fila", { p_limite: 30 });
+        if (filaErr) console.error("[pod-dispatch agenda auto] fila:", filaErr.message);
+        for (const f of (filaAgenda ?? []) as Array<{ candidato_id: string; respondeu_depois: boolean }>) {
+          if (f.respondeu_depois) { agenda.com_atendente++; continue; }
+          try {
+            const r = await enviarAgenda(admin, f.candidato_id, true);
+            if (r.status === 200) agenda.enviados++;
+            else { agenda.erros++; console.error("[pod-dispatch agenda auto]", f.candidato_id, JSON.stringify(r.corpo)); }
+          } catch (e) {
+            agenda.erros++;
+            console.error("[pod-dispatch agenda auto] erro", f.candidato_id, String(e));
+          }
+        }
+      }
+    }
+
+    return json({ ok: true, mode, enviados, silenciados, pulados, erros, processados: fila.length, agenda });
   } catch (e) {
     console.error("[pod-dispatch] fatal", String(e));
     return json({ ok: false, error: String(e) }, 500);
   }
 }
 
-// FASE DE AGENDAMENTO — envia UM follow-up de agendamento para UM convidado 'respondeu'
-// (chamado pelo clique do atendente na tela; o clique É a aprovação). Reusa toda a máquina
-// de envio (template Meta por uso_cadencia 'podcast_agenda_N' + e-mail 0704/5/6 + SAC).
-// WhatsApp só sai se o template estiver 'aprovado' na Meta; senão vai só e-mail (no-op no zap).
+// FASE DE AGENDAMENTO — UM follow-up de agendamento para UM convidado 'respondeu'. Duas portas:
+// o clique do atendente na tela (o clique É a aprovação) e, desde 21/10/2026, o cron para o
+// follow-up 2 (documento do Pedagógico: "agenda_1 → 2 a 3 dias sem agendamento → agenda_2 →
+// fim"). Reusa toda a máquina de envio (template Meta por uso_cadencia 'podcast_agenda_N' +
+// e-mail 0704/5 + SAC). O toque é TRAVADO antes de enviar (as duas portas podem coincidir) e
+// destravado se nada sair. WhatsApp só sai com o template 'aprovado' na Meta; senão vai só e-mail.
+const AGENDA_MAX = 2; // o fluxo termina no agenda_2 (até 21/10/2026 eram 3)
+
+interface ResultadoAgenda { status: number; corpo: Record<string, unknown> }
+
 async function dispatchAgenda(admin: any, candidatoId: string, json: (b: unknown, s?: number) => Response): Promise<Response> {
+  const r = await enviarAgenda(admin, candidatoId, false);
+  return json(r.corpo, r.status);
+}
+
+async function enviarAgenda(admin: any, candidatoId: string, automatico: boolean): Promise<ResultadoAgenda> {
   const { data: cfg } = await admin
     .from("ped_configuracoes").select("chave, valor")
     .in("chave", ["podcast_agenda_intervalo_horas", "podcast_email_caixa_id"]);
@@ -303,13 +344,24 @@ async function dispatchAgenda(admin: any, candidatoId: string, json: (b: unknown
 
   const { data: c } = await admin
     .from("pod_convite_candidatos")
-    .select("id, podcast_id, professor_id, status, agenda_toque, professor:ped_professores(nome,email,contato_whatsapp), podcast:ped_podcasts(nome,youtube_url)")
+    .select("id, podcast_id, professor_id, status, agenda_toque, agenda_ultimo_toque_em, agenda_proxima_acao_em, professor:ped_professores(nome,email,contato_whatsapp), podcast:ped_podcasts(nome,youtube_url)")
     .eq("id", candidatoId).maybeSingle();
-  if (!c) return json({ ok: false, error: "candidato não encontrado" }, 404);
-  if (c.status !== "respondeu") return json({ ok: false, error: `candidato não está em Interessado (status=${c.status})` }, 409);
+  if (!c) return { status: 404, corpo: { ok: false, error: "candidato não encontrado" } };
+  if (c.status !== "respondeu") return { status: 409, corpo: { ok: false, error: `candidato não está em Interessado (status=${c.status})` } };
 
-  const proxToque = (c.agenda_toque ?? 0) + 1;
-  if (proxToque > 3) return json({ ok: false, error: "esgotou os 3 follow-ups de agendamento", esgotado: true }, 409);
+  const toqueAtual = c.agenda_toque ?? 0;
+  const proxToque = toqueAtual + 1;
+  if (proxToque > AGENDA_MAX) {
+    return { status: 409, corpo: { ok: false, error: `esgotou os ${AGENDA_MAX} follow-ups de agendamento`, esgotado: true } };
+  }
+
+  // trava: só uma porta leva este toque
+  const { data: travou } = await admin.from("pod_convite_candidatos")
+    .update({ agenda_toque: proxToque, agenda_ultimo_toque_em: nowIso, agenda_proxima_acao_em: proximaEm })
+    .eq("id", c.id).eq("status", "respondeu").eq("agenda_toque", toqueAtual).select("id");
+  if (!(travou ?? []).length) {
+    return { status: 409, corpo: { ok: false, error: "este follow-up acabou de sair por outra porta (ou o convidado mudou de etapa)" } };
+  }
 
   const nome = primeiroNome(c.professor?.nome);
   const podcastNome = c.podcast?.nome ?? "podcast";
@@ -349,24 +401,33 @@ async function dispatchAgenda(admin: any, candidatoId: string, json: (b: unknown
   }
 
   if (!waOk && !emailOk) {
-    return json({
-      ok: false,
-      error: to || c.professor?.email
-        ? "não foi possível enviar (WhatsApp e e-mail falharam ou o template do WhatsApp ainda não foi aprovado e o convidado não tem e-mail)"
-        : "convidado sem e-mail e sem WhatsApp válido",
-      enviados: 0,
-    }, 422);
+    // destrava (só se a trava ainda é a nossa). No automático, a nova tentativa fica para daqui a
+    // 24h — senão o cron tentaria de novo a cada 30 min.
+    await admin.from("pod_convite_candidatos")
+      .update({
+        agenda_toque: toqueAtual,
+        agenda_ultimo_toque_em: c.agenda_ultimo_toque_em ?? null,
+        agenda_proxima_acao_em: automatico ? new Date(Date.now() + 24 * 3600_000).toISOString() : (c.agenda_proxima_acao_em ?? null),
+      })
+      .eq("id", c.id).eq("agenda_toque", proxToque).eq("agenda_ultimo_toque_em", nowIso);
+    return {
+      status: 422,
+      corpo: {
+        ok: false,
+        error: to || c.professor?.email
+          ? "não foi possível enviar (WhatsApp e e-mail falharam ou o template do WhatsApp ainda não foi aprovado e o convidado não tem e-mail)"
+          : "convidado sem e-mail e sem WhatsApp válido",
+        enviados: 0,
+      },
+    };
   }
 
-  const upd: Record<string, any> = {
-    agenda_toque: proxToque, agenda_ultimo_toque_em: nowIso, agenda_proxima_acao_em: proximaEm,
-  };
+  const upd: Record<string, any> = {};
   if (waOk) upd.agenda_wpp_em = nowIso;
   if (emailOk) upd.agenda_email_em = nowIso;
-  // guard: só avança quem ainda está 'respondeu' (não sobrescreve se o atendente mudou o status)
-  await admin.from("pod_convite_candidatos").update(upd).eq("id", c.id).eq("status", "respondeu");
+  await admin.from("pod_convite_candidatos").update(upd).eq("id", c.id);
 
-  return json({ ok: true, enviados: (waOk ? 1 : 0) + (emailOk ? 1 : 0), wa: waOk, email: emailOk, toque: proxToque });
+  return { status: 200, corpo: { ok: true, enviados: (waOk ? 1 : 0) + (emailOk ? 1 : 0), wa: waOk, email: emailOk, toque: proxToque } };
 }
 
 // Os 3 e-mails automáticos viraram templates EDITÁVEIS na aba Templates (ids fixos). Se existirem e

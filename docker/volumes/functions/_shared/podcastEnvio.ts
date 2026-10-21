@@ -159,6 +159,17 @@ export function usosDoAgendamento(toque: number, linkAgenda?: string | null): st
   return linkAgenda ? [`${base}_link`, base] : [base];
 }
 
+/** Hora (0–23) no horário de Brasília. */
+export function horaBrasilia(d: Date): number {
+  return Number(new Intl.DateTimeFormat("en-US", { timeZone: "America/Sao_Paulo", hour: "numeric", hourCycle: "h23" }).format(d));
+}
+
+/** O follow-up 2 automático da agenda (21/10/2026) só sai entre 8h e 20h de Brasília. */
+export function dentroDaJanelaAgenda(d: Date): boolean {
+  const h = horaBrasilia(d);
+  return h >= 8 && h < 20;
+}
+
 /**
  * Link da agenda para ESTE convidado (16/10/2026): o link único do podcast, se houver; senão o
  * Calendly de um host do podcast, em rodízio e fixo por candidatura — o follow-up 2 manda o

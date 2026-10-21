@@ -1,11 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { linkAgendaDoCandidato, parametrosDoModelo, renderModelo, resolverVarPodcast, usosDoAgendamento } from "./podcastEnvio";
+import { dentroDaJanelaAgenda, horaBrasilia, linkAgendaDoCandidato, parametrosDoModelo, renderModelo, resolverVarPodcast, usosDoAgendamento } from "./podcastEnvio";
 
 describe("usosDoAgendamento", () => {
   it("com link: texto novo primeiro, antigo de reserva; sem link: só o antigo", () => {
     expect(usosDoAgendamento(1, "https://calendly.com/x")).toEqual(["podcast_agenda_1_link", "podcast_agenda_1"]);
     expect(usosDoAgendamento(2, null)).toEqual(["podcast_agenda_2"]);
     expect(usosDoAgendamento(3, "")).toEqual(["podcast_agenda_3"]);
+  });
+});
+
+// Follow-up 2 automático da agenda (21/10/2026): só entre 8h e 20h de Brasília (-03:00 fixo).
+describe("dentroDaJanelaAgenda", () => {
+  it("8h entra, 20h já não; vale a hora de Brasília, não a do servidor", () => {
+    expect(horaBrasilia(new Date("2026-10-21T11:00:00Z"))).toBe(8);
+    expect(dentroDaJanelaAgenda(new Date("2026-10-21T10:59:00Z"))).toBe(false); // 07:59
+    expect(dentroDaJanelaAgenda(new Date("2026-10-21T11:00:00Z"))).toBe(true);  // 08:00
+    expect(dentroDaJanelaAgenda(new Date("2026-10-21T22:59:00Z"))).toBe(true);  // 19:59
+    expect(dentroDaJanelaAgenda(new Date("2026-10-21T23:00:00Z"))).toBe(false); // 20:00
+    expect(dentroDaJanelaAgenda(new Date("2026-10-22T02:30:00Z"))).toBe(false); // 23:30
   });
 });
 

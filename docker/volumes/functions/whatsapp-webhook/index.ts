@@ -743,7 +743,8 @@ async function handlePodcastInbound(
 }
 
 // Resposta automática a um clique de convidado de podcast (14/10/2026, fluxo do documento do
-// Pedagógico). Não é follow-up — esses seguem no clique do atendente (decisão do Rafael) —:
+// Pedagógico). Não é follow-up — o 1 da agenda sai aqui ou no clique do atendente, e o 2 sai
+// sozinho 72h depois (pod-convite-dispatch, desde 21/10/2026) —:
 // é responder a um pedido que o convidado acabou de fazer. Só sai com o modelo APROVADO e,
 // no caso da agenda, com link (o único do podcast ou, desde 16/10, o Calendly de um host em
 // rodízio — linkAgendaDoCandidato); faltando qualquer coisa, nada é enviado e o atendente
