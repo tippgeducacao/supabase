@@ -1,9 +1,11 @@
 // Google Calendar sync: fetches events for active integrations and upserts into calendar_events_cache
 // Body: { integration_id?: string }  -> if omitted, syncs all active integrations with tokens
+// Quem pode chamar (chave de serviço, segredo do cron ou usuário logado): ver ./portao.ts
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { atualizacaoAgendaDescoberta } from '../_shared/atualizacaoAgendaDescoberta.ts';
 import { erroDeTokenDaAgenda, type ErroDeTokenAgenda } from './erroDeToken.ts';
+import { quemChama } from './portao.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -346,11 +348,32 @@ Deno.serve(async (req) => {
 
   const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
 
+  const chamador = await quemChama(req.headers, {
+    chaveServico: SERVICE_ROLE,
+    cronValido: async (segredo) =>
+      (await admin.rpc('calendar_b2b_validar_cron', { p_secret: segredo })).data === true,
+    usuarioValido: async (jwt) => {
+      const { data, error } = await admin.auth.getUser(jwt);
+      return !error && !!data?.user;
+    },
+  });
+  if (!chamador) {
+    return new Response(JSON.stringify({ error: 'Não autenticado.' }), {
+      status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }
+
   let integrationId: string | undefined;
   try {
     const body = await req.json().catch(() => ({}));
     integrationId = body.integration_id;
   } catch { /* ignore */ }
+
+  if (!integrationId && chamador === 'usuario') {
+    return new Response(JSON.stringify({ error: 'Informe a agenda (integration_id).' }), {
+      status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }
 
   // Quando integration_id é informado, sincroniza ela + todas as sub-agendas
   // SELECTED da mesma conta (mesmo owner_user_id e account_email).

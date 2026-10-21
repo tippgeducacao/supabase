@@ -48,8 +48,19 @@ function consulta(tabela: string) {
   return builder
 }
 
+// Cofre e Auth falsos: só 'segredo-do-cron' passa no calendar_b2b_validar_cron, e só
+// 'jwt-de-usuario' é sessão de verdade (a chave anon, por exemplo, não é usuário).
 vi.mock('https://esm.sh/@supabase/supabase-js@2.45.0', () => ({
-  createClient: () => ({ from: (tabela: string) => consulta(tabela) }),
+  createClient: () => ({
+    from: (tabela: string) => consulta(tabela),
+    rpc: async (nome: string, args: Record<string, unknown>) =>
+      ({ data: nome === 'calendar_b2b_validar_cron' && args.p_secret === 'segredo-do-cron', error: null }),
+    auth: {
+      getUser: async (jwt: string) => jwt === 'jwt-de-usuario'
+        ? { data: { user: { id: 'usuario-1' } }, error: null }
+        : { data: { user: null }, error: { message: 'invalid JWT' } },
+    },
+  }),
 }))
 
 // Google falso: o refresh token decide a resposta do /token; o access token, a dos eventos.
@@ -112,14 +123,56 @@ const linha = (id: string, refreshToken: string | null, extra: Linha = {}): Linh
   is_primary: false, selected: true, is_active: true, calendar_token_error: null, ...extra,
 })
 
-async function sincronizar(body: Record<string, unknown> = {}) {
-  const r = await handler(new Request('https://supabase.invalid/functions/v1/google-calendar-sync', {
-    method: 'POST', body: JSON.stringify(body),
+const chamar = (body: Record<string, unknown>, headers: Record<string, string>) =>
+  handler(new Request('https://supabase.invalid/functions/v1/google-calendar-sync', {
+    method: 'POST', body: JSON.stringify(body), headers,
   }))
+
+// Rodada de sistema (edge irmã com a chave de serviço) — o caminho dos testes de token.
+async function sincronizar(body: Record<string, unknown> = {}) {
+  const r = await chamar(body, { Authorization: 'Bearer servico-teste' })
   expect(r.status).toBe(200)
   return (await r.json()).results as Array<Record<string, unknown>>
 }
 const gravacoesDoErro = () => f.updates.filter((u) => 'calendar_token_error' in u.patch)
+const chamouGoogle = () => f.fetch.mock.calls.length > 0
+
+describe('google-calendar-sync: quem pode chamar (21/10/2026)', () => {
+  it('sem credencial nenhuma: 401 e nada sincroniza', async () => {
+    f.integracoes = [linha('a', 'rt-ok')]
+    const r = await chamar({}, {})
+    expect(r.status).toBe(401)
+    expect(chamouGoogle()).toBe(false)
+    expect(f.updates).toEqual([])
+  })
+
+  it('chave pública (anon) ou token inválido não passam', async () => {
+    f.integracoes = [linha('a', 'rt-ok')]
+    for (const auth of ['Bearer chave-anon-publica', 'Bearer jwt-vencido', 'servico-teste']) {
+      expect((await chamar({}, { Authorization: auth })).status, auth).toBe(401)
+    }
+    expect(chamouGoogle()).toBe(false)
+  })
+
+  it('cron com o segredo do cofre faz a rodada completa; segredo errado não passa', async () => {
+    f.integracoes = [linha('a', 'rt-ok'), linha('b', 'rt-ok')]
+    expect((await chamar({}, { 'x-calendar-cron': 'chute' })).status).toBe(401)
+    const r = await chamar({}, { 'x-calendar-cron': 'segredo-do-cron' })
+    expect(r.status).toBe(200)
+    expect(((await r.json()).results as unknown[]).length).toBe(2)
+  })
+
+  it('usuário logado sincroniza uma agenda, mas não pede a rodada completa', async () => {
+    // 'b' é de outra conta: a mesma conta entraria junto, como sub-agenda de 'a'.
+    f.integracoes = [linha('a', 'rt-ok'), linha('b', 'rt-ok', { account_email: 'outra@exemplo.invalid' })]
+    const tudo = await chamar({}, { Authorization: 'Bearer jwt-de-usuario' })
+    expect(tudo.status).toBe(400)
+    expect(chamouGoogle()).toBe(false)
+    const uma = await chamar({ integration_id: 'a' }, { Authorization: 'Bearer jwt-de-usuario' })
+    expect(uma.status).toBe(200)
+    expect((await uma.json()).results).toEqual([expect.objectContaining({ integration_id: 'a', ok: true })])
+  })
+})
 
 describe('google-calendar-sync: erro de token vai para a linha (20/10/2026)', () => {
   it('invalid_grant grava token_revoked em calendar_token_error e diz na resposta', async () => {
