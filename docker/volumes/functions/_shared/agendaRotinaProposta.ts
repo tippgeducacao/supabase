@@ -53,6 +53,11 @@ export interface PropostaValidada {
   duracao_padrao_tarefa_min: number | null;
   duracao_padrao_trecho: string | null;
   avisos_validacao: string[];
+  /**
+   * Recado da IA para a liderança, em linguagem natural — ex.: "não há informação suficiente nos
+   * textos para montar rotinas" (22/10/2026). Nunca vira atividade nem pergunta obrigatória.
+   */
+  mensagem: string | null;
 }
 
 export const LIMITE_RELATORIO = 8000;
@@ -65,7 +70,7 @@ const nulavel = (schema: Record<string, unknown>) => ({ anyOf: [schema, { type: 
 export const SCHEMA_PROPOSTA = {
   type: 'object',
   additionalProperties: false,
-  required: ['rotinas', 'perguntas', 'suposicoes', 'fora_do_escopo', 'duracao_padrao_tarefa_min', 'duracao_padrao_trecho'],
+  required: ['rotinas', 'perguntas', 'suposicoes', 'fora_do_escopo', 'duracao_padrao_tarefa_min', 'duracao_padrao_trecho', 'mensagem'],
   properties: {
     rotinas: {
       type: 'array',
@@ -121,6 +126,7 @@ export const SCHEMA_PROPOSTA = {
     fora_do_escopo: { type: 'array', items: { type: 'string' } },
     duracao_padrao_tarefa_min: nulavel({ type: 'integer' }),
     duracao_padrao_trecho: nulavel({ type: 'string' }),
+    mensagem: nulavel({ type: 'string', description: 'Recado curto e natural para a liderança (ex.: falta informação). Null se não houver.' }),
   },
 } as const;
 
@@ -333,6 +339,7 @@ export function validarProposta(bruto: unknown, relatorio: string): PropostaVali
     duracao_padrao_tarefa_min: padraoValido ? duracaoPadrao : null,
     duracao_padrao_trecho: padraoValido ? trechoPadrao : null,
     avisos_validacao: avisos.slice(0, 30),
+    mensagem: texto(obj.mensagem, 500),
   };
 }
 
@@ -393,8 +400,25 @@ export function resumoJornada(ht: unknown): string | null {
     .join(' · ');
 }
 
+/** Tira de dentro do texto qualquer marca das molduras (abrir/fechar), dos dois tipos. */
+const semMolduras = (t: string) => t.slice(0, LIMITE_RELATORIO).replace(/<\/?\s*(relatorio|orientacao_lideranca)\s*>/gi, '');
+
 /** Remove qualquer tentativa de fechar a moldura de dados dentro do relatório. */
 export function emoldurarRelatorio(relatorio: string): string {
-  const limpo = relatorio.slice(0, LIMITE_RELATORIO).replace(/<\/?\s*relatorio\s*>/gi, '');
-  return `<relatorio>\n${limpo}\n</relatorio>`;
+  return `<relatorio>\n${semMolduras(relatorio)}\n</relatorio>`;
 }
+
+/** A orientação da liderança (22/10/2026) também é DADO, na moldura dela. */
+export function emoldurarOrientacao(orientacao: string): string {
+  return `<orientacao_lideranca>\n${semMolduras(orientacao)}\n</orientacao_lideranca>`;
+}
+
+/** Os dois textos juntos são a fonte das evidências: trecho citado tem de existir em um deles. */
+export const textoFonteDaProposta = (relato: string | null | undefined, orientacao: string | null | undefined): string =>
+  [relato ?? '', orientacao ?? ''].map((t) => t.trim()).filter(Boolean).join('\n');
+
+/** Proposta vazia com o recado — quando não há texto nenhum, nem se chama a IA. */
+export const propostaSemInformacao = (mensagem: string): PropostaValidada => ({
+  rotinas: [], perguntas: [], suposicoes: [], fora_do_escopo: [],
+  duracao_padrao_tarefa_min: null, duracao_padrao_trecho: null, avisos_validacao: [], mensagem,
+});
