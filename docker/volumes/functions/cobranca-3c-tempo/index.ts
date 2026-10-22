@@ -136,7 +136,8 @@ async function coletar() {
   const meuStatus = lista(st.json).find((x) => Number(x.id) === agente)
   const online = !!meuStatus && Number(meuStatus.status) !== 0
 
-  // 3) logins dos últimos 7 dias — a entrada mais recente também traz agent.last_login,
+  // 3) logins dos últimos 7 dias (15 por página; `per_page` derruba com HTTP 400 — visto
+  //    em 22/10) — a entrada mais recente também traz agent.last_login,
   //    que é o login EM CURSO (o histórico pode só listar sessões já encerradas).
   const sessoes: Array<{ login: string; logout: string | null }> = []
   let ultimoLogin: string | null = null
@@ -144,7 +145,7 @@ async function coletar() {
   for (let page = 1; page <= 5; page++) {
     const r = await api(
       `/agents/login_history?start_date=${seteDiasAtras}%2000:00:00&end_date=${hoje}%2023:59:59` +
-      `&agent_id=${agente}&per_page=100${page > 1 ? `&page=${page}` : ''}`,
+      `&agent_id=${agente}${page > 1 ? `&page=${page}` : ''}`,
     )
     if (!r.ok) { historicoOk = false; break }
     for (const h of lista(r.json)) {
@@ -194,18 +195,16 @@ async function coletar() {
     }
   }
 
-  // 4) a foto do minuto. Deslogado e sem mudança não grava (o intervalo longo é dividido
-  //    só pelo tempo de sessão, então pular minutos parados não muda a conta).
-  //    Compara com a última foto de QUALQUER dia: logo depois da meia-noite o 3C pode
-  //    ainda devolver o acumulado de ontem, e gravar isso no dia novo inventaria tempo.
+  // 4) a foto do minuto — SÓ com o usuário logado, mais a 1ª foto depois da saída (pega os
+  //    últimos segundos) e a 1ª foto de todas (referência inicial).
+  //    O metrics/total é monitor AO VIVO: deslogado, ele ora repete o acumulado da última
+  //    sessão (em 22/10 devolveu os números de 21/10 com ninguém logado), ora volta vazio.
+  //    Esse valor não é tempo de hoje; a divisão (cob_3c_tempo_rodizio) também o ignora.
   const { data: ult } = await supabase.from('cob_3c_amostras')
-    .select('online, available_s, in_call_s, acw_s, break_s, calls')
+    .select('online')
     .order('amostrado_em', { ascending: false }).limit(1).maybeSingle()
-  const igual = !!ult &&
-    ult.available_s === valores.available_s && ult.in_call_s === valores.in_call_s &&
-    ult.acw_s === valores.acw_s && ult.break_s === valores.break_s && ult.calls === valores.calls
   let gravou = false
-  if (online || !igual || ult?.online) {
+  if (online || !ult || ult.online) {
     const { error } = await supabase.from('cob_3c_amostras')
       .insert({ amostrado_em: agoraIso, report_date: hoje, online, ...valores })
     if (error) throw new Error(`cob_3c_amostras: ${error.message}`)
