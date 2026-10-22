@@ -197,9 +197,11 @@ async function coletar() {
 
   // 4) a foto do minuto — SÓ com o usuário logado, mais a 1ª foto depois da saída (pega os
   //    últimos segundos) e a 1ª foto de todas (referência inicial).
-  //    O metrics/total é monitor AO VIVO: deslogado, ele ora repete o acumulado da última
-  //    sessão (em 22/10 devolveu os números de 21/10 com ninguém logado), ora volta vazio.
-  //    Esse valor não é tempo de hoje; a divisão (cob_3c_tempo_rodizio) também o ignora.
+  //    O metrics/total é monitor AO VIVO e IGNORA a data pedida: devolve o acumulado do dia
+  //    corrente e zera de um dia para o outro. Deslogado, a doc do 3C registra que ele pode
+  //    voltar vazio (threec-api-docs.ts, 09/07/2026) — por isso o valor deslogado não entra
+  //    na conta (cob_3c_tempo_rodizio também o ignora). Em 22/10, deslogado às 16:44, ele
+  //    ainda trazia o acumulado das 4 sessões da tarde: o vazio é o caso a temer, não a regra.
   const { data: ult } = await supabase.from('cob_3c_amostras')
     .select('online')
     .order('amostrado_em', { ascending: false }).limit(1).maybeSingle()
@@ -210,6 +212,11 @@ async function coletar() {
     if (error) throw new Error(`cob_3c_amostras: ${error.message}`)
     gravou = true
   }
+
+  // 5) batimento: a faixa "No 3C agora" sabe que a coleta está viva mesmo com o 3C
+  //    desligado (quando não há foto nova).
+  await supabase.from('cob_3c_coleta')
+    .upsert({ id: 1, lido_em: agoraIso, online, erro: null, erro_em: null }, { onConflict: 'id' })
 
   return { agente, hoje, online, gravou, historicoOk, sessoes_lidas: sessoes.length, ultimo_login: ultimoLogin, ...valores }
 }
@@ -237,6 +244,10 @@ async function handler(req: Request): Promise<Response> {
   } catch (err) {
     const msg = semToken(String(err))
     console.error('[cobranca-3c-tempo]', msg)
+    // o erro fica no batimento; lido_em NÃO anda, e a faixa passa a dizer "atrasada"
+    const { error: eBat } = await supabase.from('cob_3c_coleta')
+      .update({ erro: msg.slice(0, 300), erro_em: new Date().toISOString() }).eq('id', 1)
+    if (eBat) console.error('[cobranca-3c-tempo] batimento', eBat.message)
     return json({ ok: false, error: msg }, 502)
   }
 }
