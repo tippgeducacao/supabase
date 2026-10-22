@@ -9,6 +9,13 @@
 //
 // ⚠️ O token é POR CONTA (`wa_accounts.access_token`): o media_id só é resolvível pelo app
 // dono do número que recebeu. Passar o token da conta errada devolve 404/190 e o anexo some.
+//
+// ⚠️ O arquivo vai da Meta para o Storage EM FLUXO (`gravarMidiaInbound`), nunca inteiro na
+// memória. O worker do edge-runtime tem 150 MB e é dividido por todas as chamadas da função:
+// em 21-22/10/2026 o PDF de 95 MB de uma professora (BM 08) era lido com `arrayBuffer()`, o
+// bucket (então 50 MB) recusava e a 2ª tentativa estourava a memória ANTES de a mensagem ser
+// gravada — o arquivo nunca aparecia no SAC, a Meta reentregava (40 estouros num dia) e cada
+// estouro derrubava junto o que mais estivesse em processamento. Ver docs/CRM Comercial.md.
 
 // Extensão do arquivo salvo: regra única em `extensaoArquivo.ts` (o nome que a Meta mandou manda;
 // o mime desempata). A cópia que morava aqui transformava nome SEM ponto em extensão
@@ -73,6 +80,139 @@ export function extrairMidiaInbound(msg: any): MidiaInbound | null {
 }
 
 /**
+ * Teto de um arquivo inbound: o `file_size_limit` do bucket `whatsapp-anexos` (migration
+ * 20261022193954). É o limite de documento da Cloud API. Mude os dois juntos.
+ */
+export const LIMITE_MIDIA_INBOUND_BYTES = 100 * 1024 * 1024;
+
+/**
+ * Falha que se repete IGUAL na próxima tentativa (arquivo acima do teto, media_id que a Meta não
+ * resolve mais, URL fora da Meta). Repetir só baixaria o arquivo inteiro de novo — foi a 2ª
+ * tentativa que estourou a memória do worker em 22/10/2026.
+ */
+export class FalhaDefinitivaMidia extends Error {
+  constructor(motivo: string) {
+    super(motivo);
+    this.name = "FalhaDefinitivaMidia";
+  }
+}
+
+/** Só baixa de hosts da Meta (anti-SSRF): a URL vem do JSON da Meta e é buscada com o token. */
+export function ehHostDeMidiaDaMeta(u: string): boolean {
+  try {
+    const h = new URL(u).hostname.toLowerCase();
+    return h === "lookaside.fbsbx.com"
+      || h === "graph.facebook.com"
+      || h.endsWith(".fbcdn.net")
+      || h.endsWith(".facebook.com");
+  } catch {
+    return false;
+  }
+}
+
+export interface MidiaGravada {
+  /** Caminho no bucket `whatsapp-anexos` — a URL pública cada chamador monta como sempre montou. */
+  path: string;
+  mime: string;
+  ext: string;
+  bytes: number;
+}
+
+/**
+ * UMA tentativa de levar a mídia da Meta para o bucket `whatsapp-anexos`, em fluxo: os bytes do
+ * download entram direto no upload, sem `arrayBuffer()`. Erro `FalhaDefinitivaMidia` = não
+ * adianta repetir; qualquer outro erro é transitório (Graph fora, lookaside, Storage).
+ *
+ * @param accessToken token da CONTA que recebeu a mensagem.
+ * @param opcoes.pasta prefixo do caminho no bucket, com a barra no fim (o CRM usa "crm/").
+ */
+export async function gravarMidiaInbound(
+  admin: any,
+  media: MidiaInbound,
+  accessToken: string,
+  opcoes: { pasta?: string; limiteBytes?: number } = {},
+): Promise<MidiaGravada> {
+  const limite = opcoes.limiteBytes ?? LIMITE_MIDIA_INBOUND_BYTES;
+
+  // a) media_id → URL temporária. O Graph já diz o tamanho (`file_size`): arquivo acima do teto
+  //    nem começa a baixar.
+  const metaRes = await fetch(`https://graph.facebook.com/v21.0/${media.id}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const meta: any = await metaRes.json().catch(() => ({}));
+  const mediaUrl: string | undefined = meta?.url;
+  if (!mediaUrl) {
+    const motivo = `sem URL (HTTP ${metaRes.status}): ${JSON.stringify(meta).slice(0, 200)}`;
+    // 4xx = id expirado/inválido ou token de outra conta; 429 e 5xx passam numa nova tentativa.
+    const definitiva = metaRes.status >= 400 && metaRes.status < 500 && metaRes.status !== 429;
+    throw definitiva ? new FalhaDefinitivaMidia(motivo) : new Error(motivo);
+  }
+  if (!ehHostDeMidiaDaMeta(mediaUrl)) {
+    throw new FalhaDefinitivaMidia(`host_nao_permitido: ${new URL(mediaUrl).hostname}`);
+  }
+  const tamanhoNoGraph = Number(meta?.file_size);
+  if (tamanhoNoGraph > limite) throw new FalhaDefinitivaMidia(`arquivo_grande: ${tamanhoNoGraph} bytes`);
+  const mime: string = meta?.mime_type || media.mime_type || "application/octet-stream";
+
+  // b) bytes (a URL da Meta também exige o Bearer)
+  const binRes = await fetch(mediaUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
+  if (!binRes.ok || !binRes.body) {
+    // Sem isso o corpo de erro da Meta subia pro Storage como se fosse o arquivo.
+    await binRes.body?.cancel().catch(() => {});
+    throw new Error(`download HTTP ${binRes.status}`);
+  }
+  const tamanhoNoDownload = binRes.headers.get("content-length");
+  if (tamanhoNoDownload === "0") {
+    await binRes.body.cancel().catch(() => {});
+    throw new Error("download vazio");
+  }
+  if (Number(tamanhoNoDownload) > limite) {
+    await binRes.body.cancel().catch(() => {});
+    throw new FalhaDefinitivaMidia(`arquivo_grande: ${tamanhoNoDownload} bytes`);
+  }
+
+  // c) Storage, direto do fluxo. O contador dá o tamanho (o upload não devolve) e corta o que
+  //    passar do teto quando a Meta não informou tamanho nenhum.
+  let bytes = 0;
+  let passouDoTeto = false;
+  const contador = new TransformStream<Uint8Array, Uint8Array>({
+    transform(pedaco, ctrl) {
+      bytes += pedaco.byteLength;
+      if (bytes > limite) {
+        passouDoTeto = true;
+        ctrl.error(new FalhaDefinitivaMidia(`arquivo_grande: mais de ${limite} bytes`));
+        return;
+      }
+      ctrl.enqueue(pedaco);
+    },
+  });
+  const ext = extensaoDe(mime, media.filename);
+  const path = `${opcoes.pasta ?? ""}${new Date().toISOString().slice(0, 10)}/inbound-${crypto.randomUUID()}.${ext}`;
+  let erroUpload: string | null = null;
+  try {
+    const { error } = await admin.storage.from("whatsapp-anexos").upload(path, binRes.body.pipeThrough(contador), {
+      contentType: mime,
+      upsert: false,
+      duplex: "half", // corpo em fluxo
+    });
+    if (error) erroUpload = error.message ?? String(error);
+  } catch (e) {
+    erroUpload = e instanceof Error ? e.message : String(e);
+  }
+  if (passouDoTeto) throw new FalhaDefinitivaMidia(`arquivo_grande: mais de ${limite} bytes`);
+  if (erroUpload !== null) {
+    const motivo = `storage upload: ${erroUpload}`;
+    // "The object exceeded the maximum allowed size" = `file_size_limit` do bucket: repetir dá o mesmo.
+    throw /maximum allowed size/i.test(erroUpload) ? new FalhaDefinitivaMidia(motivo) : new Error(motivo);
+  }
+  if (bytes === 0) {
+    await admin.storage.from("whatsapp-anexos").remove([path]).catch(() => {});
+    throw new Error("download vazio");
+  }
+  return { path, mime, ext, bytes };
+}
+
+/**
  * Baixa a mídia da Meta e sobe no bucket `whatsapp-anexos`. Devolve o array pronto para a
  * coluna `anexos` (1 item), ou `[]` em QUALQUER falha — best-effort de propósito: perder o
  * arquivo é ruim, mas perder a mensagem inteira (e o 200 pro webhook) é pior.
@@ -91,48 +231,18 @@ export async function baixarAnexoInbound(
     return [];
   }
   try {
-    // a) media_id → URL temporária
-    const metaUrlRes = await fetch(`https://graph.facebook.com/v21.0/${media.id}`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    const metaUrlJson: any = await metaUrlRes.json().catch(() => ({}));
-    const mediaUrl: string | undefined = metaUrlJson?.url;
-    const mime: string = metaUrlJson?.mime_type || media.mime_type || "application/octet-stream";
-    if (!mediaUrl) {
-      console.log(`[${tag}] mídia inbound sem URL:`, JSON.stringify(metaUrlJson));
-      return [];
-    }
-
-    // b) bytes (a URL da Meta também exige o Bearer)
-    const binRes = await fetch(mediaUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
-    if (!binRes.ok) {
-      console.log(`[${tag}] download mídia HTTP`, binRes.status);
-      return [];
-    }
-    const bin = new Uint8Array(await binRes.arrayBuffer());
-
-    // c) Storage
-    const ext = extensaoDe(mime, media.filename);
-    const path = `${new Date().toISOString().slice(0, 10)}/inbound-${crypto.randomUUID()}.${ext}`;
-    const { error: stErr } = await admin.storage
-      .from("whatsapp-anexos")
-      .upload(path, bin, { contentType: mime, upsert: false });
-    if (stErr) {
-      console.log(`[${tag}] storage upload inbound fail:`, stErr.message);
-      return [];
-    }
-
-    const pub = toPublicUrl(admin.storage.from("whatsapp-anexos").getPublicUrl(path).data.publicUrl);
+    const gravada = await gravarMidiaInbound(admin, media, accessToken);
+    const pub = toPublicUrl(admin.storage.from("whatsapp-anexos").getPublicUrl(gravada.path).data.publicUrl);
     return [{
       tipo: media.tipo,
-      mime_type: mime,
+      mime_type: gravada.mime,
       meta_media_id: media.id,
       url: pub,
       url_storage: pub,
-      filename: media.filename || `${media.tipo}.${ext}`,
+      filename: media.filename || `${media.tipo}.${gravada.ext}`,
     }];
   } catch (e: any) {
-    console.log(`[${tag}] erro download mídia inbound:`, e?.message ?? String(e));
+    console.log(`[${tag}] erro download mídia inbound (${media.id}):`, e?.message ?? String(e));
     return [];
   }
 }

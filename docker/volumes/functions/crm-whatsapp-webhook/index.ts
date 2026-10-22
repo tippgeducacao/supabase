@@ -9,7 +9,7 @@ import { carimboInbound } from "./carimbo.ts";
 import { prepararPortfolioInstagram } from "./portfolioInstagram.ts";
 import { alertaDeFalhaDeConta, statusProvaEntrega, TIPO_ALERTA_ENTREGA, type AlertaEntrega } from "./alertaEntrega.ts";
 import { CABECALHO_SEGREDO_N8N, carregarDesvioN8n, vaiParaN8n } from "../_shared/desvioN8n.ts";
-import { extensaoDoArquivo } from "../_shared/extensaoArquivo.ts";
+import { FalhaDefinitivaMidia, gravarMidiaInbound } from "../_shared/waMediaInbound.ts";
 
 declare const EdgeRuntime: { waitUntil?: (p: Promise<unknown>) => void } | undefined;
 
@@ -518,19 +518,6 @@ async function validMetaSignature(raw: string, header: string | null, appSecret:
   return diff === 0;
 }
 
-// Só baixa mídia de hosts da Meta (anti-SSRF): a URL vem do JSON da Meta e é buscada com o token.
-function isMetaMediaHost(u: string): boolean {
-  try {
-    const h = new URL(u).hostname.toLowerCase();
-    return h === "lookaside.fbsbx.com"
-      || h === "graph.facebook.com"
-      || h.endsWith(".fbcdn.net")
-      || h.endsWith(".facebook.com");
-  } catch {
-    return false;
-  }
-}
-
 // Canoniza dígitos BR pro formato COM 9º dígito. O Meta dropa o 9 no inbound
 // (manda 554688166051), mas o lead é salvo COM o 9 (5546988166051, pela
 // crm-lead-webhook). Sem canonizar, o relay manda o remotejid sem o 9, o agente
@@ -986,66 +973,45 @@ Deno.serve(async (req) => {
           // única e o áudio virava "[áudio]" mudo no SAC — 08/10/2026: 6 áudios + 2 docs em
           // 3 números. Se ainda assim falhar, o media_id vai pro metadata (`midia_pendente`):
           // a Meta guarda a mídia ~30 dias e, sem o id, o arquivo era irrecuperável.
+          // ⚠️ Falha DEFINITIVA não repete, e o arquivo vai em fluxo (`gravarMidiaInbound`):
+          // em 22/10/2026 a 2ª tentativa de um PDF de 95 MB estourou a memória do worker
+          // ANTES do insert — a mensagem do professor nunca aparecia no SAC.
           let anexos: any[] = [];
           let midiaFalha: string | null = null;
-          if (mediaInbound?.id && accountAccessToken) {
+          // Reentrega do que JÁ está gravado (a Meta repete o evento quando a resposta demora ou
+          // cai): o insert abaixo vira "retry benigno" e o arquivo baixado ficaria órfão no bucket.
+          let midiaJaGravada = false;
+          if (mediaInbound?.id && msgId) {
+            const { data: jaTem } = await admin
+              .from("crm_whatsapp_messages")
+              .select("id")
+              .eq("wa_message_id", msgId)
+              .limit(1);
+            midiaJaGravada = (jaTem?.length ?? 0) > 0;
+          }
+          if (mediaInbound?.id && accountAccessToken && !midiaJaGravada) {
            for (let tentativa = 1; tentativa <= 3 && anexos.length === 0; tentativa++) {
             if (tentativa > 1) await new Promise((r) => setTimeout(r, tentativa === 2 ? 400 : 1200));
             try {
-              // a) get media URL
-              const metaUrlRes = await fetch(`https://graph.facebook.com/v21.0/${mediaInbound.id}`, {
-                headers: { Authorization: `Bearer ${accountAccessToken}` },
+              const gravada = await gravarMidiaInbound(admin, { ...mediaInbound, id: mediaInbound.id }, accountAccessToken, {
+                pasta: "crm/",
               });
-              const metaUrlJson: any = await metaUrlRes.json().catch(() => ({}));
-              const mediaUrl: string | undefined = metaUrlJson?.url;
-              const mime: string = metaUrlJson?.mime_type || mediaInbound.mime_type || "application/octet-stream";
-              if (mediaUrl && !isMetaMediaHost(mediaUrl)) {
-                console.warn("[crm-whatsapp-webhook] mediaUrl com host não permitido, ignorando (anti-SSRF):", mediaUrl);
-                midiaFalha = "host_nao_permitido";
-                break;
-              } else if (mediaUrl) {
-                // b) download bytes (com token)
-                const binRes = await fetch(mediaUrl, {
-                  headers: { Authorization: `Bearer ${accountAccessToken}` },
-                });
-                if (!binRes.ok) {
-                  // Sem isso o corpo de erro da Meta subia pro Storage como se fosse o áudio.
-                  await binRes.body?.cancel().catch(() => {});
-                  throw new Error(`download HTTP ${binRes.status}`);
-                }
-                const bin = new Uint8Array(await binRes.arrayBuffer());
-                if (bin.length === 0) throw new Error("download vazio");
-                // c) upload to storage
-                // ⚠️ Extensão pela regra compartilhada: o mapa daqui só conhecia 8 mimes e gravou
-                // todo docx/pptx/xlsx/zip/xml como `.bin` — o navegador baixava com esse nome e o
-                // Windows não abria (Monique, 15/10/2026).
-                const ext = extensaoDoArquivo(mime, mediaInbound.filename);
-                const path = `crm/${new Date().toISOString().slice(0, 10)}/inbound-${crypto.randomUUID()}.${ext}`;
-                const { error: stErr } = await admin.storage.from("whatsapp-anexos").upload(path, bin, {
-                  contentType: mime, upsert: false,
-                });
-                if (stErr) {
-                  throw new Error(`storage upload: ${stErr.message}`);
-                } else {
-                  const pub = admin.storage.from("whatsapp-anexos").getPublicUrl(path).data.publicUrl;
-                  anexos = [{
-                    tipo: mediaInbound.tipo,
-                    mime_type: mime,
-                    meta_media_id: mediaInbound.id,
-                    url: pub,
-                    url_storage: pub,
-                    filename: mediaInbound.filename || `${mediaInbound.tipo}.${ext}`,
-                  }];
-                }
-              } else {
-                throw new Error(`sem URL (HTTP ${metaUrlRes.status}): ${JSON.stringify(metaUrlJson).slice(0, 200)}`);
-              }
+              const pub = admin.storage.from("whatsapp-anexos").getPublicUrl(gravada.path).data.publicUrl;
+              anexos = [{
+                tipo: mediaInbound.tipo,
+                mime_type: gravada.mime,
+                meta_media_id: mediaInbound.id,
+                url: pub,
+                url_storage: pub,
+                filename: mediaInbound.filename || `${mediaInbound.tipo}.${gravada.ext}`,
+              }];
             } catch (mediaErr: any) {
               midiaFalha = mediaErr?.message ?? String(mediaErr);
               console.log(
                 `[crm-whatsapp-webhook] erro download mídia inbound (tentativa ${tentativa}/3, ${mediaInbound.id}):`,
                 midiaFalha,
               );
+              if (mediaErr instanceof FalhaDefinitivaMidia) break;
             }
            }
           } else if (mediaInbound?.id && !accountAccessToken) {
