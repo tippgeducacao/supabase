@@ -746,9 +746,10 @@ async function handlePodcastInbound(
 // Pedagógico). Não é follow-up — o 1 da agenda sai aqui ou no clique do atendente, e o 2 sai
 // sozinho 72h depois (pod-convite-dispatch, desde 21/10/2026) —:
 // é responder a um pedido que o convidado acabou de fazer. Só sai com o modelo APROVADO e,
-// no caso da agenda, com link (o único do podcast ou, desde 16/10, o Calendly de um host em
-// rodízio — linkAgendaDoCandidato); faltando qualquer coisa, nada é enviado e o atendente
-// segue como antes. Cada envio é TRAVADO antes de sair (a Meta reentrega o mesmo
+// no caso da agenda, com o Calendly do host DESIGNADO no cadastro do convidado (desde
+// 22/10/2026; antes, rodízio — linkAgendaDoCandidato). Sem host, nada sai e o convidado fica
+// "aguardando host" na tela de Convites (metadata.aguardando_host_em) até a equipe escolher;
+// faltando outra coisa, o atendente segue como antes. Cada envio é TRAVADO antes de sair (a Meta reentrega o mesmo
 // webhook): mais_info uma vez por candidatura; agenda só se nenhum follow-up de agenda saiu.
 // Nunca lança: o webhook tem de responder 200.
 async function responderCliquePodcast(supabase: any, prof: any, to: string, rotulo: string) {
@@ -773,7 +774,7 @@ async function responderCliquePodcast(supabase: any, prof: any, to: string, rotu
       nome: primeiroNomePodcast(prof.nome),
       podcast: cand.podcast?.nome ?? "podcast",
       youtube: cand.podcast?.youtube_url ?? "",
-      linkAgenda: null, // só a agenda precisa — e pedir o link já sorteia o host
+      linkAgenda: null, // só a agenda precisa (o Calendly do host designado)
       plataforma: cfgMap.get("podcast_plataforma_gravacao") || "Zencastr",
     };
     const sac = { professorId: prof.id, telefone: to, nome: prof.nome ?? null, podcastId: cand.podcast_id };
@@ -802,7 +803,15 @@ async function responderCliquePodcast(supabase: any, prof: any, to: string, rotu
     const tpl = await modeloAprovadoPorUso(supabase, ["podcast_agenda_1_link"]);
     if (!tpl) return;
     ctx.linkAgenda = (await linkAgendaDoCandidato(supabase, cand.id))?.link ?? null;
-    if (!ctx.linkAgenda) return;
+    if (!ctx.linkAgenda) {
+      // sem host designado (ou host sem Calendly): avisa a equipe pela tela, sem número nenhum
+      if (!(cand.metadata || {}).aguardando_host_em) {
+        await supabase.from("pod_convite_candidatos")
+          .update({ metadata: { ...(cand.metadata || {}), aguardando_host_em: agora } })
+          .eq("id", cand.id).eq("agenda_toque", 0);
+      }
+      return;
+    }
     const { params, vazios } = parametrosDoModelo(tpl.variaveis_mapping, ctx);
     if (vazios.length) return;
     const horas = parseInt(cfgMap.get("podcast_agenda_intervalo_horas") || "72", 10) || 72;

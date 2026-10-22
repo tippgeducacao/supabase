@@ -24,9 +24,9 @@ const TOQUE_TEMPLATE: Record<number, string> = {
   2: "podcast_followup_1",
   3: "podcast_followup_2",
 };
-// FASE DE AGENDAMENTO (Interessado): os follow-ups 1/2 usam `podcast_agenda_N` — ou, se há
-// link da agenda (o único do podcast ou o Calendly do host sorteado para o convidado),
-// `podcast_agenda_N_link` (ver usosDoAgendamento e linkAgendaDoCandidato). O 2 sai sozinho
+// FASE DE AGENDAMENTO (Interessado): os follow-ups 1/2 usam `podcast_agenda_N_link`, com o
+// Calendly do host DESIGNADO no cadastro do convidado (ver usosDoAgendamento e
+// linkAgendaDoCandidato; até 22/10/2026 era um rodízio). Sem host, nada sai. O 2 sai sozinho
 // desde 21/10/2026 (passo 3 do cron, abaixo).
 
 function primeiroNome(nome?: string | null): string {
@@ -164,17 +164,20 @@ async function handler(req: Request): Promise<Response> {
     const SEL = "id, podcast_id, professor_id, status, toque, aprovado_em, proxima_acao_em, " +
       "professor:ped_professores(nome,email,contato_whatsapp), podcast:ped_podcasts(nome,youtube_url)";
 
-    // 1) toque inicial: na_fila liberados (mode on OU onda aprovada)
+    // 1) toque inicial: na_fila liberados (mode on OU onda aprovada) — e só com host designado
+    //    (22/10/2026, guia do Pedagógico: "o convite só é liberado com host no cadastro"). A
+    //    aprovação da onda já filtra; aqui é a 2ª trava (modo 'on', onda aprovada antes da regra).
     let q1 = admin.from("pod_convite_candidatos").select(SEL).eq("status", "na_fila").limit(60);
     if (mode !== "on") q1 = q1.not("aprovado_em", "is", null);
-    const { data: novos } = await q1;
+    const { data: liberados } = await q1;
+    const { com: novos, sem: semHost } = await comHostDesignado(admin, liberados ?? []);
 
     // 2) follow-ups vencidos
     const { data: seguindo } = await admin
       .from("pod_convite_candidatos").select(SEL)
       .eq("status", "convidando").lte("proxima_acao_em", nowIso).limit(120);
 
-    const fila = [...(novos ?? []), ...(seguindo ?? [])];
+    const fila = [...novos, ...(seguindo ?? [])];
     let enviados = 0, silenciados = 0, pulados = 0, erros = 0;
 
     for (const c of fila) {
@@ -289,7 +292,7 @@ async function handler(req: Request): Promise<Response> {
     //    (72h) depois do 1, entre 8h e 20h de Brasília. Quem agendou já saiu de 'respondeu' (o
     //    registro da gravação — à mão ou pelo aviso do Calendly — põe 'confirmou'). Quem RESPONDEU
     //    algo depois do 1 (WhatsApp ou e-mail) fica com o atendente: pode estar no meio de uma conversa.
-    const agenda = { enviados: 0, com_atendente: 0, erros: 0, fora_do_horario: false, ligada: agendaAuto === "on" };
+    const agenda = { enviados: 0, com_atendente: 0, sem_host: 0, erros: 0, fora_do_horario: false, ligada: agendaAuto === "on" };
     if (agendaAuto === "on") {
       if (!dentroDaJanelaAgenda(new Date())) {
         agenda.fora_do_horario = true;
@@ -301,6 +304,8 @@ async function handler(req: Request): Promise<Response> {
           try {
             const r = await enviarAgenda(admin, f.candidato_id, true);
             if (r.status === 200) agenda.enviados++;
+            // sem host designado: espera a equipe escolher (sai na rodada seguinte à escolha)
+            else if (r.corpo.sem_host) agenda.sem_host++;
             else { agenda.erros++; console.error("[pod-dispatch agenda auto]", f.candidato_id, JSON.stringify(r.corpo)); }
           } catch (e) {
             agenda.erros++;
@@ -310,11 +315,27 @@ async function handler(req: Request): Promise<Response> {
       }
     }
 
-    return json({ ok: true, mode, enviados, silenciados, pulados, erros, processados: fila.length, agenda });
+    return json({ ok: true, mode, enviados, silenciados, pulados, erros, sem_host: semHost, processados: fila.length, agenda });
   } catch (e) {
     console.error("[pod-dispatch] fatal", String(e));
     return json({ ok: false, error: String(e) }, 500);
   }
+}
+
+// Separa os candidatos com host designado no cadastro (ped_professor_podcasts.host_id do convidado
+// no podcast da onda). Erro na leitura = ninguém é convidado nesta rodada (na dúvida, não envia).
+async function comHostDesignado(admin: any, cands: any[]): Promise<{ com: any[]; sem: number }> {
+  if (!cands.length) return { com: [], sem: 0 };
+  const ids = [...new Set(cands.map((c) => c.professor_id))];
+  const { data, error } = await admin.from("ped_professor_podcasts")
+    .select("professor_id, podcast_id").in("professor_id", ids).not("host_id", "is", null);
+  if (error) {
+    console.error("[pod-dispatch] host designado:", error.message);
+    return { com: [], sem: cands.length };
+  }
+  const comHost = new Set((data ?? []).map((r: any) => `${r.professor_id}:${r.podcast_id}`));
+  const com = cands.filter((c) => comHost.has(`${c.professor_id}:${c.podcast_id}`));
+  return { com, sem: cands.length - com.length };
 }
 
 // FASE DE AGENDAMENTO — UM follow-up de agendamento para UM convidado 'respondeu'. Duas portas:
@@ -355,6 +376,17 @@ async function enviarAgenda(admin: any, candidatoId: string, automatico: boolean
     return { status: 409, corpo: { ok: false, error: `esgotou os ${AGENDA_MAX} follow-ups de agendamento`, esgotado: true } };
   }
 
+  // O link é SEMPRE o Calendly do host designado no cadastro do convidado (22/10/2026, guia do
+  // Pedagógico). Resolvido ANTES da trava: sem host não se gasta o toque, e nada sai — nem o texto
+  // antigo, que pedia dia e horário por mensagem.
+  const linkAgenda = (await linkAgendaDoCandidato(admin, c.id))?.link ?? null;
+  if (!linkAgenda) {
+    return {
+      status: 409,
+      corpo: { ok: false, sem_host: true, error: "defina o host do convidado (com o Calendly no perfil do host) antes de enviar a agenda" },
+    };
+  }
+
   // trava: só uma porta leva este toque
   const { data: travou } = await admin.from("pod_convite_candidatos")
     .update({ agenda_toque: proxToque, agenda_ultimo_toque_em: nowIso, agenda_proxima_acao_em: proximaEm })
@@ -366,12 +398,8 @@ async function enviarAgenda(admin: any, candidatoId: string, automatico: boolean
   const nome = primeiroNome(c.professor?.nome);
   const podcastNome = c.podcast?.nome ?? "podcast";
   const youtube = c.podcast?.youtube_url ?? "";
-  // link único do podcast ou, sem ele, o Calendly do host sorteado para este convidado (o
-  // mesmo em todos os follow-ups dele)
-  const linkAgenda = (await linkAgendaDoCandidato(admin, c.id))?.link ?? null;
 
-  // ---- WhatsApp: com link da agenda, o texto novo ('podcast_agenda_N_link'); senão, ou
-  //      enquanto ele não for aprovado, o antigo ('podcast_agenda_N'). ----
+  // ---- WhatsApp: o texto com o link ('podcast_agenda_N_link'). ----
   const { data: waRow } = await admin.rpc("get_wa_account_podcast");
   const wa = Array.isArray(waRow) ? waRow[0] : waRow;
   const tpl = await modeloAprovadoPorUso(admin, usosDoAgendamento(proxToque, linkAgenda));

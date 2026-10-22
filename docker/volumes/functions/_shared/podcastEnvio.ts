@@ -13,7 +13,7 @@ export interface CtxPodcast {
   nome: string;
   podcast: string;
   youtube: string;
-  /** Calendly: o link único do podcast ou o do host sorteado (linkAgendaDoCandidato). */
+  /** Calendly do host designado no cadastro do convidado (linkAgendaDoCandidato). */
   linkAgenda?: string | null;
   /** ped_configuracoes.podcast_plataforma_gravacao (ex.: Zencastr). */
   plataforma?: string | null;
@@ -150,13 +150,12 @@ export async function modeloAprovadoPorUso(admin: any, usos: string[]): Promise<
 }
 
 /**
- * Modelo do follow-up de agendamento N. Podcast COM link da agenda usa o texto novo
- * (`podcast_agenda_N_link`, com o link no {{3}}) e, enquanto ele não estiver aprovado, o
- * antigo; podcast sem link usa só o antigo, que pede dia e horário por mensagem.
+ * Modelo do follow-up de agendamento N: só o texto com o link (`podcast_agenda_N_link`, o
+ * Calendly no {{3}}). Desde 22/10/2026 a agenda é SEMPRE o Calendly do host designado (guia do
+ * Pedagógico): sem link não há modelo — o antigo, que pedia dia e horário por mensagem, não sai mais.
  */
 export function usosDoAgendamento(toque: number, linkAgenda?: string | null): string[] {
-  const base = `podcast_agenda_${toque}`;
-  return linkAgenda ? [`${base}_link`, base] : [base];
+  return linkAgenda ? [`podcast_agenda_${toque}_link`] : [];
 }
 
 /** Hora (0–23) no horário de Brasília. */
@@ -171,9 +170,9 @@ export function dentroDaJanelaAgenda(d: Date): boolean {
 }
 
 /**
- * Link da agenda para ESTE convidado (16/10/2026): o link único do podcast, se houver; senão o
- * Calendly de um host do podcast, em rodízio e fixo por candidatura — o follow-up 2 manda o
- * mesmo host do 1 (RPC pod_link_agenda_do_candidato). Sem link nenhum ⇒ null (texto antigo).
+ * Link da agenda para ESTE convidado: o Calendly do host designado no cadastro dele, para o
+ * podcast da candidatura (RPC pod_link_agenda_do_candidato; desde 22/10/2026 — antes era um
+ * rodízio entre os hosts). Sem host, host inativo ou host sem Calendly ⇒ null, e nada é enviado.
  */
 export async function linkAgendaDoCandidato(admin: any, candidatoId: string): Promise<{ link: string; hostId: string | null } | null> {
   const { data, error } = await admin.rpc("pod_link_agenda_do_candidato", { p_candidato_id: candidatoId });
