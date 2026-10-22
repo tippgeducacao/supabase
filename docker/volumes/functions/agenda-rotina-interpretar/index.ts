@@ -16,7 +16,7 @@
 //    oferece montar à mão; as tarefas seguem aparecendo (o motor é SQL, sem IA).
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.2";
 import {
-  emoldurarOrientacao, emoldurarRelatorio, LIMITE_RELATORIO, propostaSemInformacao, resumoJornada, SCHEMA_PROPOSTA,
+  emoldurarOrientacao, emoldurarRelatorio, propostaSemInformacao, resumoJornada, SCHEMA_PROPOSTA,
   textoFonteDaProposta, validarProposta,
 } from "../_shared/agendaRotinaProposta.ts";
 
@@ -147,40 +147,6 @@ async function chamarClaude(apiKey: string, relato: string, orientacao: string, 
   }
 }
 
-/**
- * TRANSIÇÃO (remover depois da fase B): o fluxo de antes, em que o colaborador mandava o próprio
- * relatório. O mesmo fluxo que estava no ar até 22/10/2026 (com o prompt novo e a orientação vazia).
- */
-// deno-lint-ignore no-explicit-any
-async function fluxoAntigoDoColaborador(supa: any, userId: string, texto: string, teste: boolean) {
-  if (!texto.trim()) return json({ ok: false, error: "Escreva o relatório da rotina" }, 400);
-  if (texto.length > LIMITE_RELATORIO) return json({ ok: false, error: "O relatório passou de 8.000 caracteres" }, 400);
-  const { data: inicio, error: errIni } = await supa.rpc("agenda_auto_proposta_iniciar", { p_relatorio: texto, p_teste: teste });
-  if (errIni) return json({ ok: false, error: errIni.message }, errIni.code === "42501" ? 403 : 400);
-  const propostaId = (inicio as { id: string; reaproveitada: boolean }).id;
-  if ((inicio as { reaproveitada: boolean }).reaproveitada) return json({ ok: true, id: propostaId, em_andamento: true });
-  let modelo: string | null = MODELO;
-  try {
-    const { data: perfil } = await supa.from("profiles").select("horario_trabalho").eq("id", userId).maybeSingle();
-    const apiKey = await getAnthropicKey();
-    if (!apiKey) throw new Error("Chave da Anthropic não configurada");
-    const { bruto, modelo: usado } = await chamarClaude(apiKey, texto.trim(), "", resumoJornada(perfil?.horario_trabalho));
-    modelo = usado;
-    const conteudo = validarProposta(bruto, texto.trim());
-    const { data: reg, error: errReg } = await supa.rpc("agenda_auto_proposta_registrar", {
-      p_id: propostaId, p_conteudo: conteudo, p_modelo: modelo, p_erro: null,
-    });
-    if (errReg) throw new Error(`Não foi possível guardar a proposta: ${errReg.message}`);
-    if (!(reg as { ok: boolean })?.ok) return json({ ok: false, id: propostaId, error: "Esta interpretação foi substituída por uma mais nova." });
-    return json({ ok: true, id: propostaId, rotinas: conteudo.rotinas.length, perguntas: conteudo.perguntas.length });
-  } catch (e) {
-    const msg = e instanceof Error ? (e.name === "AbortError" ? "A IA demorou demais para responder." : e.message) : String(e);
-    console.error("[agenda-rotina-interpretar/antigo]", msg);
-    await supa.rpc("agenda_auto_proposta_registrar", { p_id: propostaId, p_conteudo: null, p_modelo: modelo, p_erro: msg });
-    return json({ ok: false, id: propostaId, error: msg });
-  }
-}
-
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
   if (req.method !== "POST") return json({ ok: false, error: "Método não permitido" }, 405);
@@ -199,9 +165,12 @@ Deno.serve(async (req) => {
   const corpo = await req.json().catch(() => ({}));
   const { pessoa_id, teste } = corpo as { pessoa_id?: unknown; teste?: unknown };
   if (pessoa_id === undefined && typeof (corpo as { texto?: unknown }).texto === "string") {
-    // Aba com o front ANTIGO (o próprio colaborador mandando o relatório) durante a transição.
-    // Depois da fase B (20261022190100) a RPC antiga recusa com a frase "recarregue a página".
-    return await fluxoAntigoDoColaborador(supa, u.user.id, (corpo as { texto: string }).texto, teste === true);
+    // Aba aberta com o front de antes de 22/10/2026 (o colaborador mandando o próprio relatório).
+    // Esse fluxo fechou na fase B (20261022190100): quem gera a proposta é a liderança.
+    return json({
+      ok: false,
+      error: "A agenda agora é organizada pela sua liderança: salve o seu relato e ela monta a proposta. Recarregue a página.",
+    }, 410);
   }
   if (typeof pessoa_id !== "string" || !/^[0-9a-f-]{36}$/i.test(pessoa_id)) {
     return json({ ok: false, error: "Pessoa inválida" }, 400);
