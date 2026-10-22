@@ -64,6 +64,10 @@ export const SAMPLES: Record<string, string> = {
   modulo: "Módulo 01",
   data_gravacao: "15 de junho de 2026",
   link_sala_aula: "https://meet.google.com/abc-defg-hij",
+  // Pagamento dos hosts (pagamento_nf_host, 22/10/2026): valor do mês e a quantidade COM a
+  // palavra ("1 episódio", "3 episódios"), como o modelo pede.
+  valor_pagamento: "540,00",
+  quantidade_episodios: "3 episódios",
 };
 
 export const SAMPLES_URL: Record<string, string> = {

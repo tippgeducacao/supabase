@@ -1,10 +1,12 @@
-// pod-gravacao-lembretes: mensagens da GRAVAÇÃO de podcast já marcada (14/10/2026).
+// pod-gravacao-lembretes: mensagens da GRAVAÇÃO de podcast já marcada (14/10/2026; régua do guia
+// da equipe desde 22/10/2026).
 //
-// O agendamento é registrado na tela Convites de Podcast ("Gravação agendada", RPC
-// pod_gravacao_agendar). Daqui saem, pelo WhatsApp do Pedagógico: a confirmação na hora,
-// os lembretes de 5 dias / véspera / dia (convidado) e véspera / dia (host), e os
-// agradecimentos ao marcar "Gravado". QUANDO cada um sai: planoDeLembretes
-// (_shared/podcastLembretes.ts, com teste).
+// O agendamento chega pelo aviso do Calendly (aguardando a validação da equipe) ou é registrado à
+// mão em Convites de Podcast. Daqui saem, pelo WhatsApp do Pedagógico: as confirmações ao convidado
+// e ao host depois de VALIDADO, os lembretes depois dos DADOS CONFIRMADOS (convidado 7d/3d/véspera/
+// dia; host 15d/7d/3d/véspera/dia) e os agradecimentos ao marcar "Gravado". QUANDO cada um sai:
+// planoDeLembretes (_shared/podcastLembretes.ts, com teste). O lembrete de 3 dias do host que não
+// sai vira o aviso "briefing manual" para a equipe (pod_avisos) — na tela, sem telefone.
 //
 // Duas portas:
 //  · cron de 15 em 15 min (pg_cron, segredo do Vault no cabeçalho x-pod-gravacao-cron-secret)
@@ -20,7 +22,7 @@ import {
   enviarModeloPodcast, formatPhone, modeloAprovadoPorUso, parametrosDoModelo, primeiroNomePodcast, telefoneLegivel,
   type CtxPodcast,
 } from "../_shared/podcastEnvio.ts";
-import { dataBR, horaBR, LEMBRETES, planoDeLembretes } from "../_shared/podcastLembretes.ts";
+import { agradHostPula, dataBR, horaBR, LEMBRETES, planoDeLembretes } from "../_shared/podcastLembretes.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -28,7 +30,7 @@ const corsHeaders = {
 };
 
 const SEL =
-  "id, status, inicio, agendado_em, gravado_em, lembretes, link_acesso, link_briefing, usuario_acesso, podcast_id, " +
+  "id, status, inicio, agendado_em, validado_em, dados_confirmados_em, gravado_em, lembretes, link_acesso, link_briefing, usuario_acesso, podcast_id, " +
   "podcast:ped_podcasts(nome), " +
   "convidado:ped_professores!pod_gravacao_agendamentos_convidado_id_fkey(id, nome, contato_whatsapp), " +
   "host:ped_professores!pod_gravacao_agendamentos_host_id_fkey(id, nome, contato_whatsapp)";
@@ -116,10 +118,18 @@ Deno.serve(async (req: Request) => {
         if (passo.acao === "pular") {
           await admin.rpc("pod_gravacao_lembrete_registrar", { p_id: a.id, p_chave: passo.chave, p_status: "pulado", p_detalhe: passo.motivo ?? null });
           r.pulados++;
+          if (passo.chave === "host_3d") await avisarBriefingManual(admin, a, passo.motivo ?? null);
           continue;
         }
         const tpl = await modelo(def.uso);
         if (!tpl) { r.aguardando++; continue; } // modelo ainda não aprovado na Meta
+        if (passo.chave === "agrad_host" && agradHostPula(tpl.nome, a.inicio, a.gravado_em)) {
+          await admin.rpc("pod_gravacao_lembrete_registrar", {
+            p_id: a.id, p_chave: passo.chave, p_status: "pulado", p_detalhe: "marcado como gravado em outro dia (o texto antigo diz \"hoje\")",
+          });
+          r.pulados++;
+          continue;
+        }
         const { params, vazios } = parametrosDoModelo(tpl.variaveis_mapping, ctx);
         if (vazios.length) { r.aguardando++; continue; } // falta dado (ex.: briefing); a tela mostra
         const pessoa = def.destino === "host" ? a.host : a.convidado;
@@ -148,3 +158,15 @@ Deno.serve(async (req: Request) => {
     return json({ ok: false, error: String(e) }, 500);
   }
 });
+
+// "Se o de 3 dias do host for pulado, o sistema sinaliza para a equipe enviar o briefing
+// manualmente" (guia). Um aviso por gravação (índice único); falha aqui não segura os lembretes.
+async function avisarBriefingManual(admin: any, a: any, motivo: string | null) {
+  // insert puro: o índice único é parcial (tipo = briefing_manual) e o PostgREST não faz upsert nele;
+  // a 2ª tentativa só bate no índice e é ignorada
+  const { error } = await admin.from("pod_avisos").insert({
+    tipo: "briefing_manual", professor_id: a.host?.id ?? null, papel: "host", gravacao_id: a.id,
+    podcast_id: a.podcast_id, texto: motivo ? `O lembrete de 3 dias do host não saiu: ${motivo}` : "O lembrete de 3 dias do host não saiu",
+  });
+  if (error && !/duplicate|unique/i.test(error.message)) console.error("[pod-gravacao-lembretes] aviso briefing", a.id, error.message);
+}

@@ -1,5 +1,6 @@
 // pod-convite-dispatch: motor da cadência de convite de CONVIDADOS de podcast.
-// Automação = SÓ qualificar interesse. 3 toques a cada 2 dias, e-mail + WhatsApp (Meta) juntos.
+// Automação = SÓ qualificar interesse. 3 toques, e-mail + WhatsApp (Meta) juntos, a cada
+// podcast_toque_intervalo_horas (72h = 3 dias desde 22/10/2026, como pede o PDF da equipe; antes 48h).
 // Gate: podcast_dispatch_mode ('off' = só dispara ondas aprovadas via pod_convite_aprovar_onda).
 // Interessou (botão/resposta) → webhook marca 'respondeu' (humano assume no SAC/e-mail).
 // Silêncio após o 3º toque → 'silenciou' + convidado vira 'convidar_em_6m' (+6 meses).
@@ -292,7 +293,7 @@ async function handler(req: Request): Promise<Response> {
     //    (72h) depois do 1, entre 8h e 20h de Brasília. Quem agendou já saiu de 'respondeu' (o
     //    registro da gravação — à mão ou pelo aviso do Calendly — põe 'confirmou'). Quem RESPONDEU
     //    algo depois do 1 (WhatsApp ou e-mail) fica com o atendente: pode estar no meio de uma conversa.
-    const agenda = { enviados: 0, com_atendente: 0, sem_host: 0, erros: 0, fora_do_horario: false, ligada: agendaAuto === "on" };
+    const agenda = { enviados: 0, com_atendente: 0, sem_host: 0, erros: 0, encerrados: 0, fora_do_horario: false, ligada: agendaAuto === "on" };
     if (agendaAuto === "on") {
       if (!dentroDaJanelaAgenda(new Date())) {
         agenda.fora_do_horario = true;
@@ -313,6 +314,11 @@ async function handler(req: Request): Promise<Response> {
           }
         }
       }
+      // "Sem agendamento depois do agenda 2 → Convidar em 6 meses" (PDF da equipe, 22/10/2026): 72h
+      // depois do 2, quem não agendou nem respondeu nada sai de Interessados (pod_agenda_auto_encerrar).
+      const { data: enc, error: encErr } = await admin.rpc("pod_agenda_auto_encerrar", { p_limite: 30 });
+      if (encErr) console.error("[pod-dispatch agenda auto] encerrar:", encErr.message);
+      else agenda.encerrados = Number(enc ?? 0);
     }
 
     return json({ ok: true, mode, enviados, silenciados, pulados, erros, sem_host: semHost, processados: fila.length, agenda });

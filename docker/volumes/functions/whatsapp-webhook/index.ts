@@ -1,5 +1,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
-import { acaoDoCliquePodcast, ehBotaoDeRecusa, logPodcastConversaSac } from "../_shared/podcastSac.ts";
+import {
+  ACOES_DE_RECUSA, acaoDoBotaoPodcast, acaoDoCliquePodcast, logPodcastConversaSac, type AcaoBotaoPodcast,
+} from "../_shared/podcastSac.ts";
 import {
   enviarModeloPodcast, linkAgendaDoCandidato, modeloAprovadoPorUso, parametrosDoModelo, primeiroNomePodcast,
   type CtxPodcast,
@@ -150,6 +152,21 @@ Deno.serve(async (req) => {
    *    professora com 5 aulas até novembro e o podcast em agendamento) para a thread de aula,
    *    e o link "abrir no SAC" da tela de podcast quebrava.
    *  Na falha de consulta, devolve false: o fluxo de professor grava sempre. */
+  /** A mensagem cita (resposta deslizando ou CLIQUE EM BOTÃO, que chega com o context.id da original)
+   *  uma mensagem da conversa de podcast? null = não cita nada que se conheça. */
+  async function citaConversaDePodcast(msg: any): Promise<boolean | null> {
+    const citado = msg?.context?.id;
+    if (!citado) return null;
+    const { data: mc } = await supabase
+      .from("ped_conversas_mensagens").select("conversa_id")
+      .eq("wa_message_id", String(citado)).limit(1);
+    const convId = mc?.[0]?.conversa_id;
+    if (!convId) return null;
+    const { data: conv } = await supabase
+      .from("ped_conversas_avulsas").select("metadata").eq("id", convId).maybeSingle();
+    return conv?.metadata?.origem === "podcast_convite";
+  }
+
   async function ehRespostaDePodcast(msg: any): Promise<boolean> {
     const from = String(msg?.from ?? "");
     if (!from) return false;
@@ -174,7 +191,9 @@ Deno.serve(async (req) => {
         .eq("professor_id", profRow.id)
         .in("status", ["na_fila", "convidando", "respondeu", "confirmou"]).limit(1);
       if (candErr) throw new Error(`pod_convite_candidatos: ${candErr.message}`);
-      if (!cands?.length) return false;
+      // Sem candidatura aberta: o HOST (que costuma ser professor) respondendo a confirmação ou um
+      // lembrete da gravação — 22/10/2026. Se citou uma mensagem da conversa de podcast, é do podcast.
+      if (!cands?.length) return (await citaConversaDePodcast(msg)) === true;
 
       const { data: aula, error: aulaErr } = await supabase
         .from("ped_convites").select("id")
@@ -185,18 +204,8 @@ Deno.serve(async (req) => {
 
       // É as duas coisas. (1) Citou uma mensagem — resposta deslizando, ou CLIQUE EM BOTÃO,
       // que a Meta entrega com o context.id da mensagem original: segue a conversa dela.
-      const citado = msg?.context?.id;
-      if (citado) {
-        const { data: mc } = await supabase
-          .from("ped_conversas_mensagens").select("conversa_id")
-          .eq("wa_message_id", String(citado)).limit(1);
-        const convId = mc?.[0]?.conversa_id;
-        if (convId) {
-          const { data: conv } = await supabase
-            .from("ped_conversas_avulsas").select("metadata").eq("id", convId).maybeSingle();
-          return conv?.metadata?.origem === "podcast_convite";
-        }
-      }
+      const citou = await citaConversaDePodcast(msg);
+      if (citou !== null) return citou;
 
       // (2) Sem citação: quem falou por último com essa pessoa. A thread do podcast é achada
       // do mesmo jeito que `_shared/podcastSac.ts` a acha — as mensagens dela NÃO gravam
@@ -685,11 +694,13 @@ async function handlePodcastInbound(
       anexos = await baixarAnexoInbound(supabase, midia, podcastAccessToken, "whatsapp-webhook/podcast");
     }
 
-    // Botão de RECUSA ("Agora não", "Não tenho interesse") encerra o contato: candidato vira
-    // 'recusou' e o convidado vai para a espera de 6 meses — a mesma do silêncio após os 3
-    // toques. Antes (até 14/10/2026) todo clique virava 'respondeu' = "Interessado", e quem
-    // recusou entrava na lista de agendamento. Só BOTÃO: texto digitado segue para o humano.
-    const recusa = botaoClicado !== null && ehBotaoDeRecusa(resposta);
+    // Botão → ação pelo rótulo E pelo modelo da mensagem citada (PDF da equipe, 22/10/2026; ver
+    // acaoDoBotaoPodcast). As RECUSAS encerram o contato: candidato vira 'recusou' e o convidado vai
+    // para a espera de 6 meses — a mesma do silêncio após os 3 toques — ou para Rejeitado ("Não tenho
+    // interesse" no follow-up 2 do PDF). Só BOTÃO: texto digitado segue para o humano.
+    const modelo = botaoClicado !== null ? await modeloCitado(supabase, msg?.context?.id ?? null) : null;
+    const acao: AcaoBotaoPodcast | null = botaoClicado !== null ? acaoDoBotaoPodcast(resposta, modelo) : null;
+    const recusa = acao !== null && ACOES_DE_RECUSA.has(acao);
     const { data: cands } = await supabase
       .from("pod_convite_candidatos")
       .select("id, metadata")
@@ -707,11 +718,18 @@ async function handlePodcastInbound(
         .eq("id", c.id);
     }
     if (recusa && (cands ?? []).length > 0) {
-      const seis = new Date(); seis.setMonth(seis.getMonth() + 6);
-      await supabase.from("ped_professores")
-        .update({ status_podcast: "convidar_em_6m", reconvidar_a_partir_de: seis.toISOString().slice(0, 10) })
-        .eq("id", profRow.id)
-        .eq("status_podcast", "a_convidar"); // só rebaixa quem ainda está 'a_convidar' (como o motor)
+      if (acao === "encerramento") {
+        await supabase.from("ped_professores")
+          .update({ status_podcast: "rejeitado", reconvidar_a_partir_de: null })
+          .eq("id", profRow.id)
+          .in("status_podcast", ["a_convidar", "convidar_em_6m", "em_analise"]);
+      } else {
+        const seis = new Date(); seis.setMonth(seis.getMonth() + 6);
+        await supabase.from("ped_professores")
+          .update({ status_podcast: "convidar_em_6m", reconvidar_a_partir_de: seis.toISOString().slice(0, 10) })
+          .eq("id", profRow.id)
+          .eq("status_podcast", "a_convidar"); // só rebaixa quem ainda está 'a_convidar' (como o motor)
+      }
     }
 
     // Espelha a RESPOSTA no SAC pedagógico (mensagem INBOUND → card fica "aguardando resposta").
@@ -734,11 +752,136 @@ async function handlePodcastInbound(
       "anexos=", anexos.length, "→", (cands ?? []).length, "cand.");
 
     // Clique que pede resposta NA HORA: "Quero saber mais" → mais_info_podcast; "Tenho
-    // interesse"/"Vamos agendar" → link da agenda. Depois do espelho do inbound, para o SAC
-    // mostrar o clique antes da resposta.
-    if (botaoClicado !== null && !recusa) {
+    // interesse"/"Vamos agendar" → link da agenda. Os outros botões do PDF (recusa com pedido de
+    // indicação ou encerramento, indicação, alerta, confirmação) em tratarBotaoPodcast. Depois do
+    // espelho do inbound, para o SAC mostrar o clique antes da resposta.
+    if (acao === "mais_info" || acao === "agenda") {
       await responderCliquePodcast(supabase, profRow, from, resposta);
+    } else if (acao !== null) {
+      await tratarBotaoPodcast(supabase, profRow, from, acao, resposta, modelo, msg?.id ?? null);
     }
+    // "Vou enviar a foto": a foto que o convidado manda fica guardada na gravação dele
+    if (midia?.tipo === "image" && anexos.length) {
+      await guardarFotoDaGravacao(supabase, profRow.id, anexos[0]);
+    }
+  }
+}
+
+/** O modelo da mensagem que o clique citou (o botão chega com o context.id dela). */
+async function modeloCitado(supabase: any, citado: string | null): Promise<string | null> {
+  if (!citado) return null;
+  try {
+    const { data } = await supabase.from("ped_conversas_mensagens")
+      .select("template_name").eq("wa_message_id", String(citado)).limit(1);
+    return data?.[0]?.template_name ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** A gravação em andamento da pessoa (como convidado ou como host): a mais próxima, de ontem em diante. */
+async function gravacaoDaPessoa(supabase: any, professorId: string): Promise<{ id: string; papel: "convidado" | "host"; podcast_id: string | null } | null> {
+  const desde = new Date(Date.now() - 86400_000).toISOString();
+  const { data } = await supabase.from("pod_gravacao_agendamentos")
+    .select("id, convidado_id, host_id, podcast_id, inicio")
+    .or(`convidado_id.eq.${professorId},host_id.eq.${professorId}`)
+    .in("status", ["aguardando_validacao", "agendado"])
+    .gte("inicio", desde)
+    .order("inicio", { ascending: true }).limit(1);
+  const g = data?.[0];
+  if (!g) return null;
+  return { id: g.id, papel: g.host_id === professorId ? "host" : "convidado", podcast_id: g.podcast_id ?? null };
+}
+
+/** Aviso para a equipe, na tela de Convites de Podcast (sem número de telefone — decisão de 22/10/2026). */
+async function registrarAvisoPodcast(supabase: any, aviso: Record<string, unknown>) {
+  const { error } = await supabase.from("pod_avisos").insert(aviso);
+  // a Meta reentrega o webhook: o 2º insert bate no índice único do wa_message_id
+  if (error && !/duplicate|unique/i.test(error.message)) console.error("[whatsapp-webhook] aviso podcast:", error.message);
+}
+
+// Os botões do PDF que não são "saber mais"/"agendar" (22/10/2026). Nunca lança: o webhook tem de
+// responder 200. Envio de modelo só com ele APROVADO na Meta e travado antes (a Meta reentrega).
+async function tratarBotaoPodcast(
+  supabase: any, prof: any, to: string, acao: AcaoBotaoPodcast, rotulo: string, modelo: string | null, waMessageId: string | null,
+) {
+  try {
+    if (acao === "pedido_indicacao" || acao === "encerramento" || acao === "encerramento_6m") {
+      const uso = acao === "pedido_indicacao" ? "podcast_pedido_indicacao" : "podcast_encerramento";
+      const marca = acao === "pedido_indicacao" ? "pedido_indicacao_em" : "encerramento_em";
+      const { data: cand } = await supabase.from("pod_convite_candidatos")
+        .select("id, podcast_id, metadata, podcast:ped_podcasts(nome)")
+        .eq("professor_id", prof.id).order("updated_at", { ascending: false }).limit(1).maybeSingle();
+      if (!cand) return;
+      const tpl = await modeloAprovadoPorUso(supabase, [uso]);
+      if (!tpl) return; // ainda em análise na Meta
+      const { data: waRow } = await supabase.rpc("get_wa_account_podcast");
+      const wa = Array.isArray(waRow) ? waRow[0] : waRow;
+      if (!wa?.phone_number_id || !wa?.access_token) return;
+      const ctx: CtxPodcast = { nome: primeiroNomePodcast(prof.nome), podcast: cand.podcast?.nome ?? "podcast", youtube: "", linkAgenda: null };
+      const { params, vazios } = parametrosDoModelo(tpl.variaveis_mapping, ctx);
+      if (vazios.length) return;
+      const agora = new Date().toISOString();
+      const meta = { ...(cand.metadata || {}) };
+      const { data: travou } = await supabase.from("pod_convite_candidatos")
+        .update({ metadata: { ...meta, [marca]: agora } })
+        .eq("id", cand.id).is(`metadata->>${marca}`, null).select("id");
+      if (!(travou ?? []).length) return; // uma vez por candidatura
+      const env = await enviarModeloPodcast(supabase, {
+        wa, to, tpl, params, enviadaEm: agora,
+        sac: { professorId: prof.id, telefone: to, nome: prof.nome ?? null, podcastId: cand.podcast_id },
+      });
+      if (!env.ok) {
+        console.error("[whatsapp-webhook] podcast", uso, "falhou", cand.id, JSON.stringify(env.erro));
+        await supabase.from("pod_convite_candidatos").update({ metadata: meta }).eq("id", cand.id);
+      }
+      return;
+    }
+
+    if (acao === "indicacao") {
+      const { data: cand } = await supabase.from("pod_convite_candidatos")
+        .select("id, podcast_id").eq("professor_id", prof.id).order("updated_at", { ascending: false }).limit(1).maybeSingle();
+      const g = cand ? null : await gravacaoDaPessoa(supabase, prof.id);
+      await registrarAvisoPodcast(supabase, {
+        tipo: "indicacao", professor_id: prof.id, papel: "convidado", candidato_id: cand?.id ?? null,
+        gravacao_id: g?.id ?? null, podcast_id: cand?.podcast_id ?? g?.podcast_id ?? null,
+        rotulo, modelo, wa_message_id: waMessageId,
+        texto: "Quer indicar alguém: a conversa está no SAC. Cadastre a indicação como nova prospecção.",
+      });
+      return;
+    }
+
+    if (acao === "alerta" || acao === "confirmou") {
+      const g = await gravacaoDaPessoa(supabase, prof.id);
+      if (acao === "alerta") {
+        await registrarAvisoPodcast(supabase, {
+          tipo: "alerta", professor_id: prof.id, papel: g?.papel ?? null, gravacao_id: g?.id ?? null,
+          podcast_id: g?.podcast_id ?? null, rotulo, modelo, wa_message_id: waMessageId,
+          texto: `${g?.papel === "host" ? "O host" : "O convidado"} clicou em "${rotulo}": atender agora pelo SAC.`,
+        });
+      } else if (g) {
+        const agora = new Date().toISOString();
+        await supabase.from("pod_gravacao_agendamentos")
+          .update(g.papel === "host" ? { host_confirmou_em: agora } : { convidado_confirmou_em: agora })
+          .eq("id", g.id);
+      }
+    }
+  } catch (e) {
+    console.error("[whatsapp-webhook] botão de podcast:", acao, String(e));
+  }
+}
+
+// A foto que o convidado manda depois da confirmação ("Vou enviar a foto") fica na gravação dele —
+// a última que chegar vale. Só como CONVIDADO (o host também manda imagem, mas não é a foto do episódio).
+async function guardarFotoDaGravacao(supabase: any, professorId: string, anexo: any) {
+  try {
+    const g = await gravacaoDaPessoa(supabase, professorId);
+    if (!g || g.papel !== "convidado" || !anexo?.url) return;
+    await supabase.from("pod_gravacao_agendamentos")
+      .update({ foto_url: anexo.url, foto_recebida_em: new Date().toISOString() })
+      .eq("id", g.id);
+  } catch (e) {
+    console.error("[whatsapp-webhook] foto da gravação:", String(e));
   }
 }
 

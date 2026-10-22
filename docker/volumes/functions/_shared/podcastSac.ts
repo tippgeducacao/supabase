@@ -60,6 +60,53 @@ export function acaoDoCliquePodcast(rotulo: string | null | undefined): AcaoCliq
   return BOTOES_DE_ACAO[normalizarRotulo(rotulo)] ?? null;
 }
 
+// Botões do fluxo do PDF "Processo de Podcasts PPGVET" (22/10/2026). O MESMO rótulo faz coisas
+// diferentes conforme o MODELO de onde veio — "Agora não" no mais_info manda o pedido de indicação;
+// no próprio pedido de indicação, só encerra. O modelo é o da mensagem CITADA (o clique chega com o
+// context.id dela; ped_conversas_mensagens.template_name). Sem saber o modelo, vale o caso comum.
+export type AcaoBotaoPodcast =
+  | AcaoCliquePodcast
+  | "pedido_indicacao" // recusa: Convidar em 6 meses + manda o podcast_pedido_indicacao
+  | "encerramento"     // "Não tenho interesse" no follow-up 2 do PDF: podcast_encerramento_convite + Rejeitado
+  | "encerramento_6m"  // "Agora não" no follow-up 2 antigo (v2): encerramento + Convidar em 6 meses
+  | "recusa"           // "Agora não" no pedido de indicação: só o Convidar em 6 meses
+  | "indicacao"        // "Indicar alguém": avisa a equipe na tela (a conversa segue com o humano)
+  | "alerta"           // "Preciso reagendar"/"Tive um imprevisto"/"Preciso de ajuda": alerta urgente na tela
+  | "confirmou";       // "Confirmado"/"Tudo certo": registra na gravação
+
+/** As ações que encerram o contato do convidado (candidatura → recusou). */
+export const ACOES_DE_RECUSA: ReadonlySet<AcaoBotaoPodcast> = new Set(["pedido_indicacao", "encerramento", "encerramento_6m", "recusa"]);
+
+export function acaoDoBotaoPodcast(rotulo: string | null | undefined, modelo: string | null | undefined): AcaoBotaoPodcast | null {
+  const r = normalizarRotulo(rotulo);
+  const m = String(modelo ?? "").toLowerCase();
+  const clique = BOTOES_DE_ACAO[r];
+  if (clique) return clique;
+  switch (r) {
+    case "nao tenho interesse":
+      return m.startsWith("podcast_followup_2_v3") ? "encerramento" : "pedido_indicacao";
+    case "agora nao":
+      if (m.startsWith("podcast_pedido_indicacao")) return "recusa";
+      if (m.startsWith("podcast_followup_2")) return "encerramento_6m";
+      return "pedido_indicacao"; // mais_info_podcast, podcast_agenda_2, ou modelo desconhecido
+    case "indicar alguem":
+    case "quero indicar alguem":
+      return "indicacao";
+    case "preciso reagendar":
+    case "tive um imprevisto":
+    case "tenho um imprevisto":
+    case "preciso de ajuda":
+      return "alerta";
+    case "confirmado":
+    case "tudo certo":
+    case "estou pronto(a)":
+      return "confirmou";
+  }
+  // "Tenho uma dúvida", "Não consegui acessar", "Prefiro outro horário", "Já agendei", "Vou enviar a
+  // foto", "Foi ótimo!", "Gostei muito!", "Tenho um feedback/uma sugestão": só o SAC (humano)
+  return null;
+}
+
 // Best-effort: nunca lança (o disparo/webhook não pode falhar por causa do espelho no SAC).
 export async function logPodcastConversaSac(admin: any, m: PodcastConversaMsg): Promise<void> {
   try {
