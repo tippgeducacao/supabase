@@ -11,11 +11,22 @@
 // e a mesma pausa é lida de novo na rodada seguinte; gravar "erro" a marcaria como lida para sempre.
 // Saída fora do formato e recusa ficam gravadas como erro: repetir só gastaria de novo.
 //
+// Áudio do cliente sem texto é transcrito ANTES da leitura (22/10/2026), pelo mesmo Gemini do botão
+// "Transcrever áudio" do SAC, e o texto fica em sac_mensagens.transcricao. Sem o texto do áudio a IA
+// não é chamada: falha passageira repete na rodada seguinte, a outra grava a pausa como erro.
+//
 // Corpo opcional `{"ensaio": true, "max_horas": 24, "limite": 20}`: lê e devolve as decisões sem
 // gravar nada (usado para conferir o julgamento antes de ligar o agendamento).
 import Anthropic from "npm:@anthropic-ai/sdk@0.128.0";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
-import { ESQUEMA_DECISAO, interpretarDecisao, montarConversa, PROMPT_FIM_DE_CONVERSA, type Candidata } from "./regras.ts";
+import { codigoErroSeguro, transcreverAudio } from "../crm-transcrever-audio/transcricao.ts";
+import { resolverGemini } from "../crm-transcrever-audio/configuracao.ts";
+import type { ConfigGemini } from "../crm-transcrever-audio/gemini.ts";
+import { criarTelemetria } from "../crm-agente-sdr/eventos.ts";
+import {
+  audiosPendentes, comAudiosOuvidos, ESQUEMA_DECISAO, falhaDeAudioPassageira, interpretarDecisao, montarConversa,
+  PROMPT_FIM_DE_CONVERSA, textoDoAudio, type Candidata,
+} from "./regras.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -82,6 +93,56 @@ async function ler(cliente: Anthropic, c: Candidata, agora: Date): Promise<Leitu
   }
 }
 
+type Ouvida =
+  | { tipo: "ok"; candidata: Candidata; transcritos: number }
+  | { tipo: "erro_definitivo"; erro: string }
+  | { tipo: "erro_passageiro"; erro: string };
+
+/**
+ * Transcreve os áudios pendentes da conversa (em paralelo) e devolve a conversa com o texto no lugar
+ * do "[áudio]". Fora do ensaio, grava a transcrição na mensagem, como o botão do SAC faz.
+ */
+async function ouvirAudios(
+  db: ReturnType<typeof admin>,
+  c: Candidata,
+  gemini: () => Promise<ConfigGemini | null>,
+  gravar: boolean,
+): Promise<Ouvida> {
+  const audios = audiosPendentes(c);
+  if (audios.length === 0) return { tipo: "ok", candidata: c, transcritos: 0 };
+  const config = await gemini();
+  const tel = criarTelemetria(db, "sac-v2-avaliacao-fim-conversa");
+  const textos = new Map<string, string>();
+  const falhas = await Promise.all(audios.map(async (a): Promise<string | null> => {
+    if (!a.url) return "AUDIO_SEM_ARQUIVO";
+    let transcricao: string;
+    try {
+      transcricao = await transcreverAudio(a.url, a.mime, {
+        gemini: config,
+        registrar: (evento) => tel.registrar("transcricao_audio_" + evento.fase, evento),
+      });
+    } catch (e) {
+      const codigo = codigoErroSeguro(e);
+      if (codigo !== "TRANSCRICAO_VAZIA") return codigo;
+      transcricao = ""; // áudio sem fala: a IA sabe que ele existe, e não há texto para gravar
+    }
+    textos.set(a.id, textoDoAudio(transcricao));
+    if (gravar && transcricao.trim()) {
+      // O gatilho propaga ao CRM e à memória do SDR, como no botão. Se não gravar, a IA lê do mesmo
+      // jeito; só a equipe fica sem o texto no chat (e a próxima pausa transcreve de novo).
+      const { error } = await db.from("sac_mensagens").update({ transcricao: transcricao.trim() }).eq("id", a.id);
+      if (error) console.error("[sac-v2-avaliacao-fim-conversa] gravar transcrição", a.id, error.message);
+    }
+    return null;
+  }));
+  const codigos = falhas.filter((f): f is string => f !== null);
+  if (codigos.some(falhaDeAudioPassageira)) {
+    return { tipo: "erro_passageiro", erro: `audio_sem_transcricao: ${codigos.join(",")}` };
+  }
+  if (codigos.length > 0) return { tipo: "erro_definitivo", erro: `audio_sem_transcricao: ${codigos.join(",")}` };
+  return { tipo: "ok", candidata: comAudiosOuvidos(c, textos), transcritos: textos.size };
+}
+
 /** Roda `fn` em até `n` itens ao mesmo tempo, na ordem da lista. */
 async function emLotes<T, R>(itens: T[], n: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const saida: R[] = new Array(itens.length);
@@ -132,9 +193,20 @@ Deno.serve(async (req) => {
 
   const agora = new Date();
   let parar: string | null = null;
-  const resultados = await emLotes(lista, EM_PARALELO, async (c) => {
-    if (parar) return { atendimento_id: c.atendimento_id, resultado: "nao_lida", erro: parar };
-    const l = await ler(cliente, c, agora);
+  let configGemini: Promise<ConfigGemini | null> | null = null;
+  const gemini = () => (configGemini ??= resolverGemini(db, (nome) => Deno.env.get(nome)));
+  let audiosTranscritos = 0;
+  const resultados = await emLotes(lista, EM_PARALELO, async (bruta) => {
+    if (parar) return { atendimento_id: bruta.atendimento_id, resultado: "nao_lida", erro: parar };
+    const ouvida = await ouvirAudios(db, bruta, gemini, !ensaio);
+    if (ouvida.tipo === "erro_passageiro") {
+      return { atendimento_id: bruta.atendimento_id, resultado: "tentar_de_novo", erro: ouvida.erro };
+    }
+    const c = ouvida.tipo === "ok" ? ouvida.candidata : bruta;
+    if (ouvida.tipo === "ok") audiosTranscritos += ouvida.transcritos;
+    const l: Leitura = ouvida.tipo === "erro_definitivo"
+      ? { tipo: "erro_definitivo", erro: ouvida.erro, modelo: null }
+      : await ler(cliente, c, agora);
     if (l.tipo === "parar") {
       parar = l.erro;
       return { atendimento_id: c.atendimento_id, resultado: "nao_lida", erro: l.erro };
@@ -171,6 +243,10 @@ Deno.serve(async (req) => {
       : String(r.resultado);
     contagem[chaveContagem] = (contagem[chaveContagem] ?? 0) + 1;
   }
-  console.log(JSON.stringify({ fn: "sac-v2-avaliacao-fim-conversa", ensaio, lidas: lista.length, contagem, modelo: MODELO, parou: parar }));
-  return json(ensaio ? { ensaio, lidas: lista.length, contagem, resultados } : { lidas: lista.length, contagem, parou: parar });
+  console.log(JSON.stringify({
+    fn: "sac-v2-avaliacao-fim-conversa", ensaio, lidas: lista.length, contagem, audios: audiosTranscritos, modelo: MODELO, parou: parar,
+  }));
+  return json(ensaio
+    ? { ensaio, lidas: lista.length, contagem, audios: audiosTranscritos, resultados }
+    : { lidas: lista.length, contagem, audios: audiosTranscritos, parou: parar });
 });
