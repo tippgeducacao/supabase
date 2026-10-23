@@ -129,9 +129,25 @@ describe("fim de conversa: áudio do cliente é ouvido antes (22/10/2026)", () =
     expect(audiosPendentes(ouvida)).toEqual([]);
   });
 
-  it("áudio sem fala fica marcado; transcrição longa é cortada", () => {
+  it("áudio sem fala fica marcado; áudio comum vai inteiro", () => {
     expect(textoDoAudio("   ")).toBe("(áudio sem fala)");
-    expect(textoDoAudio("a".repeat(900))).toBe(`(áudio) ${"a".repeat(600)}`);
+    // 900 caracteres: com o limite antigo (600) o final sumia.
+    const medio = `${"a".repeat(850)} me manda o boleto?`;
+    expect(textoDoAudio(medio)).toBe(`(áudio) ${medio}`);
+    expect(textoDoAudio("b".repeat(2000))).toBe(`(áudio) ${"b".repeat(2000)}`);
+  });
+
+  it("áudio muito longo fica com o começo e o FIM, nunca perde o pedido do final", () => {
+    const longo = `Bom dia ${"x".repeat(3000)} então consegue me mandar o boleto?`;
+    const texto = textoDoAudio(longo);
+    expect(texto.startsWith("(áudio) Bom dia ")).toBe(true);
+    expect(texto.endsWith("então consegue me mandar o boleto?")).toBe(true);
+    expect(texto).toContain(" […] ");
+    expect(texto.length).toBe("(áudio) ".length + 1000 + " […] ".length + 1000);
+  });
+
+  it("o prompt explica o \"[…]\" do áudio longo", () => {
+    expect(PROMPT_FIM_DE_CONVERSA).toContain('"[…]" marca um trecho do meio que foi omitido');
   });
 
   it("falha que passa sozinha repete na próxima rodada; arquivo ruim não", () => {

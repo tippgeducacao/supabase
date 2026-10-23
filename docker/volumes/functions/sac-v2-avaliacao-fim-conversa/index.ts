@@ -25,7 +25,7 @@ import type { ConfigGemini } from "../crm-transcrever-audio/gemini.ts";
 import { criarTelemetria } from "../crm-agente-sdr/eventos.ts";
 import {
   audiosPendentes, comAudiosOuvidos, ESQUEMA_DECISAO, falhaDeAudioPassageira, interpretarDecisao, montarConversa,
-  PROMPT_FIM_DE_CONVERSA, textoDoAudio, type Candidata,
+  PROMPT_FIM_DE_CONVERSA, TEXTO_MAXIMO_AUDIO, textoDoAudio, type Candidata,
 } from "./regras.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -246,7 +246,8 @@ Deno.serve(async (req) => {
   console.log(JSON.stringify({
     fn: "sac-v2-avaliacao-fim-conversa", ensaio, lidas: lista.length, contagem, audios: audiosTranscritos, modelo: MODELO, parou: parar,
   }));
+  // `limite_audio` diz, em cada rodada gravada pelo pg_net, quantos caracteres de áudio a IA lê.
   return json(ensaio
-    ? { ensaio, lidas: lista.length, contagem, audios: audiosTranscritos, resultados }
-    : { lidas: lista.length, contagem, audios: audiosTranscritos, parou: parar });
+    ? { ensaio, lidas: lista.length, contagem, audios: audiosTranscritos, limite_audio: TEXTO_MAXIMO_AUDIO, resultados }
+    : { lidas: lista.length, contagem, audios: audiosTranscritos, limite_audio: TEXTO_MAXIMO_AUDIO, parou: parar });
 });
