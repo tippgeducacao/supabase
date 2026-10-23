@@ -1,8 +1,9 @@
 // Avaliação de Atendimento: a IA identifica o FIM da conversa (16/10/2026).
 //
 // O agendamento do banco (`sac_v2_avaliacao_fim_conversa_chamar`, a cada 10 min) chama esta edge
-// com o segredo no cabeçalho x-sac-fim-conversa-secret. Ela pega as conversas paradas entre 30 min e
-// 3 h (`sac_v2_avaliacao_fim_candidatos`), pergunta à IA se cada uma acabou e grava a resposta
+// com o segredo no cabeçalho x-sac-fim-conversa-secret. Ela pega as conversas paradas há mais de
+// `sac_v2_avaliacao_funis.fim_conversa_apos` (30 min até 23/10/2026; 1 h desde então) e até 3 h
+// (`sac_v2_avaliacao_fim_candidatos`), pergunta à IA se cada uma acabou e grava a resposta
 // (`sac_v2_avaliacao_fim_registrar`): se acabou, a pergunta da nota entra na fila e o tick manda,
 // com as regras de sempre (janela de 24 h, resposta da equipe, 7 dias, bloqueio). O card NÃO é
 // resolvido aqui — escolha do usuário.
