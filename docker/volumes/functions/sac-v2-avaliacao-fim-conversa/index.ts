@@ -11,7 +11,7 @@
 // e a mesma pausa é lida de novo na rodada seguinte; gravar "erro" a marcaria como lida para sempre.
 // Saída fora do formato e recusa ficam gravadas como erro: repetir só gastaria de novo.
 //
-// Áudio do cliente sem texto é transcrito ANTES da leitura (22/10/2026), pelo mesmo Gemini do botão
+// Áudio sem texto — do cliente (22/10/2026) e da equipe (23/10) — é transcrito ANTES da leitura, pelo mesmo Gemini do botão
 // "Transcrever áudio" do SAC, e o texto fica em sac_mensagens.transcricao. Sem o texto do áudio a IA
 // não é chamada: falha passageira repete na rodada seguinte, a outra grava a pausa como erro.
 //
@@ -45,6 +45,12 @@ const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
 
 const admin = () => createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
+
+// Impressão digital do prompt (8 primeiros hex do SHA-256), em cada resposta gravada pelo pg_net:
+// prova qual versão das regras está no ar sem depender de alguém trocar um número de versão.
+let promptId: Promise<string> | null = null;
+const idDoPrompt = () => (promptId ??= crypto.subtle.digest("SHA-256", new TextEncoder().encode(PROMPT_FIM_DE_CONVERSA))
+  .then((h) => Array.from(new Uint8Array(h).slice(0, 4), (b) => b.toString(16).padStart(2, "0")).join("")));
 
 /** Mesma ordem das outras IAs do sistema: chave cadastrada na tela, depois env. */
 async function chaveAnthropic(): Promise<string | null> {
@@ -246,8 +252,10 @@ Deno.serve(async (req) => {
   console.log(JSON.stringify({
     fn: "sac-v2-avaliacao-fim-conversa", ensaio, lidas: lista.length, contagem, audios: audiosTranscritos, modelo: MODELO, parou: parar,
   }));
-  // `limite_audio` diz, em cada rodada gravada pelo pg_net, quantos caracteres de áudio a IA lê.
+  // `limite_audio` diz, em cada rodada gravada pelo pg_net, quantos caracteres de áudio a IA lê;
+  // `prompt`, qual versão das regras respondeu.
+  const prompt = await idDoPrompt();
   return json(ensaio
-    ? { ensaio, lidas: lista.length, contagem, audios: audiosTranscritos, limite_audio: TEXTO_MAXIMO_AUDIO, resultados }
-    : { lidas: lista.length, contagem, audios: audiosTranscritos, limite_audio: TEXTO_MAXIMO_AUDIO, parou: parar });
+    ? { ensaio, lidas: lista.length, contagem, audios: audiosTranscritos, limite_audio: TEXTO_MAXIMO_AUDIO, prompt, resultados }
+    : { lidas: lista.length, contagem, audios: audiosTranscritos, limite_audio: TEXTO_MAXIMO_AUDIO, prompt, parou: parar });
 });

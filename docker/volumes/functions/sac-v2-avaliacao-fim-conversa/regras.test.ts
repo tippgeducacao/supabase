@@ -161,3 +161,35 @@ describe("fim de conversa: áudio do cliente é ouvido antes (22/10/2026)", () =
     }
   });
 });
+
+describe("fim de conversa: áudio da equipe e pagamento pendente (23/10/2026)", () => {
+  // O caso real da Cobrança: boleto + áudio da atendente (retorno prometido) + "Perfeito", "Obrigado".
+  const cobranca = {
+    atendimento_id: "a2",
+    ultima_mensagem_id: "t4",
+    setor: "Financeiro",
+    mensagens: [
+      { id: "t1", em: "22/10 17:19", quem: "Equipe", texto: "Boleto_ALUNO (1).pdf" },
+      { id: "t2", em: "22/10 17:20", quem: "Equipe", texto: "[áudio]", audio_pendente: true,
+        audio_url: "https://exemplo/outbound.ogg", audio_mime: "audio/ogg" },
+      { id: "t3", em: "22/10 18:32", quem: "Cliente", texto: "Perfeito" },
+      { id: "t4", em: "22/10 18:32", quem: "Cliente", texto: "Obrigado" },
+    ],
+  };
+
+  it("o áudio da equipe entra na fila de transcrição como o do cliente", () => {
+    expect(audiosPendentes(cobranca)).toEqual([{ id: "t2", url: "https://exemplo/outbound.ogg", mime: "audio/ogg" }]);
+    const ouvida = comAudiosOuvidos(cobranca, new Map([["t2", textoDoAudio("Te retorno amanhã sobre o cartão")]]));
+    expect(montarConversa(ouvida, new Date("2026-10-22T22:11:00Z")))
+      .toContain("[22/10 17:20] Equipe: (áudio) Te retorno amanhã sobre o cartão");
+  });
+
+  it("boleto enviado sem comprovante não é fim de atendimento, mesmo com agradecimento", () => {
+    expect(PROMPT_FIM_DE_CONVERSA).toContain("a equipe mandou boleto, PIX, link ou dados para pagamento e o cliente ainda não pagou nem mandou o comprovante");
+    expect(PROMPT_FIM_DE_CONVERSA).toContain('agradecer ou dizer "ok" não é pagar');
+  });
+
+  it("o prompt explica a mídia sem texto entre colchetes", () => {
+    expect(PROMPT_FIM_DE_CONVERSA).toContain('aparecem entre colchetes, como "[documento: boleto.pdf]" ou "[imagem]"');
+  });
+});
