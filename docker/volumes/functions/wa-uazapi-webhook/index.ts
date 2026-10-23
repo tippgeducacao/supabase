@@ -15,7 +15,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { canonTelBr, getWaProvider } from "../_shared/waProviders.ts";
 import { atualizarStatusWaConexao } from "../_shared/waConexaoStatus.ts";
-import { extensaoDoArquivo } from "../_shared/extensaoArquivo.ts";
+import { baixarMidiaUazapi, ehMidia, mensagemJaGravada, type MidiaPendente } from "./midia.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -32,14 +32,6 @@ function json(data: unknown, status = 200) {
     status,
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
-}
-
-function b64ToBytes(b64: string): Uint8Array {
-  const clean = b64.includes(",") ? b64.slice(b64.indexOf(",") + 1) : b64;
-  const bin = atob(clean);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
 }
 
 /**
@@ -212,55 +204,15 @@ Deno.serve(async (req) => {
       if (!telefone) continue;
       if (await ehComandoDoBot(m, telefone)) { processed++; continue; }
 
-      // baixa mídia -> storage. Uazapi manda a mídia criptografada (sem URL no webhook):
-      // resolvemos a URL pública real via /message/download (provider.downloadMedia) e
-      // baixamos pro NOSSO storage (a deles expira em ~2 dias).
+      // baixa mídia -> storage, em fluxo e antes do insert (ver midia.ts). Falhou = a mensagem
+      // entra sem o arquivo e o motivo fica em metadata.midia_pendente. O que já está gravado
+      // (reentrega, ou o eco de um envio nosso) não é baixado de novo.
       let anexos: any[] = [];
-      const ehMidia = ["image", "audio", "video", "document", "sticker"].includes(m.tipo);
-      let mediaUrl = m.mediaUrl ?? null;
-      let mediaMime = m.mediaMime ?? null;
-      let mediaB64 = m.mediaBase64 ?? null;
-      if (ehMidia && !mediaUrl && !mediaB64 && m.externalId) {
-        try {
-          const tok = await getToken();
-          if (tok) {
-            const dl = await provider.downloadMedia(conex.server_url, tok, m.externalId, { audioMp3: m.tipo === "audio" });
-            mediaUrl = dl.url ?? null;
-            mediaMime = mediaMime ?? dl.mime ?? null;
-            mediaB64 = dl.base64 ?? null;
-          }
-        } catch (e) {
-          console.log("[wa-uazapi-webhook] downloadMedia falhou:", e instanceof Error ? e.message : String(e));
-        }
-      }
-      if (mediaUrl || mediaB64) {
-        try {
-          const mime = mediaMime || "application/octet-stream";
-          let bytes: Uint8Array | null = null;
-          if (mediaUrl && provider.isAllowedMediaHost(mediaUrl, conex.server_url)) {
-            const binRes = await fetch(mediaUrl);
-            if (binRes.ok) bytes = new Uint8Array(await binRes.arrayBuffer());
-          } else if (mediaUrl) {
-            console.warn("[wa-uazapi-webhook] mediaUrl host não permitido (anti-SSRF):", mediaUrl);
-          }
-          if (!bytes && mediaB64) bytes = b64ToBytes(mediaB64);
-          if (bytes) {
-            // Regra compartilhada: o mapa local só conhecia 8 mimes e gravava docx/pptx/xlsx como `.bin`.
-            const ext = extensaoDoArquivo(mime, m.mediaFilename);
-            const path = `crm/${new Date().toISOString().slice(0, 10)}/uazapi-${crypto.randomUUID()}.${ext}`;
-            const { error: stErr } = await admin.storage.from("whatsapp-anexos").upload(path, bytes, { contentType: mime, upsert: false });
-            if (stErr) {
-              console.log("[wa-uazapi-webhook] storage upload fail:", stErr.message);
-            } else {
-              const pub = admin.storage.from("whatsapp-anexos").getPublicUrl(path).data.publicUrl;
-              anexos = [{
-                tipo: m.tipo, mime_type: mime, url: pub, url_storage: pub,
-                filename: m.mediaFilename || `${m.tipo}.${ext}`,
-              }];
-            }
-          }
-        } catch (e) {
-          console.log("[wa-uazapi-webhook] erro mídia inbound:", e instanceof Error ? e.message : String(e));
+      let midiaPendente: MidiaPendente | null = null;
+      if (ehMidia(m) && !(await mensagemJaGravada(admin, m.externalId))) {
+        ({ anexos, pendente: midiaPendente } = await baixarMidiaUazapi(admin, provider, conex.server_url, getToken, m));
+        if (midiaPendente) {
+          console.log(`[wa-uazapi-webhook] mídia sem arquivo (${m.externalId}):`, midiaPendente.motivo);
         }
       }
 
@@ -337,6 +289,7 @@ Deno.serve(async (req) => {
           ...(m.fromMe ? { origem: "humano" } : {}),
           // Backup cru do anúncio; a atribuição de verdade é crm_whatsapp_referral.
           ...(m.referral ? { referral: m.referral } : {}),
+          ...(midiaPendente ? { midia_pendente: midiaPendente } : {}),
         },
       });
       if (insErr) {

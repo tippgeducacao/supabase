@@ -10,8 +10,8 @@
 // ⚠️ O token é POR CONTA (`wa_accounts.access_token`): o media_id só é resolvível pelo app
 // dono do número que recebeu. Passar o token da conta errada devolve 404/190 e o anexo some.
 //
-// ⚠️ O arquivo vai da Meta para o Storage EM FLUXO (`gravarMidiaInbound`), nunca inteiro na
-// memória. O worker do edge-runtime tem 150 MB e é dividido por todas as chamadas da função:
+// ⚠️ O arquivo vai do provedor para o Storage EM FLUXO (`gravarRespostaNoBucket`, que a linha
+// Web também usa), nunca inteiro na memória. O worker do edge-runtime tem 150 MB e é dividido por todas as chamadas da função:
 // em 21-22/10/2026 o PDF de 95 MB de uma professora (BM 08) era lido com `arrayBuffer()`, o
 // bucket (então 50 MB) recusava e a 2ª tentativa estourava a memória ANTES de a mensagem ser
 // gravada — o arquivo nunca aparecia no SAC, a Meta reentregava (40 estouros num dia) e cada
@@ -154,25 +154,46 @@ export async function gravarMidiaInbound(
   if (tamanhoNoGraph > limite) throw new FalhaDefinitivaMidia(`arquivo_grande: ${tamanhoNoGraph} bytes`);
   const mime: string = meta?.mime_type || media.mime_type || "application/octet-stream";
 
-  // b) bytes (a URL da Meta também exige o Bearer)
+  // b) bytes (a URL da Meta também exige o Bearer) → c) Storage, em fluxo
   const binRes = await fetch(mediaUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
-  if (!binRes.ok || !binRes.body) {
-    // Sem isso o corpo de erro da Meta subia pro Storage como se fosse o arquivo.
-    await binRes.body?.cancel().catch(() => {});
-    throw new Error(`download HTTP ${binRes.status}`);
+  return await gravarRespostaNoBucket(admin, binRes, { mime, filename: media.filename }, {
+    pasta: opcoes.pasta,
+    limiteBytes: limite,
+  });
+}
+
+/**
+ * Leva o corpo de uma resposta HTTP (o download da mídia) para o bucket `whatsapp-anexos` EM
+ * FLUXO — o arquivo nunca fica inteiro na memória. Usada pela Meta (`gravarMidiaInbound`) e pela
+ * linha Web (`wa-uazapi-webhook/midia.ts`). Erro `FalhaDefinitivaMidia` = não adianta repetir.
+ *
+ * @param opcoes.pasta prefixo do caminho no bucket, com a barra no fim (o CRM usa "crm/").
+ * @param opcoes.prefixo começo do nome do objeto: "inbound" (Meta) ou "uazapi" (linha Web).
+ */
+export async function gravarRespostaNoBucket(
+  admin: any,
+  resposta: Response,
+  arquivo: { mime: string; filename?: string | null },
+  opcoes: { pasta?: string; prefixo?: string; limiteBytes?: number } = {},
+): Promise<MidiaGravada> {
+  const limite = opcoes.limiteBytes ?? LIMITE_MIDIA_INBOUND_BYTES;
+  if (!resposta.ok || !resposta.body) {
+    // Sem isso o corpo de erro do provedor subia pro Storage como se fosse o arquivo.
+    await resposta.body?.cancel().catch(() => {});
+    throw new Error(`download HTTP ${resposta.status}`);
   }
-  const tamanhoNoDownload = binRes.headers.get("content-length");
+  const tamanhoNoDownload = resposta.headers.get("content-length");
   if (tamanhoNoDownload === "0") {
-    await binRes.body.cancel().catch(() => {});
+    await resposta.body.cancel().catch(() => {});
     throw new Error("download vazio");
   }
   if (Number(tamanhoNoDownload) > limite) {
-    await binRes.body.cancel().catch(() => {});
+    await resposta.body.cancel().catch(() => {});
     throw new FalhaDefinitivaMidia(`arquivo_grande: ${tamanhoNoDownload} bytes`);
   }
 
-  // c) Storage, direto do fluxo. O contador dá o tamanho (o upload não devolve) e corta o que
-  //    passar do teto quando a Meta não informou tamanho nenhum.
+  // O contador dá o tamanho (o upload não devolve) e corta o que passar do teto quando ninguém
+  // informou tamanho nenhum.
   let bytes = 0;
   let passouDoTeto = false;
   const contador = new TransformStream<Uint8Array, Uint8Array>({
@@ -186,12 +207,13 @@ export async function gravarMidiaInbound(
       ctrl.enqueue(pedaco);
     },
   });
-  const ext = extensaoDe(mime, media.filename);
-  const path = `${opcoes.pasta ?? ""}${new Date().toISOString().slice(0, 10)}/inbound-${crypto.randomUUID()}.${ext}`;
+  const ext = extensaoDe(arquivo.mime, arquivo.filename);
+  const dia = new Date().toISOString().slice(0, 10);
+  const path = `${opcoes.pasta ?? ""}${dia}/${opcoes.prefixo ?? "inbound"}-${crypto.randomUUID()}.${ext}`;
   let erroUpload: string | null = null;
   try {
-    const { error } = await admin.storage.from("whatsapp-anexos").upload(path, binRes.body.pipeThrough(contador), {
-      contentType: mime,
+    const { error } = await admin.storage.from("whatsapp-anexos").upload(path, resposta.body.pipeThrough(contador), {
+      contentType: arquivo.mime,
       upsert: false,
       duplex: "half", // corpo em fluxo
     });
@@ -209,7 +231,7 @@ export async function gravarMidiaInbound(
     await admin.storage.from("whatsapp-anexos").remove([path]).catch(() => {});
     throw new Error("download vazio");
   }
-  return { path, mime, ext, bytes };
+  return { path, mime: arquivo.mime, ext, bytes };
 }
 
 /**

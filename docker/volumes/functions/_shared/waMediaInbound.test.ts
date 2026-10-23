@@ -171,6 +171,28 @@ describe("gravarMidiaInbound — o que repete e o que não repete", () => {
   });
 });
 
+describe("gravarRespostaNoBucket (a peça que a Meta e a linha Web dividem)", () => {
+  it("grava o corpo de qualquer resposta, com o prefixo de quem chamou", async () => {
+    const { admin, uploads } = storage();
+    const res = new Response(fluxo(500), { headers: { "content-length": "500" } });
+
+    const r = await mod.gravarRespostaNoBucket(admin, res, { mime: "video/mp4", filename: "andreia.mp4" }, {
+      pasta: "crm/",
+      prefixo: "uazapi",
+    });
+
+    expect(r).toMatchObject({ mime: "video/mp4", ext: "mp4", bytes: 500 });
+    expect(r.path).toMatch(/^crm\/\d{4}-\d{2}-\d{2}\/uazapi-[0-9a-f-]+\.mp4$/);
+    expect(uploads[0].corpo).toBeInstanceOf(ReadableStream);
+  });
+
+  it("sem prefixo, o nome segue o de sempre (inbound-)", async () => {
+    const { admin } = storage();
+    const r = await mod.gravarRespostaNoBucket(admin, new Response(fluxo(10)), { mime: "application/pdf" });
+    expect(r.path).toMatch(/^\d{4}-\d{2}-\d{2}\/inbound-[0-9a-f-]+\.pdf$/);
+  });
+});
+
 describe("baixarAnexoInbound (pipeline do pedagógico e do podcast)", () => {
   it("devolve o anexo com a URL pública e o nome original", async () => {
     meta({ json: { url: LOOKASIDE, mime_type: "application/pdf", file_size: 10 } }, () => new Response(fluxo(10)));

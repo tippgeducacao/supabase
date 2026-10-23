@@ -71,6 +71,8 @@ export interface WaInboundMessage {
   mediaBase64?: string | null; // OU base64 inline (se o provider mandar)
   mediaMime?: string | null;
   mediaFilename?: string | null;
+  /** Tamanho do arquivo informado pelo WhatsApp (`content.fileLength`), quando vier. */
+  mediaBytes?: number | null;
   senderName?: string | null;
   /** Anúncio que abriu a conversa (clique-para-WhatsApp). Só na 1ª mensagem. */
   referral?: WaAdReferral | null;
@@ -537,6 +539,8 @@ const uazapi: WaProvider = {
         mediaBase64: parsed.mediaBase64,
         mediaMime: parsed.mediaMime,
         mediaFilename: parsed.mediaFilename,
+        // Vem no webhook antes de qualquer download: arquivo acima do teto nem é pedido à Uazapi.
+        mediaBytes: Number(pick(m, ["content.fileLength", "fileLength"])) || null,
         senderName: pick<string>(m, ["senderName", "pushName", "notifyName", "verifiedName"]) ?? null,
         // O anúncio que abriu a conversa. Vem só na 1ª mensagem e não se recupera.
         referral: extrairReferral(m),
