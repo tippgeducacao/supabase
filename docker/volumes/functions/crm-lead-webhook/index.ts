@@ -1316,6 +1316,10 @@ Deno.serve(async (req) => {
 
         const tituloResolved =
           resolveWebhookVar(p.titulo, dados).trim() || cursoInteresse || integration.nome || "Oportunidade";
+        // "SAC do atendimento" (24/10/2026): em qual SAC 2.0 a resposta do lead nasce. Vazio =
+        // o SAC padrão do funil (o gatilho do banco resolve). Só aceita uuid.
+        const sacFunilId =
+          typeof p.sacFunilId === "string" && /^[0-9a-f-]{36}$/i.test(p.sacFunilId) ? p.sacFunilId : null;
         titulosDosCards.push(tituloResolved);
         if (typeof p.funilId === "string" && p.funilId) funisDosCards.push(p.funilId);
         const nowIso = new Date().toISOString();
@@ -1350,6 +1354,8 @@ Deno.serve(async (req) => {
                 recadastro_titulo: tituloResolved,
                 recadastros: (existe.recadastros ?? 0) + 1,
                 ultima_atividade_em: nowIso,
+                // recadastro também renova o destino de SAC do contato (gatilho no banco)
+                ...(sacFunilId ? { sac_v2_funil_id: sacFunilId } : {}),
               })
               .eq("id", existe.id);
             if (!oportunidadeId) oportunidadeId = existe.id;
@@ -1405,6 +1411,7 @@ Deno.serve(async (req) => {
             // De qual webhook/acao o card nasceu — e o escopo do "nao criar repetidas".
             origem_integracao_id: integration.id,
             origem_acao_id: acaoId,
+            sac_v2_funil_id: sacFunilId,
           })
           .select("id")
           .single();
