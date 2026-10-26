@@ -31,6 +31,10 @@ import { temDorFinanceira } from './objecaoFinanceira.ts';
 import { conferirHorarioDaFerramenta } from './travasDeterministicas.ts';
 import { montarRetornoInformacoes } from './envioMateriais.ts';
 import { consultarCatalogo } from './catalogoCursos.ts';
+import {
+  type LinhaDaMatriz, aceitaQualquerFormacao, chaveFormacao, formacoesDaLista, linhaDoCurso, semPontuacao, soParaVeterinario,
+} from './linhaDaMatriz.ts';
+import { filtrarCatalogoPelaFormacao, LEITURA_FORMACAO_SYSTEM, evidenciasDaFormacao, lerLeituraDaFormacao } from './catalogoPorFormacao.ts';
 import { resultadoConfirmacao } from './confirmacaoAgendamento.ts';
 import { fatoDaColeta, proximoPassoDaColeta } from './proximoPassoColeta.ts';
 import { enviarPortfolio, passoAulaSemPos, pedidoDePortfolio } from './portfolio.ts';
@@ -48,6 +52,8 @@ const SDR_API_URL = (Deno.env.get('AGENTE_SDR_SDRAPI_URL') ?? `${SUPABASE_URL}/f
 const SDR_API_KEY = Deno.env.get('AGENTE_SDR_SDRAPI_KEY') ?? '';
 const VOYAGE_KEY = Deno.env.get('AGENTE_SDR_VOYAGE_KEY') ?? Deno.env.get('VOYAGE_API_KEY') ?? '';
 const MODELO_MATRIZ = Deno.env.get('AGENTE_SDR_MODEL_MATRIZ') ?? 'claude-sonnet-5';
+// Matriz para lead na Luna (OpenAI), desde 26/10/2026: chamarModeloDaMatriz.
+const MODELO_MATRIZ_OPENAI = Deno.env.get('AGENTE_SDR_MODEL_MATRIZ_OPENAI') || 'gpt-6.1-sol';
 // Integração (calendar_integrations) da conta Workspace com acesso às agendas dos
 // monitores — equivalente à credencial "Workspace PPG" do n8n.
 const GCAL_INTEGRATION_ID = Deno.env.get('AGENTE_SDR_GCAL_INTEGRATION_ID') ?? '';
@@ -863,31 +869,7 @@ function validarMatriz(resultado: any): any {
 // que não aceita a formação é pior do que não oferecer. Só entra quando a matriz NÃO deu alternativa
 // e quando a tabela não lista a formação na própria pós pedida. Os MBAs ("qualquer formação de nível superior")
 // ficam de fora: aceitam todo mundo e não são alternativa de área.
-type LinhaDaMatriz = { pos_graduacao: string; pode_fazer?: string | null; parcialmente_aceitas?: string | null };
-const chaveFormacao = (s: unknown) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu, '')
-  .toLowerCase().replace(/\s+/g, ' ').trim();
-const formacoesDaLista = (lista: unknown) => String(lista ?? '').split(';').map(chaveFormacao).filter((x) => x && x !== '—' && x !== '-');
-const aceitaQualquerFormacao = (linha: LinhaDaMatriz) => /qualquer forma[cç][aã]o/i.test(String(linha.pode_fazer ?? ''));
-/** A tabela só lista Medicina Veterinária para esta pós (nem "parcialmente aceitas"). */
-const soParaVeterinario = (linha: LinhaDaMatriz) => {
-  const inteiras = formacoesDaLista(linha.pode_fazer);
-  return inteiras.length === 1 && inteiras[0] === 'medicina veterinaria' && formacoesDaLista(linha.parcialmente_aceitas).length === 0;
-};
-const semPontuacao = (s: unknown) => chaveFormacao(String(s ?? '').replace(/^\s*(?:P[ÓO]S|MBA)\s*\|\s*/i, ''))
-  .replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
-/**
- * A linha da tabela para o curso pedido. O catálogo e a tabela escrevem o nome diferente ("Cannabis
- * Medicinal Veterinária" × "Cannabis Medicinal"): vale a linha de nome mais longo contida no pedido,
- * ou que o contém.
- */
-const linhaDoCurso = (cursos: LinhaDaMatriz[] | null | undefined, curso: unknown): LinhaDaMatriz | undefined => {
-  const pedido = semPontuacao(curso);
-  if (!pedido) return undefined;
-  return (cursos ?? [])
-    .map((c) => ({ c, nome: semPontuacao(c.pos_graduacao) }))
-    .filter((x) => x.nome && (pedido === x.nome || pedido.includes(x.nome) || x.nome.includes(pedido)))
-    .sort((a, b) => b.nome.length - a.nome.length)[0]?.c;
-};
+// Os leitores da tabela (linhaDoCurso, soParaVeterinario...) moram em linhaDaMatriz.ts.
 
 /**
  * A reprovação NÃO depende de ele ter concluído a graduação? Vale quando a pós é exclusiva de médico
@@ -1159,48 +1141,100 @@ async function avaliarCompatibilidade(supabase: any, input: any, ctx: CtxConvers
     curso_interesse: input.curso_interesse ?? '',
   });
 
-  // thinking disabled EXPLÍCITO: no Sonnet 5, omitir liga o adaptativo — aqui é
-  // classificação contra tabela que devolve JSON cru em 1024 tokens (thinking truncaria).
-  const pedido = {
-    model: MODELO_MATRIZ,
-    max_tokens: 1024,
-    thinking: { type: 'disabled' },
-    // system idêntico em TODA chamada da matriz (prompt + tabela ordenada) →
-    // cacheado e compartilhado entre todos os leads.
-    system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
-    messages: [{ role: 'user', content: user }],
-  };
-  // A matriz segue o provedor do lead (07/10/2026: Luna 6 para 100% e crédito da Anthropic
-  // zerado — matriz presa no Claude travava TODO agendamento, porque a falha é fechada).
-  // Sem o raciocínio encadeado: a memória é da rodada do agente, não desta classificação.
-  // Se a Luna falhar, tenta o Claude antes de cair na falha fechada.
-  // Na Luna, esforço 'high' em vez de 'none' (pedido do Gustavo): sem raciocínio ela não ligava
-  // o nome do catálogo ("Comportamento e Bem-Estar de Animais de Companhia e Silvestres") ao da
-  // tabela ("Comportamento e Bem-Estar Animal") e reprovou médico veterinário (07/10/2026). O
-  // raciocínio conta no limite de saída, por isso o teto sobe.
-  const doLead = await selecionarProvedorDoLead(supabase, ctx.telefone ?? '');
-  const provedor = doLead?.formato === 'openai'
-    ? { ...doLead, esforco: 'high', raciocinio: false, memoriaRaciocinio: undefined } : null;
-  const pedidoLuna = { ...pedido, max_tokens: 16000, thinking: undefined };
-  let resp: any;
-  try {
-    resp = await chamarAnthropic(provedor ? pedidoLuna : pedido, {}, provedor);
-  } catch (e) {
-    if (!provedor) throw e;
-    console.error('[crm-agente-sdr] matriz na Luna falhou, tentando o Claude:', (e as Error)?.message ?? e);
-    resp = await chamarAnthropic(pedido);
-  }
-  const texto = (resp.content ?? [])
-    .filter((b: any) => b.type === 'text')
-    .map((b: any) => b.text)
-    .join('');
+  const { texto, modelo } = await chamarModeloDaMatriz(supabase, ctx, system, user, 1024);
   const semMarkdown = texto.includes('```') ? texto.replace(/```json\n?/g, '').replace(/```\n?/g, '') : texto;
 
   let parsed: any;
   try { parsed = JSON.parse(semMarkdown.trim()); } catch (e) {
     throw new Error(`IA da matriz não retornou JSON válido: ${(e as Error).message}`);
   }
-  return { ...alternativasPelaTabela(validarMatriz(parsed), cursos, ctx.soInformar === true), id: toolUseId };
+  return { ...alternativasPelaTabela(validarMatriz(parsed), cursos, ctx.soInformar === true), modelo_matriz: modelo, id: toolUseId };
+}
+
+/**
+ * A IA da matriz: confere formação × pós contra a tabela (verificar_compatibilidade_curso) e filtra o
+ * catálogo pela formação (consulta_pos_disponiveis). `system` idêntico em toda chamada (prompt + tabela
+ * ordenada) → cacheado e compartilhado entre todos os leads.
+ * - Lead no Claude: MODELO_MATRIZ, thinking disabled EXPLÍCITO (no Sonnet 5, omitir liga o adaptativo;
+ *   é classificação que devolve JSON cru, thinking truncaria).
+ * - Lead na Luna (OpenAI): MODELO_MATRIZ_OPENAI, esforço 'high'. Até 26/10/2026 ia na própria Luna do
+ *   lead (07/10: crédito da Anthropic zerado travava TODO agendamento, porque a falha é fechada; sem
+ *   raciocínio ela não ligava "Comportamento e Bem-Estar de Animais de Companhia e Silvestres" do
+ *   catálogo a "Comportamento e Bem-Estar Animal" da tabela e reprovou médico veterinário). Desde
+ *   26/10/2026 vai no Sol 6.1 high (pedido do Gustavo: barato e melhor em casar nomes). Sem o raciocínio
+ *   encadeado: a memória é da rodada do agente, não desta classificação. O raciocínio conta no limite
+ *   de saída, por isso o teto sobe. Se falhar, tenta o Claude antes de cair na falha fechada.
+ */
+async function chamarModeloDaMatriz(
+  supabase: any, ctx: CtxConversa, system: string, user: string, maxTokensClaude: number,
+): Promise<{ texto: string; modelo: string }> {
+  const pedido = {
+    model: MODELO_MATRIZ,
+    max_tokens: maxTokensClaude,
+    thinking: { type: 'disabled' },
+    system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
+    messages: [{ role: 'user', content: user }],
+  };
+  const doLead = await selecionarProvedorDoLead(supabase, ctx.telefone ?? '');
+  const provedor = doLead?.formato === 'openai'
+    ? { ...doLead, modelo: MODELO_MATRIZ_OPENAI, esforco: 'high', raciocinio: false, memoriaRaciocinio: undefined } : null;
+  const pedidoOpenai = { ...pedido, max_tokens: 16000, thinking: undefined };
+  let resp: any;
+  let modelo = provedor ? MODELO_MATRIZ_OPENAI : MODELO_MATRIZ;
+  try {
+    resp = await chamarAnthropic(provedor ? pedidoOpenai : pedido, {}, provedor);
+  } catch (e) {
+    if (!provedor) throw e;
+    console.error(`[crm-agente-sdr] matriz no ${MODELO_MATRIZ_OPENAI} falhou, tentando o Claude:`, (e as Error)?.message ?? e);
+    resp = await chamarAnthropic(pedido);
+    modelo = MODELO_MATRIZ;
+  }
+  const texto = (resp.content ?? []).filter((b: any) => b.type === 'text').map((b: any) => b.text).join('');
+  return { texto, modelo };
+}
+
+/**
+ * A listagem do catálogo (sem pós pedida, ou alternativas a uma pós que não existe) só com as pós
+ * que aceitam a formação do lead (catalogoPorFormacao.ts). Formação ainda desconhecida ou falha da IA
+ * = lista sem filtro, dizendo isso, para a IA perguntar a graduação antes de sugerir.
+ */
+async function catalogoDaFormacao<T extends { nome_oficial: string; nome: string }>(
+  supabase: any, ctx: CtxConversa, cursos: T[],
+): Promise<{ cursos: T[]; filtro_formacao: Record<string, unknown>; nota: string }> {
+  const semFiltro = (situacao: string, nota: string) => ({ cursos, filtro_formacao: { situacao }, nota });
+  const naoConferida = ctx.soInformar
+    ? 'A formação do lead não foi conferida: a lista não está filtrada pela formação.'
+    : 'A formação do lead ainda não foi conferida, então esta lista NÃO está filtrada pela formação. Antes de sugerir uma pós específica, pergunte a graduação dele.';
+  try {
+    const lead = await buscarLead(supabase, ctx.remotejid).catch(() => null);
+    const evidencias = evidenciasDaFormacao(ctx.historicoConversa, lead);
+    if (!evidencias) return semFiltro('formacao_desconhecida', naoConferida);
+    const { data: tabela, error } = await supabase.from('cursos_pos_graduacao')
+      .select('pos_graduacao, pode_fazer, parcialmente_aceitas, status').eq('status', 'ativo').order('pos_graduacao');
+    if (error || !tabela?.length) throw new Error(`cursos_pos_graduacao: ${error?.message ?? 'vazia'}`);
+    const catalogo = cursos.map((c) => c.nome_oficial);
+    const system = `${LEITURA_FORMACAO_SYSTEM}\n\n---\n\n## TABELA cursos_pos_graduacao (status = 'ativo')\n\n${JSON.stringify(tabela, null, 1)}`
+      + `\n\n## CATÁLOGO (pós ativas)\n\n${JSON.stringify(catalogo, null, 1)}`;
+    const { texto, modelo } = await chamarModeloDaMatriz(supabase, ctx, system, evidencias, 2048);
+    const leitura = lerLeituraDaFormacao(texto);
+    if (!leitura.formacao_identificada) return semFiltro('formacao_desconhecida', naoConferida);
+    const filtrados = filtrarCatalogoPelaFormacao(cursos, tabela, leitura);
+    const formacao = leitura.formacao_identificada;
+    const filtro_formacao = { situacao: 'filtrada', formacao, modelo, fora_da_lista: cursos.length - filtrados.length };
+    if (!filtrados.length) {
+      return { cursos: [], filtro_formacao, nota: ctx.soInformar
+        ? `Nenhuma pós do catálogo aceita a formação em ${formacao}.`
+        : `Nenhuma pós do catálogo aceita a formação em ${formacao}. Não ofereça pós como se servisse para ele.` };
+    }
+    return { cursos: filtrados, filtro_formacao, nota: `Lista já filtrada pela formação do lead (${formacao}): só estas pós aceitam essa formação; `
+      + 'as demais do catálogo não aceitam ou não têm regra cadastrada' + (ctx.soInformar ? '.' : ', não as cite como opção para ele.')
+      + ' aceite "parcial" = aceita com ressalva (condicao), não é encaixe pleno. A verificação de compatibilidade da pós escolhida continua valendo.' };
+  } catch (e) {
+    console.error('[crm-agente-sdr] catálogo pela formação falhou (segue sem filtro):', (e as Error)?.message ?? e);
+    return semFiltro('falha_ao_conferir', ctx.soInformar
+      ? 'Não foi possível conferir a formação do lead: a lista não está filtrada pela formação.'
+      : 'Não foi possível conferir a formação do lead, então esta lista NÃO está filtrada pela formação. Não afirme que uma pós serve para a formação dele; pergunte a área de interesse e confira com verificar_compatibilidade_curso antes.');
+  }
 }
 
 // ── consulta_objecoes (Voyage + match_ppg_voyage top-1) ─────────────────────
@@ -1579,7 +1613,14 @@ async function consultaPosDisponiveis(supabase: any, input: any, ctx: CtxConvers
   const troca = String(input?.trocar_para ?? '').trim();
   if (consulta && troca) return { status: 'entrada_ambigua', id: toolUseId,
     instrucao: 'Use curso_consulta para uma dúvida OU trocar_para para escolha explícita; nunca ambos.' };
-  const resultado = await consultarCatalogo(supabase, consulta || troca);
+  let resultado: any = await consultarCatalogo(supabase, consulta || troca);
+  // Toda lista que a IA pode oferecer como opção sai filtrada pela formação (26/10/2026, caso Jemima).
+  if (resultado.status === 'catalogo_disponivel' || Array.isArray(resultado.alternativas_disponiveis)) {
+    const campo = resultado.status === 'catalogo_disponivel' ? 'cursos' : 'alternativas_disponiveis';
+    const filtro = await catalogoDaFormacao(supabase, ctx, resultado[campo]);
+    resultado = { ...resultado, [campo]: filtro.cursos, filtro_formacao: filtro.filtro_formacao,
+      instrucao: `${resultado.instrucao ?? ''} ${filtro.nota}`.trim() };
+  }
   // Assunto ≠ nome de pós (assuntoDaPos.ts, 16/10/2026): sem achar, lembra a pós do cadastro antes do "não temos".
   if (!troca && consulta && (resultado.status === 'curso_nao_encontrado' || resultado.status === 'curso_nao_confirmado')
     && await assuntoDoCadastroLigado(supabase, ctx.telefone)) {

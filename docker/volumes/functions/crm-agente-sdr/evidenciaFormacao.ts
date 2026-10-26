@@ -29,7 +29,7 @@ function normalizar(texto: string): string {
   return texto.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
 }
 
-function textoDoLead(mensagem: Msg): string | null {
+export function textoDoLead(mensagem: Msg): string | null {
   if (mensagem?.role !== 'user') return null;
   const texto = typeof mensagem.content === 'string' ? mensagem.content
     : Array.isArray(mensagem.content) ? mensagem.content
