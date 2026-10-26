@@ -16,7 +16,12 @@ function mesAno(d: Date): string {
   return `${String(d.getUTCMonth() + 1).padStart(2, '0')}/${d.getUTCFullYear()}`;
 }
 
-export function proximoPassoDaColeta(input: Record<string, unknown> | null | undefined, agora: Date = new Date()): string {
+/**
+ * `antesDoConvite` (26/10/2026, caso Vinicius): antes do convite, "pergunte quando ele conclui" atropelava o fluxo
+ * (a formação vem depois do aceite) e a Luna obedecia: 83 de 171 rodadas pediram a formação antes do convite. Ali
+ * essas duas ordens viram o fato; a data já lida (fora do prazo ou dentro dele) segue com o passo exato.
+ */
+export function proximoPassoDaColeta(input: Record<string, unknown> | null | undefined, agora: Date = new Date(), antesDoConvite = false): string {
   const formacao = texto(input?.formacao);
   const tempo = texto(input?.tempo_formacao);
   const concluida = texto(input?.graduacao_concluida).toLowerCase();
@@ -47,6 +52,10 @@ export function proximoPassoDaColeta(input: Record<string, unknown> | null | und
       return `PRÓXIMO PASSO: a conclusão informada cai em ${mesAno(dataLida)}, dentro do prazo. Nesta mesma resposta, `
         + 'antes de convidar para a reunião ou oferecer horário, chame (se ainda não chamou) verificar_compatibilidade_curso com '
         + `contexto_qualificacao="estudante_apto", conclusao_graduacao="${mesAno(dataLida)}"${bruta}.`;
+    }
+    if (antesDoConvite) {
+      return `${fatoDaColeta(input, agora)} A data de conclusão se pergunta quando ele aceitar a conversa com o monitor `
+        + 'ou pedir horário, cronograma ou preço.';
     }
     if (leitura?.leitura.tipo === 'posicao_no_curso') {
       return `PRÓXIMO PASSO: "${tempo}" é a posição no curso, não a data de conclusão. Pergunte só em que mês e ano `
@@ -92,3 +101,16 @@ export function fatoDaColeta(input: Record<string, unknown> | null | undefined, 
   return `SITUAÇÃO: estudante (${grad}); mês e ano de conclusão ainda não informados.`;
 }
 
+
+/** O fato no lugar da ordem antes do convite vale para este telefone? (coleta_fato_antes_convite / _telefones). Falha = desligada. */
+export async function coletaFatoAntesDoConviteLigada(supabase: { from: (tabela: string) => any }, telefone: string | null | undefined): Promise<boolean> {
+  try {
+    const { data, error } = await supabase.from('crm_agente_sdr_config')
+      .select('coleta_fato_antes_convite, coleta_fato_antes_convite_telefones').eq('id', 1).maybeSingle();
+    if (error || !data) return false;
+    if (data.coleta_fato_antes_convite === true) return true;
+    const fim = String(telefone ?? '').replace(/\D/g, '').slice(-8);
+    const lista: unknown[] = Array.isArray(data.coleta_fato_antes_convite_telefones) ? data.coleta_fato_antes_convite_telefones : [];
+    return fim.length === 8 && lista.some((t) => String(t).replace(/\D/g, '').slice(-8) === fim);
+  } catch { return false; }
+}

@@ -93,6 +93,8 @@ export type CtxConversa = ContextoElegibilidade & {
    * barram inventar preço, horário ou reunião continuam. Produção (vendas) não liga isto.
    */
   soInformar?: boolean;
+  /** Antes do convite, com a chave (proximoPassoColeta.ts, 26/10/2026): a coleta devolve o fato, não "pergunte a data". */
+  coletaAntesDoConvite?: boolean;
   /** IA de aula v2 na produção: a pós da aula, para a busca_carreira (aulaV2.ts). */
   cursoDaAula?: string | null;
   /** Leitura do lead pelo Jev nesta rodada (leituraJev.ts, canário): só soma às palavras-chave. */
@@ -1699,7 +1701,7 @@ async function atualizarDadosLead(supabase: any, input: any, ctx: CtxConversa, t
   // Canário (25/09/2026): o próximo passo exato, com o prazo já lido pelo código (proximoPassoColeta.ts).
   // Aula MVP (sem pós): depois da formação vem o portfólio, para os dois modelos (portfolio.ts).
   const proximoPasso = ctx.aulaSemPos ? passoAulaSemPos(input ?? {})
-    : ctx.soInformar ? fatoDaColeta(input ?? {}) : ctx.ficha ? proximoPassoDaColeta(input ?? {}) : '';
+    : ctx.soInformar ? fatoDaColeta(input ?? {}) : ctx.ficha ? proximoPassoDaColeta(input ?? {}, new Date(), ctx.coletaAntesDoConvite === true) : '';
   if (!nome && !formacao && !tempoFormacao) {
     if (ctx.soInformar) return sair(`Registrado.${registroFicha}${proximoPasso ? ` ${proximoPasso}` : ''}`);
     return sair(`Registrado.${registroFicha} ${proximoPasso ? `${proximoPasso} ` : ''}NUNCA comente com o lead que registrou ou salvou os dados dele.`);

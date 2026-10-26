@@ -5,6 +5,19 @@ import { proximoPassoDaColeta } from './proximoPassoColeta';
 describe('proximoPassoDaColeta', () => {
   const agora = new Date('2026-09-25T13:00:00Z');
 
+  it('antes do convite: sem data, o fato no lugar de "pergunte" (caso Vinicius); com data, o passo exato', () => {
+    const sem = proximoPassoDaColeta({ tempo_formacao: 'nos períodos finais da faculdade', graduacao_concluida: 'cursando' }, agora, true);
+    expect(sem).not.toContain('PRÓXIMO PASSO');
+    expect(sem).toContain('SITUAÇÃO: estudante');
+    expect(sem).toContain('quando ele aceitar a conversa com o monitor');
+    const posicao = proximoPassoDaColeta({ formacao: 'Medicina Veterinária', tempo_formacao: '6º semestre', graduacao_concluida: 'cursando' }, agora, true);
+    expect(posicao).not.toContain('PRÓXIMO PASSO');
+    expect(proximoPassoDaColeta({ tempo_formacao: 'cursando, conclui em 2029', graduacao_concluida: 'cursando' }, agora, true)).toContain('estudante_fora_do_prazo');
+    expect(proximoPassoDaColeta({ tempo_formacao: 'cursando, me formo no fim do ano', graduacao_concluida: 'cursando' }, agora, true)).toContain('estudante_apto');
+    // Desligado, igual a antes.
+    expect(proximoPassoDaColeta({ tempo_formacao: 'nos períodos finais da faculdade', graduacao_concluida: 'cursando' }, agora)).toContain('PRÓXIMO PASSO: falta saber');
+  });
+
   it('"2031 em janeiro" ⇒ manda checar como fora do prazo, sem perguntar mais nada', () => {
     const t = proximoPassoDaColeta({ formacao: 'Medicina Veterinária', tempo_formacao: 'cursando, conclui em janeiro de 2031', graduacao_concluida: 'cursando' }, agora);
     expect(t).toContain('01/2031');

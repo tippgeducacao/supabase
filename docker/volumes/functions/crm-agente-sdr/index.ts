@@ -59,6 +59,7 @@ import {
 } from './fichaAtendimento.ts';
 import { comGanchoDoLote, cursoDaConversa, TITULO_SECAO_GANCHO } from './ganchoLote.ts';
 import { aberturaMapaLigada, blocoDaAbertura, comPassoDoMapa, faseDaAbertura } from './aberturaMapa.ts';
+import { coletaFatoAntesDoConviteLigada } from './proximoPassoColeta.ts';
 import { mapaDoLead } from './followupMapa.ts';
 import { aprovadoNaConversa, escolheuHorarioOfertado } from './agendaEscolhida.ts';
 import { conviteSemAbertura, correcaoDaAbertura, cursoDaAbertura } from './travaAbertura.ts';
@@ -839,9 +840,12 @@ async function definirAgente(pre: PreRouter, provedor: ProvedorIA | null, tel: T
       if (comMapa && fase && passo?.trocou) {
         promptAgente = passo.prompt;
         contextoEfetivo += blocoDaAbertura(comMapa.mapa, fase, historico);
+        // Antes do convite, a coleta devolve o fato, não "pergunte a data" (proximoPassoColeta.ts, 26/10/2026).
+        if (await coletaFatoAntesDoConviteLigada(supabase, String(remotejid).split('@')[0])) ctx.coletaAntesDoConvite = true;
       }
       tel.registrar('abertura_mapa', { grupo: comMapa?.mapa.grupo ?? null, fase: fase?.fase ?? null, feitas: fase?.feitas ?? null,
-        perfil: fase?.perfil?.ramo ?? null, estudante: fase?.estudante ?? null, aplicado: Boolean(passo?.trocou) });
+        perfil: fase?.perfil?.ramo ?? null, estudante: fase?.estudante ?? null, coleta_fato: ctx.coletaAntesDoConvite === true,
+        aplicado: Boolean(passo?.trocou) });
     } catch (e) {
       tel.registrar('erro', { onde: 'abertura_mapa' }, undefined, String((e as Error)?.message ?? e));
     }
