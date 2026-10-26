@@ -841,7 +841,7 @@ async function definirAgente(pre: PreRouter, provedor: ProvedorIA | null, tel: T
         contextoEfetivo += blocoDaAbertura(comMapa.mapa, fase, historico);
       }
       tel.registrar('abertura_mapa', { grupo: comMapa?.mapa.grupo ?? null, fase: fase?.fase ?? null, feitas: fase?.feitas ?? null,
-        perfil: fase?.perfil?.ramo ?? null, aplicado: Boolean(passo?.trocou) });
+        perfil: fase?.perfil?.ramo ?? null, estudante: fase?.estudante ?? null, aplicado: Boolean(passo?.trocou) });
     } catch (e) {
       tel.registrar('erro', { onde: 'abertura_mapa' }, undefined, String((e as Error)?.message ?? e));
     }

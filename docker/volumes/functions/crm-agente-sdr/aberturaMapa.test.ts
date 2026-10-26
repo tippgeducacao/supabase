@@ -43,6 +43,20 @@ describe('a fase antes do convite', () => {
     expect(b).toContain('"Por que você está buscando essa pós agora?"');
   });
 
+  it('estudante não recebe "já tem alguma pós-graduação?" (caso Vinicius)', () => {
+    const mapa = { ...MAPA, perguntas: [...MAPA.perguntas, { ramo: '*', etapa: 'prioridade', texto: 'Você já tem alguma pós-graduação?', ordem: 1 }] };
+    const est = h(['assistant', TEMPLATE], ['user', 'Estou nos períodos finais da faculdade e tenho interesse para realizar tratamento e fazer estudos']);
+    const f = faseDaAbertura(mapa, est, { jornada: {} })!;
+    expect(f.estudante).toBe(true);
+    const b = blocoDaAbertura(mapa, f, est);
+    expect(b).not.toContain('alguma pós-graduação');
+    expect(b).toContain('"Por que você está buscando essa pós agora?"');
+    // Pela coleta também ("cursando"), e o formado segue com a pergunta.
+    expect(faseDaAbertura(mapa, h(['assistant', TEMPLATE], ['user', 'não']), { jornada: { coleta: { graduacao_concluida: 'cursando' } } })!.estudante).toBe(true);
+    const formado = h(['assistant', TEMPLATE], ['user', 'Não, quero começar']);
+    expect(blocoDaAbertura(mapa, faseDaAbertura(mapa, formado, { jornada: {} })!, formado)).toContain('"Você já tem alguma pós-graduação?"');
+  });
+
   it('pergunta feita sai da lista; com duas feitas é hora da abertura, sem perguntas', () => {
     const uma = h(['assistant', TEMPLATE], ['user', 'Não prescrevo'],
       ['assistant', 'certo. e hoje vc é contratada de uma clínica, tem a sua própria clínica ou faz atendimento a domicílio?'], ['user', 'sou contratada']);

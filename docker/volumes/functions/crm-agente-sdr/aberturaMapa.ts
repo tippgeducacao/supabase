@@ -67,7 +67,16 @@ function perguntasEmResposta(historico: readonly Msg[]): number {
   return n;
 }
 
-export type FaseAbertura = { fase: 'perguntar' | 'abertura'; feitas: number; perfil: RamoMapa | null };
+export type FaseAbertura = { fase: 'perguntar' | 'abertura'; feitas: number; perfil: RamoMapa | null; estudante?: boolean };
+
+// Caso Vinicius (26/10/2026): "Estou nos períodos finais da faculdade" recebeu "vc já tem alguma pós-graduação?",
+// a 1ª pergunta de momento do mapa. Quem ainda não se formou não tem pós: pra ele, ela sai da lista.
+const RE_AINDA_ESTUDA = /faculdade|per[ií]odo|semestre|cursando|estudante|gradua(?:ndo|nda)|ainda (?:estudo|curso)/i;
+const RE_PERGUNTA_TEM_POS = /j[áa] (?:tem|possui|fez) alguma p[óo]s/i;
+function aindaEstuda(historico: readonly Msg[], lead: any): boolean {
+  if (String(lead?.jornada?.coleta?.graduacao_concluida ?? '') === 'cursando') return true;
+  return historico.some((m) => m?.role === 'user' && RE_AINDA_ESTUDA.test(textoDe(m)));
+}
 
 /** Em que ponto a conversa está antes do convite; null = o convite já saiu (ou um vendedor assumiu). */
 export function faseDaAbertura(mapa: MapaCarreira, historico: readonly Msg[], lead: any): FaseAbertura | null {
@@ -79,7 +88,8 @@ export function faseDaAbertura(mapa: MapaCarreira, historico: readonly Msg[], le
   const perguntasNossas = perguntasEmResposta(historico);
   const doMapa = mapa.perguntas.filter((p) => (p.etapa === 'divide' || p.etapa === 'carreira') && jaPerguntou(p.texto, historico)).length;
   const feitas = Math.max(perguntasNossas, doMapa);
-  return { fase: feitas >= MAX_PERGUNTAS_ANTES_DO_CONVITE ? 'abertura' : 'perguntar', feitas, perfil: ramoDoLead(mapa, lead) };
+  return { fase: feitas >= MAX_PERGUNTAS_ANTES_DO_CONVITE ? 'abertura' : 'perguntar', feitas, perfil: ramoDoLead(mapa, lead),
+    estudante: aindaEstuda(historico, lead) };
 }
 
 /** O bloco do contexto da rodada com a fase e as perguntas do mapa que ainda cabem. */
@@ -105,7 +115,8 @@ export function blocoDaAbertura(mapa: MapaCarreira, f: FaseAbertura, historico: 
   // Caso Lua (16/10/2026): "Não, quero começar" recebeu "você trabalha com pequenos ou grandes animais?". As
   // perguntas de perfil e de carreira pressupõem que ele atua; as de momento do mapa servem pra quem ainda não.
   const momento = f.fase === 'perguntar'
-    ? mapa.perguntas.filter((p) => p.etapa === 'prioridade' && ainda(p.texto)).map((p) => `"${p.texto}"`) : [];
+    ? mapa.perguntas.filter((p) => p.etapa === 'prioridade' && ainda(p.texto) && !(f.estudante && RE_PERGUNTA_TEM_POS.test(p.texto)))
+      .map((p) => `"${p.texto}"`) : [];
   if (momento.length) {
     // 17/10/2026 (lead "Veterinário Emergência"): "Ainda não 😝" à pergunta do template recebeu só "certo. por que você
     // está buscando essa pós agora?", seco e fora de ordem. "Não"/"ainda não" sem dizer onde trabalha pede primeiro a
