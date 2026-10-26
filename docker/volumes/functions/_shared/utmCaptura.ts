@@ -52,7 +52,41 @@ export function extrairRastreamento({
   return resultado;
 }
 
-const normalizar = (valor: unknown) => limparValorRastreamento(valor)?.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+/** Algum campo de rastreio (UTM ou clique) preenchido? */
+export function temRastreamento(r: Rastreamento): boolean {
+  return CAMPOS_RASTREAMENTO.some((campo) => !!r[campo]);
+}
+
+// Só domínio NOSSO: a UTM de uma página nossa diz como a pessoa chegou até nós; a de
+// um site parceiro diz como ela chegou ao site DELE (medido: produtivaassessoriavet).
+const DOMINIO_PROPRIO = /(?:^|\.)(?:ppgvet|ppgeducacao|ppgagro)\.com\.br$/i;
+
+/**
+ * UTM que se perdeu entre páginas (26/10/2026). A visita entra numa página nossa COM
+ * UTM (link da bio do Instagram, anúncio do Google…) e envia o formulário de OUTRA
+ * página, já sem ela — o GreatPages manda a página anterior em `Referral_Source`.
+ * Medido em 30 dias: 42 leads de pós vindos do link da bio e 3 de anúncio do Google
+ * chegavam sem UTM nenhuma por isso.
+ *
+ * Devolve só o que está ESCRITO na URL (UTM e clique), e só se o domínio for nosso —
+ * nunca presume origem pelo caminho. Quem chama decide quando usar: só quando nada de
+ * rastreio veio por outro caminho, para não misturar dois toques.
+ */
+export function rastreamentoDoReferrer(referrer: unknown): Rastreamento {
+  if (typeof referrer !== "string" || !referrer.trim()) return {};
+  const texto = referrer.trim();
+  try {
+    const url = new URL(/^https?:\/\//i.test(texto) ? texto : `https://${texto}`);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return {};
+    if (!DOMINIO_PROPRIO.test(url.hostname)) return {};
+    return extrairRastreamento({ urls: [url.toString()] });
+  } catch {
+    // Referrer é texto do navegador: inválido não pode derrubar a captação.
+    return {};
+  }
+}
+
+const normalizar =(valor: unknown) => limparValorRastreamento(valor)?.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 const canal = (valor: string | undefined): string | undefined => {
   if (!valor) return undefined;
   if (/^(tiktok|tik tok|tt)(?:$|[_\s-])/.test(valor)) return "tiktok";

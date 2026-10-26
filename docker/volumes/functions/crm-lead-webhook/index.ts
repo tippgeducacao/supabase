@@ -51,7 +51,7 @@
 //   { ok:true, lead_id, segmento_aplicado, lead_oportunidade_id, oportunidade_id, duplicado_lote }
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
-import { CAMPOS_RASTREAMENTO, complementarPrimeiraAtribuicao, extrairRastreamento, limparValorRastreamento, podeComplementarAtribuicao } from "../_shared/utmCaptura.ts";
+import { CAMPOS_RASTREAMENTO, complementarPrimeiraAtribuicao, extrairRastreamento, limparValorRastreamento, podeComplementarAtribuicao, rastreamentoDoReferrer, temRastreamento } from "../_shared/utmCaptura.ts";
 import { telefoneEnviavel } from "../_shared/telefone.ts";
 import { normalizeWhatsapp } from "./normalizaWhatsapp.ts";
 import { aplicarFiltrosToken, parseTokenWebhook } from "./tokenFiltros.ts";
@@ -182,6 +182,16 @@ function pickUrlAuto(dados: Record<string, unknown>): string | undefined {
 function pickOrigemUrl(dados: Record<string, unknown>): string | undefined {
   for (const [k, v] of Object.entries(dados)) {
     if (k.toLowerCase() === "origem_url" && typeof v === "string" && v.trim()) return v.trim();
+  }
+  return undefined;
+}
+
+// Página ANTERIOR da visita (GreatPages = `Referral_Source`, o document.referrer). NÃO é
+// página de captação nem `fonte_referencia`: serve só para recuperar a UTM que se perdeu
+// entre páginas — ver `rastreamentoDoReferrer` e o uso logo antes do contato efetivo.
+function pickReferralSource(dados: Record<string, unknown>): string | undefined {
+  for (const [k, v] of Object.entries(dados)) {
+    if (k.toLowerCase() === "referral_source" && typeof v === "string" && v.trim()) return v.trim();
   }
   return undefined;
 }
@@ -863,6 +873,16 @@ Deno.serve(async (req) => {
   if (!inUtm.utm_campaign && inMeta.meta_campaign_name) inUtm.utm_campaign = inMeta.meta_campaign_name;
   if (!inUtm.utm_content  && inMeta.meta_ad_name)       inUtm.utm_content  = inMeta.meta_ad_name;
   if (!inUtm.utm_term     && inMeta.meta_adset_name)    inUtm.utm_term     = inMeta.meta_adset_name;
+
+  // 26/10/2026: UTM que se perdeu entre páginas. A visita entrou numa página NOSSA com UTM
+  // (link da bio, anúncio do Google) e enviou o formulário de outra, já sem ela; o
+  // GreatPages manda a página anterior em `Referral_Source`. Só quando NADA de rastreio
+  // veio por outro caminho (nem meta_*) — senão misturaria dois toques —, só domínio nosso
+  // e só a UTM ESCRITA na URL. `fonte_referencia` continua vazia de propósito: com ela o
+  // compute_lead_fonte presumiria a origem pelo caminho (home → GOOGLE).
+  if (!temRastreamento(inUtm) && Object.keys(inMeta).length === 0) {
+    Object.assign(inUtm, rastreamentoDoReferrer(pickReferralSource(dados)));
+  }
 
   // ── Contato EFETIVO vs IDENTIFICADOR (2026-08-12) ────────────────────────────
   // `email`/`whatsapp` = IDENTIFICADOR (aba Entrada) e servem SÓ pra dedup no passo (5).

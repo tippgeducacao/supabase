@@ -176,6 +176,50 @@ describe("webhook integrado: captura UTM no entrypoint real", () => {
     expect(cliente.from.mock.calls.map(([tabela]) => tabela)).toEqual(["crm_webhook_integrations", "crm_webhook_escutas", "crm_webhook_logs", "crm_webhook_logs"]);
   });
 
+  /**
+   * UTM perdida entre páginas (26/10/2026): o GreatPages envia os campos utm_* VAZIOS
+   * quando o formulário está numa página diferente da que recebeu a UTM, e manda a
+   * página anterior em Referral_Source. Forma real do payload (pós 3 em 1, 25/10).
+   */
+  const envioSemUtm = (referral: string, extra: Record<string, unknown> = {}) => ({
+    URL: "https://www.ppgvet.com.br/poa", utm_source: "", utm_medium: "", utm_campaign: "", utm_content: "",
+    utm_term: "", gclid: "", fbclid: "", Referral_Source: referral, ...extra,
+  });
+
+  it("UTM perdida entre páginas: a página anterior NOSSA devolve a UTM ao contato e à chegada", async () => {
+    await enviar(envioSemUtm("https://www.ppgvet.com.br/links?utm_source=ig&utm_medium=social&utm_content=link_in_bio&fbclid=clique-bio"));
+    expect(gravacoes.leads[0]).toMatchObject({ utm_source: "ig", utm_medium: "social", utm_content: "link_in_bio", fbclid: "clique-bio" });
+    // a página de captação continua sendo a do formulário, e a origem NÃO é presumida
+    expect(gravacoes.leads[0]).toMatchObject({ pagina_nome: "https://www.ppgvet.com.br/poa" });
+    expect(gravacoes.leads[0]).not.toHaveProperty("fonte_referencia");
+    expect(gravacoes.crm_webhook_logs[0].resultado).toMatchObject({ rastreamento: { utm_source: "ig", utm_content: "link_in_bio" } });
+  });
+
+  it("página anterior de site PARCEIRO não vira a nossa UTM", async () => {
+    await enviar(envioSemUtm("https://www.produtivaassessoriavet.com.br/?utm_source=parceiro&utm_content=banner"));
+    expect(gravacoes.leads[0]).not.toHaveProperty("utm_source");
+    expect(gravacoes.leads[0]).not.toHaveProperty("utm_content");
+  });
+
+  it("UTM do próprio envio vence: a página anterior não completa outro toque", async () => {
+    await enviar(envioSemUtm("https://www.ppgvet.com.br/links?utm_source=ig&utm_content=link_in_bio", { utm_source: "tiktok" }));
+    expect(gravacoes.leads[0]).toMatchObject({ utm_source: "tiktok" });
+    expect(gravacoes.leads[0]).not.toHaveProperty("utm_content");
+  });
+
+  it("formulário instantâneo com anúncio mapeado não herda a UTM da página anterior", async () => {
+    integracao.field_mapping = { nome: "lead.nome", email: "lead.email", anuncio: "lead.meta_ad_name" };
+    await enviar(envioSemUtm("https://www.ppgvet.com.br/links?utm_source=ig&utm_content=link_in_bio", { anuncio: "ad00612_SA_v01_c01_e05_ATMP" }));
+    expect(gravacoes.leads[0]).toMatchObject({ meta_ad_name: "ad00612_SA_v01_c01_e05_ATMP", utm_content: "ad00612_SA_v01_c01_e05_ATMP" });
+    expect(gravacoes.leads[0]).not.toHaveProperty("utm_source");
+  });
+
+  it("página anterior sem UTM (home do site) não inventa origem", async () => {
+    await enviar(envioSemUtm("https://ppgvet.com.br/"));
+    expect(gravacoes.leads[0]).not.toHaveProperty("utm_source");
+    expect(gravacoes.leads[0]).not.toHaveProperty("fonte_referencia");
+  });
+
   it("reenvio de log legado sem snapshot não inventa atribuição com o config atual", async () => {
     logAnterior = { id: "log-legado", criado_em: "2026-09-09T12:00:00Z", resultado: {} };
     integracao.config = { acoes: { itens: [{ tipo: "salvar_utm", params: { utm_source: "tiktok" } }] } };

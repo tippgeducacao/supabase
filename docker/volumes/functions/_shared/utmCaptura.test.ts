@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { complementarPrimeiraAtribuicao, extrairRastreamento, podeComplementarAtribuicao } from "./utmCaptura";
+import { complementarPrimeiraAtribuicao, extrairRastreamento, podeComplementarAtribuicao, rastreamentoDoReferrer, temRastreamento } from "./utmCaptura";
 
 describe("captura de rastreamento da chegada", () => {
   it.each(["tiktok_aviario", "linkedin_ppgvet", "whatsapp_aves", "ig_petfood"])("recupera %s com campanha e conteúdo enviados somente na URL", fonte => {
@@ -102,5 +102,50 @@ describe("primeira atribuição do contato", () => {
 
   it("contato ainda sem origem aceita os sinais recebidos", () => {
     expect(complementarPrimeiraAtribuicao({ fonte: "UTM COM ERRO" }, { utm_source: "linkedin_ppgvet", utm_campaign: "sanidade" })).toEqual({ utm_source: "linkedin_ppgvet", utm_campaign: "sanidade" });
+  });
+});
+
+/**
+ * UTM que se perdeu entre páginas (26/10/2026): casos do banco real — o link da bio
+ * (/links) e o anúncio do Google na home, ambos com o formulário enviado de outra página.
+ */
+describe("rastreamento da página anterior (Referral_Source)", () => {
+  it("recupera a UTM escrita na página nossa de onde a pessoa veio — inclusive o clique", () => {
+    expect(rastreamentoDoReferrer("https://www.ppgvet.com.br/links?utm_source=ig&utm_medium=social&utm_content=link_in_bio&fbclid=PAZXh0bgNhZW0")).toEqual({
+      utm_source: "ig", utm_medium: "social", utm_content: "link_in_bio", fbclid: "PAZXh0bgNhZW0",
+    });
+    expect(rastreamentoDoReferrer("https://ppgvet.com.br/?utm_source=google&utm_medium=cpc&utm_campaign=CONVERSAO_LEAD_INSTITUCIONAL-COMERCIAL_PESQUISA&utm_content=ad_688605250440_ag_156423297085_dev_m_net_g_mt_b")).toEqual({
+      utm_source: "google", utm_medium: "cpc", utm_campaign: "CONVERSAO_LEAD_INSTITUCIONAL-COMERCIAL_PESQUISA",
+      utm_content: "ad_688605250440_ag_156423297085_dev_m_net_g_mt_b",
+    });
+  });
+
+  it("decodifica como a URL da landing (o ✅ das campanhas chega como %E2%9C%85+)", () => {
+    expect(rastreamentoDoReferrer("https://www.ppgvet.com.br/pos-3em1?utm_source=meta&utm_campaign=%E2%9C%85+LP_LEAD_POS-BOVINOS31-COMERCIAL-mensal").utm_campaign)
+      .toBe("✅ LP_LEAD_POS-BOVINOS31-COMERCIAL-mensal");
+  });
+
+  it("vale para os três domínios nossos e seus subdomínios", () => {
+    for (const host of ["site.ppgvet.com.br", "www.ppgeducacao.com.br", "ppgagro.com.br"]) {
+      expect(rastreamentoDoReferrer(`https://${host}/x?utm_source=ig`)).toEqual({ utm_source: "ig" });
+    }
+  });
+
+  it("página de site PARCEIRO não vira a nossa UTM (a UTM é de como chegaram ao site dele)", () => {
+    expect(rastreamentoDoReferrer("https://www.produtivaassessoriavet.com.br/?utm_source=parceiro&utm_content=banner")).toEqual({});
+    // domínio que só CONTÉM o nosso também não é nosso
+    expect(rastreamentoDoReferrer("https://ppgvet.com.br.golpe.com/?utm_source=ig")).toEqual({});
+  });
+
+  it("sem UTM na página anterior (home, busca do Google, acesso direto) não inventa nada", () => {
+    for (const ref of ["https://ppgvet.com.br/", "https://www.google.com/", "Acesso direto", "", null, 42]) {
+      expect(rastreamentoDoReferrer(ref)).toEqual({});
+    }
+  });
+
+  it("temRastreamento olha UTM e clique, nada mais", () => {
+    expect(temRastreamento({})).toBe(false);
+    expect(temRastreamento({ fbclid: "x" })).toBe(true);
+    expect(temRastreamento({ utm_content: "link_in_bio" })).toBe(true);
   });
 });
