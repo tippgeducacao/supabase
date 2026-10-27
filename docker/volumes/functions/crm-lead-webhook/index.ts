@@ -60,6 +60,8 @@ import { receberModulosPraticosHttp } from "./modulosPraticosHttp.ts";
 import { obterMotivoExclusaoModulosPraticos } from "./modulosPraticosExclusoes.ts";
 import { executarAcaoEmail, type ResultadoAcaoEmail } from "./acaoEmail.ts";
 import { aplicarCursoDaInscricao } from "./cursoDaInscricao.ts";
+import { receberComArquivos } from "./arquivosWebhook.ts";
+import { etapaPorCampo } from "./arquivosValidacao.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -297,7 +299,7 @@ const ACAO_LABELS: Record<string, string> = {
   remove_segmento:     "Remover de um segmento",
 };
 
-Deno.serve(async (req) => {
+async function receberWebhook(req: Request, arquivosConferidos = false): Promise<Response> {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
 
@@ -414,6 +416,15 @@ Deno.serve(async (req) => {
       erro: debug, ip_origem: ipOrigem, ...reqMeta,
     });
     return json({ error: "invalid_secret" }, 401);
+  }
+
+  // Opt-in: transporte de documentos privados. O callback volta a este intake
+  // após validar os bytes; a flag é interna, nunca vem do corpo/header público.
+  if (integration.config?.arquivos?.habilitado === true && !arquivosConferidos) {
+    return receberComArquivos(req, integration, admin, payload => receberWebhook(new Request(req.url, {
+      method: "POST", headers: { "content-type": "application/json", "x-webhook-secret": integration.secret },
+      body: JSON.stringify(payload),
+    }), true));
   }
 
   // Inscrições de módulos são cards pedagógicos, não uma nova captação comercial.
@@ -597,6 +608,18 @@ Deno.serve(async (req) => {
   // CHAVE contra qualquer uma. Body tem prioridade em caso de chave repetida. O log segue
   // gravando o `payload` (corpo) cru; query/headers já vão no log via ...reqMeta.
   const dados: Record<string, unknown> = { ...queryParams, ...headersObj, ...(payload as Record<string, unknown>) };
+
+  // Roteamento opt-in da ação existente. Resolver ANTES de criar contato/captação:
+  // opção fora do mapa ou etapa de outro funil devolve erro, sem destino silencioso.
+  for (const acao of config?.acoes?.itens ?? []) {
+    if (acao?.tipo !== "criar_oportunidade" || !acao.params?.etapaPorCampo) continue;
+    const etapaId = etapaPorCampo(acao.params, dados);
+    if (!etapaId) return json({ ok: false, erro: "Área de inscrição inválida.", campo: "area" }, 422);
+    const { data: etapa } = await admin.from("crm_funis_etapas").select("id")
+      .eq("id", etapaId).eq("funil_id", acao.params.funilId).maybeSingle();
+    if (!etapa) return json({ ok: false, erro: "Destino da inscrição indisponível." }, 503);
+    acao.params.etapaId = etapaId;
+  }
 
   // Grafias LEGADAS de UTM (typos herdados do GreatPages/prompt antigo do Pages):
   // "utm_campaing"→"utm_campaign" e "utm_contet"→"utm_content", fill-if-missing nos DOIS
@@ -1222,7 +1245,7 @@ Deno.serve(async (req) => {
   // esse número ancora o fluxo INTEIRO; senão, a primeira conta ativa (legado).
   try {
     const acaoComConta = acoesItens.find(
-      (a: any) => a?.tipo === "enviar_mensagem_whatsapp" &&
+      (a: any) => ["enviar_mensagem_whatsapp", "criar_oportunidade"].includes(a?.tipo) &&
         typeof a?.params?.wa_account_id === "string" && a.params.wa_account_id,
     );
     if (acaoComConta) {
@@ -1823,7 +1846,7 @@ Deno.serve(async (req) => {
   // `!whatsappImpossivel`: número que não pode existir não semeia o agente nem fura o
   // n8n — o JID seria de um telefone inexistente e o follow-up nasceria condenado.
   // A guarda de `crm-whatsapp-send` já barraria o envio; aqui evita-se o lixo antes.
-  if (abrirCards && whatsappLead && telCanon && !whatsappImpossivel) {
+  if (abrirCards && whatsappLead && telCanon && !whatsappImpossivel && config?.semearAgente !== false) {
     // (10a) Seed cliente_ppg_leads_sdr (CONTEXTO do agente). O n8n só escuta eventos de
     // MENSAGEM (webhook apioficial), NÃO o webhook do SprintHub — então o lead é semeado
     // aqui, server-side. Upsert manual por remotejid (não há unique no remotejid): insere
@@ -2072,4 +2095,6 @@ Deno.serve(async (req) => {
     acoes_aplicadas: acoesAplicadas,
     ...(acoesEmail.length ? { acoes_email_resultados: acoesEmailResultados } : {}),
   }, statusResp);
-});
+}
+
+Deno.serve(req => receberWebhook(req));
