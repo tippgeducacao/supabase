@@ -1277,10 +1277,20 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
   //   escolhidos (RPC distribuir_proximo_responsavel; devolve tambem o logId p/ amarrar
   //   opp/atendimento e a carga contar pelo estado real); nenhum → null.
   // Devolve { id, logId }: logId só vem na estrategia setor_equipe (linha em crm_distribuicao_log).
-  async function resolverResponsavel(acaoId: string, resp: any): Promise<{ id: string | null; logId: string | null }> {
+  async function resolverResponsavel(acaoId: string, resp: any, produtoDepto: string | null = null): Promise<{ id: string | null; logId: string | null }> {
     const estrategia = resp?.estrategia ?? "do_contato";
     try {
       if (estrategia === "nenhum") return { id: null, logId: null };
+      // Rodízio no TIME DO PRODUTO (27/10/2026): o mesmo pool por departamento do CRM do
+      // setor_equipe, só que o departamento vem do produto da ação. Sem produto = sem dono.
+      if (estrategia === "time_do_produto") {
+        if (!produtoDepto) return { id: null, logId: null };
+        const { data: pick } = await admin.rpc("distribuir_proximo_responsavel", {
+          p_acao_id: acaoId, p_departamentos: [produtoDepto], p_excluir: null,
+        });
+        const row: any = Array.isArray(pick) ? pick[0] : pick;
+        return { id: row?.usuario_id ?? null, logId: row?.log_id ?? null };
+      }
       if (estrategia === "usuario") return { id: (typeof resp?.usuarioId === "string" && resp.usuarioId) ? resp.usuarioId : null, logId: null };
       if (estrategia === "do_contato") {
         const { data } = await admin.from("leads").select("vendedor_atribuido").eq("id", leadId).maybeSingle();
@@ -1351,6 +1361,19 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
   // responsavel e respeita "nao criar oportunidades repetidas". O INSERT na etapa escolhida
   // dispara a engine de automacao (saudacao) se a etapa tiver automacao — controle do usuario.
   // Roda tambem p/ lead IDENTIFICADO (abrirCards), nao so quando passou o dedup de saudacao.
+  // PRODUTO (27/10/2026) — a fonte da verdade: do produto da ação saem o SAC do atendimento
+  // (gatilho no banco), o time dono (estratégia 'time_do_produto') e a persona da IA
+  // (contexto_campanha do lead do SDR). Carregado uma vez; falha aqui não derruba o webhook.
+  type ProdutoRow = { chave: string; sac_v2_funil_id: string | null; crm_departamento_id: string | null; ia_persona: string | null };
+  const produtosPorChave = new Map<string, ProdutoRow>();
+  try {
+    const { data: prs } = await admin.from("crm_produtos").select("chave, sac_v2_funil_id, crm_departamento_id, ia_persona").eq("ativo", true);
+    for (const pr of (prs ?? []) as ProdutoRow[]) produtosPorChave.set(pr.chave, pr);
+  } catch (e: any) { console.error("[crm-lead-webhook] crm_produtos:", e?.message); }
+  // Persona do ÚLTIMO produto com ação de card nesta chamada — vai para o lead do SDR (10a).
+  // 'aula' fica de fora: a persona de aula exige a aula cadastrada (contexto do fluxo de aula).
+  let produtoIaCtx: Record<string, unknown> | null = null;
+
   if (abrirCards) {
     let captacaoVinculada = false;
     for (const a of opActions) {
@@ -1363,6 +1386,11 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
         // o SAC padrão do funil (o gatilho do banco resolve). Só aceita uuid.
         const sacFunilId =
           typeof p.sacFunilId === "string" && /^[0-9a-f-]{36}$/i.test(p.sacFunilId) ? p.sacFunilId : null;
+        const produtoChave = typeof p.produto === "string" && produtosPorChave.has(p.produto) ? p.produto : null;
+        const produto = produtoChave ? produtosPorChave.get(produtoChave)! : null;
+        if (produto?.ia_persona && produto.ia_persona !== "aula") {
+          produtoIaCtx = { persona: produto.ia_persona, produto: produtoChave, origem: "webhook", disparado_em: new Date().toISOString() };
+        }
         titulosDosCards.push(tituloResolved);
         if (typeof p.funilId === "string" && p.funilId) funisDosCards.push(p.funilId);
         const nowIso = new Date().toISOString();
@@ -1399,6 +1427,7 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
                 ultima_atividade_em: nowIso,
                 // recadastro também renova o destino de SAC do contato (gatilho no banco)
                 ...(sacFunilId ? { sac_v2_funil_id: sacFunilId } : {}),
+                ...(produtoChave ? { produto: produtoChave } : {}),
               })
               .eq("id", existe.id);
             if (!oportunidadeId) oportunidadeId = existe.id;
@@ -1430,7 +1459,7 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
         const rawValor = resolveWebhookVar(p.valor, dados).replace(",", ".").replace(/[^0-9.\-]/g, "").trim();
         const valorNum = rawValor !== "" && Number.isFinite(Number(rawValor)) ? Number(rawValor) : null;
         const statusOp = (p.status === "ganha" || p.status === "perdida") ? p.status : "aberta";
-        const { id: responsavelId, logId } = await resolverResponsavel(a.id, p.responsavel);
+        const { id: responsavelId, logId } = await resolverResponsavel(a.id, p.responsavel, produto?.crm_departamento_id ?? null);
 
         const { data: op, error: opErr } = await admin
           .from("crm_oportunidades")
@@ -1455,6 +1484,7 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
             origem_integracao_id: integration.id,
             origem_acao_id: acaoId,
             sac_v2_funil_id: sacFunilId,
+            produto: produtoChave,
           })
           .select("id")
           .single();
@@ -1867,7 +1897,7 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
       }
       const { data: leadSdr } = await admin
         .from("cliente_ppg_leads_sdr")
-        .select("id, nome, curso_interesse_original, formacao_academica")
+        .select("id, nome, curso_interesse_original, formacao_academica, contexto_campanha")
         .eq("remotejid", remoteJid)
         .maybeSingle();
       const novaForm = formacaoLead ?? tempoFormacao ?? areaLead;
@@ -1887,6 +1917,8 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
           followup_ativado: acaoAtivarIa,
           // Sem a ação de ativar a IA o lead nasce fora da cadência; o gatilho guarda o porquê.
           ...(acaoAtivarIa ? {} : { followup_desligado_motivo: "criado_sem_ativar_ia" }),
+          // Persona pelo PRODUTO da ação (27/10/2026). Lead novo: sempre.
+          ...(produtoIaCtx ? { contexto_campanha: produtoIaCtx } : {}),
         });
       } else {
         // Lead JÁ EXISTIA: preenche os campos VAZIOS do registro do agente (fill-if-empty,
@@ -1899,6 +1931,9 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
         if (vazio(ls.nome) && nome) patch.nome = nome;
         if (vazio(ls.formacao_academica) && novaForm) patch.formacao_academica = novaForm;
         if (acaoAtivarIa) patch.iniciar_atendimento = true; // responde quando reagir ao template
+        // Persona pelo produto (27/10/2026): gradual — lead que JÁ tem contexto (ex.: aula com
+        // aula_id) não é sobrescrito pelo webhook; só preenche o vazio.
+        if (produtoIaCtx && !ls.contexto_campanha) patch.contexto_campanha = produtoIaCtx;
         if (Object.keys(patch).length) {
           await admin.from("cliente_ppg_leads_sdr").update(patch).eq("id", ls.id);
         }
