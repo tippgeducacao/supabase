@@ -62,7 +62,9 @@ async function montarEvento(p: Pendente) {
   const tel = telefoneMeta(p.telefone);
   if (tel) user_data.ph = [await sha256(tel)];
   // String, não número: 15-17 dígitos passam do inteiro seguro do JavaScript.
-  if (p.leadgen_id && /^\d{15,17}$/.test(p.leadgen_id)) user_data.lead_id = p.leadgen_id;
+  // meta_leadgen_entregas guarda o ID como na exportação da Meta, com "l:" na frente.
+  const leadId = (p.leadgen_id || "").replace(/^l:/, "");
+  if (/^\d{15,17}$/.test(leadId)) user_data.lead_id = leadId;
   if (p.fbclid) user_data.fbc = `fb.1.${new Date(p.lead_criado_em).getTime()}.${p.fbclid}`;
   return {
     event_name: p.etapa,
