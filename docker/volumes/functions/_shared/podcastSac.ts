@@ -84,7 +84,8 @@ export function acaoDoBotaoPodcast(rotulo: string | null | undefined, modelo: st
   if (clique) return clique;
   switch (r) {
     case "nao tenho interesse":
-      return m.startsWith("podcast_followup_2_v3") ? "encerramento" : "pedido_indicacao";
+      // só os follow-ups 2 do PDF (v3 em diante) têm este botão; o v2 tem "Agora não"
+      return m.startsWith("podcast_followup_2") ? "encerramento" : "pedido_indicacao";
     case "agora nao":
       if (m.startsWith("podcast_pedido_indicacao")) return "recusa";
       if (m.startsWith("podcast_followup_2")) return "encerramento_6m";

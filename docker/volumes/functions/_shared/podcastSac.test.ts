@@ -17,6 +17,8 @@ describe("acaoDoBotaoPodcast", () => {
     expect(acaoDoBotaoPodcast("Não tenho interesse", "podcast_convite_v2")).toBe("pedido_indicacao");
     expect(acaoDoBotaoPodcast("Não tenho interesse", "podcast_followup_1_v2")).toBe("pedido_indicacao");
     expect(acaoDoBotaoPodcast("Não tenho interesse", "podcast_followup_2_v3")).toBe("encerramento");
+    // a versão de texto informativo (27/10/2026) tem o mesmo botão
+    expect(acaoDoBotaoPodcast("Não tenho interesse", "podcast_followup_2_v4")).toBe("encerramento");
     expect(acaoDoBotaoPodcast("Não tenho interesse", null)).toBe("pedido_indicacao");
   });
 
