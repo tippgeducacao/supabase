@@ -89,13 +89,24 @@ export async function receberComArquivos(req: Request, integracao: any, db: any,
         if (erroLista || !recebido || Number(recebido.metadata?.size) !== a.tamanho || recebido.metadata?.mimetype !== a.tipo) return resposta({ ok: false, campo: a.campo, erro: `O arquivo não chegou completo: ${a.rotulo}.` }, 422);
         const { data: link, error: erroLink } = await db.storage.from(a.bucket).createSignedUrl(a.caminho, 60);
         if (erroLink) throw erroLink;
-        const r = await fetch(link.signedUrl, { headers: { Range: "bytes=0-31" }, signal: AbortSignal.timeout(15000) });
+        // Um objeto menor que 32 bytes precisa chegar à validação de formato;
+        // pedir além do tamanho pode retornar 416 e parecer falha temporária.
+        const limite = Math.min(32, a.tamanho);
+        const r = await fetch(link.signedUrl, { headers: { Range: `bytes=0-${limite - 1}` }, signal: AbortSignal.timeout(15000) });
         // Cancela o stream depois do cabeçalho: um servidor sem Range nunca força baixar 2 GB.
         const leitor = r.body?.getReader();
         if (!r.ok || !leitor) throw new Error("Não foi possível conferir o arquivo.");
-        const { value } = await leitor.read();
+        const cabecalho = new Uint8Array(limite);
+        let lidos = 0;
+        while (lidos < limite) {
+          const { value, done } = await leitor.read();
+          if (done || !value) break;
+          const trecho = value.subarray(0, limite - lidos);
+          cabecalho.set(trecho, lidos);
+          lidos += trecho.length;
+        }
         await leitor.cancel();
-        if (!value || !assinaturaCompativel(a.tipo, value)) return resposta({ ok: false, campo: a.campo, erro: `O conteúdo não corresponde ao formato: ${a.rotulo}.` }, 422);
+        if (!assinaturaCompativel(a.tipo, cabecalho.subarray(0, lidos))) return resposta({ ok: false, campo: a.campo, erro: `O conteúdo não corresponde ao formato: ${a.rotulo}.` }, 422);
       }
       // Recupera entrega cujo HTTP se perdeu APÓS o log do intake, antes do recibo final.
       const { data: anterior } = await db.from("crm_webhook_logs").select("resultado").eq("integration_id", integracao.id)
