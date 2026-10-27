@@ -6,10 +6,12 @@
 // não verificar. Por isso esta function usa a busca na web NATIVA da Anthropic
 // (`web_search`, servidor deles): o modelo pesquisa, lê o resultado e só então registra.
 //
-// LOTES PEQUENOS (3 referências por invocação): cada uma pode custar duas buscas, e o
+// LOTES PEQUENOS (até 3 referências por invocação; o front manda UMA desde 27/10/2026): cada uma
+// pode custar duas buscas, e o
 // caminho até aqui passa pelo proxy do Cloudflare, que corta a resposta da origem em
 // ~100 s (524, sem CORS). Não são os ~150 s do runtime. Por isso também há um
-// AbortController de 85 s, somando TODAS as rodadas de pause_turn. O front itera os lotes
+// AbortController de 85 s, somando TODAS as rodadas de pause_turn (e o corte responde 503,
+// nunca 502/504 — ver `falhaTemporaria`). O front itera as referências (uma por chamada)
 // e grava o progresso (`referencias_verificadas`) para retomar de onde parou.
 //
 // CUSTA DINHEIRO de verdade: cada busca é cobrada à parte dos tokens. O botão na tela é
@@ -47,6 +49,19 @@ function json(payload: unknown, status = 200) {
     status,
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
+}
+
+/**
+ * Falha que o front pode TENTAR DE NOVO sozinho: a busca passou do tempo ou a API caiu.
+ *
+ * ⚠️ NUNCA 502 nem 504 aqui. O Cloudflare na frente da api troca TODO 502/504 da origem
+ * pela página de erro dele — sem os nossos cabeçalhos de CORS —, e o navegador entrega ao
+ * front um "Failed to send a request to the Edge Function", sem a mensagem. Foi assim até
+ * 27/10/2026: as 16 interrupções registradas desde 21/09 pararam todas em 85 s (o
+ * `TEMPO_MAXIMO_MS`) e nenhuma mostrou o texto que esta function escrevia. O 503 passa.
+ */
+function falhaTemporaria(error: string, motivo: "tempo" | "ia", extra: Record<string, unknown> = {}) {
+  return json({ error, temporario: true, motivo, ...extra }, 503);
 }
 
 async function chaveAnthropic(sb: ReturnType<typeof createClient>): Promise<string> {
@@ -229,7 +244,12 @@ Deno.serve(async (req) => {
       if (!resp.ok) {
         const detalhe = await resp.text();
         console.error("[tcc-referencias] anthropic", resp.status, detalhe.slice(0, 500));
-        return json({ error: "falha na verificação", status: resp.status }, 502);
+        // Sobrecarga e instabilidade da API (429, 5xx, 529) passam: vale tentar de novo.
+        // O resto (400, 401…) é defeito nosso, e repetir só gastaria.
+        if (resp.status === 429 || resp.status >= 500) {
+          return falhaTemporaria("a IA da verificação está instável agora", "ia", { status: resp.status });
+        }
+        return json({ error: "falha na verificação", status: resp.status }, 500);
       }
 
       data = await resp.json();
@@ -242,7 +262,19 @@ Deno.serve(async (req) => {
       break;
     }
 
-    if (!data) return json({ error: "sem resposta do modelo" }, 502);
+    // Tempo esgotado: as buscas já foram pagas, mas o front precisa PARAR este lote —
+    // seguir repetiria o custo sem nunca terminar. Vem ANTES do `!data`: o corte na primeira
+    // rodada deixa `data` vazio, e era esse caminho que respondia 502 sem log nenhum.
+    if (esgotouTempo) {
+      console.error(JSON.stringify({ evento: "tcc_referencias_tempo", lote: referencias.length, buscas, duracao_ms: Date.now() - inicioMs }));
+      return falhaTemporaria(
+        `a busca na web passou de ${Math.round(TEMPO_MAXIMO_MS / 1000)} s nesta referência`,
+        "tempo",
+        { buscas },
+      );
+    }
+
+    if (!data) return falhaTemporaria("a IA da verificação não respondeu", "ia");
 
     // Recusa dos classificadores chega com HTTP 200 — e um TCC de veterinária sobre
     // patógeno ou fármaco pode disparar. Não pode virar "lote verificado, nada a apontar":
@@ -250,16 +282,6 @@ Deno.serve(async (req) => {
     if (data.stop_reason === "refusal") {
       console.log(JSON.stringify({ evento: "tcc_referencias_recusa", lote: referencias.length, categoria: data?.stop_details?.category ?? null }));
       return json({ error: "o modelo recusou verificar este lote de referências; confira essas entradas à mão", recusado: true }, 422);
-    }
-
-    // Tempo esgotado: as buscas já foram pagas, mas o front precisa PARAR — seguir para o
-    // próximo lote repetiria o custo sem nunca terminar este.
-    if (esgotouTempo) {
-      console.error(JSON.stringify({ evento: "tcc_referencias_tempo", lote: referencias.length, buscas, duracao_ms: Date.now() - inicioMs }));
-      return json(
-        { error: `a verificação passou de ${Math.round(TEMPO_MAXIMO_MS / 1000)} s neste lote e foi interrompida; tente de novo`, buscas },
-        504,
-      );
     }
 
     const chamada = (data.content ?? []).find(
