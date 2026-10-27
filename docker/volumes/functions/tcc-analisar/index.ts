@@ -13,6 +13,13 @@
 // vezes bastante (tcc_excecoes.ativa) não volta a aparecer. Sem isso a lista enche de nome
 // de fármaco e de espécie a cada TCC, e no terceiro mês ninguém mais lê.
 //
+// ⚠️ TEMPO e ERRO: `api.ppgeducacao.site` está atrás do Cloudflare, que corta a resposta da
+// origem em ~100 s e TROCA todo 502/504 da origem pela página dele, sem CORS — o navegador
+// via "Failed to send a request to the Edge Function" e nunca a mensagem. Por isso há um
+// AbortController de 90 s, e a falha que vale repetir responde 503 (`falhaTemporaria`), que
+// passa. O front tenta o pedaço de novo sozinho uma vez. (27/10/2026, mesmo conserto da
+// `tcc-referencias`.)
+//
 // Desenho: docs/superpowers/specs/2026-09-16-correcao-tcc-design.md
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 
@@ -33,12 +40,24 @@ const MODELO = Deno.env.get("ANTHROPIC_MODEL_TCC") ?? "claude-opus-5";
 
 /** Teto de páginas por chamada — acima disso a saída fica longa e o modelo começa a resumir. */
 const MAX_PAGINAS_POR_CHUNK = 10;
+/** Abaixo do corte do Cloudflare (~100 s), com folga para a resposta chegar. */
+const TEMPO_MAXIMO_MS = 90_000;
 
 function json(payload: unknown, status = 200) {
   return new Response(JSON.stringify(payload), {
     status,
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
+}
+
+/**
+ * Falha que vale tentar de novo (tempo esgotado, IA instável): 503 com `temporario: true`.
+ *
+ * NUNCA 502/504: o Cloudflare troca esses dois pela página de erro dele, sem os nossos
+ * cabeçalhos de CORS, e o front recebia "Failed to send a request to the Edge Function".
+ */
+function falhaTemporaria(error: string, motivo: "tempo" | "ia", extra: Record<string, unknown> = {}) {
+  return json({ error, temporario: true, motivo, ...extra }, 503);
 }
 
 async function chaveAnthropic(sb: ReturnType<typeof createClient>): Promise<string> {
@@ -216,46 +235,71 @@ Deno.serve(async (req) => {
       "</texto_do_aluno>",
     ].join("\n\n");
 
-    const resp = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model: MODELO,
-        max_tokens: 16000,
-        // Pensamento adaptativo ligado (padrão no Opus 5) com esforço médio: revisão de
-        // texto não é problema difícil, e esforço alto aqui só queima token e latência.
-        thinking: { type: "adaptive" },
-        output_config: { effort: "medium" },
-        system: [
-          {
-            type: "text",
-            text: SISTEMA,
-            // O prompt se repete a cada chunk do mesmo TCC — o cache paga logo no segundo.
-            cache_control: { type: "ephemeral" },
-          },
-        ],
-        tools: [FERRAMENTA],
-        // `auto` + instrução, e não `tool_choice` forçado: a forma forçada é rejeitada em
-        // parte da família de modelos, e `strict: true` já garante que o argumento venha
-        // no formato certo quando a chamada acontecer.
-        tool_choice: { type: "auto" },
-        messages: [
-          {
-            role: "user",
-            content: `Revise o texto abaixo e chame a ferramenta registrar_apontamentos com o que encontrar.\n\n${corpo}`,
-          },
-        ],
-      }),
-    });
+    // Falha NOSSA, com mensagem, antes de o Cloudflare cortar sem CORS.
+    const inicioMs = Date.now();
+    const controle = new AbortController();
+    const temporizador = setTimeout(() => controle.abort(), TEMPO_MAXIMO_MS);
+
+    let resp: Response;
+    try {
+      resp = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        signal: controle.signal,
+        headers: {
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: MODELO,
+          max_tokens: 16000,
+          // Pensamento adaptativo ligado (padrão no Opus 5) com esforço médio: revisão de
+          // texto não é problema difícil, e esforço alto aqui só queima token e latência.
+          thinking: { type: "adaptive" },
+          output_config: { effort: "medium" },
+          system: [
+            {
+              type: "text",
+              text: SISTEMA,
+              // O prompt se repete a cada chunk do mesmo TCC — o cache paga logo no segundo.
+              cache_control: { type: "ephemeral" },
+            },
+          ],
+          tools: [FERRAMENTA],
+          // `auto` + instrução, e não `tool_choice` forçado: a forma forçada é rejeitada em
+          // parte da família de modelos, e `strict: true` já garante que o argumento venha
+          // no formato certo quando a chamada acontecer.
+          tool_choice: { type: "auto" },
+          messages: [
+            {
+              role: "user",
+              content: `Revise o texto abaixo e chame a ferramenta registrar_apontamentos com o que encontrar.\n\n${corpo}`,
+            },
+          ],
+        }),
+      });
+    } catch (e) {
+      if (controle.signal.aborted) {
+        console.error(JSON.stringify({ evento: "tcc_analisar_tempo", paginas: paginas.length, duracao_ms: Date.now() - inicioMs }));
+        return falhaTemporaria(
+          `a leitura destas páginas passou de ${Math.round(TEMPO_MAXIMO_MS / 1000)} s e foi interrompida`,
+          "tempo",
+        );
+      }
+      throw e;
+    } finally {
+      clearTimeout(temporizador);
+    }
 
     if (!resp.ok) {
       const detalhe = await resp.text();
       console.error("[tcc-analisar] anthropic", resp.status, detalhe.slice(0, 500));
-      return json({ error: "falha na análise", status: resp.status }, 502);
+      // Sobrecarga e instabilidade da API (429, 5xx, 529) passam: vale tentar de novo.
+      // O resto (400, 401…) é defeito nosso, e repetir só gastaria.
+      if (resp.status === 429 || resp.status >= 500) {
+        return falhaTemporaria("a IA da varredura está instável agora", "ia", { status: resp.status });
+      }
+      return json({ error: "falha na análise", status: resp.status }, 500);
     }
 
     const data = await resp.json();

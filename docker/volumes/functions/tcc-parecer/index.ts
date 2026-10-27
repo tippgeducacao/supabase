@@ -14,10 +14,14 @@
 // ⚠️ TEMPO: `api.ppgeducacao.site` está atrás do proxy do Cloudflare, que corta a resposta
 // da origem em ~100 s (524, sem CORS — o navegador vê um erro genérico). Não são os
 // ~150 s do runtime. Por isso: effort `low`, no máximo 25 apontamentos por modo,
-// `max_tokens` 8000 e um AbortController de 90 s que devolve um 504 NOSSO, com mensagem,
+// `max_tokens` 8000 e um AbortController de 90 s que devolve uma falha NOSSA, com mensagem,
 // antes de o proxy cortar. Meça `duracao_ms` e `saida_tokens` no log `tcc_parecer_ok` nos
 // primeiros TCCs reais antes de subir qualquer um desses números.
 // (Revisão adversarial de 18/09/2026.)
+// ⚠️ Essa falha é 503, NUNCA 502/504: o Cloudflare TROCA todo 502/504 da origem pela página
+// dele, sem CORS, e a mensagem nunca chegava — o front via "Failed to send a request to the
+// Edge Function". Até 27/10/2026 o corte respondia 504 e três outros casos 502. Ver
+// `falhaTemporaria`; o front tenta o modo de novo sozinho uma vez.
 //
 // O que fica de FORA daqui de propósito, porque já é conferido por código ou por outra
 // function (e o modelo é instruído a não repetir): ortografia/gramática, citação ×
@@ -166,6 +170,15 @@ function json(payload: unknown, status = 200) {
     status,
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
+}
+
+/**
+ * Falha que vale tentar de novo (tempo esgotado, IA instável, saída cortada ou fora do
+ * formato): 503 com `temporario: true`. NUNCA 502/504 — o Cloudflare troca esses dois pela
+ * página de erro dele, sem os nossos cabeçalhos de CORS.
+ */
+function falhaTemporaria(error: string, motivo: "tempo" | "ia", extra: Record<string, unknown> = {}) {
+  return json({ error, temporario: true, motivo, ...extra }, 503);
 }
 
 async function chaveAnthropic(sb: ReturnType<typeof createClient>): Promise<string> {
@@ -421,9 +434,9 @@ Deno.serve(async (req) => {
     } catch (e) {
       if (controle.signal.aborted) {
         console.error(JSON.stringify({ evento: "tcc_parecer_tempo", modo, paginas: paginas.length, duracao_ms: Date.now() - inicioMs }));
-        return json(
-          { error: `o parecer passou de ${Math.round(TEMPO_MAXIMO_MS / 1000)} s neste modo e foi interrompido; tente de novo — se repetir, o trabalho é longo demais para uma passada` },
-          504,
+        return falhaTemporaria(
+          `o parecer passou de ${Math.round(TEMPO_MAXIMO_MS / 1000)} s neste modo e foi interrompido — se repetir, o trabalho é longo demais para uma passada`,
+          "tempo",
         );
       }
       throw e;
@@ -434,7 +447,12 @@ Deno.serve(async (req) => {
     if (!resp.ok) {
       const detalhe = await resp.text();
       console.error("[tcc-parecer] anthropic", resp.status, detalhe.slice(0, 500));
-      return json({ error: "falha no parecer", status: resp.status }, 502);
+      // Sobrecarga e instabilidade da API (429, 5xx, 529) passam: vale tentar de novo.
+      // O resto (400, 401…) é defeito nosso, e repetir só gastaria.
+      if (resp.status === 429 || resp.status >= 500) {
+        return falhaTemporaria("a IA do parecer está instável agora", "ia", { status: resp.status });
+      }
+      return json({ error: "falha no parecer", status: resp.status }, 500);
     }
 
     const data = await resp.json();
@@ -450,7 +468,7 @@ Deno.serve(async (req) => {
     // stop_reason ANTES de aceitar a chamada — senão a lista pela metade passa por inteira.
     if (data?.stop_reason === "max_tokens") {
       console.error(JSON.stringify({ evento: "tcc_parecer_cortado", modo, saida_tokens: data?.usage?.output_tokens ?? null }));
-      return json({ error: "o parecer ficou longo demais e foi cortado; tente de novo" }, 502);
+      return falhaTemporaria("o parecer ficou longo demais e foi cortado", "ia");
     }
 
     const chamada = (data?.content ?? []).find(
@@ -458,7 +476,7 @@ Deno.serve(async (req) => {
     );
     if (!chamada) {
       console.error("[tcc-parecer] sem tool_use", data?.stop_reason);
-      return json({ error: "o modelo não devolveu o parecer no formato esperado; tente de novo" }, 502);
+      return falhaTemporaria("o modelo não devolveu o parecer no formato esperado", "ia");
     }
 
     const brutos = chamada.input?.apontamentos ?? [];
