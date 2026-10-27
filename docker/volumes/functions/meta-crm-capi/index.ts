@@ -10,7 +10,8 @@
 // "Lead"; um "Lead" vindo daqui contaria de novo nas campanhas que otimizam por Lead.
 //
 // Quem pode chamar: só quem traz a service role key (o cron, pelo vault). O runtime não valida
-// JWT (VERIFY_JWT=false, docs/Infraestrutura e Deploy.md), então a checagem é aqui.
+// JWT (VERIFY_JWT=false, docs/Infraestrutura e Deploy.md), então a checagem é aqui
+// (chamadaInterna, que deixa o PostgREST conferir a assinatura).
 //
 // Corpo (JSON, tudo opcional):
 //   { "dias": 1..7 }          janela (padrão 2; a API aceita evento de até 7 dias)
@@ -73,11 +74,30 @@ async function montarEvento(p: Pendente) {
   };
 }
 
+/**
+ * Só o sistema chama: o cron manda a service role key do VAULT, que pode não ser igual
+ * letra a letra à da env da function (deu 401 no 1º teste, 27/10/2026). Ler a claim `role`
+ * sem conferir a assinatura não serve aqui: este runtime não valida JWT (VERIFY_JWT=false),
+ * então um token forjado passaria. Quem confere a assinatura é o PostgREST: com o token
+ * recebido, executa a RPC que só service_role pode executar. Assinatura falsa ou papel de
+ * usuário = erro = 401.
+ */
+async function chamadaInterna(authHeader: string, serviceKey: string): Promise<boolean> {
+  if (!authHeader.startsWith("Bearer ")) return false;
+  if (authHeader === `Bearer ${serviceKey}`) return true;
+  const comoQuemChamou = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_ANON_KEY") ?? "", {
+    global: { headers: { Authorization: authHeader } },
+    auth: { persistSession: false },
+  });
+  const { error } = await comoQuemChamou.rpc("meta_crm_eventos_pendentes", { p_dias: 1, p_limite: 1 });
+  return !error;
+}
+
 Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ ok: false, erro: "Método não permitido" }, 405);
 
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-  if (req.headers.get("Authorization") !== `Bearer ${serviceKey}`) {
+  if (!(await chamadaInterna(req.headers.get("Authorization") ?? "", serviceKey))) {
     return json({ ok: false, erro: "Não autorizado" }, 401);
   }
 
