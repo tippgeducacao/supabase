@@ -185,7 +185,8 @@ Deno.serve(async (req) => {
       falhas,
     }, falhas.length ? 207 : 200);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    // Erro do supabase-js não é instanceof Error: tem .message solto no objeto.
+    const msg = err instanceof Error ? err.message : (err as { message?: string })?.message ?? JSON.stringify(err);
     console.error("meta-crm-capi:", msg);
     return json({ ok: false, erro: msg.slice(0, 300) }, 500);
   }
