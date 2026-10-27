@@ -75,29 +75,34 @@ async function montarEvento(p: Pendente) {
 }
 
 /**
- * Só o sistema chama: o cron manda a service role key do VAULT, que pode não ser igual
- * letra a letra à da env da function (deu 401 no 1º teste, 27/10/2026). Ler a claim `role`
- * sem conferir a assinatura não serve aqui: este runtime não valida JWT (VERIFY_JWT=false),
- * então um token forjado passaria. Quem confere a assinatura é o PostgREST: com o token
- * recebido, executa a RPC que só service_role pode executar. Assinatura falsa ou papel de
- * usuário = erro = 401.
+ * Só o sistema chama. O cron manda a chave do VAULT (`_get_service_role_key()`), que NÃO é a
+ * service role key válida de hoje: o gateway a recusa (401 medido em 27/10/2026) e ela também
+ * difere da env desta function. Ler a claim `role` sem conferir assinatura não serve
+ * (VERIFY_JWT=false, um token forjado passaria). Então: aceita a chave da env OU a do vault,
+ * lida do banco com a chave da env. A do vault é secreta (só service_role/postgres executam
+ * `_get_service_role_key`), então só o próprio banco consegue mandá-la.
  */
-async function chamadaInterna(authHeader: string, serviceKey: string): Promise<boolean> {
+async function chamadaInterna(
+  authHeader: string,
+  serviceKey: string,
+  lerChaveDoVault: () => Promise<unknown>,
+): Promise<boolean> {
   if (!authHeader.startsWith("Bearer ")) return false;
   if (authHeader === `Bearer ${serviceKey}`) return true;
-  const comoQuemChamou = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_ANON_KEY") ?? "", {
-    global: { headers: { Authorization: authHeader } },
-    auth: { persistSession: false },
-  });
-  const { error } = await comoQuemChamou.rpc("meta_crm_eventos_pendentes", { p_dias: 1, p_limite: 1 });
-  return !error;
+  const chave = await lerChaveDoVault();
+  return typeof chave === "string" && chave.length > 20 && authHeader === `Bearer ${chave}`;
 }
 
 Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ ok: false, erro: "Método não permitido" }, 405);
 
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-  if (!(await chamadaInterna(req.headers.get("Authorization") ?? "", serviceKey))) {
+  const supabase = createClient(Deno.env.get("SUPABASE_URL")!, serviceKey);
+  const lerChaveDoVault = async () => {
+    const { data, error } = await supabase.rpc("_get_service_role_key");
+    return error ? null : data;
+  };
+  if (!(await chamadaInterna(req.headers.get("Authorization") ?? "", serviceKey, lerChaveDoVault))) {
     return json({ ok: false, erro: "Não autorizado" }, 401);
   }
 
@@ -111,8 +116,6 @@ Deno.serve(async (req) => {
   const teste = typeof corpo.teste === "string" && /^TEST\w+$/i.test(corpo.teste) ? corpo.teste : null;
 
   try {
-    const supabase = createClient(Deno.env.get("SUPABASE_URL")!, serviceKey);
-
     const { data: pendentes, error } = await supabase.rpc("meta_crm_eventos_pendentes", { p_dias: dias, p_limite: 5000 });
     if (error) throw error;
     const lista = (pendentes || []) as Pendente[];
