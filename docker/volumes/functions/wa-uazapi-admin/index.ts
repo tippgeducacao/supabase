@@ -61,6 +61,16 @@ Deno.serve(async (req) => {
   const body = await req.json().catch(() => ({}));
   const action = String(body?.action ?? "");
 
+  // Dono da linha (28/10/2026): conectar, status, desconectar e excluir só em linha que a
+  // pessoa gerencia (dona, quem criou, admin ou diretor). Antes qualquer usuário ativo agia
+  // na linha de qualquer outro só passando o conexao_id.
+  if (["conectar", "status", "desconectar", "deletar"].includes(action)) {
+    const alvo = String(body?.conexao_id ?? "");
+    if (!alvo) return json({ error: "conexao_id é obrigatório" }, 400);
+    const { data: podeNesta, error: donoErr } = await userClient.rpc("pode_gerenciar_wa_conexao", { p_conexao: alvo });
+    if (donoErr || podeNesta !== true) return json({ error: "esta linha é de outra pessoa" }, 403);
+  }
+
   // Resolve o token da instância (segredo) a partir do conexao_id.
   async function tokenDe(conexaoId: string): Promise<{ token: string; server: string } | null> {
     const { data: conex } = await admin.from("wa_conexoes").select("server_url").eq("id", conexaoId).maybeSingle();
@@ -87,13 +97,16 @@ Deno.serve(async (req) => {
         // 2) grava conexão (metadata) + segredo (token)
         const { data: userInfo } = await userClient.auth.getUser();
         const criadoPor = userInfo?.user?.id ?? null;
+        // Só admin/diretor cria linha em nome de outra pessoa (28/10/2026); os demais criam a própria.
+        const { data: ehAdminOuDiretor } = await userClient.rpc("is_admin_ou_diretor_user");
+        const responsavelId = ehAdminOuDiretor === true ? (body?.responsavel_id ?? null) : criadoPor;
         const { data: conexRow, error: insErr } = await admin.from("wa_conexoes").insert({
           provider: PROVIDER,
           server_url: UAZAPI_SERVER_URL,
           instancia_externa_id: inst.instanceId,
           instancia_nome: nome,
           numero_display: String(body?.numero_display ?? "").trim() || null,
-          responsavel_id: body?.responsavel_id ?? null,
+          responsavel_id: responsavelId,
           sac_funil_ids: Array.isArray(body?.sac_funil_ids) ? body.sac_funil_ids : [],
           status_conexao: inst.status,
           ultimo_status_em: new Date().toISOString(),
