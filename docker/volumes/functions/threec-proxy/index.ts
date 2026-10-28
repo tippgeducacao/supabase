@@ -163,6 +163,16 @@ async function writeCache(
   if (error) console.error('[threec-proxy] cache write failed', error)
 }
 
+// Só pessoa logada (ou o próprio servidor) usa o proxy desde 28/10/2026: as telas de TV
+// passaram a exigir login e a chave anônima, que está no código do site, deixou de bastar.
+async function chamadorLogado(req: Request): Promise<boolean> {
+  const token = (req.headers.get('Authorization') ?? '').replace(/^Bearer\s+/i, '').trim()
+  if (!token) return false
+  if (token === SERVICE_ROLE) return true
+  const { data, error } = await supabase.auth.getUser(token)
+  return !error && !!data?.user
+}
+
 const ageSeconds = (fetchedAt: string): number =>
   Math.max(0, Math.floor((Date.now() - new Date(fetchedAt).getTime()) / 1000))
 
@@ -174,6 +184,13 @@ Deno.serve(async (req) => {
   if (req.method !== 'POST') {
     return new Response(JSON.stringify({ error: 'Method not allowed' }), {
       status: 405,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    })
+  }
+
+  if (!(await chamadorLogado(req))) {
+    return new Response(JSON.stringify({ error: 'Login necessário' }), {
+      status: 401,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     })
   }

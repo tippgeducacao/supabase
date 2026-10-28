@@ -17,7 +17,23 @@ serve(async (req) => {
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     
     const supabase = createClient(supabaseUrl, supabaseKey);
-    
+
+    // Só pessoa logada (ou o próprio servidor) dispara a atualização desde 28/10/2026:
+    // as telas de TV exigem login, e com a chave anônima qualquer visitante refazia o
+    // ranking inteiro (TRUNCATE + recarga) quantas vezes quisesse.
+    const token = (req.headers.get('Authorization') ?? '').replace(/^Bearer\s+/i, '').trim();
+    let logado = !!token && token === supabaseKey;
+    if (!logado && token) {
+      const { data, error: erroUsuario } = await supabase.auth.getUser(token);
+      logado = !erroUsuario && !!data?.user;
+    }
+    if (!logado) {
+      return new Response(JSON.stringify({ error: 'Login necessário', success: false }), {
+        status: 401,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
     console.log('🔄 Iniciando atualização do ranking público...');
     
     // Chamar função do banco para atualizar ranking
