@@ -552,7 +552,13 @@ async function relayToN8n(payload: Record<string, unknown>): Promise<void> {
   try {
     const res = await fetch(destino, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...(paraN8n ? { [CABECALHO_SEGREDO_N8N]: desvio!.segredo } : {}) },
+      // Destino interno (João, RH, aluno — todos em ${RELAY_BASE}/functions/v1) leva a chave de
+      // serviço: desde 29/10/2026 os agentes exigem quem chama (exigirAcesso). O desvio para o
+      // n8n é URL EXTERNA e NUNCA recebe a chave — só o segredo próprio dele.
+      headers: {
+        "Content-Type": "application/json",
+        ...(paraN8n ? { [CABECALHO_SEGREDO_N8N]: desvio!.segredo } : { Authorization: `Bearer ${SERVICE_ROLE}` }),
+      },
       body: JSON.stringify(payload),
       signal: ctrl.signal,
     });
