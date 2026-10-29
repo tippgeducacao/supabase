@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  BACKOFF_RATE_LIMIT_MIN, chaveDaConta, criarRitmo, intercalarPorConta,
+  BACKOFF_RATE_LIMIT_MIN, chaveDaConta, criarRitmo, intercalarPorConta, INTERVALO_WEB_MS,
   MAX_REAGENDAMENTOS_RATE_LIMIT, proximaTentativaRateLimit,
 } from "./ritmo.ts";
 
@@ -99,6 +99,24 @@ describe("ritmo por conta", () => {
     expect(ritmo.reservar("a")).toBe(0);
     ritmo.penalizar("a", 2_000);
     expect(ritmo.reservar("a")).toBe(2_000);
+  });
+
+  it("linha de WhatsApp Web anda devagar (1 envio a cada INTERVALO_WEB_MS); a Meta segue a 20/s (29/10/2026)", () => {
+    const t = 1_000;
+    const ritmo = criarRitmo(20, () => t);
+    expect([ritmo.reservar("web:L1"), ritmo.reservar("web:L1"), ritmo.reservar("web:L1")])
+      .toEqual([0, INTERVALO_WEB_MS, 2 * INTERVALO_WEB_MS]);
+    expect(ritmo.reservar("web:L2")).toBe(0); // outra linha Web não espera esta
+    expect([ritmo.reservar("meta:A"), ritmo.reservar("meta:A")]).toEqual([0, 50]);
+    expect(INTERVALO_WEB_MS).toBeGreaterThanOrEqual(3_000);
+  });
+
+  it("77 envios de uma linha Web numa rodada: só os que começam dentro dos 45 s ficam; o resto volta à fila", () => {
+    const ritmo = criarRitmo(20, () => 0);
+    const esperas = Array.from({ length: 77 }, () => ritmo.reservar("web:L1"));
+    const cabem = esperas.filter((ms) => ms <= 45_000).length;
+    expect(cabem).toBe(10);
+    expect(esperas.length - cabem).toBe(67);
   });
 
   it("intercala contas preservando a ordem de cada uma", () => {

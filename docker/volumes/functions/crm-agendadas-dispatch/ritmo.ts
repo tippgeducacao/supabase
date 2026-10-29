@@ -6,9 +6,17 @@
 // crm_mensagens_agendadas e este dispatcher:
 //   1. espaça os envios POR CONTA (no máximo ENVIOS_POR_SEGUNDO_POR_CONTA iniciados/s);
 //   2. intercala as contas, para um número com fila grande não segurar os outros;
-//   3. reagenda o 130429 com backoff (a Meta não aceitou ⇒ reenviar não duplica).
+//   3. reagenda o 130429 com backoff (a Meta não aceitou ⇒ reenviar não duplica);
+//   4. linha de WhatsApp WEB (uazapi) anda a INTERVALO_WEB_MS por envio (29/10/2026, abaixo).
 
 export const ENVIOS_POR_SEGUNDO_POR_CONTA = 20;
+/**
+ * Linha de WhatsApp Web (uazapi): número pessoal, sem a vazão da API da Meta. O uazapi enfileira e responde
+ * devagar sob rajada: 77 envios de uma vez estouraram os 12 s, o envio foi repetido e as cobranças saíram em
+ * DOBRO enquanto o painel mostrava "falhou" (29/10/2026). 1 envio a cada 5 s por linha (12/min).
+ * O que não couber nos 45 s da execução volta para a fila e sai na próxima, sem perder nada.
+ */
+export const INTERVALO_WEB_MS = 5_000;
 export const CODIGO_RATE_LIMIT = 130429;
 /** Espera (min) antes da tentativa N+1. Esgotou ⇒ a última tentativa grava a falha. */
 export const BACKOFF_RATE_LIMIT_MIN = [1, 2, 4, 8, 15];
@@ -40,7 +48,11 @@ export function intercalarPorConta<T extends LinhaConta>(rows: T[]): T[] {
 }
 
 /** Reserva de horário por conta: cada envio ocupa 1000/porSegundo ms da conta. */
-export function criarRitmo(porSegundo = ENVIOS_POR_SEGUNDO_POR_CONTA, agora: () => number = Date.now) {
+export function criarRitmo(
+  porSegundo = ENVIOS_POR_SEGUNDO_POR_CONTA,
+  agora: () => number = Date.now,
+  intervaloWebMs = INTERVALO_WEB_MS,
+) {
   const intervalo = 1000 / porSegundo;
   const proximo = new Map<string, number>();
   return {
@@ -48,7 +60,7 @@ export function criarRitmo(porSegundo = ENVIOS_POR_SEGUNDO_POR_CONTA, agora: () 
     reservar(conta: string): number {
       const t = agora();
       const slot = Math.max(t, proximo.get(conta) ?? t);
-      proximo.set(conta, slot + intervalo);
+      proximo.set(conta, slot + (conta.startsWith("web:") ? intervaloWebMs : intervalo));
       return slot - t;
     },
     penalizar(conta: string, ms = PAUSA_APOS_RATE_LIMIT_MS): void {

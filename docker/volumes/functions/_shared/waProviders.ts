@@ -283,7 +283,7 @@ async function uazFetch(
   method: string,
   headers: Record<string, string>,
   body?: unknown,
-  opts?: { timeoutMs?: number; retries?: number },
+  opts?: { timeoutMs?: number; retries?: number; retryOnAbort?: boolean },
 ): Promise<{ ok: boolean; status: number; json: any }> {
   const timeoutMs = opts?.timeoutMs ?? 20000;
   const retries = Math.max(0, opts?.retries ?? 0);
@@ -303,10 +303,14 @@ async function uazFetch(
       const json = await res.json().catch(() => ({}));
       return { ok: res.ok, status: res.status, json };
     } catch (e) {
-      // Só cai aqui em erro de REDE/timeout (sem resposta) — provável que o envio não
-      // completou; retry é seguro. Backoff curto e crescente.
+      // Cai aqui SEM resposta HTTP. Erro de REDE (conexão recusada, DNS): a requisição nem chegou ao
+      // servidor, o retry é seguro. TIMEOUT (AbortError): o servidor PODE ter aceitado — sob carga o
+      // uazapi enfileira e só responde depois do limite, e repetir manda a mensagem DUAS vezes (77
+      // cobranças saíram em dobro em 29/10/2026). Quem ENVIA mensagem passa retryOnAbort: false.
+      // Backoff curto e crescente.
       lastErr = e;
-      if (attempt < retries) { await sleep(700 * (attempt + 1)); continue; }
+      const abortou = (e as { name?: string } | null)?.name === "AbortError";
+      if (attempt < retries && !(abortou && opts?.retryOnAbort === false)) { await sleep(700 * (attempt + 1)); continue; }
       throw e;
     } finally {
       clearTimeout(timer);
@@ -382,7 +386,7 @@ const uazapi: WaProvider = {
   },
 
   async sendText(serverUrl, token, numberDigits, text) {
-    const r = await uazFetch(serverUrl, "/send/text", "POST", { token }, { number: numberDigits, text }, { timeoutMs: 12000, retries: 1 });
+    const r = await uazFetch(serverUrl, "/send/text", "POST", { token }, { number: numberDigits, text }, { timeoutMs: 12000, retries: 1, retryOnAbort: false });
     return {
       externalId: pick<string>(r.json, ["messageid", "id", "key.id", "message.key.id", "message.id"]) ?? null,
       ok: r.ok,
@@ -437,7 +441,7 @@ const uazapi: WaProvider = {
       file: opts.url,
       ...(opts.caption ? { text: opts.caption } : {}),
       ...(opts.filename ? { docName: opts.filename } : {}),
-    }, { timeoutMs: 20000, retries: 1 });
+    }, { timeoutMs: 20000, retries: 1, retryOnAbort: false });
     return {
       externalId: pick<string>(r.json, ["messageid", "id", "key.id", "message.key.id", "message.id"]) ?? null,
       ok: r.ok,
@@ -460,7 +464,7 @@ const uazapi: WaProvider = {
       number: numberDigits,
       text: emoji, // string vazia remove a reação
       id: targetExternalId,
-    }, { timeoutMs: 12000, retries: 1 });
+    }, { timeoutMs: 12000, retries: 1, retryOnAbort: false });
     return {
       externalId: pick<string>(r.json, ["messageid", "id", "reaction.id"]) ?? null,
       ok: r.ok,

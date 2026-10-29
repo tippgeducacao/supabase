@@ -329,31 +329,44 @@ async function enviarViaConexao(admin: any, p: {
   let anexosPersist: any[] = [];
   let conteudoPersist = String(p.conteudo ?? "");
 
-  if (p.tipo === "text") {
-    if (!conteudoPersist.trim()) return json({ error: "conteudo vazio" }, 400);
-    result = await provider.sendText(conex.server_url, sec.token, numberDigits, conteudoPersist.slice(0, 4096));
-  } else if (["document", "audio", "image", "sticker", "video"].includes(p.tipo)) {
-    const urlMidia = String(p.anexo_url ?? "").trim();
-    if (!urlMidia) return json({ error: `anexo_url obrigatório para tipo ${p.tipo}` }, 400);
-    const caption = p.tipo === "audio" || p.tipo === "sticker" ? "" : conteudoPersist.trim();
-    result = await provider.sendMedia(conex.server_url, sec.token, numberDigits, {
-      tipo: p.tipo, url: urlMidia, caption, filename: p.filename, mime: p.mime_type,
-    });
-    anexosPersist = [{
-      tipo: p.tipo,
-      mime_type: String(p.mime_type ?? (p.tipo === "audio" ? "audio/mp4" : p.tipo === "image" ? "image/jpeg" : p.tipo === "sticker" ? "image/webp" : "application/octet-stream")),
-      url: urlMidia,
-      filename: p.filename ?? `${p.tipo}`,
-    }];
-    if (p.tipo === "audio") conteudoPersist = p.textoVozIa ?? "";
-    else if (p.tipo === "sticker") conteudoPersist = "";
-  } else if (p.tipo === "reaction") {
-    const emoji = conteudoPersist.trim();
-    if (!emoji || !p.reaction_message_id) return json({ error: "reaction_message_id e conteudo (emoji) obrigatórios" }, 400);
-    result = await provider.sendReaction(conex.server_url, sec.token, numberDigits, String(p.reaction_message_id), emoji);
-    conteudoPersist = `[reacao]${emoji}`; // marcador renderizado como reação no chat
-  } else {
-    return json({ error: `tipo '${p.tipo}' não suportado nesta linha (use text, document, audio, image, video, sticker, reaction)` }, 400);
+  try {
+    if (p.tipo === "text") {
+      if (!conteudoPersist.trim()) return json({ error: "conteudo vazio" }, 400);
+      result = await provider.sendText(conex.server_url, sec.token, numberDigits, conteudoPersist.slice(0, 4096));
+    } else if (["document", "audio", "image", "sticker", "video"].includes(p.tipo)) {
+      const urlMidia = String(p.anexo_url ?? "").trim();
+      if (!urlMidia) return json({ error: `anexo_url obrigatório para tipo ${p.tipo}` }, 400);
+      const caption = p.tipo === "audio" || p.tipo === "sticker" ? "" : conteudoPersist.trim();
+      result = await provider.sendMedia(conex.server_url, sec.token, numberDigits, {
+        tipo: p.tipo, url: urlMidia, caption, filename: p.filename, mime: p.mime_type,
+      });
+      anexosPersist = [{
+        tipo: p.tipo,
+        mime_type: String(p.mime_type ?? (p.tipo === "audio" ? "audio/mp4" : p.tipo === "image" ? "image/jpeg" : p.tipo === "sticker" ? "image/webp" : "application/octet-stream")),
+        url: urlMidia,
+        filename: p.filename ?? `${p.tipo}`,
+      }];
+      if (p.tipo === "audio") conteudoPersist = p.textoVozIa ?? "";
+      else if (p.tipo === "sticker") conteudoPersist = "";
+    } else if (p.tipo === "reaction") {
+      const emoji = conteudoPersist.trim();
+      if (!emoji || !p.reaction_message_id) return json({ error: "reaction_message_id e conteudo (emoji) obrigatórios" }, 400);
+      result = await provider.sendReaction(conex.server_url, sec.token, numberDigits, String(p.reaction_message_id), emoji);
+      conteudoPersist = `[reacao]${emoji}`; // marcador renderizado como reação no chat
+    } else {
+      return json({ error: `tipo '${p.tipo}' não suportado nesta linha (use text, document, audio, image, video, sticker, reaction)` }, 400);
+    }
+  } catch (e) {
+    // Tempo esgotado SEM resposta do uazapi: ele pode ter aceitado a mensagem (sob carga enfileira e responde
+    // depois do limite). Não repetimos sozinhos — repetir mandou 77 cobranças em dobro em 29/10/2026 — e o erro
+    // diz a verdade a quem chamou (a fila de saída e o painel da cobrança mostram este texto).
+    if ((e as { name?: string } | null)?.name === "AbortError") {
+      return json({
+        error: "sem resposta do WhatsApp Web (tempo esgotado): a mensagem pode ter saído, confira a conversa antes de reenviar",
+        incerto: true,
+      }, 422);
+    }
+    throw e;
   }
 
   const nowIso = new Date().toISOString();
