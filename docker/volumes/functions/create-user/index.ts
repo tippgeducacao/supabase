@@ -1,6 +1,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3'
 import { corsHeaders } from '../_shared/cors.ts'
 import { createLogger } from '../_shared/logger.ts'
+import { problemaDaSenha } from '../_shared/senhaForte.ts'
 
 const logger = createLogger('create-user');
 
@@ -61,6 +62,15 @@ Deno.serve(async (req) => {
 
     // Parse request body
     const { email, password, name, userType, nivel } = await req.json()
+
+    // Regra de senha forte (29/10/2026): antes esta edge aceitava QUALQUER senha.
+    const problemaSenha = password ? problemaDaSenha(String(password)) : null
+    if (problemaSenha) {
+      return new Response(
+        JSON.stringify({ error: problemaSenha }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
 
     // Validate required fields
     if (!email || !password || !name || !userType) {

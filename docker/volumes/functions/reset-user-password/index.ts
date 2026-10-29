@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3';
 import { createLogger } from '../_shared/logger.ts';
+import { problemaDaSenha } from '../_shared/senhaForte.ts';
 
 const logger = createLogger('reset-user-password');
 
@@ -110,10 +111,12 @@ serve(async (req) => {
       );
     }
 
-    if (newPassword.length < 6) {
-      logger.warn('Password too short');
+    // Regra de senha forte (29/10/2026): 10+ com maiúscula, minúscula e número.
+    const problemaSenha = problemaDaSenha(newPassword);
+    if (problemaSenha) {
+      logger.warn('Weak password rejected');
       return new Response(
-        JSON.stringify({ error: 'A senha deve ter pelo menos 6 caracteres' }),
+        JSON.stringify({ error: problemaSenha }),
         { 
           status: 400, 
           headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
