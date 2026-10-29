@@ -192,9 +192,12 @@ Deno.serve(async (req) => {
   const nome = perfilR.data?.name ? String(perfilR.data.name).split(" ")[0] : "colega";
   const cargo = perfilR.data?.user_type ? String(perfilR.data.user_type) : "comercial";
 
+  // Base fixa (~16 mil tokens) em cache de 1 h: em 30 dias, 152 de 359 perguntas chegaram
+  // 5–60 min depois da anterior e regravavam a base no cache de 5 min. O de 1 h tem de vir
+  // ANTES do de 5 min (o marcador do fim da conversa, em `comCacheNoFim`).
   const system: Anthropic.Beta.BetaTextBlockParam[] = [
-    { type: "text", text: PROMPT_BASE, cache_control: { type: "ephemeral" } },
-    { type: "text", text: blocoBase(catalogoR.data, documentos, avisos), cache_control: { type: "ephemeral" } },
+    { type: "text", text: PROMPT_BASE, cache_control: { type: "ephemeral", ttl: "1h" } },
+    { type: "text", text: blocoBase(catalogoR.data, documentos, avisos), cache_control: { type: "ephemeral", ttl: "1h" } },
     {
       type: "text",
       text: blocoConversa({
