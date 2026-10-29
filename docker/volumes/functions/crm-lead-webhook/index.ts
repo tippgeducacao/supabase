@@ -38,6 +38,10 @@
 //   (9b) Ação criar_oportunidade: cria o card (funil/etapa/titulo+tokens/valor/status/
 //        responsavel com distribuicao + "nao criar repetidas"). Opt-in. Abre card
 //        INCLUSIVE p/ o lead IDENTIFICADO (que so ganha card por esta acao).
+//   (9a) EMPRESA (opt-in): aba Criação Automática de Empresas (config.criacaoAutomaticaEmpresa)
+//        + ação criar_oportunidade com params.entidade="empresa" → RPCs
+//        crm_webhook_empresa_vincular / crm_webhook_empresa_oportunidade. Falha com card de
+//        empresa configurado = resposta não-2xx e log "erro" (o contato fica gravado).
 //   (9.5) Ações Extras: modificar_segmentos / definir_responsavel / atualizar_lead
 //         (SOBRESCREVE lead.* e campo:<alias> físico/EAV; resolve {webhook=Campo}).
 //   (9.6) enviar_email: usa template/remetente configurados e contato persistido após
@@ -63,6 +67,7 @@ import { aplicarCursoDaInscricao } from "./cursoDaInscricao.ts";
 import { receberComArquivos } from "./arquivosWebhook.ts";
 import { etapaPorCampo } from "./arquivosValidacao.ts";
 import { nomeComPrefixo } from "./prefixoNome.ts";
+import { codigoErroEmpresa, dadosDaEmpresa, falhaDaEmpresa, responsavelDaEmpresa } from "./empresaWebhook.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -569,7 +574,8 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
         // a resposta original se perde na rede. Opt-in preserva o retorno legado.
         const anterior = jaProcessado.resultado ?? {};
         const reciboAnterior = config?.retornarReciboReenvio === true && anterior.lead_id && anterior.oportunidade_id
-          ? { lead_id: anterior.lead_id, oportunidade_id: anterior.oportunidade_id, lead_oportunidade_id: anterior.lead_oportunidade_id ?? null }
+          ? { lead_id: anterior.lead_id, oportunidade_id: anterior.oportunidade_id, lead_oportunidade_id: anterior.lead_oportunidade_id ?? null,
+              ...(anterior.empresa_id ? { empresa_id: anterior.empresa_id } : {}) }
           : {};
         // Reenvio da mesma submissão conserva a atribuição já resolvida na primeira
         // entrega. Reaproveita a consulta de idempotência, sem buscar o contato ou
@@ -1230,6 +1236,7 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
   // SEM card. (Antes o card era criado automaticamente pelo intake global — removido.)
   let leadOportunidadeId: string | null = null;
   let oportunidadeId: string | null = null;
+  let empresaId: string | null = null;
   let waAccId: string | null = null;
   if (abrirCards) {
     try {
@@ -1393,6 +1400,9 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
     for (const a of opActions) {
       try {
         const p: any = a.params ?? {};
+        // Card de EMPRESA roda no passo (9a), fora desta trava de saudação: não é card do
+        // contato, não alimenta o curso/IA e a RPC dele já evita duplicar.
+        if (p.entidade === "empresa") continue;
 
         const tituloResolved =
           resolveWebhookVar(p.titulo, dados).trim() || cursoInteresse || integration.nome || "Oportunidade";
@@ -1659,7 +1669,71 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
     }
   }
 
+  // (9a) EMPRESA — aba "Criação Automática de Empresas" + ação "Criar oportunidade" para
+  // Empresa (B2B), 29/10/2026 (Fórum: o participante é contato; o negócio é da empresa).
+  // Mesmo contrato dos contatos: localiza pelo nome (sem acento/caixa/pontuação) ou cria,
+  // e os demais campos só preenchem o que estiver vazio. Sem nome no envio, usa a empresa
+  // do negócio em que a pessoa já está neste funil (inscrição → confirmação) ou a já
+  // vinculada a ela. Roda fora da trava de saudação: as RPCs são idempotentes e o card
+  // da empresa é um só por funil (reaproveita o aberto sem mexer em etapa/dono).
+  // Falha aqui NÃO interrompe as ações do contato (segmentos/tags/UTM gravam): só a
+  // resposta final deixa de ser sucesso quando há ação de card de empresa — ver (11).
+  const criacaoEmpresa = config?.criacaoAutomaticaEmpresa;
+  const empresaHabilitada = criacaoEmpresa?.habilitada === true;
+  const opActionsEmpresa = opActions.filter((a: { params?: { entidade?: unknown } }) => a?.params?.entidade === "empresa");
+  let empresaFalha: { status: number; erro: string; codigo: string } | null = null;
+  // Card da empresa fica FORA do `oportunidadeId`: aquele é o card do contato e alimenta
+  // fluxos, definir_responsavel e o aviso ao n8n — nada disso pode mexer no negócio B2B.
+  let oportunidadeEmpresaId: string | null = null;
+  let empresaResultado: Record<string, unknown> | null = null;
+  if (leadId && (empresaHabilitada || opActionsEmpresa.length > 0)) {
+    const dadosEmpresa = empresaHabilitada
+      ? dadosDaEmpresa(criacaoEmpresa?.campos, (v) => resolveWebhookVar(v, dados))
+      : { nome: null, campos: {} };
+    const respEmpresa = responsavelDaEmpresa(opActionsEmpresa[0]?.params?.responsavel);
+    const origemEmpresa = integration.nome ?? fonte ?? slug;
+    try {
+      const { data: vinc, error: vincErr } = await admin.rpc("crm_webhook_empresa_vincular", {
+        p_lead_id: leadId, p_nome_empresa: dadosEmpresa.nome, p_campos: dadosEmpresa.campos,
+        p_responsavel_id: respEmpresa, p_integration_id: integration.id,
+        p_funil_id: opActionsEmpresa[0]?.params?.funilId ?? null, p_evento_id: idExterno,
+        p_origem: origemEmpresa, p_campanha: utm_campaign,
+      });
+      if (vincErr || !vinc?.empresa_id) throw vincErr ?? new Error("EMPRESA_INDISPONIVEL");
+      empresaId = vinc.empresa_id;
+      empresaResultado = vinc;
+      acoesAplicadas.push("criacao_empresa");
+      for (const a of opActionsEmpresa) {
+        const p = a.params ?? {};
+        const { data: card, error: cardErr } = await admin.rpc("crm_webhook_empresa_oportunidade", {
+          p_lead_id: leadId, p_empresa_id: empresaId, p_funil_id: p.funilId, p_etapa_id: p.etapaId,
+          p_integration_id: integration.id, p_acao_id: typeof a.id === "string" && a.id ? a.id : null,
+          p_responsavel_id: responsavelDaEmpresa(p.responsavel), p_origem: origemEmpresa,
+          p_campanha: utm_campaign, p_empresa_criada: vinc.empresa_criada === true,
+        });
+        if (cardErr || !card?.oportunidade_id) throw cardErr ?? new Error("EMPRESA_INDISPONIVEL");
+        oportunidadeEmpresaId ??= card.oportunidade_id;
+        acoesAplicadas.push("criar_oportunidade_empresa");
+      }
+      await logAtividade(
+        leadId, "acao_webhook",
+        opActionsEmpresa.length ? "Participante associado ao negócio da empresa" : "Contato vinculado à empresa",
+        acaoChip("criar_oportunidade"),
+      );
+    } catch (e) {
+      const erro = e as { message?: string; details?: string } | null;
+      const codigo = codigoErroEmpresa(erro?.message);
+      console.error("[crm-lead-webhook] empresa falhou:", codigo, erro?.message);
+      empresaResultado = { pendente: true, codigo, ...(erro?.details ? { detalhe: String(erro.details).slice(0, 500) } : {}) };
+      // Só a aba (sem card de empresa) é enriquecimento, como um campo vazio do contato.
+      if (opActionsEmpresa.length > 0) empresaFalha = { ...falhaDaEmpresa(codigo), codigo };
+    }
+  }
+
   for (const a of acoesExtras) {
+    // Empresa pendente devolve erro e o formulário reenvia: mensagem que saísse agora
+    // sairia de novo no retry. Dados do contato (segmento/tag/UTM) seguem gravando.
+    if (empresaFalha && (a?.tipo === "enviar_mensagem_whatsapp" || a?.tipo === "enviar_email")) continue;
     try {
       if (a?.tipo === "modificar_segmentos" && leadId) {
         const add = segArr(a?.params?.adicionar);
@@ -2065,11 +2139,16 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
   }
 
   // (11) log
+  // Recibo: sem card do contato, o negócio da empresa é "a oportunidade" desta chegada.
+  const oportunidadeRecibo = oportunidadeId ?? oportunidadeEmpresaId;
   await admin.from("crm_webhook_logs").insert({
     integration_id: integration.id, slug, payload, ...reqMeta,
     resultado: {
       lead_id: leadId, segmento_aplicado: segmentoAplicado,
-      lead_oportunidade_id: leadOportunidadeId, oportunidade_id: oportunidadeId, duplicado,
+      ...(empresaId ? { empresa_id: empresaId } : {}),
+      ...(oportunidadeEmpresaId ? { oportunidade_empresa_id: oportunidadeEmpresaId } : {}),
+      ...(empresaResultado ? { empresa: empresaResultado } : {}),
+      lead_oportunidade_id: leadOportunidadeId, oportunidade_id: oportunidadeRecibo, duplicado,
       duplicado_lote: duplicadoLote, novo_lead_disparado: novoLeadDisparado, lote: lote ?? null,
       acoes_aplicadas: acoesAplicadas,
       ...(acoesEmail.length ? { acoes_email_resultados: acoesEmailResultados } : {}),
@@ -2085,7 +2164,10 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
       // integração não define identificador, ou o valor dele não veio/veio inválido).
       sem_dedup: (!email && !whatsapp) || undefined,
     },
-    status: duplicado ? "duplicado" : "ok",
+    // Empresa obrigatória que não fechou = "erro": aparece na aba Logs para revisão e a
+    // trava de reenvio (que só olha ok/duplicado) deixa o retry concluir.
+    status: empresaFalha ? "erro" : duplicado ? "duplicado" : "ok",
+    ...(empresaFalha ? { erro: `Empresa (B2B): ${empresaFalha.codigo}` } : {}),
     ip_origem: ipOrigem,
   });
 
@@ -2114,12 +2196,20 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
   // (12) MAPEAMENTO DE RETORNO (config.retorno) — opt-in. Se definido, devolve um objeto
   // custom com variáveis resolvidas; senão, mantém o shape padrão. Código de status vem de
   // integration.codigo_status (default 200 → sem mudança p/ webhooks antigos).
+  if (empresaFalha) {
+    // O contato e as ações dele ficaram gravados; a empresa não. Nunca 2xx aqui.
+    return json({
+      ok: false, erro: empresaFalha.erro, codigo: empresaFalha.codigo,
+      lead_id: leadId, empresa_pendente: true,
+    }, empresaFalha.status);
+  }
   const statusResp = Number(integration.codigo_status) || 200;
   const retorno = Array.isArray(config?.retorno) ? config.retorno : [];
   if (retorno.length > 0) {
     const ctx: Record<string, unknown> = {
       "lead.id": leadId,
-      "oportunidade.id": oportunidadeId,
+      "empresa.id": empresaId,
+      "oportunidade.id": oportunidadeRecibo,
       "lead_oportunidade.id": leadOportunidadeId,
       "segmento": segmentoAplicado,
       "duplicado": duplicado,
@@ -2135,9 +2225,10 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
   return json({
     ok: true,
     lead_id: leadId,
+    ...(empresaId ? { empresa_id: empresaId } : {}),
     segmento_aplicado: segmentoAplicado,
     lead_oportunidade_id: leadOportunidadeId,
-    oportunidade_id: oportunidadeId,
+    oportunidade_id: oportunidadeRecibo,
     duplicado,
     duplicado_lote: duplicadoLote,
     novo_lead_disparado: novoLeadDisparado,
