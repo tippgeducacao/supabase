@@ -565,6 +565,12 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
         .limit(1)
         .maybeSingle();
       if (jaProcessado) {
+        // Formulários que confirmam o recibo precisam dos mesmos vínculos quando
+        // a resposta original se perde na rede. Opt-in preserva o retorno legado.
+        const anterior = jaProcessado.resultado ?? {};
+        const reciboAnterior = config?.retornarReciboReenvio === true && anterior.lead_id && anterior.oportunidade_id
+          ? { lead_id: anterior.lead_id, oportunidade_id: anterior.oportunidade_id, lead_oportunidade_id: anterior.lead_oportunidade_id ?? null }
+          : {};
         // Reenvio da mesma submissão conserva a atribuição já resolvida na primeira
         // entrega. Reaproveita a consulta de idempotência, sem buscar o contato ou
         // recalcular com uma configuração que pode ter mudado depois da chegada.
@@ -578,6 +584,7 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
             id_externo: idExterno,
             chegada_anterior_em: jaProcessado.criado_em,
             chegada_anterior_log_id: jaProcessado.id,
+            ...reciboAnterior,
             ...(temRastreamentoAnterior ? { rastreamento: rastreamentoAnterior } : {}),
           },
         });
@@ -594,7 +601,7 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
           return json(outReenvio, Number(integration.codigo_status) || 200);
         }
         return json(
-          { ok: true, reenvio_ignorado: true, processado: false, duplicado: true, id_externo: idExterno },
+          { ok: true, reenvio_ignorado: true, processado: false, duplicado: true, id_externo: idExterno, ...reciboAnterior },
           Number(integration.codigo_status) || 200,
         );
       }

@@ -65,9 +65,18 @@ async function enviar(dados: Record<string, unknown>, query = "") {
   }));
   expect(resposta.status).toBe(200);
   expect(fetch).not.toHaveBeenCalled();
+  return resposta.json();
 }
 
 describe("webhook integrado: captura UTM no entrypoint real", () => {
+  it("reenvio do Fórum devolve o recibo original sem executar o intake outra vez", async () => {
+    integracao.config = { retornarReciboReenvio: true };
+    logAnterior = { id: "log-original", resultado: { lead_id: "contato-original", oportunidade_id: "card-original" } };
+    const resultado = await enviar({ dados_completos: { id: "envio-original" } });
+    expect(resultado).toMatchObject({ ok: true, reenvio_ignorado: true, lead_id: "contato-original", oportunidade_id: "card-original" });
+    expect(gravacoes.leads).toBeUndefined();
+    expect(gravacoes.lead_oportunidades).toBeUndefined();
+  });
   it("marca o Fórum sem substituir o nome já cadastrado e sem duplicar no retorno", async () => {
     contato = { id: "lead-antigo", nome: "Maria Souza", email: "sintetico@example.com" };
     integracao.config = { prefixoNome: "FÓRUM" };
