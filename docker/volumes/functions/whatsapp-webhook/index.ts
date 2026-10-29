@@ -10,6 +10,7 @@ import {
   type CtxPodcast,
 } from "../_shared/podcastEnvio.ts";
 import { baixarAnexoInbound, extrairMidiaInbound } from "../_shared/waMediaInbound.ts";
+import { BUCKET_RECEBIDOS } from "../_shared/midiaRecebida.ts";
 import { exigirAcesso, AcessoNegado } from "../_shared/acesso.ts";
 
 const corsHeaders = {
@@ -605,7 +606,10 @@ Deno.serve(async (req) => {
               if (mediaInbound?.id) {
                 const { data: waRow } = await supabase.rpc("get_wa_account_pedagogico");
                 const wa = Array.isArray(waRow) ? waRow[0] : waRow;
-                anexos = await baixarAnexoInbound(supabase, mediaInbound, wa?.access_token, "whatsapp-webhook");
+                // Mídia recebida pelo Pedagógico vai para o bucket PRIVADO desde 29/10/2026 (link
+                // assinado de 7 dias, renovado pelas telas). O PODCAST segue no público: a foto do
+                // convidado vira `pod_gravacao_agendamentos.foto_url`, que precisa de link permanente.
+                anexos = await baixarAnexoInbound(supabase, mediaInbound, wa?.access_token, "whatsapp-webhook", { bucket: BUCKET_RECEBIDOS });
               }
 
               // 4) INSERT mensagem real

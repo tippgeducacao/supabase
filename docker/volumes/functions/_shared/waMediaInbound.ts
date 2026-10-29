@@ -266,6 +266,7 @@ export async function baixarAnexoInbound(
   media: MidiaInbound,
   accessToken: string | null | undefined,
   tag = "wa-media",
+  opcoes: { bucket?: string } = {},
 ): Promise<any[]> {
   if (!media?.id) return [];
   if (!accessToken) {
@@ -273,14 +274,17 @@ export async function baixarAnexoInbound(
     return [];
   }
   try {
-    const gravada = await gravarMidiaInbound(admin, media, accessToken);
-    const pub = toPublicUrl(admin.storage.from("whatsapp-anexos").getPublicUrl(gravada.path).data.publicUrl);
+    const gravada = await gravarMidiaInbound(admin, media, accessToken, { bucket: opcoes.bucket });
+    // Bucket privado (Pedagógico desde 29/10/2026) = link assinado de 7 dias + bucket/caminho;
+    // bucket público (podcast) = o link público de sempre. Ver linkDaMidiaGravada.
+    const link = await linkDaMidiaGravada(admin, gravada);
     return [{
       tipo: media.tipo,
       mime_type: gravada.mime,
       meta_media_id: media.id,
-      url: pub,
-      url_storage: pub,
+      url: link,
+      url_storage: link,
+      ...(gravada.bucket === BUCKET_RECEBIDOS ? { bucket: gravada.bucket, caminho: gravada.path } : {}),
       filename: media.filename || `${media.tipo}.${gravada.ext}`,
     }];
   } catch (e: any) {
