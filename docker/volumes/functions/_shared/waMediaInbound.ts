@@ -21,12 +21,13 @@
 // o mime desempata). A cópia que morava aqui transformava nome SEM ponto em extensão
 // ("Aula1" → `.aula1`) e só conhecia 6 mimes — o resto virava `.bin` (15/10/2026).
 import { extensaoDoArquivo as extensaoDe } from "./extensaoArquivo.ts";
+import { BUCKET_RECEBIDOS, VALIDADE_LINK_GRAVADO_S } from "./midiaRecebida.ts";
 
 const PUBLIC_SUPABASE_URL = Deno.env.get("PUBLIC_SUPABASE_URL") || "https://api.ppgeducacao.site";
 
 /** URL interna do Kong → host público (o navegador do atendente não enxerga `kong:8000`). */
 export function toPublicUrl(internalUrl: string): string {
-  return internalUrl.replace(/^https?:\/\/kong:8000/i, PUBLIC_SUPABASE_URL);
+  return internalUrl.replace(/^https?:\/\/(?:supabase-)?kong:8000/i, PUBLIC_SUPABASE_URL);
 }
 
 export interface MidiaInbound {
@@ -111,8 +112,10 @@ export function ehHostDeMidiaDaMeta(u: string): boolean {
 }
 
 export interface MidiaGravada {
-  /** Caminho no bucket `whatsapp-anexos` — a URL pública cada chamador monta como sempre montou. */
+  /** Caminho no bucket — o link sai de `linkDaMidiaGravada`. */
   path: string;
+  /** `whatsapp-anexos` (público, legado) ou `whatsapp-recebidos` (privado, mídia recebida do CRM desde 29/10/2026). */
+  bucket: string;
   mime: string;
   ext: string;
   bytes: number;
@@ -130,7 +133,7 @@ export async function gravarMidiaInbound(
   admin: any,
   media: MidiaInbound,
   accessToken: string,
-  opcoes: { pasta?: string; limiteBytes?: number } = {},
+  opcoes: { pasta?: string; limiteBytes?: number; bucket?: string } = {},
 ): Promise<MidiaGravada> {
   const limite = opcoes.limiteBytes ?? LIMITE_MIDIA_INBOUND_BYTES;
 
@@ -159,6 +162,7 @@ export async function gravarMidiaInbound(
   return await gravarRespostaNoBucket(admin, binRes, { mime, filename: media.filename }, {
     pasta: opcoes.pasta,
     limiteBytes: limite,
+    bucket: opcoes.bucket,
   });
 }
 
@@ -174,9 +178,10 @@ export async function gravarRespostaNoBucket(
   admin: any,
   resposta: Response,
   arquivo: { mime: string; filename?: string | null },
-  opcoes: { pasta?: string; prefixo?: string; limiteBytes?: number } = {},
+  opcoes: { pasta?: string; prefixo?: string; limiteBytes?: number; bucket?: string } = {},
 ): Promise<MidiaGravada> {
   const limite = opcoes.limiteBytes ?? LIMITE_MIDIA_INBOUND_BYTES;
+  const bucket = opcoes.bucket ?? "whatsapp-anexos";
   if (!resposta.ok || !resposta.body) {
     // Sem isso o corpo de erro do provedor subia pro Storage como se fosse o arquivo.
     await resposta.body?.cancel().catch(() => {});
@@ -212,7 +217,7 @@ export async function gravarRespostaNoBucket(
   const path = `${opcoes.pasta ?? ""}${dia}/${opcoes.prefixo ?? "inbound"}-${crypto.randomUUID()}.${ext}`;
   let erroUpload: string | null = null;
   try {
-    const { error } = await admin.storage.from("whatsapp-anexos").upload(path, resposta.body.pipeThrough(contador), {
+    const { error } = await admin.storage.from(bucket).upload(path, resposta.body.pipeThrough(contador), {
       contentType: arquivo.mime,
       upsert: false,
       duplex: "half", // corpo em fluxo
@@ -228,10 +233,25 @@ export async function gravarRespostaNoBucket(
     throw /maximum allowed size/i.test(erroUpload) ? new FalhaDefinitivaMidia(motivo) : new Error(motivo);
   }
   if (bytes === 0) {
-    await admin.storage.from("whatsapp-anexos").remove([path]).catch(() => {});
+    await admin.storage.from(bucket).remove([path]).catch(() => {});
     throw new Error("download vazio");
   }
-  return { path, mime: arquivo.mime, ext, bytes };
+  return { path, bucket, mime: arquivo.mime, ext, bytes };
+}
+
+/**
+ * Link que vai gravado em `anexos[].url`. Bucket público (legado): o link público de sempre.
+ * Bucket privado `whatsapp-recebidos`: link ASSINADO de 7 dias — quem usa a mídia em minutos
+ * (João, transcrição) segue funcionando; depois disso a tela renova pela edge
+ * `midia-recebida-renovar` e as edges por `urlBaixavel` (_shared/midiaRecebida.ts).
+ */
+export async function linkDaMidiaGravada(admin: any, gravada: MidiaGravada): Promise<string> {
+  if (gravada.bucket !== BUCKET_RECEBIDOS) {
+    return toPublicUrl(admin.storage.from(gravada.bucket).getPublicUrl(gravada.path).data.publicUrl);
+  }
+  const { data, error } = await admin.storage.from(gravada.bucket).createSignedUrl(gravada.path, VALIDADE_LINK_GRAVADO_S);
+  if (error || !data?.signedUrl) throw new Error(`assinar mídia recebida: ${error?.message ?? "sem signedUrl"}`);
+  return toPublicUrl(data.signedUrl);
 }
 
 /**

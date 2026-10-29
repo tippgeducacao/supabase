@@ -79,6 +79,11 @@ function admin(jaGravadas: string[] = []) {
           return { data: { path }, error: null };
         },
         remove: async () => ({ data: [], error: null }),
+        // Mídia recebida vai para o bucket privado com link assinado (29/10/2026).
+        createSignedUrl: async (path: string, validade: number) => ({
+          data: { signedUrl: `http://kong:8000/storage/v1/object/sign/${bucket}/${path}?token=t${validade}` },
+          error: null,
+        }),
         getPublicUrl: (path: string) => ({
           data: { publicUrl: `http://kong:8000/storage/v1/object/public/${bucket}/${path}` },
         }),
@@ -140,8 +145,11 @@ describe("mídia da linha Web — arquivo grande (23/10/2026)", () => {
     expect(r.anexos).toEqual([{
       tipo: "video",
       mime_type: "video/mp4",
-      url: `http://kong:8000/storage/v1/object/public/whatsapp-anexos/${uploads[0].path}`,
-      url_storage: `http://kong:8000/storage/v1/object/public/whatsapp-anexos/${uploads[0].path}`,
+      // Bucket PRIVADO + link assinado de 7 dias (604800 s), com o host público no lugar do Kong.
+      url: `https://api.ppgeducacao.site/storage/v1/object/sign/whatsapp-recebidos/${uploads[0].path}?token=t604800`,
+      url_storage: `https://api.ppgeducacao.site/storage/v1/object/sign/whatsapp-recebidos/${uploads[0].path}?token=t604800`,
+      bucket: "whatsapp-recebidos",
+      caminho: uploads[0].path,
       filename: "andreia.mp4",
     }]);
   });

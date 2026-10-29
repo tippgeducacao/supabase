@@ -3,6 +3,7 @@
 export const LIMITE_AUDIO_BYTES = 25_000_000;
 export const TEMPO_MAXIMO_AUDIO_MS = 45_000;
 import { codigoErroSeguro, ErroTranscricao } from './erros.ts';
+import { urlBaixavel } from "../_shared/midiaRecebida.ts";
 import { type ConfigGemini, transcreverGemini } from './gemini.ts';
 export { codigoErroSeguro, ErroTranscricao } from './erros.ts';
 
@@ -75,7 +76,8 @@ export async function transcreverAudio(
   mimeAnexo: string | null | undefined,
   config: ConfigTranscricao,
 ): Promise<string> {
-  const url = validarUrl(audioUrl);
+  // Mídia recebida em bucket privado (29/10/2026): link vencido ganha um novo antes de baixar.
+  const url = validarUrl(await urlBaixavel(audioUrl));
   if (!config.gemini?.chave) throw new ErroTranscricao("CHAVE_NAO_CONFIGURADA");
   const fetchImpl = config.fetchImpl ?? fetch;
   const informado = config.tempoMaximoMs ?? TEMPO_MAXIMO_AUDIO_MS;

@@ -7,7 +7,8 @@
 // o que passasse de 50 MB também ia estourar. Mesmo conserto do caminho da Meta
 // (`_shared/waMediaInbound.ts`): tamanho checado antes de pedir, download em fluxo, e o que
 // falhar vira `motivo` — a mensagem é gravada de qualquer jeito.
-import { gravarRespostaNoBucket, LIMITE_MIDIA_INBOUND_BYTES, type MidiaGravada } from "../_shared/waMediaInbound.ts";
+import { gravarRespostaNoBucket, LIMITE_MIDIA_INBOUND_BYTES, linkDaMidiaGravada, type MidiaGravada } from "../_shared/waMediaInbound.ts";
+import { BUCKET_RECEBIDOS } from "../_shared/midiaRecebida.ts";
 import type { WaInboundMessage, WaProvider } from "../_shared/waProviders.ts";
 
 /** base64 decodificado com `atob` ocupa umas 3x o arquivo (texto + binário + bytes): só o pequeno. */
@@ -55,13 +56,16 @@ function hostDe(u: string): string {
   }
 }
 
-function anexoDe(admin: any, m: WaInboundMessage, gravada: MidiaGravada) {
-  const pub = admin.storage.from("whatsapp-anexos").getPublicUrl(gravada.path).data.publicUrl;
+// Mídia RECEBIDA vai para o bucket PRIVADO desde 29/10/2026: link assinado de 7 dias + bucket/caminho.
+async function anexoDe(admin: any, m: WaInboundMessage, gravada: MidiaGravada) {
+  const link = await linkDaMidiaGravada(admin, gravada);
   return {
     tipo: m.tipo,
     mime_type: gravada.mime,
-    url: pub,
-    url_storage: pub,
+    url: link,
+    url_storage: link,
+    bucket: gravada.bucket,
+    caminho: gravada.path,
     filename: m.mediaFilename || `${m.tipo}.${gravada.ext}`,
   };
 }
@@ -115,13 +119,13 @@ export async function baixarMidiaUazapi(
   }
 
   const arquivo = { mime: mime || "application/octet-stream", filename: m.mediaFilename };
-  const opcoes = { pasta: "crm/", prefixo: "uazapi" };
+  const opcoes = { pasta: "crm/", prefixo: "uazapi", bucket: BUCKET_RECEBIDOS };
   let motivo = "sem_url_nem_base64";
   if (mediaUrl) {
     if (provider.isAllowedMediaHost(mediaUrl, serverUrl)) {
       try {
         const res = await fetch(mediaUrl, { signal: AbortSignal.timeout(TIMEOUT_DOWNLOAD_MS) });
-        return { anexos: [anexoDe(admin, m, await gravarRespostaNoBucket(admin, res, arquivo, opcoes))], pendente: null };
+        return { anexos: [await anexoDe(admin, m, await gravarRespostaNoBucket(admin, res, arquivo, opcoes))], pendente: null };
       } catch (e) {
         motivo = e instanceof Error ? e.message : String(e);
       }
@@ -134,7 +138,7 @@ export async function baixarMidiaUazapi(
     if (estimado > LIMITE_BASE64_BYTES) return pendente(`base64_grande: ~${estimado} bytes (${motivo})`);
     try {
       const res = new Response(b64ToBytes(base64));
-      return { anexos: [anexoDe(admin, m, await gravarRespostaNoBucket(admin, res, arquivo, opcoes))], pendente: null };
+      return { anexos: [await anexoDe(admin, m, await gravarRespostaNoBucket(admin, res, arquivo, opcoes))], pendente: null };
     } catch (e) {
       motivo = e instanceof Error ? e.message : String(e);
     }

@@ -7,6 +7,7 @@
 
 // deno-lint-ignore-file no-explicit-any
 import { GEMINI_ANALISE_SCHEMA, GEMINI_ANALISE_SYSTEM } from './prompts.ts';
+import { urlBaixavel } from '../_shared/midiaRecebida.ts';
 import { resumir, type Telemetria } from './eventos.ts';
 
 const GEMINI_KEY = Deno.env.get('AGENTE_SDR_GEMINI_KEY') ?? Deno.env.get('GEMINI_API_KEY') ?? '';
@@ -38,7 +39,8 @@ async function gemini(model: string, body: Record<string, unknown>, tentativas =
 }
 
 async function baixarBase64(url: string): Promise<{ b64: string; mime: string }> {
-  const res = await fetch(url);
+  // Mídia recebida em bucket privado (29/10/2026): link vencido ganha um novo antes de baixar.
+  const res = await fetch(await urlBaixavel(url));
   if (!res.ok) throw new Error(`download da mídia falhou: HTTP ${res.status}`);
   const mime = res.headers.get('content-type') ?? 'application/octet-stream';
   const buf = new Uint8Array(await res.arrayBuffer());

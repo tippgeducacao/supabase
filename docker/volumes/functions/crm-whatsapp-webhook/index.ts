@@ -9,7 +9,8 @@ import { carimboInbound } from "./carimbo.ts";
 import { prepararPortfolioInstagram } from "./portfolioInstagram.ts";
 import { alertaDeFalhaDeConta, statusProvaEntrega, TIPO_ALERTA_ENTREGA, type AlertaEntrega } from "./alertaEntrega.ts";
 import { CABECALHO_SEGREDO_N8N, carregarDesvioN8n, vaiParaN8n } from "../_shared/desvioN8n.ts";
-import { FalhaDefinitivaMidia, gravarMidiaInbound } from "../_shared/waMediaInbound.ts";
+import { FalhaDefinitivaMidia, gravarMidiaInbound, linkDaMidiaGravada } from "../_shared/waMediaInbound.ts";
+import { BUCKET_RECEBIDOS } from "../_shared/midiaRecebida.ts";
 
 declare const EdgeRuntime: { waitUntil?: (p: Promise<unknown>) => void } | undefined;
 
@@ -999,16 +1000,21 @@ Deno.serve(async (req) => {
            for (let tentativa = 1; tentativa <= 3 && anexos.length === 0; tentativa++) {
             if (tentativa > 1) await new Promise((r) => setTimeout(r, tentativa === 2 ? 400 : 1200));
             try {
+              // Mídia RECEBIDA vai para o bucket PRIVADO desde 29/10/2026; a mensagem guarda um
+              // link assinado de 7 dias + bucket/caminho (ver _shared/midiaRecebida.ts).
               const gravada = await gravarMidiaInbound(admin, { ...mediaInbound, id: mediaInbound.id }, accountAccessToken, {
                 pasta: "crm/",
+                bucket: BUCKET_RECEBIDOS,
               });
-              const pub = admin.storage.from("whatsapp-anexos").getPublicUrl(gravada.path).data.publicUrl;
+              const link = await linkDaMidiaGravada(admin, gravada);
               anexos = [{
                 tipo: mediaInbound.tipo,
                 mime_type: gravada.mime,
                 meta_media_id: mediaInbound.id,
-                url: pub,
-                url_storage: pub,
+                url: link,
+                url_storage: link,
+                bucket: gravada.bucket,
+                caminho: gravada.path,
                 filename: mediaInbound.filename || `${mediaInbound.tipo}.${gravada.ext}`,
               }];
             } catch (mediaErr: any) {
