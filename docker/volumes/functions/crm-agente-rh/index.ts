@@ -17,6 +17,7 @@
 // Responde 200 na hora e processa em background: o relay do gateway desiste em 10s.
 
 // deno-lint-ignore-file no-explicit-any
+import { exigirAcesso, respostaAcessoNegado } from '../_shared/acesso.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3';
 import { PROMPT_RH } from './prompt.ts';
 import { extrairToolsVazadas, limparResposta } from '../_shared/respostaModelo.ts';
@@ -1083,6 +1084,16 @@ Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { status: 200 });
   if (req.method !== 'POST') return json({ erro: 'use POST' }, 405);
 
+  // QUEM CHAMA (29/10/2026). Os três chamadores mandam a chave de serviço exata: o relay do
+  // crm-whatsapp-webhook (destino interno), o wa-uazapi-webhook e rh_followup_janela_tick
+  // (migration 20261029131000). Qualquer outro pedido para aqui, antes de ler o corpo.
+  // A conferência de ORIGEM abaixo continua como segunda camada.
+  try {
+    await exigirAcesso(req, { servico: true });
+  } catch (e) {
+    return respostaAcessoNegado(e);
+  }
+
   let payload: any = {};
   try { payload = await req.json(); } catch { return json({ erro: 'json inválido' }, 400); }
 
@@ -1103,9 +1114,8 @@ Deno.serve(async (req) => {
   // furava a idempotência e gerava um turno pago + WhatsApp ao candidato. Os dois relays
   // (Meta e Uazapi) GRAVAM a mensagem em crm_whatsapp_messages ANTES de chamar aqui, então
   // o que vale é o banco: o id tem de ser um inbound deste canal, do mesmo telefone.
-  // ⚠️ A retomada de janela aberta (`motivo: 'followup'`, rh_followup_janela_tick) usa id
-  // sintético e segue sem conferência até o cron mandar um segredo — ver o relatório de
-  // 29/10/2026 (plano: x-followup-key no net.http_post da função).
+  // A retomada de janela aberta (`motivo: 'followup'`, rh_followup_janela_tick) usa id
+  // sintético e não passa por aqui; ela já foi barrada acima se não trouxe a chave de serviço.
   if (payload?.motivo !== 'followup') {
     const msgId = String(payload?.id ?? '').trim();
     if (!msgId) return json({ ok: true, pulado: 'sem_id' });

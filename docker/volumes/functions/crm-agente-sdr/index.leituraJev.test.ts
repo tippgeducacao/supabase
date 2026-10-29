@@ -51,7 +51,7 @@ const LEITURA: LeituraLead = {
 
 async function chamar() {
   return await handler(new Request('https://edge.invalid/crm-agente-sdr', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer chave-servico-teste' },
     body: JSON.stringify({
       direcao: 'inbound', from_me: false, telefone: '5511999990001', remotejid, id: 'wamid.SINTETICO', tipo: 'text',
       conteudo: 'Sou veterinária formada. E o link não abre', agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica',
@@ -60,7 +60,7 @@ async function chamar() {
 }
 
 beforeAll(async () => {
-  vi.stubGlobal('Deno', { env: { get: (k: string) => (k === 'SUPABASE_URL' ? 'https://supabase.invalid' : '') }, serve: (fn: typeof handler) => { handler = fn; } });
+  vi.stubGlobal('Deno', { env: { get: (k: string) => (k === 'SUPABASE_URL' ? 'https://supabase.invalid' : k === 'SUPABASE_SERVICE_ROLE_KEY' ? 'chave-servico-teste' : '') }, serve: (fn: typeof handler) => { handler = fn; } });
   vi.stubGlobal('fetch', vi.fn(() => { throw new Error('Rede não autorizada neste teste'); }));
   await import('./index');
 });

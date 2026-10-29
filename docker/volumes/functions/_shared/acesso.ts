@@ -22,17 +22,20 @@
 //   import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 //   try { await exigirAcesso(req, { usuario: true, servico: true }); }
 //   catch (e) { return respostaAcessoNegado(e, corsHeaders); }
+//
+// ⚠️ Sem import por URL (esm.sh) de propósito: fala com o GoTrue e o PostgREST por fetch, para
+// que os testes (vitest) das edges que importam esta porta continuem carregando.
 
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { AcessoNegado, decidirAcesso, type Chamador, type OpcoesAcesso } from "./acessoRegra.ts";
 
 export { AcessoNegado, iguaisEmTempoConstante, tokenDoCabecalho } from "./acessoRegra.ts";
 export type { Chamador, OpcoesAcesso } from "./acessoRegra.ts";
 
 export function exigirAcesso(req: Request, opcoes: OpcoesAcesso): Promise<Chamador> {
-  const url = Deno.env.get("SUPABASE_URL") ?? "";
+  const url = (Deno.env.get("SUPABASE_URL") ?? "").replace(/\/$/, "");
   const chaveServico = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
   const chaveAnon = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
+  const apikey = chaveAnon || chaveServico;
   return decidirAcesso(
     { authorization: req.headers.get("Authorization"), get: (n) => req.headers.get(n) },
     opcoes,
@@ -40,25 +43,23 @@ export function exigirAcesso(req: Request, opcoes: OpcoesAcesso): Promise<Chamad
       chaveServico,
       chaveAnon,
       usuarioDoToken: async (token) => {
-        const admin = createClient(url, chaveServico, { auth: { persistSession: false } });
-        const { data, error } = await admin.auth.getUser(token);
-        if (error) {
-          // 4xx do GoTrue = token ruim (sessão inválida); o resto = não deu para conferir.
-          const status = (error as { status?: number }).status ?? 0;
-          if (status >= 400 && status < 500) return null;
-          throw error;
-        }
-        if (!data?.user?.id) return null;
-        return { id: data.user.id, anonimo: !!(data.user as { is_anonymous?: boolean }).is_anonymous };
+        const r = await fetch(`${url}/auth/v1/user`, {
+          headers: { apikey, Authorization: `Bearer ${token}` },
+        });
+        // 4xx do GoTrue = token ruim (sessão inválida/expirada); o resto = não deu para conferir.
+        if (r.status >= 400 && r.status < 500) return null;
+        if (!r.ok) throw new Error(`GoTrue ${r.status}`);
+        const u = (await r.json()) as { id?: string; is_anonymous?: boolean };
+        return u?.id ? { id: u.id, anonimo: !!u.is_anonymous } : null;
       },
       rpcComoUsuario: async (token, rpc) => {
-        const comoUsuario = createClient(url, chaveAnon || chaveServico, {
-          global: { headers: { Authorization: `Bearer ${token}` } },
-          auth: { persistSession: false },
+        const r = await fetch(`${url}/rest/v1/rpc/${encodeURIComponent(rpc)}`, {
+          method: "POST",
+          headers: { apikey, Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: "{}",
         });
-        const { data, error } = await comoUsuario.rpc(rpc);
-        if (error) return null;
-        return data === true;
+        if (!r.ok) return null;
+        return (await r.json()) === true;
       },
     },
   );

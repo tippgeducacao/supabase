@@ -60,7 +60,7 @@ let limparResposta: (texto: string) => string;
 beforeAll(async () => {
   vi.useFakeTimers({ toFake: ['setTimeout'] });
   vi.stubGlobal('Deno', {
-    env: { get: (chave: string) => ({ SUPABASE_URL: 'https://supabase.invalid', AGENTE_RH_ANTHROPIC_KEY: 'chave-ficticia' } as Registro)[chave] },
+    env: { get: (chave: string) => ({ SUPABASE_URL: 'https://supabase.invalid', AGENTE_RH_ANTHROPIC_KEY: 'chave-ficticia', SUPABASE_SERVICE_ROLE_KEY: 'chave-servico-teste' } as Registro)[chave] },
     serve: (fn: typeof handler) => { handler = fn; },
   });
   vi.stubGlobal('fetch', vi.fn(async (url: string, init: { body: string }) => {
@@ -77,7 +77,7 @@ beforeEach(() => {
 
 async function chamar() {
   const execucao = handler(new Request('https://edge.invalid/crm-agente-rh', {
-    method: 'POST', body: JSON.stringify({ wa_account_id: CONTA, direcao: 'inbound', telefone: TELEFONE, id: 'wamid.teste', conteudo: 'Conheço uma pessoa da equipe.' }),
+    method: 'POST', headers: { Authorization: 'Bearer chave-servico-teste' }, body: JSON.stringify({ wa_account_id: CONTA, direcao: 'inbound', telefone: TELEFONE, id: 'wamid.teste', conteudo: 'Conheço uma pessoa da equipe.' }),
   }));
   await vi.runAllTimersAsync();
   return await execucao;
@@ -119,10 +119,18 @@ describe('RH: bastidor não vira resposta reserva', () => {
 });
 
 describe('RH: origem da mensagem', () => {
+  it('sem a chave de serviço o agente nem lê o pedido (29/10/2026)', async () => {
+    const r = await handler(new Request('https://edge.invalid/crm-agente-rh', {
+      method: 'POST', body: JSON.stringify({ wa_account_id: CONTA, direcao: 'inbound', telefone: TELEFONE, id: 'wamid.teste', motivo: 'followup' }),
+    }));
+    expect(r.status).toBe(401);
+    expect(estado.chamadas).toHaveLength(0);
+  });
+
   it('id que o banco não conhece neste canal não acorda o agente', async () => {
     estado.respostas = [{ content: [{ type: 'text', text: 'não devia sair' }] }];
     const execucao = handler(new Request('https://edge.invalid/crm-agente-rh', {
-      method: 'POST', body: JSON.stringify({ wa_account_id: CONTA, direcao: 'inbound', telefone: TELEFONE, id: 'wamid.forjado', conteudo: 'oi' }),
+      method: 'POST', headers: { Authorization: 'Bearer chave-servico-teste' }, body: JSON.stringify({ wa_account_id: CONTA, direcao: 'inbound', telefone: TELEFONE, id: 'wamid.forjado', conteudo: 'oi' }),
     }));
     await vi.runAllTimersAsync();
     const r = await execucao;
@@ -133,7 +141,7 @@ describe('RH: origem da mensagem', () => {
 
   it('wamid real com telefone de outra pessoa também não passa', async () => {
     const execucao = handler(new Request('https://edge.invalid/crm-agente-rh', {
-      method: 'POST', body: JSON.stringify({ wa_account_id: CONTA, direcao: 'inbound', telefone: '5546988887777', id: 'wamid.teste', conteudo: 'oi' }),
+      method: 'POST', headers: { Authorization: 'Bearer chave-servico-teste' }, body: JSON.stringify({ wa_account_id: CONTA, direcao: 'inbound', telefone: '5546988887777', id: 'wamid.teste', conteudo: 'oi' }),
     }));
     await vi.runAllTimersAsync();
     expect(await (await execucao).json()).toEqual({ ok: true, pulado: 'origem' });

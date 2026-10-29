@@ -52,7 +52,7 @@ const payload = {
 
 async function chamar(extra: Record<string, unknown> = {}) {
   return await handler(new Request('https://edge.invalid/crm-agente-sdr', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...payload, ...extra }),
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer chave-servico-teste' }, body: JSON.stringify({ ...payload, ...extra }),
   }));
 }
 function semResposta() {
@@ -66,6 +66,7 @@ beforeAll(async () => {
   vi.stubGlobal('Deno', {
     env: { get: (chave: string) => {
       if (chave === 'SUPABASE_URL') return 'https://supabase.invalid';
+      if (chave === 'SUPABASE_SERVICE_ROLE_KEY') return 'chave-servico-teste';
       if (fronteiras.vozAtiva) return ({
         AGENTE_SDR_VOZ_ATIVA: 'true', AGENTE_SDR_VOZ_TELEFONES: '5511999990001', ELEVENLABS_API_KEY: 'chave-sintetica',
       } as Record<string, string>)[chave] ?? '';
@@ -132,6 +133,17 @@ describe('entrada HTTP: memória da pausa antes de mídia, buffer e LLM', () => 
     expect(fronteiras.prepararMensagem).not.toHaveBeenCalled();
     expect(fronteiras.bufferInserir).not.toHaveBeenCalled();
     semResposta();
+  });
+
+  it('sem a chave de serviço nem o segredo de follow-up, a entrada recusa (29/10/2026)', async () => {
+    const semChave = await handler(new Request('https://edge.invalid/crm-agente-sdr', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    }));
+    expect(semChave.status).toBe(401);
+    const chaveErrada = await handler(new Request('https://edge.invalid/crm-agente-sdr', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer outra-coisa' }, body: JSON.stringify(payload),
+    }));
+    expect(chaveErrada.status).toBe(401);
   });
 
   it('cria lead novo da campanha antes de exigir identidade SDR da primeira mensagem', async () => {

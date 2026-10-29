@@ -34,6 +34,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3';
+import { exigirAcesso, iguaisEmTempoConstante, respostaAcessoNegado } from '../_shared/acesso.ts';
 import { pausaVigente } from './pausa.ts';
 import { blocosDoPrompt, type ConjuntoPrompt } from './conjuntoPrompt.ts';
 import { AGENTE_RECONTATO, montarDossieRecontato } from './prompts-recontato.ts';
@@ -1985,6 +1986,28 @@ Deno.serve(async (req) => {
 
   const url = new URL(req.url);
 
+  // ▸ Quem chama (29/10/2026, validação pós-pentest): até aqui a entrada aceitava qualquer
+  // pedido — uma mensagem forjada acionava o João (IA paga) contra qualquer lead. Agora:
+  //   • relay do crm-whatsapp-webhook e crm_agente_sdr_reconciliar → chave de serviço exata;
+  //   • crons de follow-up e roteiros de teste → x-followup-key (crm_agente_sdr_config);
+  //   • mode=n8n → segredo próprio do desvio, conferido no bloco dele, mais abaixo;
+  //   • ?token= legado (AGENTE_SDR_TOKEN), se configurado.
+  if (url.searchParams.get('mode') !== 'n8n' && !(TOKEN && url.searchParams.get('token') === TOKEN)) {
+    const { data: cfgAcesso } = await supabase
+      .from('crm_agente_sdr_config')
+      .select('followup_secret')
+      .eq('id', 1)
+      .maybeSingle();
+    try {
+      await exigirAcesso(req, {
+        servico: true,
+        segredo: { cabecalho: 'x-followup-key', valor: cfgAcesso?.followup_secret ?? '' },
+      });
+    } catch (e) {
+      return respostaAcessoNegado(e);
+    }
+  }
+
   // Esteira de follow-up de JANELA ABERTA: disparada pelo cron (mode=followup),
   // não é um inbound. Varre os leads devidos e reabre as conversas que esfriaram.
   // Auth por SEGREDO COMPARTILHADO no banco (crm_agente_sdr_config.followup_secret),
@@ -2001,7 +2024,7 @@ Deno.serve(async (req) => {
       .eq('id', 1)
       .maybeSingle();
     const segredo = cfg?.followup_secret ?? '';
-    if (!segredo || req.headers.get('x-followup-key') !== segredo) {
+    if (!segredo || !iguaisEmTempoConstante(req.headers.get('x-followup-key') ?? '', segredo)) {
       return json({ error: 'unauthorized' }, 401);
     }
     const limiteParam = Number(url.searchParams.get('limite'));
@@ -2026,7 +2049,7 @@ Deno.serve(async (req) => {
       .eq('id', 1)
       .maybeSingle();
     const segredo = cfg?.followup_secret ?? '';
-    if (!segredo || req.headers.get('x-followup-key') !== segredo) {
+    if (!segredo || !iguaisEmTempoConstante(req.headers.get('x-followup-key') ?? '', segredo)) {
       return json({ error: 'unauthorized' }, 401);
     }
     const limiteParam = Number(url.searchParams.get('limite'));
@@ -2104,7 +2127,7 @@ Deno.serve(async (req) => {
     }
   }
 
-  if (TOKEN && url.searchParams.get('token') !== TOKEN) return json({ error: 'unauthorized' }, 401);
+  // (A conferência de quem chama da entrada fica no começo do handler — 29/10/2026.)
 
   let payload: any;
   try { payload = await req.json(); } catch { return json({ error: 'payload inválido' }, 400); }
