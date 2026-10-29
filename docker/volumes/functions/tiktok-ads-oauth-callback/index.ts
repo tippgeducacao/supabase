@@ -1,12 +1,18 @@
+// acesso: publico — callback de OAuth (navegador voltando do TikTok); só age com state assinado, no prazo e de uso único (_shared/tiktokState.ts)
 // tiktok-ads-oauth-callback — volta do portal do TikTok for Business com ?auth_code=...
 // Troca o código por um Access-Token, lista os advertisers autorizados e grava cada um em
 // public.tiktok_ad_accounts. É um redirect de navegador ⇒ responde HTML.
+//
+// ⚠️ O `state` é a trava (29/10/2026): antes era fixo ("ppgvet") e qualquer um com este
+// endereço plantava a PRÓPRIA conta de anúncio aqui. Agora o link nasce só da ação logada
+// `acao: "autorizar"` da `tiktok-ads-connect`, e o state é conferido ANTES de trocar o código.
 //
 // ⚠️ Não confundir com `tiktok-oauth-callback` (sem "-ads-"), que é o do PERFIL ORGÂNICO:
 // outro app, outro domínio de API e outro formato de token.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { getSegredo } from "../_shared/segredos.ts";
 import { escaparHtml } from "../_shared/escaparHtml.ts";
+import { conferirState, MSG_JA_USADO, MSG_STATE, reservarState } from "../_shared/tiktokState.ts";
 
 const API = "https://business-api.tiktok.com/open_api/v1.3";
 
@@ -72,7 +78,20 @@ Deno.serve(async (req) => {
     const secret = await getSegredo(admin, "TIKTOK_ADS_SECRET");
     if (!appId || !secret) return page("Configuração ausente", "O app do TikTok Ads não está cadastrado no servidor (TIKTOK_ADS_APP_ID / TIKTOK_ADS_SECRET).", false);
 
-    const token = await trocarCodigo(appId, secret, authCode);
+    const conf = await conferirState(secret, "ads", url.searchParams.get("state"));
+    if (!conf.ok) return page("Link não vale", MSG_STATE[conf.motivo], false);
+    const reserva = await reservarState(admin, "ads", conf);
+    if (!reserva.ok) {
+      return page("Link não vale", reserva.jaUsado ? MSG_JA_USADO : "Não consegui conferir o link agora. Tente de novo em instantes.", false);
+    }
+
+    let token;
+    try {
+      token = await trocarCodigo(appId, secret, authCode);
+    } catch (e) {
+      await reserva.devolver();
+      throw e;
+    }
     const accessToken: string = token.access_token;
     const escopo = Array.isArray(token.scope) ? token.scope.join(",") : (token.scope ?? null);
 
@@ -104,6 +123,7 @@ Deno.serve(async (req) => {
         origem: "oauth",
         ativo: true,
         ultimo_erro: null,
+        conectado_por: conf.usuarioId,
         updated_at: agora,
       })),
       { onConflict: "advertiser_id" },

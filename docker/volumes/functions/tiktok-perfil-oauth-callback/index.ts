@@ -1,5 +1,10 @@
+// acesso: publico — callback de OAuth (navegador voltando do TikTok); só age com state assinado, no prazo e de uso único (_shared/tiktokState.ts)
 // tiktok-perfil-oauth-callback — volta da autorização do DONO DO PERFIL (TikTok account
 // holder) e grava a conta em `tiktok_business_accounts`, que é quem pode publicar.
+//
+// ⚠️ O `state` é a trava (29/10/2026): antes o callback aceitava qualquer código, e quem tivesse
+// o link do portal conectava o PRÓPRIO perfil como destino dos posts da casa. Agora o link nasce
+// só da `tiktok-perfil-connect` (ação logada de marketing/diretoria) e vale uma vez, por 24 h.
 //
 // ⚠️ É o TERCEIRO callback de TikTok da casa, e eles não se misturam:
 //   • tiktok-oauth-callback        → perfil pelo Display API (app antigo, Sandbox)
@@ -13,6 +18,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { buscarPerfil, erroDe, trocarCodigoPorToken } from "../_shared/tiktokAccountsApi.ts";
 import { getSegredo } from "../_shared/segredos.ts";
 import { escaparHtml } from "../_shared/escaparHtml.ts";
+import { conferirState, MSG_JA_USADO, MSG_STATE, reservarState } from "../_shared/tiktokState.ts";
 
 const REDIRECT_URI = "https://api.ppgeducacao.site/functions/v1/tiktok-perfil-oauth-callback";
 
@@ -54,7 +60,20 @@ Deno.serve(async (req) => {
       return pagina("Configuração ausente", "As credenciais do app de publicação não estão configuradas no servidor.", false);
     }
 
-    const t = await trocarCodigoPorToken(appId, secret, authCode, REDIRECT_URI);
+    const conf = await conferirState(secret, "perfil", url.searchParams.get("state"));
+    if (!conf.ok) return pagina("Link não vale", escaparHtml(MSG_STATE[conf.motivo]), false);
+    const reserva = await reservarState(supabase, "perfil", conf);
+    if (!reserva.ok) {
+      return pagina("Link não vale", escaparHtml(reserva.jaUsado ? MSG_JA_USADO : "Não consegui conferir o link agora. Tente de novo em instantes."), false);
+    }
+
+    let t: Awaited<ReturnType<typeof trocarCodigoPorToken>>;
+    try {
+      t = await trocarCodigoPorToken(appId, secret, authCode, REDIRECT_URI);
+    } catch (e) {
+      await reserva.devolver();
+      throw e;
+    }
 
     // O identificador da conta muda de nome conforme o exemplo da documentação. Em vez de
     // apostar num, aceita o primeiro que vier — e só falha se NENHUM vier.

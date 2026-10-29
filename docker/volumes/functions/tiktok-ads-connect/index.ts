@@ -1,16 +1,20 @@
 // tiktok-ads-connect — conecta uma conta do TikTok Ads Manager (Marketing API).
 //
-// Dois caminhos, porque na prática o segundo é o que resolve:
-//  • GET  → 302 para o portal de autorização do TikTok for Business (precisa de
-//    TIKTOK_ADS_APP_ID configurado E da nossa URL registrada como redirect no app).
-//  • POST → salva `advertiser_id` + `access_token` colados à mão. É o caminho de quem já
+// Dois caminhos, os dois LOGADOS (marketing/diretoria):
+//  • POST { acao: "autorizar" } → { url } do portal de autorização do TikTok for Business, com
+//    `state` ASSINADO (30 min, uso único). O callback `tiktok-ads-oauth-callback` só aceita esse
+//    state. Precisa de TIKTOK_ADS_APP_ID/TIKTOK_ADS_SECRET e da nossa URL registrada no app.
+//  • POST { advertiser_id, access_token } → salva o par colado à mão. É o caminho de quem já
 //    tem um app autorizado (o do gestor de tráfego, por exemplo): não exige mexer no app
 //    nem registrar redirect. O token é VALIDADO contra a API antes de ser gravado.
 //
-// ⚠️ verify_jwt = false (o GET é um clique de navegador, sem header). Por isso o POST
-// confere o JWT e o cargo NA MÃO — sem isso qualquer um plantaria um token aqui dentro.
+// ⚠️ Até 29/10/2026 havia um GET sem login que redirecionava para o portal com state fixo
+// ("ppgvet"), e o callback aceitava qualquer código: quem tivesse o endereço plantava a PRÓPRIA
+// conta de anúncio aqui. O GET agora só explica que o link mudou. Ver _shared/tiktokState.ts.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 import { getSegredo } from "../_shared/segredos.ts";
+import { criarState } from "../_shared/tiktokState.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -23,6 +27,7 @@ const err = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 const API = "https://business-api.tiktok.com/open_api/v1.3";
 const REDIRECT_URI = "https://api.ppgeducacao.site/functions/v1/tiktok-ads-oauth-callback";
+const PRAZO_AUTORIZAR_MS = 30 * 60 * 1000;
 
 
 
@@ -31,39 +36,32 @@ Deno.serve(async (req) => {
 
   const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 
-  // ── GET: manda o navegador pro portal de autorização ───────────────────────────
+  // ── GET: o link antigo (sem login) não autoriza mais nada ─────────────────────
   if (req.method === "GET") {
-    try {
-      const appId = await getSegredo(admin, "TIKTOK_ADS_APP_ID");
-      if (!appId) {
-        return new Response(
-          "TikTok Ads: falta o TIKTOK_ADS_APP_ID no servidor. Use o botão \"Colar token\" na tela, ou peça à TI para cadastrar o app.",
-          { status: 500, headers: { "Content-Type": "text/plain; charset=utf-8" } },
-        );
-      }
-      const state = new URL(req.url).searchParams.get("state") || "ppgvet";
-      const authUrl = `https://business-api.tiktok.com/portal/auth?app_id=${encodeURIComponent(appId)}`
-        + `&state=${encodeURIComponent(state)}`
-        + `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}`;
-      return new Response(null, { status: 302, headers: { Location: authUrl } });
-    } catch (e) {
-      console.error("[tiktok-ads-connect] GET:", e);
-      return new Response("Erro ao iniciar a conexão com o TikTok Ads.", { status: 500 });
-    }
+    return new Response(
+      "Este link de conexão do TikTok Ads não vale mais. Abra o sistema, vá em TikTok Ads > Conectar conta > Autorizar pelo TikTok.",
+      { status: 410, headers: { "Content-Type": "text/plain; charset=utf-8" } },
+    );
   }
 
   if (req.method !== "POST") return json({ error: "Método não suportado." }, 405);
 
-  // ── POST: grava advertiser_id + access_token (só marketing/diretoria) ──────────
+  // ── POST: link de autorização OU token colado (só marketing/diretoria) ─────────
+  let usuarioId: string;
+  let tokenSessao: string;
   try {
-    const auth = req.headers.get("Authorization") || "";
-    if (!auth) return json({ ok: false, error: "Não autenticado" }, 401);
+    const quem = await exigirAcesso(req, { usuario: true });
+    if (quem.tipo !== "usuario") return json({ ok: false, error: "Acesso restrito." }, 403);
+    usuarioId = quem.usuarioId;
+    tokenSessao = quem.token;
+  } catch (e) {
+    return respostaAcessoNegado(e, corsHeaders);
+  }
 
+  try {
     const comoUsuario = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_ANON_KEY")!, {
-      global: { headers: { Authorization: auth } },
+      global: { headers: { Authorization: `Bearer ${tokenSessao}` } },
     });
-    const { data: u } = await comoUsuario.auth.getUser();
-    if (!u?.user) return json({ ok: false, error: "Não autenticado" }, 401);
 
     const [mkt, dir] = await Promise.all([
       comoUsuario.rpc("is_marketing_user"),
@@ -74,6 +72,22 @@ Deno.serve(async (req) => {
     }
 
     const body = await req.json().catch(() => ({}));
+
+    if (body.acao === "autorizar") {
+      const [appId, segredo] = await Promise.all([
+        getSegredo(admin, "TIKTOK_ADS_APP_ID"),
+        getSegredo(admin, "TIKTOK_ADS_SECRET"),
+      ]);
+      if (!appId || !segredo) {
+        return json({ ok: false, error: "O app do TikTok Ads não está cadastrado no servidor. Use \"Colar token\" ou fale com a TI." }, 500);
+      }
+      const state = await criarState(segredo, "ads", usuarioId, PRAZO_AUTORIZAR_MS);
+      const url = `https://business-api.tiktok.com/portal/auth?app_id=${encodeURIComponent(appId)}`
+        + `&state=${encodeURIComponent(state)}`
+        + `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}`;
+      return json({ ok: true, url });
+    }
+
     const advertiserId = String(body.advertiser_id ?? "").replace(/\D/g, "");
     const accessToken = String(body.access_token ?? "").trim();
     if (!advertiserId) return json({ ok: false, error: "Informe o ID da conta de anúncios (só números)." }, 400);
@@ -105,7 +119,7 @@ Deno.serve(async (req) => {
       origem: "manual",
       ativo: true,
       ultimo_erro: null,
-      conectado_por: u.user.id,
+      conectado_por: usuarioId,
       updated_at: new Date().toISOString(),
     }, { onConflict: "advertiser_id" });
     if (upErr) return json({ ok: false, error: `Não consegui salvar a conta: ${upErr.message}` }, 500);
