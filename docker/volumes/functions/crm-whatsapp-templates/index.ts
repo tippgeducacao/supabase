@@ -48,12 +48,21 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   // Telas do CRM (token do colaborador) ou outra edge (onb-regua-dispatch, chave de serviço).
-  try { await exigirAcesso(req, { usuario: true, servico: true }); }
+  let chamador: Awaited<ReturnType<typeof exigirAcesso>>;
+  try { chamador = await exigirAcesso(req, { usuario: true, servico: true }); }
   catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   try {
     const body = await req.json().catch(() => ({}));
     const { wa_account_id, action = "list" } = body ?? {};
+
+    // Mexer em template exige a permissão (29/10/2026): admin/diretor ou a chave
+    // `crm-templates-whatsapp` do Gerenciar Permissões. Antes qualquer logado criava, editava
+    // e APAGAVA template de qualquer número. Listar segue aberto: composer e disparo escolhem.
+    if (chamador.tipo === "usuario" && ["create", "edit", "delete", "upload_header_media"].includes(action)) {
+      try { await exigirAcesso(req, { usuario: true, rpcPermissao: "pode_gerir_templates_whatsapp" }); }
+      catch (e) { return respostaAcessoNegado(e, corsHeaders); }
+    }
 
     const admin = createClient(SUPABASE_URL, SERVICE_ROLE, {
       auth: { persistSession: false },
