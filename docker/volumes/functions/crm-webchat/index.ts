@@ -35,6 +35,7 @@ import { extrairRastreamento } from "../_shared/utmCaptura.ts";
 // Transcrição de áudio: o MESMO módulo Gemini do botão do SAC e da fila do SDR.
 import { transcreverGemini } from "../crm-transcrever-audio/gemini.ts";
 import { resolverGemini } from "../crm-transcrever-audio/configuracao.ts";
+import { BUCKET_RECEBIDOS, VALIDADE_LINK_GRAVADO_S, caminhoRecebido, precisaRenovar } from "../_shared/midiaRecebida.ts";
 import { codigoErroSeguro } from "../crm-transcrever-audio/erros.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -784,18 +785,26 @@ async function acaoAudio(body: Record<string, unknown>, req: Request) {
   }
   if (!bytes.length) return json({ ok: false, erro: "audio_vazio" }, 400);
 
-  // Valida pelos BYTES, não pelo mime do cliente: bucket público + upload anônimo.
+  // Valida pelos BYTES, não pelo mime do cliente: upload anônimo.
   const mimeReal = detectarMimeAudio(bytes);
   if (!mimeReal) return json({ ok: false, erro: "audio_invalido" }, 400);
 
-  // sobe pro Storage (mesmo bucket público do WhatsApp; pasta webchat/)
+  // Áudio do LEAD = mídia recebida: bucket PRIVADO `whatsapp-recebidos` desde 29/10/2026 (antes ia
+  // para o público whatsapp-anexos). A mensagem guarda link assinado de 7 dias + bucket/caminho;
+  // o poll renova o vencido para o próprio lead (ver `renovarLinksDoLead`), o SAC pela edge
+  // midia-recebida-renovar.
   let url: string | null = null;
+  let caminho: string | null = null;
   try {
     const ext = extDoMime(mimeReal);
     const path = `webchat/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}.${ext}`;
-    const { error: stErr } = await supabase.storage.from("whatsapp-anexos").upload(path, bytes, { contentType: mimeReal, upsert: false });
+    const { error: stErr } = await supabase.storage.from(BUCKET_RECEBIDOS).upload(path, bytes, { contentType: mimeReal, upsert: false });
     if (stErr) console.error(`[crm-webchat] storage upload: ${stErr.message}`);
-    else url = toPublicUrl(supabase.storage.from("whatsapp-anexos").getPublicUrl(path).data.publicUrl);
+    else {
+      const { data: ass, error: assErr } = await supabase.storage.from(BUCKET_RECEBIDOS).createSignedUrl(path, VALIDADE_LINK_GRAVADO_S);
+      if (assErr || !ass?.signedUrl) console.error(`[crm-webchat] assinar áudio: ${assErr?.message ?? "sem signedUrl"}`);
+      else { url = toPublicUrl(ass.signedUrl); caminho = path; }
+    }
   } catch (e) {
     console.error(`[crm-webchat] storage: ${(e as Error).message}`);
   }
@@ -803,7 +812,7 @@ async function acaoAudio(body: Record<string, unknown>, req: Request) {
   // transcreve (Gemini); vazio → "[áudio]" (a conversa segue mesmo sem transcrição)
   const transcricao = await transcreverAudioChat(bytes, mimeReal);
   const conteudo = transcricao || "[áudio]";
-  const anexos = url ? [{ tipo: "audio", mime_type: mimeReal, url, url_storage: url }] : [];
+  const anexos = url ? [{ tipo: "audio", mime_type: mimeReal, url, url_storage: url, bucket: BUCKET_RECEBIDOS, caminho }] : [];
 
   const { data: msg, error } = await supabase
     .from("webchat_mensagens")
@@ -1104,7 +1113,34 @@ async function acaoPoll(body: Record<string, unknown>) {
     return json({ ok: false, erro: "erro_interno" }, 500);
   }
 
-  return json({ ok: true, mensagens: data ?? [] });
+  return json({ ok: true, mensagens: await renovarLinksDoLead(data ?? []) });
+}
+
+/**
+ * O lead não tem login, então não usa a edge midia-recebida-renovar: quem renova o link vencido do
+ * áudio dele é o próprio poll, que só devolve mensagens da sessão dele (29/10/2026).
+ */
+async function renovarLinksDoLead<T extends { anexos?: unknown }>(mensagens: T[]): Promise<T[]> {
+  type A = { url?: string | null; url_storage?: string | null };
+  const caminhos = new Set<string>();
+  for (const m of mensagens) {
+    for (const a of (Array.isArray(m.anexos) ? m.anexos : []) as A[]) {
+      for (const u of [a?.url, a?.url_storage]) if (precisaRenovar(u)) caminhos.add(caminhoRecebido(u)!);
+    }
+  }
+  if (!caminhos.size) return mensagens;
+  const lista = [...caminhos];
+  const { data, error } = await supabase.storage.from(BUCKET_RECEBIDOS).createSignedUrls(lista, 24 * 60 * 60);
+  if (error || !data) return mensagens;
+  const novo = new Map<string, string>();
+  data.forEach((d: { signedUrl?: string | null }, i: number) => { if (d?.signedUrl) novo.set(lista[i], toPublicUrl(d.signedUrl)); });
+  const trocar = (u: string | null | undefined) => {
+    const c = precisaRenovar(u) ? caminhoRecebido(u) : null;
+    return c && novo.has(c) ? novo.get(c)! : u;
+  };
+  return mensagens.map((m) => Array.isArray(m.anexos)
+    ? { ...m, anexos: (m.anexos as A[]).map((a) => (a ? { ...a, url: trocar(a.url), url_storage: trocar(a.url_storage) } : a)) }
+    : m);
 }
 
 // ── entrada ──────────────────────────────────────────────────────────────────
