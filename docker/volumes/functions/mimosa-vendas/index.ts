@@ -31,9 +31,10 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-// Opus 5 por padrão (precisão acima de tudo: ela responde preço e data para o lead).
+// Só Sonnet desde 29/10/2026 (pedido do usuário; até então o padrão era o Opus 5):
+// Sonnet 5.5, com o Sonnet 5 de reserva.
 // Troca sem deploy de código: env MIMOSA_VENDAS_MODEL / MIMOSA_VENDAS_EFFORT.
-const MODELO = Deno.env.get("MIMOSA_VENDAS_MODEL") ?? "claude-opus-5";
+const MODELO = Deno.env.get("MIMOSA_VENDAS_MODEL") ?? "claude-sonnet-5-5";
 const MODELO_RESERVA = "claude-sonnet-5";
 const ESFORCOS = ["low", "medium", "high", "xhigh", "max"] as const;
 const ESFORCO = (ESFORCOS as readonly string[]).includes(Deno.env.get("MIMOSA_VENDAS_EFFORT") ?? "")
@@ -65,9 +66,13 @@ function textoLimitado(v: unknown, max: number): string | null {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** Parâmetros que dependem do modelo: o fallback server-side só existe para o Opus 5/Fable. */
+/**
+ * Parâmetros que dependem do modelo: o fallback server-side só existe para Opus 5/Fable e
+ * Sonnet 5.5. No Sonnet 5.5 ele refaz a recusa (só `cyber`/`frontier_llm`) no Sonnet 5.
+ */
 function paramsDoModelo(modelo: string): Record<string, unknown> {
-  const comFallback = modelo.startsWith("claude-opus-5") || modelo.startsWith("claude-fable");
+  const comFallback = modelo.startsWith("claude-opus-5") || modelo.startsWith("claude-fable")
+    || modelo.startsWith("claude-sonnet-5-5");
   return {
     model: modelo,
     max_tokens: MAX_TOKENS,
