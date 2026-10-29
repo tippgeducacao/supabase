@@ -33,7 +33,8 @@ export async function receberComArquivos(req: Request, integracao: any, db: any,
         caminho: `${integracao.id}/${body.envio_id}/${a.campo}.${extensaoArquivo(a.tipo)}`,
       }));
       // Id do pedido vem da LP e é estável no retry. Não cria protocolos/pastas órfãos.
-      const protocolo = `PROF26-${body.envio_id.replaceAll("-", "").slice(0, 12).toUpperCase()}`;
+      const prefixo = /^[A-Z0-9]{2,12}$/.test(cfg.prefixoProtocolo ?? "") ? cfg.prefixoProtocolo : "PROF26";
+      const protocolo = `${prefixo}-${body.envio_id.replaceAll("-", "").slice(0, 12).toUpperCase()}`;
       const { error: erroInsert } = await db.from("crm_webhook_envios").upsert({
         id: body.envio_id, integration_id: integracao.id, protocolo, arquivos,
       }, { onConflict: "id", ignoreDuplicates: true });
@@ -115,7 +116,10 @@ export async function receberComArquivos(req: Request, integracao: any, db: any,
       if (!resultado?.lead_id || !resultado?.oportunidade_id) {
         // Só campos esperados são encaminhados. O visitante não pode injetar destinos/ações.
         const payload: Record<string, unknown> = { Protocolo: envio.protocolo, dados_completos: { id: envio.id } };
-        for (const chave of ["Nome", "WhatsApp", "E_mail", "Area", "Subarea", "Tema_aula", "Lattes", "Link_aula", "Ciente", "URL", "Referral_Source", "Id_do_formulario", "Data_da_conversao", "Dispositivo", "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "utm_id", "gclid", "fbclid", "ttclid"]) {
+        // Currículos do curso usam o MESMO transporte privado da seleção. Apenas
+        // o administrador configura os campos extras; o visitante não amplia o contrato.
+        const extras = Array.isArray(cfg.camposDados) ? cfg.camposDados.filter((c: unknown) => typeof c === "string" && /^[A-Za-z][A-Za-z0-9_]{0,79}$/.test(c)) : [];
+        for (const chave of ["Nome", "WhatsApp", "E_mail", "Area", "Subarea", "Tema_aula", "Lattes", "Link_aula", "Ciente", "URL", "Referral_Source", "Id_do_formulario", "Data_da_conversao", "Dispositivo", "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "utm_id", "gclid", "fbclid", "ttclid", ...extras]) {
           if (typeof dados[chave] === "string") payload[chave] = dados[chave].slice(0, chave.endsWith("clid") ? 4096 : chave.startsWith("utm_") ? 255 : 2000);
           else if (chave === "Ciente") payload[chave] = dados[chave];
         }

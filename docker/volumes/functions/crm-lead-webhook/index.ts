@@ -62,6 +62,7 @@ import { executarAcaoEmail, type ResultadoAcaoEmail } from "./acaoEmail.ts";
 import { aplicarCursoDaInscricao } from "./cursoDaInscricao.ts";
 import { receberComArquivos } from "./arquivosWebhook.ts";
 import { etapaPorCampo } from "./arquivosValidacao.ts";
+import { nomeComPrefixo } from "./prefixoNome.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -1031,6 +1032,12 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
         !s || !s.trim() || s.trim().toLowerCase() === "sem nome";
       const nomeNovo = inNome ?? criacaoDefaults.nome;
       if (nomeVazio(existing.nome) && nomeNovo && !nomeVazio(nomeNovo))           patch.nome = nomeNovo;
+      // O Fórum precisa aparecer identificado também para contatos que já existiam.
+      // Conserva o nome do cadastro e não acumula o prefixo em inscrição/confirmação.
+      if (config?.prefixoNome) {
+        const nomeMarcado = nomeComPrefixo(nomeVazio(existing.nome) ? nomeNovo : existing.nome, config.prefixoNome);
+        if (nomeMarcado && nomeMarcado !== existing.nome) patch.nome = nomeMarcado;
+      }
       if (!existing.email && emailLead)                                           patch.email = emailLead;
       if (!existing.whatsapp && whatsappLead)                                     patch.whatsapp = whatsappLead;
       if (!existing.curso_interesse && (inCurso ?? criacaoDefaults.curso_interesse))   patch.curso_interesse = (inCurso ?? criacaoDefaults.curso_interesse)!;
@@ -1053,7 +1060,7 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
       const { data: novo, error: leadErr } = await admin
         .from("leads")
         .insert({
-          nome: inNome ?? criacaoDefaults.nome ?? "Sem nome",
+          nome: nomeComPrefixo(inNome ?? criacaoDefaults.nome, config?.prefixoNome) ?? "Sem nome",
           // identificador (Entrada) tem prioridade; senão usa o valor de criação da
           // Criação Automática. dedup já rodou acima — o default aqui só preenche o campo.
           email: emailLead,

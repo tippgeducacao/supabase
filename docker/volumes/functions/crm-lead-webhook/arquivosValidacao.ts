@@ -18,7 +18,7 @@ export function validarManifesto(regras: RegraArquivo[], entrada: unknown): stri
 }
 
 export function extensaoArquivo(tipo: string): string {
-  const mapa: Record<string, string> = { "application/pdf": "pdf", "image/jpeg": "jpg", "image/png": "png", "video/mp4": "mp4", "video/quicktime": "mov", "video/webm": "webm" };
+  const mapa: Record<string, string> = { "application/pdf": "pdf", "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "video/mp4": "mp4", "video/quicktime": "mov", "video/webm": "webm" };
   if (!mapa[tipo]) throw new Error("Formato não suportado.");
   return mapa[tipo];
 }
@@ -29,6 +29,7 @@ export function assinaturaCompativel(tipo: string, b: Uint8Array): boolean {
   if (tipo === "application/pdf") return texto(0, 5) === "%PDF-";
   if (tipo === "image/png") return [137,80,78,71,13,10,26,10].every((v,i) => b[i] === v);
   if (tipo === "image/jpeg") return b[0] === 255 && b[1] === 216 && b[2] === 255;
+  if (tipo === "image/webp") return texto(0, 4) === "RIFF" && texto(8, 12) === "WEBP";
   if (tipo === "video/webm") return [26,69,223,163].every((v,i) => b[i] === v);
   if (tipo === "video/mp4" || tipo === "video/quicktime") return texto(4, 8) === "ftyp";
   return false;

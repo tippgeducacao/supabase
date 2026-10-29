@@ -33,6 +33,8 @@ describe("dados e documentos", () => {
     expect(assinaturaCompativel("application/pdf",new TextEncoder().encode("<html>falso.pdf"))).toBe(false);
     expect(assinaturaCompativel("image/png",new Uint8Array([137,80,78,71,13,10,26,10]))).toBe(true);
     expect(assinaturaCompativel("video/mp4",new Uint8Array([0,0,0,20,102,116,121,112]))).toBe(true);
+    expect(assinaturaCompativel("image/webp",new TextEncoder().encode("RIFF0000WEBPVP8 "))).toBe(true);
+    expect(assinaturaCompativel("image/webp",new TextEncoder().encode("RIFF0000WAVEfmt "))).toBe(false);
   });
   it("preserva DDD 55 e normaliza DDI, espaços e e-mail", () => {
     const d = {...dados(), WhatsApp:"(55) 99999-1234"};

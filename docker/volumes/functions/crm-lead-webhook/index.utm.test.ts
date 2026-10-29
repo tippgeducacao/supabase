@@ -68,6 +68,21 @@ async function enviar(dados: Record<string, unknown>, query = "") {
 }
 
 describe("webhook integrado: captura UTM no entrypoint real", () => {
+  it("marca o Fórum sem substituir o nome já cadastrado e sem duplicar no retorno", async () => {
+    contato = { id: "lead-antigo", nome: "Maria Souza", email: "sintetico@example.com" };
+    integracao.config = { prefixoNome: "FÓRUM" };
+    await enviar({ nome: "Maria" });
+    expect(contato?.nome).toBe("FÓRUM Maria Souza");
+    gravacoes = {};
+    await enviar({ nome: "FÓRUM Maria" });
+    expect(gravacoes["leads:update"]).toBeUndefined();
+  });
+
+  it("cria o contato do Fórum com o prefixo exigido pela direção", async () => {
+    integracao.config = { prefixoNome: "FÓRUM" };
+    await enviar({ nome: "Maria Souza" });
+    expect(contato?.nome).toBe("FÓRUM Maria Souza");
+  });
   it.each(["tiktok_aviario", "linkedin_ppgvet", "whatsapp_aves", "ig_petfood"])("captura URL-only %s sem exigir configuração de cada UTM", async fonte => {
     await enviar({ URL: `https://sanidade.ppgvet.com.br/?utm_source=${fonte}&utm_medium=bio&utm_campaign=sanidade&utm_content=video` });
     expect(gravacoes.leads[0]).toMatchObject({ utm_source: fonte, utm_medium: "bio", utm_campaign: "sanidade", utm_content: "video" });
