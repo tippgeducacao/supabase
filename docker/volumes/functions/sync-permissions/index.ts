@@ -11,6 +11,7 @@
 // pede, porque um bundle desatualizado já desativou 8 telas por engano.
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
+import { exigirAcesso, respostaAcessoNegado } from '../_shared/acesso.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -33,6 +34,12 @@ Deno.serve(async (req: Request) => {
     return new Response('ok', { headers: corsHeaders });
   }
 
+  // Só diretor logado (boot do app e botão "Sincronizar agora"). O antigo atalho
+  // "sem JWT = diretor" (build hook que não existe mais) saiu em 29/10/2026: deixava
+  // qualquer um reescrever o catálogo e aposentar telas.
+  try { await exigirAcesso(req, { usuario: true, rpcPermissao: 'is_diretor_user' }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
+
   try {
     const supabaseUrl = Deno.env.get('SUPABASE_URL');
     const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
@@ -40,33 +47,6 @@ Deno.serve(async (req: Request) => {
       throw new Error('Missing Supabase env vars');
     }
     const supabase = createClient(supabaseUrl, serviceKey);
-
-    // Validar caller: precisa ser autenticado E diretor (ou chamada interna sem auth)
-    const authHeader = req.headers.get('Authorization') || '';
-    const jwt = authHeader.replace(/^Bearer\s+/i, '');
-    let callerIsDiretor = false;
-    if (jwt) {
-      const userClient = createClient(supabaseUrl, Deno.env.get('SUPABASE_ANON_KEY') ?? '');
-      const { data: userData } = await userClient.auth.getUser(jwt);
-      const userId = userData?.user?.id;
-      if (userId) {
-        const { data: rolesRows } = await supabase
-          .from('user_roles')
-          .select('role')
-          .eq('user_id', userId);
-        callerIsDiretor = (rolesRows ?? []).some((r: { role: string }) => r.role === 'diretor');
-      }
-    } else {
-      // Chamada sem JWT (build hook / boot inicial) — permite, mas sem auditoria de actor
-      callerIsDiretor = true;
-    }
-
-    if (!callerIsDiretor) {
-      return new Response(JSON.stringify({ error: 'forbidden' }), {
-        status: 403,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
-    }
 
     const body = (await req.json().catch(() => ({}))) as {
       permissions?: PermissionDef[];

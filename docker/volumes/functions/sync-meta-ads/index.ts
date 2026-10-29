@@ -1,4 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -40,6 +41,9 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
+  // Telas de Marketing (colaborador logado) ou cron (chave de serviço): usa os tokens das contas Meta.
+  try { await exigirAcesso(req, { usuario: true, servico: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   try {
     const { date_from, date_to } = await req.json();

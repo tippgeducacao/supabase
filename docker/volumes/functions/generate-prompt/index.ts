@@ -1,4 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -7,6 +8,8 @@ const corsHeaders = {
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+  try { await exigirAcesso(req, { usuario: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   try {
     const { channel, description, answers, textForSpace, textPosition } = await req.json();

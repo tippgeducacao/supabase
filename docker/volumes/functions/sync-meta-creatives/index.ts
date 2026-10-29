@@ -1,4 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 // Sincronização DEDICADA dos criativos do Meta Ads — foco nos ANÚNCIOS ATIVOS.
 // Antes (sync-meta-ads) os criativos morriam por wall-clock porque a função também fazia
@@ -43,6 +44,9 @@ function normalizeCreativeImageUrl(url?: string | null) {
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  // Tela MetaAdsDashboard (colaborador logado) ou cron (chave de serviço): usa os tokens da Meta.
+  try { await exigirAcesso(req, { usuario: true, servico: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   try {
     const body = await req.json().catch(() => ({}));

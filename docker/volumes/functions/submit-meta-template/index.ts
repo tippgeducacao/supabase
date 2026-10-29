@@ -1,5 +1,6 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
 import { META_API, buildComponents } from '../_shared/pedWaTemplateMeta.ts';
+import { exigirAcesso, respostaAcessoNegado } from '../_shared/acesso.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -9,6 +10,10 @@ const corsHeaders = {
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
+
+  // Só a tela Templates WA do Pedagógico chama (token do colaborador).
+  try { await exigirAcesso(req, { usuario: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   const supabase = createClient(
     Deno.env.get('SUPABASE_URL')!,

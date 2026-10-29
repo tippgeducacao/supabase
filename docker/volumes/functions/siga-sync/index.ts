@@ -29,6 +29,7 @@
 // Envs: SIGA_API_KEY (obrigatória), SIGA_API_BASE, SIGA_SYNC_GAP_MS, SIGA_SYNC_BUDGET_MS.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -242,6 +243,13 @@ function mapFicha(f: any, agora: string) {
 // ------------------------------------------------------------------------------------ main
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+
+  // Só o sistema (crons). A chave anon pública não dispara rodada nem gasta a cota do SIGA.
+  try {
+    await exigirAcesso(req, { servico: true });
+  } catch (e) {
+    return respostaAcessoNegado(e, corsHeaders);
+  }
 
   const t0 = Date.now();
   const agora = new Date().toISOString();

@@ -1,4 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -49,6 +50,10 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
+  // Sem chamador no front, em edge ou cron (29/10/2026): só a chave de serviço, para rodar à mão.
+  // Grava em ped_professores e no bucket público professor-photos e gasta a cota do Drive.
+  try { await exigirAcesso(req, { servico: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   try {
     const apiKey = Deno.env.get("GOOGLE_DRIVE_API_KEY");

@@ -12,6 +12,7 @@
 // inseridas em crm_whatsapp_messages -> o trigger crm_mirror_to_sac espelha pro
 // SAC/Omnichat automaticamente. Eventos connection atualizam wa_conexoes.
 // ----------------------------------------------------------------------------
+// acesso: publico — webhook da Uazapi; confere o token da instância (payload.token) contra wa_conexoes_secrets da ?conexao= antes de gravar qualquer coisa
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { canonTelBr, getWaProvider } from "../_shared/waProviders.ts";
 import { atualizarStatusWaConexao } from "../_shared/waConexaoStatus.ts";
@@ -26,6 +27,17 @@ const corsHeaders = {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const PROVIDER = "uazapi";
+
+/** Comparação em tempo constante (não vaza pelo tempo quanto do token estava certo). */
+function tokenIgual(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  const ea = new TextEncoder().encode(a);
+  const eb = new TextEncoder().encode(b);
+  let dif = ea.length ^ eb.length;
+  const n = Math.max(ea.length, eb.length);
+  for (let i = 0; i < n; i++) dif |= (ea[i] ?? 0) ^ (eb[i] ?? 0);
+  return dif === 0;
+}
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -86,6 +98,36 @@ Deno.serve(async (req) => {
   let payload: any = null;
   try { payload = await req.json(); } catch { payload = null; }
 
+  // ── ORIGEM (29/10/2026): só a Uazapi da PRÓPRIA conexão passa daqui ─────────
+  // Antes qualquer POST era logado e processado: enchia o wa_webhook_log (disco da VPS) e,
+  // com o UUID de uma linha, injetava mensagem falsa no SAC, forjava status de conexão e
+  // acordava o agente de RH. A Uazapi manda em TODO evento o `token` da instância no corpo
+  // (conferido em 29/10/2026: 27.122 de 27.122 eventos em 7 dias batiam com
+  // wa_conexoes_secrets.token da conexão da URL). Sem ?conexao=, sem token ou com token de
+  // outra instância: recusa SEM gravar nada, nem o log.
+  if (!payload || typeof payload !== "object") return json({ ok: true, skipped: "payload vazio" });
+  if (!conexaoId) {
+    console.warn("[wa-uazapi-webhook] sem ?conexao= na URL; recusado sem log");
+    return json({ ok: true, skipped: "sem conexao" });
+  }
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(conexaoId)) {
+    return json({ error: "origem não autorizada" }, 401);
+  }
+  {
+    const { data: segredoConexao, error: segredoErr } = await admin
+      .from("wa_conexoes_secrets").select("token").eq("conexao_id", conexaoId).maybeSingle();
+    if (segredoErr) {
+      console.error("[wa-uazapi-webhook] não deu para conferir o token da conexão:", segredoErr.message);
+      return json({ ok: false, erro: "conferência de origem indisponível" }, 503);
+    }
+    const esperado = String(segredoConexao?.token ?? "");
+    const recebido = typeof payload.token === "string" ? payload.token : "";
+    if (!tokenIgual(recebido, esperado)) {
+      console.warn("[wa-uazapi-webhook] token da instância ausente/divergente — recusado sem log:", conexaoId);
+      return json({ error: "origem não autorizada" }, 401);
+    }
+  }
+
   // ── LOG-FIRST: grava o cru antes de tudo ────────────────────────────────────
   let evento = "desconhecido";
   try {
@@ -102,12 +144,6 @@ Deno.serve(async (req) => {
     });
   } catch (e) {
     console.error("[wa-uazapi-webhook] falha ao logar payload:", e instanceof Error ? e.message : String(e));
-  }
-
-  if (!payload) return json({ ok: true, skipped: "payload vazio" });
-  if (!conexaoId) {
-    console.warn("[wa-uazapi-webhook] sem ?conexao= na URL; só logado");
-    return json({ ok: true, skipped: "sem conexao" });
   }
 
   // Resolve a conexão (server_url p/ baixar mídia + secret token).

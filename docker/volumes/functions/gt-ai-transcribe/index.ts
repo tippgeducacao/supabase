@@ -1,3 +1,4 @@
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 // Edge function: gt-ai-transcribe
 // Receives audio (base64) and returns transcription (PT-BR) using Gemini 2.5 Flash multimodal.
 // Supports incremental transcription via optional `context` (previous transcript) for chunked recording.
@@ -34,6 +35,8 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+  try { await exigirAcesso(req, { usuario: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   try {
     const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");

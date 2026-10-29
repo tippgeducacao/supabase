@@ -31,6 +31,7 @@
 //      revisão da Meta) — NÃO manda nada pra ninguém sozinho; o envio real continua travado por
 //      `onb_regua_config.flow_id_avaliacao_d15` (ver docs/CRM — Integração do Aluno.md).
 import { createClient } from 'npm:@supabase/supabase-js@2';
+import { exigirAcesso, respostaAcessoNegado } from '../_shared/acesso.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -156,6 +157,10 @@ function json(data: unknown, status = 200): Response {
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
   if (req.method !== 'POST') return json({ ok: false, error: 'método não suportado' }, 405);
+
+  // Uso manual de admin (curl): exige a chave de serviço exata. Nenhum gatilho chama.
+  try { await exigirAcesso(req, { servico: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   const admin = createClient(
     Deno.env.get('SUPABASE_URL')!,

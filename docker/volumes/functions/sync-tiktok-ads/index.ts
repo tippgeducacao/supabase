@@ -10,6 +10,7 @@
 // `access_token` (header `Access-Token`) e `advertiser_id`. Quem grava essa linha é a edge
 // `tiktok-ads-connect` (token colado à mão) ou `tiktok-ads-oauth-callback` (OAuth do portal).
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -333,6 +334,9 @@ async function alcanceDoPeriodo(contas: Record<string, string>[], de: string, at
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  // Tela TikTok Ads (colaborador logado) ou cron (chave de serviço): usa os tokens das contas TikTok.
+  try { await exigirAcesso(req, { usuario: true, servico: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   try {
     const body = await req.json().catch(() => ({}));
@@ -344,11 +348,8 @@ Deno.serve(async (req) => {
     const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 
     if (body.modo === "alcance") {
-      // Leitura sob demanda da tela TikTok Ads: exige usuário logado (o token das contas é usado
-      // para falar com o TikTok). A sincronização de sempre, abaixo, não mudou.
-      const jwt = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "");
-      const { data: quem } = jwt ? await supabase.auth.getUser(jwt) : { data: { user: null } };
-      if (!quem?.user) return json({ error: "Entre no sistema para consultar o alcance." }, 401);
+      // Leitura sob demanda da tela TikTok Ads (o token das contas é usado para falar com o
+      // TikTok). Quem chama já foi conferido no exigirAcesso do topo.
       const dia = /^\d{4}-\d{2}-\d{2}$/;
       if (!dia.test(String(body.date_from || "")) || !dia.test(String(body.date_to || "")) || body.date_from > body.date_to) {
         return json({ error: "Informe date_from e date_to (AAAA-MM-DD), com o início antes do fim." }, 400);

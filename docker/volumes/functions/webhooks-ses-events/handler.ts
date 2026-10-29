@@ -34,6 +34,14 @@ export interface DepsWebhookSes {
   buscar?: (url: string) => Promise<{ ok: boolean }>;
   /** Ligar só em desenvolvimento. */
   pularVerificacao?: boolean;
+  /**
+   * TopicArn aceitos. A assinatura prova que veio da AWS, NÃO que veio da conta da PPG:
+   * qualquer conta AWS cria um tópico, inscreve este endpoint e publica `Bounce`/`Complaint`
+   * autênticos com endereços à escolha (validação de 29/10/2026). Tópico fora da lista é
+   * recusado ANTES de qualquer efeito — inclusive a confirmação de inscrição.
+   * Indefinido = sem filtro (só nos testes antigos; o index.ts sempre passa a lista).
+   */
+  topicosPermitidos?: string[];
 }
 
 export async function tratarEventoSns(req: Request, deps: DepsWebhookSes): Promise<Response> {
@@ -51,6 +59,11 @@ export async function tratarEventoSns(req: Request, deps: DepsWebhookSes): Promi
     msg = JSON.parse(bruto);
   } catch {
     return json({ error: "corpo não é JSON" }, 400);
+  }
+
+  if (deps.topicosPermitidos && !deps.topicosPermitidos.includes(String(msg?.TopicArn ?? ""))) {
+    console.warn("webhooks-ses-events: tópico SNS fora da lista — recusado", msg?.TopicArn);
+    return json({ error: "tópico SNS não autorizado" }, 403);
   }
 
   if (deps.pularVerificacao) {

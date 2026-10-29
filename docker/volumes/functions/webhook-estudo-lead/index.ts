@@ -1,4 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { exigirAcesso, respostaAcessoNegado } from '../_shared/acesso.ts'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -11,6 +12,17 @@ const WEBHOOK_URL = 'https://auto.ppgeducacao.site/webhook/dadoslead'
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders })
+  }
+
+  // PORTA (29/10/2026): sem login, repassava qualquer corpo ao n8n e gravava a resposta em
+  // agendamentos.estudo_lead. Não há chamador vivo: o WebhookEstudoLeadService do front não é
+  // importado por nenhuma tela, o n8n foi excluído em 14/10/2026 e o domínio
+  // auto.ppgeducacao.site passou a apontar para servidor de OUTRA empresa (ver a lápide do
+  // sync-eduq-faturas). Fica restrita à chave de serviço até ser aposentada de vez.
+  try {
+    await exigirAcesso(req, { servico: true })
+  } catch (e) {
+    return respostaAcessoNegado(e, corsHeaders)
   }
 
   try {

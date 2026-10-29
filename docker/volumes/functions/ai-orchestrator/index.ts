@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { exigirAcesso, respostaAcessoNegado, type Chamador } from "../_shared/acesso.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -991,6 +992,9 @@ ${sectionsHtml}
 // ─── Main Handler ───
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+  let chamador: Chamador;
+  try { chamador = await exigirAcesso(req, { usuario: true, servico: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   const supabase = createClient(
     Deno.env.get("SUPABASE_URL")!,
@@ -998,7 +1002,9 @@ serve(async (req) => {
   );
 
   try {
-    const { userMessage, sessionId, agentSlug, brandId, userId, attachments, stream: streamToClient } = await req.json();
+    const { userMessage, sessionId, agentSlug, brandId, userId: userIdCorpo, attachments, stream: streamToClient } = await req.json();
+    // Logado: o dono é quem está no token, nunca o corpo. Serviço (auto-chamada do campaign-director): vem do corpo.
+    const userId = chamador.tipo === "usuario" ? chamador.usuarioId : userIdCorpo;
 
     if (!userId || !userMessage || !agentSlug) {
       return new Response(JSON.stringify({ error: "userId, userMessage, and agentSlug are required" }), {

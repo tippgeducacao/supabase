@@ -15,6 +15,7 @@
 // A conta WA é resolvida por `wa_account_id` (ou a 1ª ativa) via RPC
 // get_crm_wa_account (service_role). Cada conta = 1 número de API cadastrado.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -45,6 +46,10 @@ function metaErro(metaResp: any, fallbackStatus: number): string {
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+
+  // Telas do CRM (token do colaborador) ou outra edge (onb-regua-dispatch, chave de serviço).
+  try { await exigirAcesso(req, { usuario: true, servico: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   try {
     const body = await req.json().catch(() => ({}));

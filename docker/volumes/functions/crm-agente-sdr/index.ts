@@ -1878,7 +1878,14 @@ async function gatesDeEntrada(payload: any, viaN8n = false): Promise<Response | 
   if (!payload?.remotejid || !payload?.telefone) return json({ error: 'remotejid/telefone obrigatórios' }, 400);
 
   // Comando de reset usado nos testes (/excluirdados): apaga lead + mensagens.
+  // ⚠️ Só para telefone de TESTE (luna_telefones, mesma régua do /limpar). Antes valia para
+  // qualquer remotejid: um POST forjado (ou um lead real digitando o comando) apagava o
+  // histórico de um lead de verdade (validação de segurança de 29/10/2026). Fora da lista,
+  // o comando é ignorado sem apagar nada e sem acordar a IA.
   if (String(payload.conteudo ?? '').trim() === '/excluirdados') {
+    if (!(await ehTelefoneDeTeste(supabase, String(payload.telefone)))) {
+      return json({ ok: true, skip: 'excluirdados_fora_do_teste' });
+    }
     await excluirDadosLead(supabase, payload.remotejid);
     await supabase.from('crm_agente_sdr_buffer').delete().eq('remotejid', payload.remotejid);
     return json({ ok: true, reset: true });

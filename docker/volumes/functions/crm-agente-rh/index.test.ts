@@ -30,6 +30,10 @@ vi.mock('https://esm.sh/@supabase/supabase-js@2.50.3', () => ({
         if (tabela === 'crm_campos') return { data: { id: 'campo-area' }, error: null };
         if (tabela === 'crm_campo_valores') return { data: { id: 'origem-candidato' }, error: null };
         if (tabela === 'rh_entrevista_config') return { data: {}, error: null };
+        // Conferência de ORIGEM do handler: o wamid do relay existe como inbound deste canal.
+        if (tabela === 'crm_whatsapp_messages' && filtros.some(([k]) => k === 'wa_message_id')) {
+          return { data: filtros.some(([k, v]) => k === 'wa_message_id' && v === 'wamid.teste') ? { telefone: '5546999990001' } : null, error: null };
+        }
         if (tabela === 'crm_whatsapp_messages' && !filtros.some(([k, v]) => k === 'gt' || (k === 'direcao' && v === 'outbound'))) {
           return { data: [{ telefone: '5546999990001', direcao: 'inbound', conteudo: 'Conheço uma pessoa da equipe.', created_at: new Date().toISOString() }], error: null };
         }
@@ -111,5 +115,28 @@ describe('RH: bastidor não vira resposta reserva', () => {
     expect(limparResposta(`<${tag}>Preciso decidir.`)).toBe('');
     expect(limparResposta(`Pode enviar seu currículo! <${tag}>Preciso decidir.`)).toBe('Pode enviar seu currículo!');
     expect(limparResposta(`Preciso decidir.</${tag}>Pode enviar seu currículo!`)).toBe('Pode enviar seu currículo!');
+  });
+});
+
+describe('RH: origem da mensagem', () => {
+  it('id que o banco não conhece neste canal não acorda o agente', async () => {
+    estado.respostas = [{ content: [{ type: 'text', text: 'não devia sair' }] }];
+    const execucao = handler(new Request('https://edge.invalid/crm-agente-rh', {
+      method: 'POST', body: JSON.stringify({ wa_account_id: CONTA, direcao: 'inbound', telefone: TELEFONE, id: 'wamid.forjado', conteudo: 'oi' }),
+    }));
+    await vi.runAllTimersAsync();
+    const r = await execucao;
+    expect(await r.json()).toEqual({ ok: true, pulado: 'origem' });
+    expect(estado.chamadas).toHaveLength(0);
+    expect(estado.fila).toEqual([]);
+  });
+
+  it('wamid real com telefone de outra pessoa também não passa', async () => {
+    const execucao = handler(new Request('https://edge.invalid/crm-agente-rh', {
+      method: 'POST', body: JSON.stringify({ wa_account_id: CONTA, direcao: 'inbound', telefone: '5546988887777', id: 'wamid.teste', conteudo: 'oi' }),
+    }));
+    await vi.runAllTimersAsync();
+    expect(await (await execucao).json()).toEqual({ ok: true, pulado: 'origem' });
+    expect(estado.chamadas).toHaveLength(0);
   });
 });

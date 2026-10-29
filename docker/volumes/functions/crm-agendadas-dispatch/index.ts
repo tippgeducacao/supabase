@@ -16,6 +16,7 @@
 // e a mídia vem por aqui) — é o que garante que o vídeo chegue DEPOIS do texto, já que o
 // pg_net dispara as requisições em paralelo, sem ordem.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 import { AUTOR_REENVIO_MATERIAL, LIMITE_REENVIO_MS, proximaTentativaMaterial } from '../_shared/reenvioMaterial.ts';
 import { interpretarEnvioMaterial } from '../_shared/resultadoEnvioMaterial.ts';
 import { phoneVariants } from '../crm-whatsapp-send/telefoneConversa.ts';
@@ -91,9 +92,10 @@ function tipoDaMidia(mime: string | null, url: string, filename: string | null):
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
-  if (!req.headers.get("Authorization")?.startsWith("Bearer ")) {
-    return jsonResp({ error: "Unauthorized" }, 401);
-  }
+  // Só o cron `crm-mensagens-agendadas-dispatch` (chave de serviço exata, via
+  // `_get_service_role_key()`). Antes bastava começar com "Bearer " — a chave anon passava.
+  try { await exigirAcesso(req, { servico: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   const admin = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 

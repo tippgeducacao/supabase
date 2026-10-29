@@ -27,6 +27,7 @@
 //       EDUQ_CONSULTA_TITULOS_ID (opcional, default 11).
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -127,6 +128,16 @@ function paraLinha(t: Record<string, unknown>) {
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+
+  // Só o sistema (cron eduq-api-titulos-30min). Até 29/10/2026 o cron mandava a chave ANON,
+  // que qualquer visitante tem: gastava a cota da consulta 11 e marcava títulos como
+  // "Ausente na EDUQ" com a janela que quisesse.
+  try {
+    await exigirAcesso(req, { servico: true });
+  } catch (e) {
+    return respostaAcessoNegado(e, corsHeaders);
+  }
+
   const t0 = Date.now();
   try {
     if (!EDUQ_TOKEN) throw new Error("EDUQ_API_TOKEN não configurada");

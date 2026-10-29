@@ -1,4 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
+import { exigirAcesso, respostaAcessoNegado } from '../_shared/acesso.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -52,6 +53,11 @@ function normalize(c: any) {
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
+
+  // Só colaborador do Financeiro (Financeiro → Integração SIGA): devolve faturas com dado pessoal.
+  try { await exigirAcesso(req, { usuario: true, rpcPermissao: 'is_financial_user' }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
+
   if (req.method !== 'POST') {
     return new Response(
       JSON.stringify({ success: false, error: 'Método não permitido' }),

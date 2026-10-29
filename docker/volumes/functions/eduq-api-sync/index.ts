@@ -17,6 +17,7 @@
 //   EDUQ_CONSULTA_PAGAMENTOS_ID (opcional, default 5).
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { exigirAcesso, respostaAcessoNegado, type Chamador } from "../_shared/acesso.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -116,12 +117,6 @@ function normalize(it: any) {
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
-  const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: s, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-  if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
-
-  if (!EDUQ_TOKEN) return json({ success: false, error: "EDUQ_API_TOKEN não configurada no edge-runtime (Dokploy)." }, 400);
-  const authHeader = req.headers.get("Authorization") ?? "";
-  if (!authHeader) return json({ success: false, error: "Não autenticado." }, 401);
 
   // ── Chamada do cron × chamada de gente ───────────────────────────────────────
   // Até 12/10/2026 esta edge só rodava no clique do botão "Sincronizar EDUQ", e por isso
@@ -130,13 +125,26 @@ Deno.serve(async (req) => {
   //
   // O cron não tem usuário, e a `eduq_api_sync_upsert` exige `is_financial_user()` ou
   // `is_management_user()`. Em vez de afrouxar esse gate, a edge se identifica como
-  // SERVIÇO quando o disparo é do cron — e a função passou a aceitar
-  // `auth.role() = 'service_role'`, que é o padrão já usado no resto do banco
-  // (ver calendar_b2b_pode_consultar).
+  // SERVIÇO quando o disparo é do cron — e a função aceita `auth.role() = 'service_role'`.
   //
-  // ⚠️ O gatilho é o header `x-trigger: cron`, que só existe dentro da VPS: a edge não
-  //    está exposta sem o bearer, e o cron usa o kong interno. Não é um bypass aberto.
-  const doCron = (req.headers.get("x-trigger") ?? "").toLowerCase() === "cron";
+  // ⚠️ Até 29/10/2026 o "é do cron" era só o cabeçalho `x-trigger: cron` com a chave ANON:
+  //    qualquer visitante mandava os dois e enchia a fila de aprovação com a janela que
+  //    quisesse. Agora o cron precisa provar com a chave de serviço exata, e gente precisa
+  //    estar logada e ser do Financeiro.
+  let chamador: Chamador;
+  try {
+    chamador = await exigirAcesso(req, { usuario: true, rpcPermissao: "is_financial_user", servico: true });
+  } catch (e) {
+    return respostaAcessoNegado(e, corsHeaders);
+  }
+
+  const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: s, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+  if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
+
+  if (!EDUQ_TOKEN) return json({ success: false, error: "EDUQ_API_TOKEN não configurada no edge-runtime (Dokploy)." }, 400);
+  const authHeader = req.headers.get("Authorization") ?? "";
+
+  const doCron = chamador.tipo !== "usuario";
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
   if (doCron && !serviceKey) {
     return json({ success: false, error: "SUPABASE_SERVICE_ROLE_KEY não configurada." }, 500);

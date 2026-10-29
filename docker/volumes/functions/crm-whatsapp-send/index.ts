@@ -2,6 +2,7 @@
 // Envia mensagem WhatsApp (texto, template ou documento/PDF) via Meta Cloud API para o CRM Comercial.
 // Diferente do whatsapp-send-message (pedagógico) — usa crm_whatsapp_accounts e crm_whatsapp_messages.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 import { getWaProvider } from "../_shared/waProviders.ts";
 import { telefoneEnviavel, digitosParaEnvio } from "../_shared/telefone.ts";
 import { phoneVariants, canonicalConversationPhone } from "./telefoneConversa.ts";
@@ -403,6 +404,12 @@ async function enviarViaConexao(admin: any, p: {
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+
+  // Atendimento (token do colaborador; ped-aula-avaliacao-enviar repassa o dele) ou interno
+  // com a chave de serviço exata: edges (agente SDR, lembretes, webchat, fila de agendadas…)
+  // e funções do banco via pg_net (`_get_service_role_key()`).
+  try { await exigirAcesso(req, { usuario: true, servico: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   try {
     const body = await req.json().catch(() => ({}));

@@ -22,6 +22,7 @@
 // `?dry=1` devolve exatamente quem receberia, sem mandar nada e sem gravar.
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.0';
+import { exigirAcesso, respostaAcessoNegado } from '../_shared/acesso.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -48,12 +49,17 @@ function primeiroNome(nome: string | null): string {
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
 
-  const url = new URL(req.url);
-  const dry = url.searchParams.get('dry') === '1';
-
   const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
   const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
   const db = createClient(supabaseUrl, serviceKey);
+
+  // Só o cron chama (chave de serviço). O ?dry=1 devolve nome e e-mail de inscrito, então
+  // também fica atrás da trava.
+  try { await exigirAcesso(req, { servico: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
+
+  const url = new URL(req.url);
+  const dry = url.searchParams.get('dry') === '1';
 
   const desde = new Date(Date.now() - JANELA_DIAS * 86_400_000).toISOString();
 

@@ -2,6 +2,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { encode as base64Encode, decode as base64Decode } from "https://deno.land/std@0.168.0/encoding/base64.ts";
 import { limparSaidaIA, tirarTravessao } from "../_shared/limparSaidaIA.ts";
+import { exigirAcesso, respostaAcessoNegado, type Chamador } from "../_shared/acesso.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -174,6 +175,9 @@ async function fetchAIWithRetry(
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+  let chamador: Chamador;
+  try { chamador = await exigirAcesso(req, { usuario: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   const supabase = createClient(
     Deno.env.get("SUPABASE_URL")!,
@@ -181,7 +185,9 @@ serve(async (req) => {
   );
 
   try {
-    const { user_id, brand_profile_id, context, tom_de_voz, post_type, original_caption, image_description, reference_images, reference_image_urls, operator_name, video_url, video_data, video_mime, ig_handle, pilar_chave } = await req.json();
+    const { user_id: _userIdCorpo, brand_profile_id, context, tom_de_voz, post_type, original_caption, image_description, reference_images, reference_image_urls, operator_name, video_url, video_data, video_mime, ig_handle, pilar_chave } = await req.json();
+    // O custo e a geração ficam em nome de quem está no token, nunca do user_id do corpo.
+    const user_id = chamador.tipo === "usuario" ? chamador.usuarioId : _userIdCorpo;
     if (!user_id) {
       return new Response(JSON.stringify({ error: "user_id is required" }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }

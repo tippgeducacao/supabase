@@ -1,5 +1,6 @@
 // Extrai blueprint (módulos + aulas) de um PDF de PPC usando Lovable AI Gateway (Gemini).
 import { corsHeaders } from "npm:@supabase/supabase-js@2/cors";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
 
@@ -28,6 +29,8 @@ Regras:
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  try { await exigirAcesso(req, { usuario: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   try {
     if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY ausente");

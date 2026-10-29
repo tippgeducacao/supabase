@@ -18,6 +18,7 @@
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3'
 import { corsHeaders } from '../_shared/cors.ts'
+import { exigirAcesso, respostaAcessoNegado } from '../_shared/acesso.ts'
 
 const supabase = createClient(
   Deno.env.get('SUPABASE_URL') ?? '',
@@ -39,6 +40,9 @@ interface Envio {
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
+  // Só o cron (chave de serviço): drena a fila ped_biblioteca_envios com o segredo de ingestão.
+  try { await exigirAcesso(req, { servico: true }) }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders) }
 
   const { data: config } = await supabase
     .from('ped_biblioteca_config')

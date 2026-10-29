@@ -19,6 +19,7 @@ import type { SessaoImap } from '../_shared/imap/conexao.ts';
 import { diferencaPorLinha, emLotes, LOTE_FILTRO_IN } from '../_shared/emailReconciliacao.ts';
 import { resolvedorDaPlataforma, verificarServidorDoDominio } from '../_shared/imap/servidorDoDominio.ts';
 import { regraReligar } from '../_shared/imap/religar.ts';
+import { exigirAcesso, respostaAcessoNegado } from '../_shared/acesso.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -542,12 +543,40 @@ async function varrerPasta(
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
+  // Quem chama (29/10/2026): o cron com x-email-sync-secret (o mesmo segredo do Gmail,
+  // conferido no banco contra o vault), o imap-connect-caixa com a chave de serviço, ou o
+  // colaborador logado sincronizando UMA caixa que ele enxerga (botão da Inbox). Antes,
+  // qualquer um com a chave anon disparava login IMAP em todas as caixas.
+  const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
+  let porSegredo = false;
+  const segredoCron = req.headers.get('x-email-sync-secret');
+  if (segredoCron) {
+    const { data, error } = await admin.rpc('email_sync_validar_cron', { p_segredo: segredoCron });
+    porSegredo = !error && data === true;
+  }
+  let usuarioId: string | null = null;
+  if (!porSegredo) {
+    try {
+      const quem = await exigirAcesso(req, { usuario: true, servico: true });
+      if (quem.tipo === 'usuario') usuarioId = quem.usuarioId;
+    } catch (e) { return respostaAcessoNegado(e, corsHeaders); }
+  }
+  const negar = (status: number, error: string) => new Response(JSON.stringify({ error }), {
+    status, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+  });
   INICIO = agora();
 
-  const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
   try {
     const body = req.method === 'POST' ? await req.json().catch(() => ({})) : {};
     let ids: string[];
+
+    if (usuarioId) {
+      // Colaborador: só a caixa pedida e só se ele a enxerga.
+      if (!body.caixa_id || typeof body.caixa_id !== 'string') return negar(400, 'Informe a caixa.');
+      const { data: visivel, error: visErr } = await admin.rpc('email_caixa_visible', { _caixa_id: body.caixa_id, _user_id: usuarioId });
+      if (visErr) return negar(503, 'Não foi possível conferir a permissão.');
+      if (visivel !== true) return negar(403, 'Você não tem acesso a esta caixa.');
+    }
 
     if (body.caixa_id) {
       ids = [body.caixa_id];

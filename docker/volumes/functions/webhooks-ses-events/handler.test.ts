@@ -50,6 +50,37 @@ describe("assinatura", () => {
     expect(db.linhas("email_webhook_eventos")).toHaveLength(0);
   });
 
+  it("tópico de OUTRA conta AWS é recusado com 403 antes de qualquer efeito (mesmo assinado)", async () => {
+    const db = bancoComEnvio();
+    const buscas: string[] = [];
+    const permitidos = ["arn:aws:sns:sa-east-1:110379261517:ppgvet-ses-eventos"];
+    const bounce = await tratarEventoSns(
+      requisicao(fixture("notification-bounce-permanent")),
+      { supabase: db, ...aceitaTudo, topicosPermitidos: permitidos },
+    );
+    const inscricao = await tratarEventoSns(
+      requisicao(fixture("subscription-confirmation")),
+      { supabase: db, ...aceitaTudo, topicosPermitidos: permitidos, buscar: async (u) => { buscas.push(u); return { ok: true }; } },
+    );
+
+    expect(bounce.status).toBe(403);
+    expect(inscricao.status).toBe(403);
+    expect(buscas).toHaveLength(0);
+    expect(db.linhas("email_supressoes")).toHaveLength(0);
+    expect(db.linhas("email_webhook_eventos")).toHaveLength(0);
+    expect(db.linhas("email_sns_assinaturas")).toHaveLength(0);
+  });
+
+  it("tópico da lista segue o fluxo normal", async () => {
+    const db = bancoComEnvio();
+    const res = await tratarEventoSns(
+      requisicao(fixture("notification-bounce-permanent")),
+      { supabase: db, ...aceitaTudo, topicosPermitidos: ["arn:aws:sns:us-east-1:123456789012:crm-ses-events"] },
+    );
+    expect(res.status).toBe(200);
+    expect(db.linhas("email_supressoes")).toHaveLength(1);
+  });
+
   it("corpo que não é JSON devolve 400", async () => {
     const db = bancoComEnvio();
     const res = await tratarEventoSns(requisicao("nao-e-json"), { supabase: db, ...aceitaTudo });

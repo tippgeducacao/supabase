@@ -1,3 +1,6 @@
+// acesso: publico — aceita só a chave de serviço exata (relay do crm-whatsapp-webhook) ou uma
+// X-Hub-Signature-256 válida da Meta (HMAC do corpo BRUTO com CRM_META_APP_SECRET). Por isso lê o
+// corpo antes de exigirAcesso; qualquer outro pedido leva 401 antes de tocar no banco (29/10/2026).
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import {
   ACOES_DE_RECUSA, acaoDoBotaoPodcast, acaoDoCliquePodcast, logPodcastConversaSac, type AcaoBotaoPodcast,
@@ -7,6 +10,7 @@ import {
   type CtxPodcast,
 } from "../_shared/podcastEnvio.ts";
 import { baixarAnexoInbound, extrairMidiaInbound } from "../_shared/waMediaInbound.ts";
+import { exigirAcesso, AcessoNegado } from "../_shared/acesso.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -15,6 +19,37 @@ const corsHeaders = {
 };
 
 const VERIFY_TOKEN = "ppgvet-pedagogico-v2";
+
+// Porta de entrada do POST (29/10/2026). Desde 10/09/2026 o único número do pedagógico (e do
+// podcast) vive na WABA do app "API Oficial CRM - BM 08", cuja URL de webhook é o
+// crm-whatsapp-webhook: ele confere a assinatura da Meta e ENCAMINHA para cá com
+// `Authorization: Bearer <service_role>` (encaminharAoPedagogico). Antes daqui não havia
+// conferência nenhuma: um POST forjado no formato da Meta criava conversa no SAC pedagógico e
+// mudava convite de professor. Aceita:
+//   1. a chave de serviço exata (o encaminhamento do crm-whatsapp-webhook);
+//   2. reserva: X-Hub-Signature-256 válida com um dos App Secrets de CRM_META_APP_SECRET,
+//      caso algum app da Meta volte a apontar direto para esta URL.
+const META_APP_SECRETS = (Deno.env.get("CRM_META_APP_SECRET") ?? "")
+  .split(",").map((s) => s.trim()).filter(Boolean);
+
+async function assinaturaMetaValida(raw: string, header: string | null): Promise<boolean> {
+  if (!header || !META_APP_SECRETS.length) return false;
+  const [algo, sigHex] = header.split("=");
+  if (algo !== "sha256" || !sigHex) return false;
+  const corpo = new TextEncoder().encode(raw);
+  for (const segredo of META_APP_SECRETS) {
+    const key = await crypto.subtle.importKey(
+      "raw", new TextEncoder().encode(segredo), { name: "HMAC", hash: "SHA-256" }, false, ["sign"],
+    );
+    const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, corpo));
+    const esperado = Array.from(mac).map((b) => b.toString(16).padStart(2, "0")).join("");
+    // comparação em tempo constante
+    let dif = esperado.length ^ sigHex.length;
+    for (let i = 0; i < esperado.length; i++) dif |= esperado.charCodeAt(i) ^ (sigHex.charCodeAt(i) || 0);
+    if (dif === 0) return true;
+  }
+  return false;
+}
 
 // Mapeia texto/id de botão → ação no convite
 // action: 'set_status' atualiza convite.status; 'trigger_reserva' aciona busca de reserva; 'log_only' só registra evento
@@ -96,6 +131,22 @@ Deno.serve(async (req) => {
 
   if (req.method !== "POST") {
     return new Response("ok", { status: 200, headers: corsHeaders });
+  }
+
+  // Corpo BRUTO lido uma vez: a assinatura da Meta é sobre os bytes exatos.
+  const rawBody = await req.text();
+  let origemOk = false;
+  try {
+    await exigirAcesso(req, { servico: true });
+    origemOk = true;
+  } catch (e) {
+    if (!(e instanceof AcessoNegado)) throw e;
+  }
+  if (!origemOk && !(await assinaturaMetaValida(rawBody, req.headers.get("x-hub-signature-256")))) {
+    console.warn("[whatsapp-webhook] POST recusado: sem chave de serviço nem assinatura da Meta válida");
+    return new Response(JSON.stringify({ error: "origem não autorizada" }), {
+      status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
   }
 
   const supabase = createClient(
@@ -242,7 +293,7 @@ Deno.serve(async (req) => {
 
   let body: any = null;
   try {
-    body = await req.json();
+    body = JSON.parse(rawBody);
     console.log("[whatsapp-webhook] POST body:", JSON.stringify(body));
   } catch (e) {
     console.log("[whatsapp-webhook] POST body parse error", (e as Error).message);

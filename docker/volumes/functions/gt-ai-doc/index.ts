@@ -1,3 +1,4 @@
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 // Edge function: gt-ai-doc
 // Multi-action AI helper for the document editor (Notion-like)
 // Actions: improve | summarize | expand | shorten | translate | continue | generate
@@ -58,6 +59,8 @@ function systemPromptFor(action: Action, opts: { instruction?: string; language?
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+  try { await exigirAcesso(req, { usuario: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   try {
     const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");

@@ -13,6 +13,7 @@
 // Cada conta ativa: troca o refresh_token por um access_token e roda uma GAQL
 // que traz campanha + métricas por dia; grava spend = cost_micros ÷ 1e6.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -95,6 +96,9 @@ async function queryGAQL(
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  // Só o cron (chave de serviço): troca o refresh_token do Google Ads e gasta a cota do developer token.
+  try { await exigirAcesso(req, { servico: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   try {
     const body = await req.json().catch(() => ({}));
@@ -103,6 +107,11 @@ Deno.serve(async (req) => {
     const iso = (d: Date) => d.toISOString().slice(0, 10);
     const date_to = body.date_to || iso(hojeSP);
     const date_from = body.date_from || iso(new Date(hojeSP.getTime() - 30 * 86400000));
+    // As datas entram concatenadas na GAQL: só AAAA-MM-DD.
+    const dia = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dia.test(String(date_from)) || !dia.test(String(date_to))) {
+      return json({ error: "date_from e date_to devem ser AAAA-MM-DD." }, 400);
+    }
 
     const developerToken = Deno.env.get("GOOGLE_ADS_DEVELOPER_TOKEN");
     const clientId = Deno.env.get("GOOGLE_ADS_CLIENT_ID");

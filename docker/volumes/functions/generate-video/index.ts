@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { exigirAcesso, respostaAcessoNegado, type Chamador } from "../_shared/acesso.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -10,6 +11,9 @@ const BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+  let chamador: Chamador;
+  try { chamador = await exigirAcesso(req, { usuario: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   const supabase = createClient(
     Deno.env.get("SUPABASE_URL")!,
@@ -17,7 +21,9 @@ serve(async (req) => {
   );
 
   try {
-    const { user_id, prompt, brand_profile_id, source_type, source_post_id, aspect_ratio, operator_name } = await req.json();
+    const { user_id: _userIdCorpo, prompt, brand_profile_id, source_type, source_post_id, aspect_ratio, operator_name } = await req.json();
+    // O custo e a geração ficam em nome de quem está no token, nunca do user_id do corpo.
+    const user_id = chamador.tipo === "usuario" ? chamador.usuarioId : _userIdCorpo;
     if (!user_id || !prompt) {
       return new Response(JSON.stringify({ error: "user_id and prompt are required" }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }

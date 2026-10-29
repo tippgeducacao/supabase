@@ -25,6 +25,7 @@
 // pela RPC threec_sync_registrar_batimento — ver registrarBatimento().
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0'
+import { exigirAcesso, respostaAcessoNegado } from '../_shared/acesso.ts'
 
 // CORS inline (sem depender de ../_shared/cors.ts) — deploy self-hosted via
 // docker cp é frágil; manter a função num único arquivo evita boot error por
@@ -300,6 +301,13 @@ async function registrarBatimento(b: Batimento): Promise<void> {
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders })
+  }
+
+  // Só o sistema (cron). A chave anon pública não roda o ciclo nem gasta a cota do 3C.
+  try {
+    await exigirAcesso(req, { servico: true })
+  } catch (e) {
+    return respostaAcessoNegado(e, corsHeaders)
   }
 
   if (!THREEC_TOKEN) {

@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -70,6 +71,18 @@ serve(async (req) => {
       status: 405,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
+  }
+
+  // PORTA (29/10/2026): sem login, gravava captação creditada ao captador da URL do corpo (fraude de premiação) e
+  // criava lead. Nenhum chamador vivo: a última captação sem criado_por_usuario_id (as desta
+  // edge) é de 05/03/2026; o app grava direto (CaptacoesOrganicasService).
+  // Aceita só a chave de serviço exata ou o cabeçalho x-webhook-secret = env WEBHOOK_CAPTACOES_SECRET
+  // (vazio = desligado). Reativar uma integração: criar WEBHOOK_CAPTACOES_SECRET no env das edges e configurar
+  // o mesmo valor no cabeçalho x-webhook-secret de quem chama. Ver docs/SECURITY.md.
+  try {
+    await exigirAcesso(req, { servico: true, segredo: { cabecalho: "x-webhook-secret", valor: Deno.env.get("WEBHOOK_CAPTACOES_SECRET") } });
+  } catch (e) {
+    return respostaAcessoNegado(e, corsHeaders);
   }
 
   try {

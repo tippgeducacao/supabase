@@ -1,4 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 // Catálogo COMPLETO de anúncios (tabela meta_ads) — TODOS os status, não só ativos.
 // Alimenta o dashboard "Melhores Criativos": o lead traz utm_content = {{ad.name}} e
@@ -21,6 +22,9 @@ const BUDGET_MS = Number(Deno.env.get("SYNC_META_ADS_CATALOG_BUDGET_MS") || 100_
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  // Só o cron (chave de serviço): percorre o catálogo inteiro da Meta e prende o worker até 100 s.
+  try { await exigirAcesso(req, { servico: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   const startedAt = Date.now();
   try {

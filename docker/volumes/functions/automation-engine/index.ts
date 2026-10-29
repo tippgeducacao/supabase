@@ -1,6 +1,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.4';
 import { autorDoAtor, resolverAtor } from './ator.ts';
 import { conteudoDoComentario, previaDoAviso } from './comentarioChat.ts';
+import { exigirAcesso, respostaAcessoNegado } from '../_shared/acesso.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -10,6 +11,11 @@ const corsHeaders = {
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
+
+  // Gestor de Tarefas (front e widget do Mac, token do colaborador) ou o próprio motor no
+  // encadeamento (chave de serviço). O resolverAtor abaixo segue decidindo QUEM assina.
+  try { await exigirAcesso(req, { usuario: true, servico: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   try {
     const body = await req.json();

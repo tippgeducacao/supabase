@@ -5,6 +5,7 @@
 // e fazemos follow-ups (a cada 3 dias, máx 3 tentativas) enquanto a fase não muda.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { resolverCampoProfessor } from "../_shared/pedProfessorCampos.ts";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -85,6 +86,13 @@ function mappingToArray(vm: any): string[] {
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+
+  // Só chamada interna (cron e RPCs ped_v2_gravacao_aprovar_e_disparar_agora /
+  // ped_v2_gravacao_disparar_proxima_agora, via pg_net com `_get_service_role_key()`).
+  // force_live e convite_id deixam de estar ao alcance de quem tem só a chave anon.
+  try { await exigirAcesso(req, { servico: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
+
   const supabase = createClient(SUPABASE_URL, SERVICE_ROLE);
   let processed = 0, sent = 0, errors = 0;
   const details: any[] = [];

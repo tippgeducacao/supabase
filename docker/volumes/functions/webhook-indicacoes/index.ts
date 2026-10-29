@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -35,6 +36,18 @@ serve(async (req) => {
       status: 405,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
+  }
+
+  // PORTA (29/10/2026): sem login, gravava indicação e lead com o dono vindo do CORPO (fraude da campanha "ponto por
+  // 100 indicações"). Nenhum chamador vivo: o app grava indicacoes direto (IndicacoesService) e
+  // nenhuma linha com a assinatura desta edge (nota_probabilidade nula) entrou desde 12/08/2026.
+  // Aceita só a chave de serviço exata ou o cabeçalho x-webhook-secret = env WEBHOOK_INDICACOES_SECRET
+  // (vazio = desligado). Reativar uma integração: criar WEBHOOK_INDICACOES_SECRET no env das edges e configurar
+  // o mesmo valor no cabeçalho x-webhook-secret de quem chama. Ver docs/SECURITY.md.
+  try {
+    await exigirAcesso(req, { servico: true, segredo: { cabecalho: "x-webhook-secret", valor: Deno.env.get("WEBHOOK_INDICACOES_SECRET") } });
+  } catch (e) {
+    return respostaAcessoNegado(e, corsHeaders);
   }
 
   try {

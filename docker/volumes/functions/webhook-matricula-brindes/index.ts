@@ -1,4 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -15,6 +16,16 @@ Deno.serve(async (req) => {
       status: 405,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
+  }
+
+  // PORTA (29/10/2026): sem login, fazia upsert em `alunos` (sobrescrevia dados pessoais de
+  // aluno existente) e `matriculas`. O único chamador é o gatilho notify_webhook_matricula_brindes
+  // (form_entries), que manda `Bearer ' || _get_service_role_key()` — e esse helper passou a ler
+  // a chave ATUAL (edge_service_role_key) na migration 20261029110000. Só a chave de serviço passa.
+  try {
+    await exigirAcesso(req, { servico: true });
+  } catch (e) {
+    return respostaAcessoNegado(e, corsHeaders);
   }
 
   try {

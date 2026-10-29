@@ -1,3 +1,4 @@
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 // Proxy legado: encaminha para generate-prof-curriculo.
 // Mantido para retrocompatibilidade com o ProfessorDrawer antigo.
 const corsHeaders = {
@@ -11,6 +12,8 @@ const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  try { await exigirAcesso(req, { usuario: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
   try {
     const { professor_id, async: runAsync } = await req.json();
     if (!professor_id) {

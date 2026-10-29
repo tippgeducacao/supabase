@@ -1,4 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -21,6 +22,10 @@ function graphErrorMessage(error: any): string {
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  // Publicar agora (colaborador logado, só modo single) ou cron (chave de serviço).
+  let porUsuario = false;
+  try { porUsuario = (await exigirAcesso(req, { usuario: true, servico: true })).tipo === "usuario"; }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   try {
     const supabase = createClient(
@@ -32,6 +37,13 @@ Deno.serve(async (req) => {
     const mode = body.mode || "cron";
     const nowIso = new Date().toISOString();
 
+    // Colaborador só usa o "Publicar agora" (single com post_id); rodar a fila é do cron.
+    if (porUsuario && !(mode === "single" && body.post_id)) {
+      return new Response(JSON.stringify({ error: "Acesso restrito ao sistema." }), {
+        status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     if (mode === "single" && body.post_id) {
       // CLAIM atômico: só publica se a linha ainda não está em publicação/publicada.
       // Evita publicação dupla quando o usuário clica "Publicar agora" e o cron
@@ -40,7 +52,9 @@ Deno.serve(async (req) => {
         .from("ig_scheduled_posts")
         .update({ status: "publishing", updated_at: nowIso })
         .eq("id", body.post_id)
-        .in("status", ["scheduled", "draft", "failed"])
+        // Pelo clique só sai post 'scheduled' (o "Publicar agora" grava assim); rascunho e
+        // falha não saem por id solto (29/10/2026).
+        .in("status", porUsuario ? ["scheduled"] : ["scheduled", "draft", "failed"])
         .select("*, ig_accounts(*)");
 
       const post = claimed?.[0];

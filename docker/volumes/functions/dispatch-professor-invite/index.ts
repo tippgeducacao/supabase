@@ -4,6 +4,7 @@
 // DIA (1h antes da aula) nunca era alcançado no próprio dia. Ver docs/Pedagógico.md.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { resolverCampoProfessor } from "../_shared/pedProfessorCampos.ts";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 // Régua da fase 2 (30 → 7 → 1 → dia da aula): módulo PURO, coberto por vitest em
 // cadenciaFase2.test.ts. Não reescreva a aritmética aqui dentro.
 import {
@@ -406,6 +407,13 @@ function getMeetSlug(aula: any, pos: any): string {
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+
+  // Só chamada interna: cron `ped-v2-dispatch-professores` e as RPCs de aprovação do
+  // Pedagógico (ped_v2_aprovar_disparo_inicial / _aprovar_e_disparar_agora /
+  // _disparar_proxima_agora), via pg_net com a chave de serviço. force_live e convite_id
+  // deixam de estar ao alcance de quem tem só a chave anon.
+  try { await exigirAcesso(req, { servico: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   const supabase = createClient(SUPABASE_URL, SERVICE_ROLE, {
     auth: { persistSession: false },

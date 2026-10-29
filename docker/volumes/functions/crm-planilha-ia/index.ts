@@ -16,6 +16,7 @@
 // best-effort (nunca derruba a resposta principal por causa disso).
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -107,6 +108,8 @@ function validarResposta(acao: Acao, obj: Record<string, unknown>): { ok: true }
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+  try { await exigirAcesso(req, { usuario: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
 
   const inicio = Date.now();

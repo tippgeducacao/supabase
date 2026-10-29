@@ -18,6 +18,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { ensureToken, parsePayload, parseHeaders, parseAddress, parseAddressList, isTokenRevokedError, markCaixaTokenRevoked, markCaixaTransient, isScopeInsufficientError, markCaixaEscopoInsuficiente } from '../_shared/gmail.ts';
 import { diferencaPorLinha, emLotes, LOTE_FILTRO_IN } from '../_shared/emailReconciliacao.ts';
 import { normalizarMessageId } from '../_shared/emailMessageId.ts';
+import { exigirAcesso, respostaAcessoNegado } from '../_shared/acesso.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -518,18 +519,40 @@ async function syncCaixa(admin: any, caixaId: string, forceInitial: boolean, soz
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
+  // Quem chama (29/10/2026): o cron com x-email-sync-secret (conferido no banco contra o
+  // vault), outra edge com a chave de serviço (gmail-connect-caixa, google-calendar-oauth),
+  // ou o colaborador logado sincronizando UMA caixa que ele enxerga (botão da Inbox).
+  // Antes, fora do modo rápido, qualquer um com a chave anon varria as 21 caixas.
+  const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
+  let porSegredo = false;
+  const segredoCron = req.headers.get('x-email-sync-secret');
+  if (segredoCron) {
+    const { data, error } = await admin.rpc('email_sync_validar_cron', { p_segredo: segredoCron });
+    porSegredo = !error && data === true;
+  }
+  let usuarioId: string | null = null;
+  if (!porSegredo) {
+    try {
+      const quem = await exigirAcesso(req, { usuario: true, servico: true });
+      if (quem.tipo === 'usuario') usuarioId = quem.usuarioId;
+    } catch (e) { return respostaAcessoNegado(e, corsHeaders); }
+  }
+  const negar = (status: number, error: string) => new Response(JSON.stringify({ error }), {
+    status, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+  });
   try {
-    const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
     const body = req.method === 'POST' ? await req.json().catch(() => ({})) : {};
-    const { caixa_id, initial } = body;
+    const { caixa_id } = body;
+    let { initial } = body;
     const rapido = body.rapido === true;
-    if (rapido) {
-      const { data, error } = await admin.rpc('email_sync_validar_cron', {
-        p_segredo: req.headers.get('x-email-sync-secret'),
-      });
-      if (error || data !== true) return new Response(JSON.stringify({ error: 'Não autorizado' }), {
-        status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
+    if (rapido && !porSegredo) return negar(401, 'Não autorizado');
+    if (usuarioId) {
+      // Colaborador: só a caixa pedida, só se ele a enxerga, e sem varredura completa.
+      if (!caixa_id || typeof caixa_id !== 'string') return negar(400, 'Informe a caixa.');
+      const { data: visivel, error: visErr } = await admin.rpc('email_caixa_visible', { _caixa_id: caixa_id, _user_id: usuarioId });
+      if (visErr) return negar(503, 'Não foi possível conferir a permissão.');
+      if (visivel !== true) return negar(403, 'Você não tem acesso a esta caixa.');
+      initial = false;
     }
 
     let caixaIds: string[];

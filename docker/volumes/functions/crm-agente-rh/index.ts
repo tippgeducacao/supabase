@@ -1096,6 +1096,37 @@ Deno.serve(async (req) => {
     (!!conexaoDoPayload && !!conexaoWeb && conexaoDoPayload === conexaoWeb);
   if (!ehCanalDoRh) return json({ ok: true, pulado: 'numero' });
   if (payload?.direcao !== 'inbound' || payload?.from_me === true) return json({ ok: true, pulado: 'nao_inbound' });
+
+  // ORIGEM DA MENSAGEM (29/10/2026). O endpoint não pede credencial (o relay do
+  // crm-whatsapp-webhook não manda nenhuma) e o UUID da conta do RH é conhecido, então o id
+  // e o telefone do corpo eram aceitos de olho fechado: cada POST forjado com um id novo
+  // furava a idempotência e gerava um turno pago + WhatsApp ao candidato. Os dois relays
+  // (Meta e Uazapi) GRAVAM a mensagem em crm_whatsapp_messages ANTES de chamar aqui, então
+  // o que vale é o banco: o id tem de ser um inbound deste canal, do mesmo telefone.
+  // ⚠️ A retomada de janela aberta (`motivo: 'followup'`, rh_followup_janela_tick) usa id
+  // sintético e segue sem conferência até o cron mandar um segredo — ver o relatório de
+  // 29/10/2026 (plano: x-followup-key no net.http_post da função).
+  if (payload?.motivo !== 'followup') {
+    const msgId = String(payload?.id ?? '').trim();
+    if (!msgId) return json({ ok: true, pulado: 'sem_id' });
+    const { data: origem, error: origemErr } = await supabase
+      .from('crm_whatsapp_messages')
+      .select('telefone')
+      .eq('wa_message_id', msgId)
+      .eq('direcao', 'inbound')
+      .or(filtroDeCanal(conexaoWeb))
+      .limit(1)
+      .maybeSingle();
+    if (origemErr) {
+      console.error('[crm-agente-rh] conferência de origem falhou:', origemErr.message);
+      return json({ ok: false, erro: 'origem_indisponivel' }, 503);
+    }
+    if (!origem || !so8(String(origem.telefone ?? '')) || so8(String(origem.telefone)) !== so8(String(payload?.telefone ?? ''))) {
+      console.warn('[crm-agente-rh] mensagem que o banco não conhece neste canal, ignorada:', msgId);
+      return json({ ok: true, pulado: 'origem' });
+    }
+  }
+
   if (!ANTHROPIC_KEY) ANTHROPIC_KEY = await chaveDoBanco();
   if (!ANTHROPIC_KEY) { await evento('erro', { motivo: 'sem ANTHROPIC key' }); return json({ ok: true, pulado: 'sem_chave' }); }
 

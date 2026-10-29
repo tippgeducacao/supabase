@@ -1,5 +1,6 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { resolverImagemCriativo, resolverVideoCriativo, bytesParaDataUrl } from "../_shared/metaCreativeImage.ts";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 // Resolve a imagem GRANDE de um criativo do Meta Ads para o preview + download do
 // dashboard "Melhores Criativos". Busca FRESCO na Graph API (a thumbnail guardada
@@ -16,6 +17,8 @@ const getErr = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  try { await exigirAcesso(req, { usuario: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
   try {
     const body = await req.json().catch(() => ({}));
     const creativeId: string | null = body?.creative_id || null;

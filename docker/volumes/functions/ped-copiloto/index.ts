@@ -2,6 +2,7 @@
 // Recebe { messages: [{role, content}], user_id } e devolve { reply, tools_used }.
 // As tools são RPCs Postgres (ped_copiloto_*) que retornam JSON pronto.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -235,6 +236,8 @@ async function callTool(sb: any, name: string, input: any): Promise<any> {
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  try { await exigirAcesso(req, { usuario: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
   try {
     const body = await req.json();
     const messages: Array<{ role: "user" | "assistant"; content: any }> = body.messages ?? [];

@@ -1,5 +1,6 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { createLogger } from '../_shared/logger.ts'
+import { exigirAcesso, respostaAcessoNegado } from '../_shared/acesso.ts'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -19,6 +20,16 @@ Deno.serve(async (req) => {
       JSON.stringify({ error: 'Método não permitido' }),
       { status: 405, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
+  }
+
+  // PORTA (29/10/2026): sem login, sobrescrevia agendamentos.estudo_lead de qualquer agendamento
+  // (e servia de oráculo de UUID). Quem chamava era o n8n, excluído em 14/10/2026; nenhum
+  // estudo_lead foi gravado nos últimos 30 dias. Aceita só a chave de serviço exata ou o
+  // cabeçalho x-webhook-secret = env RECEBER_ESTUDO_LEAD_SECRET (vazio = desligado).
+  try {
+    await exigirAcesso(req, { servico: true, segredo: { cabecalho: 'x-webhook-secret', valor: Deno.env.get('RECEBER_ESTUDO_LEAD_SECRET') } })
+  } catch (e) {
+    return respostaAcessoNegado(e, corsHeaders)
   }
 
   try {

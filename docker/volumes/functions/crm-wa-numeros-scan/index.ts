@@ -18,6 +18,7 @@
 // ⚠️ Também é chamada pelo NAVEGADOR (botão "Atualizar agora") → nunca devolver 502/504:
 // o Cloudflare troca por página sem CORS e o front só vê "Failed to send a request".
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -27,7 +28,6 @@ const corsHeaders = {
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
 const META_GRAPH = "https://graph.facebook.com/v21.0";
 const TIMEOUT_MS = 12_000;
 
@@ -76,42 +76,17 @@ interface Alvo {
   wabasConhecidas: Set<string>;
 }
 
-/** A claim `role` do JWT já validado pelo gateway. Token torto devolve null. */
-function papelDoToken(authHeader: string): string | null {
-  try {
-    const bruto = authHeader.replace(/^Bearer\s+/i, "");
-    const payload = bruto.split(".")[1];
-    if (!payload) return null;
-    const json = atob(payload.replace(/-/g, "+").replace(/_/g, "/"));
-    return (JSON.parse(json) as { role?: string }).role ?? null;
-  } catch {
-    return null;
-  }
-}
-
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
-  try {
-    // Cron chama com a service_role; a tela chama com o usuário logado. Os dois valem,
-    // qualquer outro não — a varredura gasta cota da Graph API.
-    //
-    // A régua do serviço é a claim `role` do JWT, não comparar a chave com a env: o
-    // `_get_service_role_key()` do banco e a `SUPABASE_SERVICE_ROLE_KEY` da function são
-    // dois lugares diferentes que podem carregar chaves diferentes (foi o que deu 401 no
-    // primeiro teste do cron). Ler a claim é seguro porque o gateway JÁ validou a
-    // assinatura antes de chegar aqui — a function não é pública (`verify_jwt` ligado).
-    const authHeader = req.headers.get("Authorization") ?? "";
-    if (!authHeader) return json({ error: "não autorizado" }, 401);
-    if (papelDoToken(authHeader) !== "service_role") {
-      const asUser = createClient(SUPABASE_URL, ANON_KEY, {
-        global: { headers: { Authorization: authHeader } },
-        auth: { persistSession: false },
-      });
-      const { data: userData } = await asUser.auth.getUser();
-      if (!userData?.user) return json({ error: "não autorizado" }, 401);
-    }
+  // Cron (chave de serviço exata, via `_get_service_role_key()`) ou a tela "Planilha de
+  // Números" (colaborador logado). Qualquer outro não — a varredura gasta cota da Graph API.
+  // Antes se lia a claim `role` do JWT SEM conferir a assinatura (o runtime não aplica
+  // verify_jwt): um token forjado passava.
+  try { await exigirAcesso(req, { usuario: true, servico: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
+  try {
     const admin = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 
     const { data: contas, error: contasErr } = await admin

@@ -4,6 +4,7 @@
 // Modo async ({ async: true }): retorna 202 imediato e processa em background
 // atualizando ped_professores.bio_status ('processing' -> 'completed'/'failed').
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -532,6 +533,8 @@ ${aulasResumo || "—"}`;
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  try { await exigirAcesso(req, { usuario: true, servico: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   try {
     const {

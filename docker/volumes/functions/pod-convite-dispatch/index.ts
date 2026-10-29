@@ -8,6 +8,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { ensureToken, base64UrlEncode, encodeHeaderUtf8, encodeDisplayName } from "../_shared/gmail.ts";
 import { logPodcastConversaSac } from "../_shared/podcastSac.ts";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 import {
   dentroDaJanelaAgenda, enviarModeloPodcast, formatPhone, linkAgendaDoCandidato, modeloAprovadoPorUso, parametrosDoModelo,
   resolverVarPodcast, usosDoAgendamento,
@@ -100,6 +101,11 @@ async function handler(req: Request): Promise<Response> {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   const json = (b: unknown, s = 200) =>
     new Response(JSON.stringify(b), { status: s, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+
+  // Cron (chave de serviço) ou a Fila de Convites do Podcast (colaborador logado; o modo
+  // 'agenda' ainda confere o pedagógico abaixo).
+  try { await exigirAcesso(req, { usuario: true, servico: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   try {
     const admin = createClient(

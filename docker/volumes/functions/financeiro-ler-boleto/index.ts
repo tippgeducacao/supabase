@@ -5,6 +5,7 @@
 // Clonado de extract-pdf-blueprint + padrão de chave de mimosa-analise (ai_api_keys → env).
 // Deploy: git push (deploy-edges.yml), NUNCA Deploy do Dokploy.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.2";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -99,6 +100,10 @@ function json(body: unknown, status = 200) {
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+
+  // Só colaborador do Financeiro (contas a pagar): cada chamada gasta crédito do Gemini.
+  try { await exigirAcesso(req, { usuario: true, rpcPermissao: "is_financial_user" }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   try {
     const contentType = req.headers.get("content-type") || "";

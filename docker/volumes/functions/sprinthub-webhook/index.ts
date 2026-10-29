@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -32,6 +33,18 @@ serve(async (req) => {
   // Handle CORS preflight requests
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
+  }
+
+  // PORTA (29/10/2026): sem login nem segredo, qualquer POST virava lead (16 triggers, automação de WhatsApp) e
+  // a resposta confirmava se um e-mail já era lead. Nenhum chamador: não existe lead com
+  // fonte_referencia = 'SprintHub' no banco (nunca entrou um por aqui).
+  // Aceita só a chave de serviço exata ou o cabeçalho x-webhook-secret = env SPRINTHUB_WEBHOOK_SECRET
+  // (vazio = desligado). Reativar uma integração: criar SPRINTHUB_WEBHOOK_SECRET no env das edges e configurar
+  // o mesmo valor no cabeçalho x-webhook-secret de quem chama. Ver docs/SECURITY.md.
+  try {
+    await exigirAcesso(req, { servico: true, segredo: { cabecalho: "x-webhook-secret", valor: Deno.env.get("SPRINTHUB_WEBHOOK_SECRET") } });
+  } catch (e) {
+    return respostaAcessoNegado(e, corsHeaders);
   }
 
   try {

@@ -4,6 +4,7 @@
 //
 // Body: { incidente_codigo: string, dry_run?: boolean }
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -31,6 +32,10 @@ function firstName(full: string | null | undefined): string {
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+
+  // Disparo pontual de incidente, sem chamador no sistema: só quem tem a chave de serviço roda à mão.
+  try { await exigirAcesso(req, { servico: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   try {
     const body = req.method === "POST" ? await req.json().catch(() => ({})) : {};
