@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { escaparHtml } from "../_shared/escaparHtml.ts";
+import { getSegredo } from "../_shared/segredos.ts";
 
 // Callback do OAuth do TikTok. O perfil autoriza o app e o TikTok redireciona pra cá
 // com ?code=...  Trocamos o code por access/refresh token, buscamos o perfil e salvamos
@@ -23,10 +24,9 @@ h1{font-size:20px;margin:0 0 8px}p{color:#a1a1aa;font-size:14px;line-height:1.5;
   return new Response(html, { status: ok ? 200 : 400, headers: { "Content-Type": "text/html; charset=utf-8" } });
 }
 
-async function getConfig(supabase: ReturnType<typeof createClient>, chave: string): Promise<string | null> {
-  const { data } = await supabase.from("ped_configuracoes").select("valor").eq("chave", chave).maybeSingle();
-  return (data?.valor as string) || Deno.env.get(chave) || null;
-}
+// 29/10/2026: o client key/secret saiu de ped_configuracoes (leitura aberta a todo logado) para
+// app_secrets; getSegredo procura lá primeiro e cai nos lugares antigos.
+const getConfig = (supabase: ReturnType<typeof createClient>, chave: string) => getSegredo(supabase, chave);
 
 serve(async (req) => {
   try {

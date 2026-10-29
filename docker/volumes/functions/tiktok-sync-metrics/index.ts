@@ -1,5 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { getSegredo } from "../_shared/segredos.ts";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 // Sincroniza métricas do TikTok (perfil + vídeos) de cada conta conectada.
 // Espelha ig-sync-metrics. Roda por cron (e dá pra chamar na mão). Renova o token
@@ -16,10 +18,9 @@ const USERINFO_URL = "https://open.tiktokapis.com/v2/user/info/?fields=open_id,u
 const VIDEO_FIELDS = "id,title,video_description,duration,cover_image_url,share_url,view_count,like_count,comment_count,share_count,create_time";
 const VIDEO_LIST_URL = `https://open.tiktokapis.com/v2/video/list/?fields=${VIDEO_FIELDS}`;
 
-async function getConfig(supabase: ReturnType<typeof createClient>, chave: string): Promise<string | null> {
-  const { data } = await supabase.from("ped_configuracoes").select("valor").eq("chave", chave).maybeSingle();
-  return (data?.valor as string) || Deno.env.get(chave) || null;
-}
+// 29/10/2026: o client key/secret saiu de ped_configuracoes (leitura aberta a todo logado) para
+// app_secrets; getSegredo procura lá primeiro e cai nos lugares antigos.
+const getConfig = (supabase: ReturnType<typeof createClient>, chave: string) => getSegredo(supabase, chave);
 
 // Garante um access_token válido; renova via refresh_token se faltar < 5 min.
 async function ensureToken(supabase: any, account: any, clientKey: string, clientSecret: string): Promise<string | null> {
@@ -113,6 +114,10 @@ async function syncConta(supabase: any, account: any, clientKey: string, clientS
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+  // Chamadores: cron tiktok-sync-metrics-3h (chave de serviço) e o botão Sincronizar do
+  // TikTokDashboard (pessoa logada). Ninguém mais (29/10/2026).
+  try { await exigirAcesso(req, { usuario: true, servico: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
   try {
     const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
     const clientKey = await getConfig(supabase, "TIKTOK_CLIENT_KEY");

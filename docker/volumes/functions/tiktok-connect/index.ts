@@ -1,7 +1,8 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { getSegredo } from "../_shared/segredos.ts";
 
-// Inicia o OAuth do TikTok: lê o client_key do servidor (ped_configuracoes) e
+// Inicia o OAuth do TikTok: lê o client_key do servidor (app_secrets, via getSegredo) e
 // redireciona o navegador pra tela de autorização do TikTok. O botão "Conectar"
 // do dashboard só abre esta URL — assim o front nunca manuseia a client_key e o
 // mesmo fluxo serve pra Sandbox e Produção (basta trocar a chave no servidor).
@@ -11,8 +12,8 @@ const SCOPES = "user.info.basic,user.info.profile,user.info.stats,video.list";
 serve(async (req) => {
   try {
     const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
-    const { data } = await supabase.from("ped_configuracoes").select("valor").eq("chave", "TIKTOK_CLIENT_KEY").maybeSingle();
-    const clientKey = (data?.valor as string) || Deno.env.get("TIKTOK_CLIENT_KEY");
+    // 29/10/2026: saiu de ped_configuracoes (leitura aberta) para app_secrets — ver _shared/segredos.ts.
+    const clientKey = await getSegredo(supabase, "TIKTOK_CLIENT_KEY");
     if (!clientKey) return new Response("Credenciais do TikTok não configuradas.", { status: 500 });
 
     // state simples (anti-CSRF leve); o callback não depende dele hoje.
