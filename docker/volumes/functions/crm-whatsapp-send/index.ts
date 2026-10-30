@@ -12,7 +12,7 @@ import { linhaDaMensagemReagida } from "./linhaDaReacao.ts";
 // `whatsapp-anexos` passa a privado (30/10/2026): todo link do nosso storage que a edge BAIXA
 // (media_id) ou REPASSA (link de reserva, cabeçalho de template, linha Web) é assinado antes
 // pela service role. O que se grava na mensagem continua sendo o link original.
-import { urlBaixavel } from "../_shared/midiaRecebida.ts";
+import { urlBaixavel, urlParaTerceiros } from "../_shared/midiaRecebida.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -342,7 +342,7 @@ async function enviarViaConexao(admin: any, p: {
       if (!urlMidia) return json({ error: `anexo_url obrigatório para tipo ${p.tipo}` }, 400);
       const caption = p.tipo === "audio" || p.tipo === "sticker" ? "" : conteudoPersist.trim();
       result = await provider.sendMedia(conex.server_url, sec.token, numberDigits, {
-        tipo: p.tipo, url: await urlBaixavel(urlMidia), caption, filename: p.filename, mime: p.mime_type,
+        tipo: p.tipo, url: await urlParaTerceiros(urlMidia), caption, filename: p.filename, mime: p.mime_type,
       });
       anexosPersist = [{
         tipo: p.tipo,
@@ -853,7 +853,7 @@ Deno.serve(async (req) => {
           headerMediaId = midiaHdr.mediaId;
           // ⚠️ `filename` é SÓ do document: mandar em image/video faz a Meta recusar o
           // parâmetro. Sem ele no document, o card chega como "Sem título".
-          const midiaHeader: Record<string, unknown> = headerMediaId ? { id: headerMediaId } : { link: await urlBaixavel(hdrUrl) };
+          const midiaHeader: Record<string, unknown> = headerMediaId ? { id: headerMediaId } : { link: await urlParaTerceiros(hdrUrl) };
           if (key === "document") midiaHeader.filename = nomeArq;
           comps.push({
             type: "header",
@@ -902,7 +902,7 @@ Deno.serve(async (req) => {
         to,
         type: "document",
         document: {
-          ...(mediaIdUsado ? { id: mediaIdUsado } : { link: await urlBaixavel(docUrl) }),
+          ...(mediaIdUsado ? { id: mediaIdUsado } : { link: await urlParaTerceiros(docUrl) }),
           filename: docFilename,
           ...(caption ? { caption: caption.slice(0, 1024) } : {}),
         },
@@ -924,7 +924,7 @@ Deno.serve(async (req) => {
         to,
         type: "image",
         image: {
-          ...(mediaIdUsado ? { id: mediaIdUsado } : { link: await urlBaixavel(docUrl) }),
+          ...(mediaIdUsado ? { id: mediaIdUsado } : { link: await urlParaTerceiros(docUrl) }),
           ...(caption ? { caption: caption.slice(0, 1024) } : {}),
         },
       };
@@ -946,7 +946,7 @@ Deno.serve(async (req) => {
         to,
         type: "video",
         video: {
-          ...(mediaIdUsado ? { id: mediaIdUsado } : { link: await urlBaixavel(docUrl) }),
+          ...(mediaIdUsado ? { id: mediaIdUsado } : { link: await urlParaTerceiros(docUrl) }),
           ...(caption ? { caption: caption.slice(0, 1024) } : {}),
         },
       };
@@ -958,7 +958,7 @@ Deno.serve(async (req) => {
       // (forma de onda) em vez de "arquivo de áudio". Exige OGG/Opus e mídia carregada
       // (audio.id). Ver doc Meta "Audio messages".
       const ehOgg = /audio\/ogg/i.test(String(mime_type ?? "")) || /\.ogg(\?|$)/i.test(docUrl);
-      let audioObj: Record<string, unknown> = { link: await urlBaixavel(docUrl) };
+      let audioObj: Record<string, unknown> = { link: await urlParaTerceiros(docUrl) };
       if (ehOgg) {
         // ⚠️ Pelo CACHE de media_id, como documento/imagem/vídeo (17/09/2026). Até aqui o
         // áudio chamava `metaUploadMedia` direto: baixava o OGG do storage e subia pra Meta
@@ -977,7 +977,7 @@ Deno.serve(async (req) => {
           return await abortarPorAnexoMorto(admin, accountId, docUrl, docFilename, midiaAud.origemMorta);
         }
         mediaIdUsado = midiaAud.mediaId;
-        audioObj = mediaIdUsado ? { id: mediaIdUsado, voice: true } : { link: await urlBaixavel(docUrl), voice: true };
+        audioObj = mediaIdUsado ? { id: mediaIdUsado, voice: true } : { link: await urlParaTerceiros(docUrl), voice: true };
       }
       waPayload = {
         messaging_product: "whatsapp",
@@ -1005,7 +1005,7 @@ Deno.serve(async (req) => {
         messaging_product: "whatsapp",
         to,
         type: "sticker",
-        sticker: mediaIdUsado ? { id: mediaIdUsado } : { link: await urlBaixavel(docUrl) },
+        sticker: mediaIdUsado ? { id: mediaIdUsado } : { link: await urlParaTerceiros(docUrl) },
       };
     } else if (tipo === "reaction") {
       // Reação a uma mensagem existente: emoji em `conteudo`, alvo em reaction_message_id.
@@ -1083,7 +1083,7 @@ Deno.serve(async (req) => {
       console.warn("[crm-whatsapp-send] Meta recusou media_id, refazendo por link:", JSON.stringify(waResp?.error ?? {}));
       await invalidarMediaId(admin, docUrl, phoneNumberId);
       const obj = (waPayload as any)[tipo as string];
-      if (obj && typeof obj === "object") { delete obj.id; obj.link = await urlBaixavel(docUrl); }
+      if (obj && typeof obj === "object") { delete obj.id; obj.link = await urlParaTerceiros(docUrl); }
       mediaIdUsado = null;
       r = await postMeta(waPayload);
       waResp = await r.json().catch(() => ({}));
@@ -1097,7 +1097,7 @@ Deno.serve(async (req) => {
         (c: any) => String(c?.type ?? "").toLowerCase() === "header",
       );
       const hpar = Array.isArray(hc?.parameters) ? hc.parameters[0] : null;
-      if (hpar?.[headerMediaKey]) hpar[headerMediaKey] = { link: await urlBaixavel(headerMediaUrl) };
+      if (hpar?.[headerMediaKey]) hpar[headerMediaKey] = { link: await urlParaTerceiros(headerMediaUrl) };
       headerMediaId = null;
       r = await postMeta(waPayload);
       waResp = await r.json().catch(() => ({}));

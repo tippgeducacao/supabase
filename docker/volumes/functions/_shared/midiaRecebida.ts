@@ -131,3 +131,23 @@ export async function urlBaixavel(url: string, deps: DepsAssinatura | null = dep
     return url;
   }
 }
+
+function hostPublico(): string {
+  const env = (globalThis as { Deno?: { env: { get(k: string): string | undefined } } }).Deno?.env;
+  return env?.get("PUBLIC_SUPABASE_URL") || "https://api.ppgeducacao.site";
+}
+
+/** URL interna do Kong (a que a edge enxerga) → host público, que Meta, Uazapi e navegador alcançam. */
+export function paraHostPublico(url: string, publico = hostPublico()): string {
+  return url.replace(/^https?:\/\/(?:supabase-)?kong:8000/i, publico);
+}
+
+/**
+ * Link para ENTREGAR A TERCEIROS (Meta por `link`, Uazapi, navegador do lead): assinado como
+ * `urlBaixavel` E com o host público. ⚠️ `urlBaixavel` sozinho devolve o host interno
+ * (`kong:8000`), que só a própria edge alcança — a linha Web falhou com "failed to fetch URL"
+ * em 30/10/2026 por causa disso.
+ */
+export async function urlParaTerceiros(url: string, deps: DepsAssinatura | null = depsDoAmbiente(), validadeS = 600): Promise<string> {
+  return paraHostPublico(await urlBaixavel(url, deps, validadeS));
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { caminhoRecebido, expiracaoDoLink, precisaRenovar, urlBaixavel } from "./midiaRecebida";
+import { caminhoRecebido, expiracaoDoLink, paraHostPublico, precisaRenovar, urlBaixavel, urlParaTerceiros } from "./midiaRecebida";
 
 const b64 = (o: unknown) => btoa(JSON.stringify(o)).replace(/=+$/, "");
 const assinado = (caminho: string, exp: number) =>
@@ -40,6 +40,15 @@ describe("mídia recebida em bucket privado (29/10/2026)", () => {
     expect(url).toBe("http://kong:8000/storage/v1/object/sign/whatsapp-anexos/outbound/x.pdf");
     // `caminhoRecebido` continua sendo só do bucket de mídia recebida.
     expect(caminhoRecebido(pub)).toBeNull();
+  });
+
+  it("link para TERCEIROS sai assinado E com o host público (a Uazapi não alcança kong:8000)", async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ signedURL: "/object/sign/whatsapp-anexos/stickers/a.webp?token=novo" })));
+    const pub = "https://api.ppgeducacao.site/storage/v1/object/public/whatsapp-anexos/stickers/a.webp";
+    const terceiros = await urlParaTerceiros(pub, { base: "http://kong:8000", chave: "k", fetchImpl });
+    expect(terceiros).toBe("https://api.ppgeducacao.site/storage/v1/object/sign/whatsapp-anexos/stickers/a.webp?token=novo");
+    expect(paraHostPublico("http://supabase-kong:8000/storage/v1/x", "https://api.exemplo")).toBe("https://api.exemplo/storage/v1/x");
+    expect(paraHostPublico("https://cdn.meta.com/x", "https://api.exemplo")).toBe("https://cdn.meta.com/x");
   });
 
   it("link vencido do bucket privado ganha um novo pela service role", async () => {

@@ -2,7 +2,7 @@
 // Envia mensagem WhatsApp (texto, template, image, video, document, audio) via Meta Cloud API,
 // persiste em ped_conversas_mensagens e atualiza ped_conversas_avulsas.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
-import { urlBaixavel } from "../_shared/midiaRecebida.ts";
+import { urlParaTerceiros } from "../_shared/midiaRecebida.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -215,7 +215,7 @@ Deno.serve(async (req) => {
     } else {
       // Media: image, video, document, audio
       // `whatsapp-anexos` privado (30/10/2026): a Meta baixa pelo link, então vai assinado (10 min).
-      const mediaObj: Record<string, unknown> = { link: await urlBaixavel(String(media_url)) };
+      const mediaObj: Record<string, unknown> = { link: await urlParaTerceiros(String(media_url)) };
       if (tipo === "document" && media_filename) mediaObj.filename = media_filename;
       if ((tipo === "image" || tipo === "video" || tipo === "document") && caption) {
         mediaObj.caption = String(caption).slice(0, 1024);

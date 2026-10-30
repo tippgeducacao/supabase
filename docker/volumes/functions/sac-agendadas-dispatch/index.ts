@@ -11,7 +11,7 @@
 // espelha a mensagem de volta no chat do SAC automaticamente.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { telefoneEnviavel } from "../_shared/telefone.ts";
-import { urlBaixavel } from "../_shared/midiaRecebida.ts";
+import { urlParaTerceiros } from "../_shared/midiaRecebida.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -188,7 +188,7 @@ async function processarUma(
       const tipoMidia = row.tipo_mensagem === "audio" ? "audio" : (ax.tipo ?? "document");
       if (!ax.url) return await falhar("Anexo sem URL");
       // `whatsapp-anexos` privado (30/10/2026): a Meta baixa pelo link, então vai assinado (10 min).
-      const mediaObj: Record<string, unknown> = { link: await urlBaixavel(String(ax.url)) };
+      const mediaObj: Record<string, unknown> = { link: await urlParaTerceiros(String(ax.url)) };
       if (tipoMidia === "document" && ax.filename) mediaObj.filename = ax.filename;
       if (tipoMidia !== "audio" && row.conteudo?.trim()) {
         mediaObj.caption = row.conteudo.trim().slice(0, 1024);
