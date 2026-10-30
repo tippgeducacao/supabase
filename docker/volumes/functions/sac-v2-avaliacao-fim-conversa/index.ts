@@ -5,8 +5,11 @@
 // `sac_v2_avaliacao_funis.fim_conversa_apos` (30 min até 23/10/2026; 1 h desde então) e até 3 h
 // (`sac_v2_avaliacao_fim_candidatos`), pergunta à IA se cada uma acabou e grava a resposta
 // (`sac_v2_avaliacao_fim_registrar`): se acabou, a pergunta da nota entra na fila e o tick manda,
-// com as regras de sempre (janela de 24 h, resposta da equipe, 7 dias, bloqueio). O card NÃO é
-// resolvido aqui — escolha do usuário.
+// com as regras de sempre (janela de 24 h, resposta da equipe, 7 dias, bloqueio) — ou, no funil com
+// `fim_conversa_confirmar` (desde 30/10/2026), a função cria um PEDIDO ao responsável do card ("posso
+// enviar a avaliação?") e a pergunta só entra na fila se ele responder "Pode enviar". Esta edge não
+// muda por isso: quem decide entre as duas coisas é o banco. O card NÃO é resolvido aqui — escolha do
+// usuário.
 //
 // ⚠️ Só a decisão VÁLIDA é gravada. Falha passageira da IA (rede, 429, 5xx, prazo) não grava nada,
 // e a mesma pausa é lida de novo na rodada seguinte; gravar "erro" a marcaria como lida para sempre.

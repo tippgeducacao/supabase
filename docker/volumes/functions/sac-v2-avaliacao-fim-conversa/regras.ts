@@ -5,6 +5,10 @@
  * A pergunta da nota ("Seu atendimento foi finalizado. Que nota você dá?") passa a sair quando a
  * conversa ACABA, e não quando alguém clica em Resolver no dia seguinte. A IA só decide se acabou;
  * quem manda a pergunta continua sendo o tick do banco, com todas as regras de sempre.
+ *
+ * Desde 30/10/2026, nos funis com `fim_conversa_confirmar`, "acabou" gera um pedido ao responsável do card
+ * e a pergunta só entra na fila se ele responder "Pode enviar". O prompt NÃO mudou de propósito: ele segue
+ * dizendo "na dúvida, NÃO acabou", o que mantém as decisões da IA como estavam e poupa avisos à atendente.
  */
 
 export interface MensagemConversa {
