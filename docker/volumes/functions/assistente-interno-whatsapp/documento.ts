@@ -453,9 +453,14 @@ export async function gerarEnviarPdf(input: any, ctx: Ctx) {
     .upload(caminho, bytes, { contentType: "application/pdf", upsert: true });
   if (error) throw new Error(`upload falhou: ${error.message}`);
 
-  const { data: pub } = ctx.admin.storage.from("gt-doc-assets").getPublicUrl(caminho);
-  const url = toPublicUrl(pub?.publicUrl ?? "");
-  if (!url) throw new Error("sem URL pública do arquivo");
+  // `gt-doc-assets` é privado desde 30/10/2026: a Meta baixa o PDF pelo link na hora do envio,
+  // então o link é ASSINADO (1 h) e traduzido para o host público (o container vê o kong).
+  const { data: assinado, error: erroAssinar } = await ctx.admin.storage
+    .from("gt-doc-assets")
+    .createSignedUrl(caminho, 60 * 60);
+  if (erroAssinar) throw new Error(`assinar PDF falhou: ${erroAssinar.message}`);
+  const url = toPublicUrl(assinado?.signedUrl ?? "");
+  if (!url) throw new Error("sem URL assinada do arquivo");
 
   await enviarDocumento(ctx.linha, ctx.numero, url, nome, tituloFinal);
   return {

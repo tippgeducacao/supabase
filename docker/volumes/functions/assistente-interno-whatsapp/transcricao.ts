@@ -582,9 +582,11 @@ async function entregar(admin: any, linha: LinhaWa | null, job: any, resultado: 
       });
       const path = `assistente/${job.canon}/${Date.now()}-${meta.pdfNome}.pdf`;
       await admin.storage.from(BUCKET).upload(path, bytes, { contentType: "application/pdf", upsert: true });
-      const { data: pub } = admin.storage.from(BUCKET).getPublicUrl(path);
+      // Bucket privado desde 30/10/2026: link ASSINADO (1 h) — a Meta baixa na hora do envio.
+      const { data: assinado, error: erroAssinar } = await admin.storage.from(BUCKET).createSignedUrl(path, 60 * 60);
+      if (erroAssinar) throw new Error(`assinar PDF falhou: ${erroAssinar.message}`);
       await exigirOk(
-        enviarDocumento(linha, job.numero, toPublicUrl(pub?.publicUrl ?? ""), `${meta.pdfNome}.pdf`, meta.pdfTitulo),
+        enviarDocumento(linha, job.numero, toPublicUrl(assinado?.signedUrl ?? ""), `${meta.pdfNome}.pdf`, meta.pdfTitulo),
         "PDF",
       );
       await enviarTexto(linha, job.numero, meta.avisoPdf).catch(() => {}); // aviso é secundário
