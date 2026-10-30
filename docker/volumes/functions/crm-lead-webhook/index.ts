@@ -38,6 +38,8 @@
 //   (9b) Ação criar_oportunidade: cria o card (funil/etapa/titulo+tokens/valor/status/
 //        responsavel com distribuicao + "nao criar repetidas"). Opt-in. Abre card
 //        INCLUSIVE p/ o lead IDENTIFICADO (que so ganha card por esta acao).
+//        `avancarDe` (opt-in): card aberto do contato no funil nessas etapas é trazido
+//        para a etapa da ação (só para a frente) em vez de nascer outro — avancarCard.ts.
 //   (9a) EMPRESA (opt-in): aba Criação Automática de Empresas (config.criacaoAutomaticaEmpresa)
 //        + ação criar_oportunidade com params.entidade="empresa" → RPCs
 //        crm_webhook_empresa_vincular / crm_webhook_empresa_oportunidade. Falha com card de
@@ -66,6 +68,7 @@ import { executarAcaoEmail, type ResultadoAcaoEmail } from "./acaoEmail.ts";
 import { aplicarCursoDaInscricao } from "./cursoDaInscricao.ts";
 import { receberComArquivos } from "./arquivosWebhook.ts";
 import { etapaPorCampo } from "./arquivosValidacao.ts";
+import { decidirAvanco, etapasDeOrigem } from "./avancarCard.ts";
 import { nomeComPrefixo } from "./prefixoNome.ts";
 import { codigoErroEmpresa, dadosDaEmpresa, falhaDaEmpresa, responsavelDaEmpresa } from "./empresaWebhook.ts";
 
@@ -1419,6 +1422,54 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
         if (typeof p.funilId === "string" && p.funilId) funisDosCards.push(p.funilId);
         const nowIso = new Date().toISOString();
         const acaoId = typeof a.id === "string" && a.id ? a.id : null;
+
+        // TRAZER CARD DE OUTRA ETAPA (30/10/2026, opt-in `avancarDe`): card ABERTO do contato
+        // NESTE funil numa das etapas marcadas é reaproveitado em vez de nascer outro — anda
+        // para a etapa da ação se estiver antes dela; já nela ou depois, só ganha o recadastro.
+        // Responsável, conversa e histórico ficam; o título passa a ser o desta ação.
+        // Falha aqui NÃO cai para "criar outro": sem oportunidade_id a página com arquivos
+        // pede para tentar de novo, em vez de deixar dois cards da mesma pessoa.
+        const origens = etapasDeOrigem(p);
+        if (origens.length && leadId) {
+          const { data: anterior, error: antErr } = await admin
+            .from("crm_oportunidades")
+            .select("id, etapa_id, recadastros")
+            .eq("lead_id", leadId)
+            .eq("funil_id", p.funilId)
+            .eq("status", "aberta")
+            .eq("arquivada", false)
+            .in("etapa_id", origens)
+            .order("criada_em", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          if (antErr) throw antErr;
+          if (anterior?.id) {
+            const { data: ordens, error: ordErr } = await admin
+              .from("crm_funis_etapas").select("id, ordem").in("id", [anterior.etapa_id, p.etapaId]);
+            if (ordErr) throw ordErr;
+            const ordemDe = (id: string) => (ordens ?? []).find((e: any) => e.id === id)?.ordem ?? null;
+            const mover = decidirAvanco(ordemDe(anterior.etapa_id), ordemDe(p.etapaId)) === "mover";
+            const { error: avErr } = await admin
+              .from("crm_oportunidades")
+              .update({
+                ...(mover
+                  ? { etapa_id: p.etapaId, titulo: tituloResolved }
+                  : { recadastro_em: nowIso, recadastro_titulo: tituloResolved, recadastros: (anterior.recadastros ?? 0) + 1 }),
+                ultima_atividade_em: nowIso,
+                ...(sacFunilId ? { sac_v2_funil_id: sacFunilId } : {}),
+                ...(produtoChave ? { produto: produtoChave } : {}),
+              })
+              .eq("id", anterior.id);
+            if (avErr) throw avErr;
+            if (!oportunidadeId) oportunidadeId = anterior.id;
+            await logAtividade(
+              leadId, "acao_webhook",
+              mover ? "Card avançado de etapa pela webhook" : "Ação de Webhook Integrado executada",
+              `${integration.nome ?? slug} - ${ACAO_LABELS.criar_oportunidade}`,
+            );
+            continue;
+          }
+        }
 
         // "Nao criar repetidas" = por WEBHOOK, NAO por funil. Toda webhook de pos aponta pro
         // MESMO funil (1.0 SDR), entao o dedup por funil fazia um card de Producao de Suinos
