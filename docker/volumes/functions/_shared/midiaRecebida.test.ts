@@ -23,11 +23,23 @@ describe("mídia recebida em bucket privado (29/10/2026)", () => {
     expect(precisaRenovar("https://x/storage/v1/object/public/whatsapp-anexos/a.ogg", agora)).toBe(false);
   });
 
-  it("link público volta igual, sem pedir nada ao storage", async () => {
+  it("link de bucket público ou de fora volta igual, sem pedir nada ao storage", async () => {
     const fetchImpl = vi.fn();
-    const pub = "https://api.ppgeducacao.site/storage/v1/object/public/whatsapp-anexos/crm/a.ogg";
+    const pub = "https://api.ppgeducacao.site/storage/v1/object/public/professor-photos/a.jpg";
     expect(await urlBaixavel(pub, { base: "http://kong:8000", chave: "k", fetchImpl })).toBe(pub);
+    expect(await urlBaixavel("https://lookaside.fbsbx.com/x.ogg", { base: "http://kong:8000", chave: "k", fetchImpl })).toBe("https://lookaside.fbsbx.com/x.ogg");
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("link PÚBLICO gravado de bucket que virou privado (whatsapp-anexos, 30/10) ganha link assinado", async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ signedURL: "/object/sign/whatsapp-anexos/outbound/x.pdf?token=novo" })));
+    const pub = "https://api.ppgeducacao.site/storage/v1/object/public/whatsapp-anexos/outbound/x.pdf";
+    const novo = await urlBaixavel(pub, { base: "http://kong:8000", chave: "k", fetchImpl });
+    expect(novo).toBe("http://kong:8000/storage/v1/object/sign/whatsapp-anexos/outbound/x.pdf?token=novo");
+    const [url] = fetchImpl.mock.calls[0] as unknown as [string];
+    expect(url).toBe("http://kong:8000/storage/v1/object/sign/whatsapp-anexos/outbound/x.pdf");
+    // `caminhoRecebido` continua sendo só do bucket de mídia recebida.
+    expect(caminhoRecebido(pub)).toBeNull();
   });
 
   it("link vencido do bucket privado ganha um novo pela service role", async () => {

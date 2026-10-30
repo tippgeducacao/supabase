@@ -1042,15 +1042,22 @@ async function acaoAtendenteAudio(body: Record<string, unknown>, req: Request) {
 
   // ⚠️ Sem URL não há o que tocar: aqui o upload é BLOQUEANTE, ao contrário do lado do lead,
   // onde a transcrição ainda salva a mensagem. Um balão de áudio sem áudio é pior que um erro.
+  // Áudio do ATENDENTE também no bucket PRIVADO (30/10/2026): o lead toca pelo link assinado de
+  // 7 dias e o poll renova o vencido (`renovarLinksDoLead`), igual ao áudio dele. Antes ia para o
+  // público `whatsapp-anexos/webchat/`, que vai fechar.
   let url: string | null = null;
+  let caminho: string | null = null;
   try {
     const ext = extDoMime(mimeReal);
     const path = `webchat/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}.${ext}`;
     const { error: stErr } = await supabase.storage
-      .from("whatsapp-anexos")
+      .from(BUCKET_RECEBIDOS)
       .upload(path, bytes, { contentType: mimeReal, upsert: false });
     if (stErr) throw new Error(stErr.message);
-    url = toPublicUrl(supabase.storage.from("whatsapp-anexos").getPublicUrl(path).data.publicUrl);
+    const { data: ass, error: assErr } = await supabase.storage.from(BUCKET_RECEBIDOS).createSignedUrl(path, VALIDADE_LINK_GRAVADO_S);
+    if (assErr || !ass?.signedUrl) throw new Error(assErr?.message ?? "sem signedUrl");
+    url = toPublicUrl(ass.signedUrl);
+    caminho = path;
   } catch (e) {
     console.error(`[crm-webchat] atendente_audio storage: ${(e as Error).message}`);
     return json({ ok: false, erro: "falha_no_upload" }, 500);
@@ -1058,7 +1065,7 @@ async function acaoAtendenteAudio(body: Record<string, unknown>, req: Request) {
 
   const transcricao = await transcreverAudioChat(bytes, mimeReal);
   const conteudo = transcricao || "[áudio]";
-  const anexos = [{ tipo: "audio", mime_type: mimeReal, url, url_storage: url }];
+  const anexos = [{ tipo: "audio", mime_type: mimeReal, url, url_storage: url, bucket: BUCKET_RECEBIDOS, caminho }];
 
   const { data: msg, error } = await supabase
     .from("webchat_mensagens")
