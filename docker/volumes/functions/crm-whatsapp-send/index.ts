@@ -2,7 +2,7 @@
 // Envia mensagem WhatsApp (texto, template ou documento/PDF) via Meta Cloud API para o CRM Comercial.
 // Diferente do whatsapp-send-message (pedagógico) — usa crm_whatsapp_accounts e crm_whatsapp_messages.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
-import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
+import { exigirAcesso, respostaAcessoNegado, AcessoNegado, type Chamador } from "../_shared/acesso.ts";
 import { getWaProvider } from "../_shared/waProviders.ts";
 import { telefoneEnviavel, digitosParaEnvio } from "../_shared/telefone.ts";
 import { phoneVariants, canonicalConversationPhone } from "./telefoneConversa.ts";
@@ -12,7 +12,9 @@ import { linhaDaMensagemReagida } from "./linhaDaReacao.ts";
 // `whatsapp-anexos` passa a privado (30/10/2026): todo link do nosso storage que a edge BAIXA
 // (media_id) ou REPASSA (link de reserva, cabeçalho de template, linha Web) é assinado antes
 // pela service role. O que se grava na mensagem continua sendo o link original.
-import { urlBaixavel, urlParaTerceiros } from "../_shared/midiaRecebida.ts";
+import { MidiaInvalida } from "../_shared/midiaRecebida.ts";
+import { criarMidiaEnvio, type MidiaEnvio } from "../_shared/midiaEnvioAutorizada.ts";
+import { conferirUrlPublica } from "../_shared/urlMidiaPublica.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -43,9 +45,9 @@ class OrigemMidiaIndisponivel extends Error {
  * enviar por `audio.link` ⇒ arquivo. Baixa do nosso storage e reenvia como multipart.
  */
 async function metaUploadMedia(
-  phoneNumberId: string, accessToken: string, fileUrl: string, mime: string, filename: string,
+  midia: MidiaEnvio, phoneNumberId: string, accessToken: string, fileUrl: string, mime: string, filename: string,
 ): Promise<string> {
-  const fileResp = await fetch(await urlBaixavel(fileUrl));
+  const fileResp = await midia.baixar(fileUrl);
   if (!fileResp.ok) {
     if (fileResp.status >= 400 && fileResp.status < 500) throw new OrigemMidiaIndisponivel(fileResp.status, fileUrl);
     throw new Error(`download mídia ${fileResp.status}`);
@@ -93,10 +95,12 @@ async function metaUploadMedia(
 type MidiaResolvida = { mediaId: string | null; origemMorta: number | null };
 
 async function resolverMediaId(
-  admin: any, phoneNumberId: string, accessToken: string,
+  midia: MidiaEnvio, admin: any, phoneNumberId: string, accessToken: string,
   fileUrl: string, mime: string, filename: string,
 ): Promise<MidiaResolvida> {
   try {
+    // Mesmo media_id em cache exige autorização: o cache não concede acesso ao arquivo.
+    await midia.conferir(fileUrl);
     const { data: hit } = await admin
       .from("crm_whatsapp_media_cache")
       .select("media_id")
@@ -106,7 +110,7 @@ async function resolverMediaId(
       .maybeSingle();
     if (hit?.media_id) return { mediaId: String(hit.media_id), origemMorta: null };
 
-    const mediaId = await metaUploadMedia(phoneNumberId, accessToken, fileUrl, mime, filename);
+    const mediaId = await metaUploadMedia(midia, phoneNumberId, accessToken, fileUrl, mime, filename);
     // upsert: outra rodada em paralelo pode ter subido o mesmo arquivo (2 ids válidos, tanto faz)
     await admin.from("crm_whatsapp_media_cache").upsert({
       url: fileUrl,
@@ -119,6 +123,7 @@ async function resolverMediaId(
     }, { onConflict: "url,phone_number_id" });
     return { mediaId, origemMorta: null };
   } catch (e) {
+    if (e instanceof AcessoNegado || e instanceof MidiaInvalida) throw e;
     if (e instanceof OrigemMidiaIndisponivel) {
       console.error(`[crm-whatsapp-send] arquivo do anexo NÃO EXISTE (HTTP ${e.status}): ${fileUrl}`);
       return { mediaId: null, origemMorta: e.status };
@@ -304,7 +309,7 @@ function json(data: unknown, status = 200) {
 // Envio por uma LINHA provider-agnóstica (wa_conexoes). Resolve o provider + token
 // (segredo, só service_role), envia pelo adapter e persiste em crm_whatsapp_messages
 // (-> trigger espelha pro SAC). Sem janela 24h/template (regra Meta não se aplica).
-async function enviarViaConexao(admin: any, p: {
+async function enviarViaConexao(midia: MidiaEnvio, admin: any, p: {
   conexaoId: string; to: string; tipo: string; conteudo?: string;
   anexo_url?: string; filename?: string; mime_type?: string;
   lead_id?: string | null; oportunidade_id?: string | null; origemFinal: string | null;
@@ -342,7 +347,7 @@ async function enviarViaConexao(admin: any, p: {
       if (!urlMidia) return json({ error: `anexo_url obrigatório para tipo ${p.tipo}` }, 400);
       const caption = p.tipo === "audio" || p.tipo === "sticker" ? "" : conteudoPersist.trim();
       result = await provider.sendMedia(conex.server_url, sec.token, numberDigits, {
-        tipo: p.tipo, url: await urlParaTerceiros(urlMidia), caption, filename: p.filename, mime: p.mime_type,
+        tipo: p.tipo, url: await midia.paraTerceiros(urlMidia), caption, filename: p.filename, mime: p.mime_type,
       });
       anexosPersist = [{
         tipo: p.tipo,
@@ -425,11 +430,23 @@ Deno.serve(async (req) => {
   // Atendimento (token do colaborador; ped-aula-avaliacao-enviar repassa o dele) ou interno
   // com a chave de serviço exata: edges (agente SDR, lembretes, webchat, fila de agendadas…)
   // e funções do banco via pg_net (`_get_service_role_key()`).
-  try { await exigirAcesso(req, { usuario: true, servico: true }); }
+  let quem: Chamador;
+  try { quem = await exigirAcesso(req, { usuario: true, servico: true, rpcPermissao: "crm_pode_ler_atendimentos" }); }
   catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   try {
     const body = await req.json().catch(() => ({}));
+    const midia = criarMidiaEnvio(quem, {
+      base: SUPABASE_URL, chaveAnon: Deno.env.get("SUPABASE_ANON_KEY") ?? "", chaveServico: SERVICE_ROLE,
+      publico: Deno.env.get("PUBLIC_SUPABASE_URL") || "https://api.ppgeducacao.site",
+      conferirExterna: async (url) => { await conferirUrlPublica(url); },
+    }, body?.midia_origem);
+    // Também vale para a faixa de ensaio: não gravar referência forjada para depois
+    // usá-la como prova de acesso numa renovação. O cache evita repetir a assinatura.
+    for (const url of [body?.anexo_url, body?.header_media_url]) {
+      if (typeof url === "string" && url.trim()) await midia.conferir(url.trim());
+    }
+    if (body?.template_components) await midia.componentes(body.template_components);
     const {
       wa_account_id,
       // Quando presente, a conversa é de uma LINHA provider-agnóstica (ex.: Uazapi):
@@ -687,7 +704,7 @@ Deno.serve(async (req) => {
       }
     }
     if (conexaoIdRota) {
-      return await enviarViaConexao(admin, {
+      return await enviarViaConexao(midia, admin, {
         conexaoId: conexaoIdRota, to, tipo, conteudo, anexo_url, filename, mime_type,
         lead_id, oportunidade_id, origemFinal, reaction_message_id, enviadoPorId, enviadoPorNome,
         textoVozIa,
@@ -844,7 +861,7 @@ Deno.serve(async (req) => {
           const nomeArq = String(header_media_filename ?? "").trim() || nomeDaUrl || extPadrao;
           headerMediaUrl = hdrUrl;
           headerMediaKey = key;
-          const midiaHdr = await resolverMediaId(admin, phoneNumberId, accessToken, hdrUrl, mime, nomeArq);
+          const midiaHdr = await resolverMediaId(midia, admin, phoneNumberId, accessToken, hdrUrl, mime, nomeArq);
           // Cabeçalho apontando pra arquivo apagado: por `link` a Meta recusa igual (131053 /
           // 132012) e o disparo inteiro sai "enviado" mentindo. Aborta e alerta.
           if (midiaHdr.origemMorta) {
@@ -853,7 +870,7 @@ Deno.serve(async (req) => {
           headerMediaId = midiaHdr.mediaId;
           // ⚠️ `filename` é SÓ do document: mandar em image/video faz a Meta recusar o
           // parâmetro. Sem ele no document, o card chega como "Sem título".
-          const midiaHeader: Record<string, unknown> = headerMediaId ? { id: headerMediaId } : { link: await urlParaTerceiros(hdrUrl) };
+          const midiaHeader: Record<string, unknown> = headerMediaId ? { id: headerMediaId } : { link: await midia.paraTerceiros(hdrUrl) };
           if (key === "document") midiaHeader.filename = nomeArq;
           comps.push({
             type: "header",
@@ -882,7 +899,9 @@ Deno.serve(async (req) => {
         template: {
           name: template_name,
           language: { code: template_lang || "pt_BR" },
-          components: comps,
+          // IDs aqui só podem ter sido gerados pelo servidor: o corpo original
+          // já passou por componentes() antes de qualquer operação privilegiada.
+          components: await midia.componentes(comps, true),
         },
       };
     } else if (tipo === "document") {
@@ -890,7 +909,7 @@ Deno.serve(async (req) => {
       // Preferimos media_id (a Meta NÃO baixa a URL ⇒ imune ao 131053); link é o fallback.
       const caption = String(conteudo ?? "").trim();
       const midiaDoc = await resolverMediaId(
-        admin, phoneNumberId, accessToken, docUrl,
+        midia, admin, phoneNumberId, accessToken, docUrl,
         String(mime_type ?? "").trim() || "application/pdf", docFilename || "documento.pdf",
       );
       if (midiaDoc.origemMorta) {
@@ -902,7 +921,7 @@ Deno.serve(async (req) => {
         to,
         type: "document",
         document: {
-          ...(mediaIdUsado ? { id: mediaIdUsado } : { link: await urlParaTerceiros(docUrl) }),
+          ...(mediaIdUsado ? { id: mediaIdUsado } : { link: await midia.paraTerceiros(docUrl) }),
           filename: docFilename,
           ...(caption ? { caption: caption.slice(0, 1024) } : {}),
         },
@@ -912,7 +931,7 @@ Deno.serve(async (req) => {
       // jpeg/png por URL pública.
       const caption = String(conteudo ?? "").trim();
       const midiaImg = await resolverMediaId(
-        admin, phoneNumberId, accessToken, docUrl,
+        midia, admin, phoneNumberId, accessToken, docUrl,
         String(mime_type ?? "").trim() || "image/jpeg", docFilename || "imagem.jpg",
       );
       if (midiaImg.origemMorta) {
@@ -924,7 +943,7 @@ Deno.serve(async (req) => {
         to,
         type: "image",
         image: {
-          ...(mediaIdUsado ? { id: mediaIdUsado } : { link: await urlParaTerceiros(docUrl) }),
+          ...(mediaIdUsado ? { id: mediaIdUsado } : { link: await midia.paraTerceiros(docUrl) }),
           ...(caption ? { caption: caption.slice(0, 1024) } : {}),
         },
       };
@@ -934,7 +953,7 @@ Deno.serve(async (req) => {
       // vídeo era enviado como `document` e chegava como arquivo pra baixar.
       const caption = String(conteudo ?? "").trim();
       const midiaVid = await resolverMediaId(
-        admin, phoneNumberId, accessToken, docUrl,
+        midia, admin, phoneNumberId, accessToken, docUrl,
         String(mime_type ?? "").trim() || "video/mp4", docFilename || "video.mp4",
       );
       if (midiaVid.origemMorta) {
@@ -946,7 +965,7 @@ Deno.serve(async (req) => {
         to,
         type: "video",
         video: {
-          ...(mediaIdUsado ? { id: mediaIdUsado } : { link: await urlParaTerceiros(docUrl) }),
+          ...(mediaIdUsado ? { id: mediaIdUsado } : { link: await midia.paraTerceiros(docUrl) }),
           ...(caption ? { caption: caption.slice(0, 1024) } : {}),
         },
       };
@@ -958,7 +977,7 @@ Deno.serve(async (req) => {
       // (forma de onda) em vez de "arquivo de áudio". Exige OGG/Opus e mídia carregada
       // (audio.id). Ver doc Meta "Audio messages".
       const ehOgg = /audio\/ogg/i.test(String(mime_type ?? "")) || /\.ogg(\?|$)/i.test(docUrl);
-      let audioObj: Record<string, unknown> = { link: await urlParaTerceiros(docUrl) };
+      let audioObj: Record<string, unknown> = { link: await midia.paraTerceiros(docUrl) };
       if (ehOgg) {
         // ⚠️ Pelo CACHE de media_id, como documento/imagem/vídeo (17/09/2026). Até aqui o
         // áudio chamava `metaUploadMedia` direto: baixava o OGG do storage e subia pra Meta
@@ -970,14 +989,14 @@ Deno.serve(async (req) => {
         // Se a Meta recusar o id, a rede de segurança lá embaixo (`mediaIdUsado`) invalida
         // o cache e refaz por link — que mantém o `voice: true`.
         const midiaAud = await resolverMediaId(
-          admin, phoneNumberId, accessToken, docUrl, "audio/ogg", docFilename || "audio.ogg",
+          midia, admin, phoneNumberId, accessToken, docUrl, "audio/ogg", docFilename || "audio.ogg",
         );
         // Origem 4xx: o áudio não existe mais — por link a Meta falha do mesmo jeito.
         if (midiaAud.origemMorta) {
           return await abortarPorAnexoMorto(admin, accountId, docUrl, docFilename, midiaAud.origemMorta);
         }
         mediaIdUsado = midiaAud.mediaId;
-        audioObj = mediaIdUsado ? { id: mediaIdUsado, voice: true } : { link: await urlParaTerceiros(docUrl), voice: true };
+        audioObj = mediaIdUsado ? { id: mediaIdUsado, voice: true } : { link: await midia.paraTerceiros(docUrl), voice: true };
       }
       waPayload = {
         messaging_product: "whatsapp",
@@ -995,7 +1014,7 @@ Deno.serve(async (req) => {
       // O MESMO arquivo ora ia, ora não — é o download da Meta expirando, não a arte.
       // Foi o último tipo de mídia que ainda ia por link; agora nenhum vai.
       const midiaFig = await resolverMediaId(
-        admin, phoneNumberId, accessToken, docUrl, "image/webp", docFilename || "sticker.webp",
+        midia, admin, phoneNumberId, accessToken, docUrl, "image/webp", docFilename || "sticker.webp",
       );
       if (midiaFig.origemMorta) {
         return await abortarPorAnexoMorto(admin, accountId, docUrl, docFilename, midiaFig.origemMorta);
@@ -1005,7 +1024,7 @@ Deno.serve(async (req) => {
         messaging_product: "whatsapp",
         to,
         type: "sticker",
-        sticker: mediaIdUsado ? { id: mediaIdUsado } : { link: await urlParaTerceiros(docUrl) },
+        sticker: mediaIdUsado ? { id: mediaIdUsado } : { link: await midia.paraTerceiros(docUrl) },
       };
     } else if (tipo === "reaction") {
       // Reação a uma mensagem existente: emoji em `conteudo`, alvo em reaction_message_id.
@@ -1083,7 +1102,7 @@ Deno.serve(async (req) => {
       console.warn("[crm-whatsapp-send] Meta recusou media_id, refazendo por link:", JSON.stringify(waResp?.error ?? {}));
       await invalidarMediaId(admin, docUrl, phoneNumberId);
       const obj = (waPayload as any)[tipo as string];
-      if (obj && typeof obj === "object") { delete obj.id; obj.link = await urlParaTerceiros(docUrl); }
+      if (obj && typeof obj === "object") { delete obj.id; obj.link = await midia.paraTerceiros(docUrl); }
       mediaIdUsado = null;
       r = await postMeta(waPayload);
       waResp = await r.json().catch(() => ({}));
@@ -1097,7 +1116,7 @@ Deno.serve(async (req) => {
         (c: any) => String(c?.type ?? "").toLowerCase() === "header",
       );
       const hpar = Array.isArray(hc?.parameters) ? hc.parameters[0] : null;
-      if (hpar?.[headerMediaKey]) hpar[headerMediaKey] = { link: await urlParaTerceiros(headerMediaUrl) };
+      if (hpar?.[headerMediaKey]) hpar[headerMediaKey] = { link: await midia.paraTerceiros(headerMediaUrl) };
       headerMediaId = null;
       r = await postMeta(waPayload);
       waResp = await r.json().catch(() => ({}));
@@ -1356,6 +1375,8 @@ Deno.serve(async (req) => {
       wa_account_id: accountId,
     });
   } catch (e) {
+    if (e instanceof AcessoNegado) return respostaAcessoNegado(e, corsHeaders);
+    if (e instanceof MidiaInvalida) return json({ error: e.message }, 403);
     const msg = e instanceof Error ? e.message : String(e);
     console.error("[crm-whatsapp-send] fatal:", msg);
     return json({ error: "erro interno ao enviar mensagem" }, 500);

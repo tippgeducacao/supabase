@@ -21,7 +21,56 @@ export const VALIDADE_LINK_GRAVADO_S = 7 * 24 * 60 * 60;
  */
 export const BUCKETS_PRIVADOS = ["whatsapp-recebidos", "whatsapp-anexos", "gt-doc-assets", "gt-chat-media"] as const;
 
-const RE_OBJETO = /\/storage\/v1\/object\/(?:sign|public|authenticated)\/([^/]+)\/([^?#]+)/;
+const RE_OBJETO = /^https?:\/\/[^/?#]+\/storage\/v1\/object\/(?:sign|public|authenticated)\/([^/]+)\/([^?#]+)/i;
+
+export class MidiaInvalida extends Error {
+  constructor() { super("Endereço de mídia não permitido."); }
+}
+
+const temControleOuBarraInvertida = (valor: string) =>
+  [...valor].some((c) => c === "\\" || c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127);
+
+/** Antes de new URL: o parser normaliza /../ e esconderia a tentativa (pentest, 31/10). */
+export function caminhoSeguro(caminho: string): boolean {
+  if (!caminho || caminho.startsWith("/") || temControleOuBarraInvertida(caminho)) return false;
+  let examinado = caminho;
+  for (let i = 0; i < 5; i++) {
+    if (examinado.split("/").some((p) => p === "." || p === "..") || temControleOuBarraInvertida(examinado)) return false;
+    if (!/%[0-9a-f]{2}/i.test(examinado)) return true;
+    try {
+      const proximo = decodeURIComponent(examinado);
+      if (proximo === examinado) return true;
+      examinado = proximo;
+    } catch { return false; }
+  }
+  return false;
+}
+
+function origensStorage(): Set<string> {
+  const env = (globalThis as { Deno?: { env: { get(k: string): string | undefined } } }).Deno?.env;
+  const valores = ["https://api.ppgeducacao.site", "http://kong:8000", "http://supabase-kong:8000",
+    env?.get("SUPABASE_URL"), env?.get("PUBLIC_SUPABASE_URL"), env?.get("SUPABASE_PUBLIC_URL")];
+  return new Set(valores.flatMap((v) => { try { return v ? [new URL(v).origin] : []; } catch { return []; } }));
+}
+
+/** Reconhece somente nosso Storage, mantendo o caminho bruto até validar a travessia. */
+export function objetoDoStorage(url: string | null | undefined): ObjetoPrivado | null {
+  if (typeof url !== "string") return null;
+  let u: URL;
+  try { u = new URL(url); } catch { return null; }
+  if (!origensStorage().has(u.origin)) return null;
+  if (u.username || u.password || temControleOuBarraInvertida(url)) throw new MidiaInvalida();
+  const m = url.match(RE_OBJETO);
+  if (!m) {
+    if (u.pathname.startsWith("/storage/")) throw new MidiaInvalida();
+    return null;
+  }
+  if (!/^[a-z0-9][a-z0-9_-]*$/i.test(m[1]) || !caminhoSeguro(m[2])) throw new MidiaInvalida();
+  let caminho: string;
+  try { caminho = decodeURIComponent(m[2]); } catch { throw new MidiaInvalida(); }
+  if (!caminhoSeguro(caminho)) throw new MidiaInvalida();
+  return { bucket: m[1], caminho };
+}
 
 export interface ObjetoPrivado {
   bucket: string;
@@ -30,15 +79,8 @@ export interface ObjetoPrivado {
 
 /** `{ bucket, caminho }` se o link aponta para um dos buckets privados; senão null. */
 export function objetoPrivado(url: string | null | undefined): ObjetoPrivado | null {
-  const m = typeof url === "string" ? url.match(RE_OBJETO) : null;
-  if (!m || !(BUCKETS_PRIVADOS as readonly string[]).includes(m[1])) return null;
-  let caminho = m[2];
-  try {
-    caminho = decodeURIComponent(m[2]);
-  } catch {
-    // caminho já decodificado
-  }
-  return { bucket: m[1], caminho };
+  const o = objetoDoStorage(url);
+  return o && (BUCKETS_PRIVADOS as readonly string[]).includes(o.bucket) ? o : null;
 }
 
 /** Caminho do objeto no bucket de mídia RECEBIDA, ou null se o link não é de lá. */
@@ -79,6 +121,7 @@ export interface DepsAssinatura {
 
 /** Gera um link assinado para um objeto de qualquer bucket privado (POST /storage/v1/object/sign/...). */
 export async function assinarObjeto(bucket: string, caminho: string, validadeS: number, deps: DepsAssinatura): Promise<string> {
+  if (!(BUCKETS_PRIVADOS as readonly string[]).includes(bucket) || !caminhoSeguro(caminho)) throw new MidiaInvalida();
   const base = deps.base.replace(/\/$/, "");
   const r = await (deps.fetchImpl ?? fetch)(`${base}/storage/v1/object/sign/${bucket}/${codificarCaminho(caminho)}`, {
     method: "POST",
@@ -125,11 +168,8 @@ function depsDoAmbiente(): DepsAssinatura | null {
 export async function urlBaixavel(url: string, deps: DepsAssinatura | null = depsDoAmbiente(), validadeS = 600): Promise<string> {
   if (!precisaAssinar(url) || !deps) return url;
   const o = objetoPrivado(url)!;
-  try {
-    return await assinarObjeto(o.bucket, o.caminho, validadeS, deps);
-  } catch {
-    return url;
-  }
+  // Falha de assinatura não vira tentativa de baixar o link original (fail-closed).
+  return await assinarObjeto(o.bucket, o.caminho, validadeS, deps);
 }
 
 function hostPublico(): string {

@@ -1,5 +1,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
-import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
+import { AcessoNegado, exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
+
+import { autorizarPublicacao } from "./autorizacao.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -23,9 +25,15 @@ function graphErrorMessage(error: any): string {
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   // Publicar agora (colaborador logado, só modo single) ou cron (chave de serviço).
-  let porUsuario = false;
-  try { porUsuario = (await exigirAcesso(req, { usuario: true, servico: true })).tipo === "usuario"; }
+  let quem: Awaited<ReturnType<typeof exigirAcesso>>;
+  try { quem = await exigirAcesso(req, { usuario: true, servico: true }); }
   catch (e) { return respostaAcessoNegado(e, corsHeaders); }
+
+  const porUsuario = quem.tipo === "usuario";
+  const comoUsuario = quem.tipo === "usuario" ? createClient(
+    Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_ANON_KEY")!,
+    { global: { headers: { Authorization: `Bearer ${quem.token}` } }, auth: { persistSession: false } },
+  ) : null;
 
   try {
     const supabase = createClient(
@@ -45,26 +53,32 @@ Deno.serve(async (req) => {
     }
 
     if (mode === "single" && body.post_id) {
+      if (typeof body.post_id !== "string") return new Response(JSON.stringify({ error: "post_id inválido" }), { status: 400, headers: corsHeaders });
+      if (quem.tipo === "usuario") await autorizarPublicacao(comoUsuario, quem.usuarioId, body.post_id);
       // CLAIM atômico: só publica se a linha ainda não está em publicação/publicada.
       // Evita publicação dupla quando o usuário clica "Publicar agora" e o cron
       // pega o mesmo post no mesmo segundo (ou em duplo-clique).
-      const { data: claimed } = await supabase
+      const { data: claimed, error: erroClaim } = await (comoUsuario ?? supabase)
         .from("ig_scheduled_posts")
         .update({ status: "publishing", updated_at: nowIso })
         .eq("id", body.post_id)
         // Pelo clique só sai post 'scheduled' (o "Publicar agora" grava assim); rascunho e
         // falha não saem por id solto (29/10/2026).
         .in("status", porUsuario ? ["scheduled"] : ["scheduled", "draft", "failed"])
-        .select("*, ig_accounts(*)");
+        .select("id");
+      if (erroClaim) throw new AcessoNegado(erroClaim.code === "42501" ? 403 : 503, "Não foi possível autorizar a publicação.");
 
-      const post = claimed?.[0];
-      if (!post) {
+      if (!claimed?.[0]) {
         // Já reivindicado por outra execução (cron/clique) ou já publicado.
         return new Response(JSON.stringify({ skipped: true, reason: "já em publicação ou publicado" }), {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
 
+      // Credencial da Meta só é lida depois do claim autorizado pela sessão/RLS.
+      const { data: post, error: erroPost } = await supabase.from("ig_scheduled_posts")
+        .select("*, ig_accounts(*)").eq("id", claimed[0].id).single();
+      if (erroPost || !post) throw new Error("Não foi possível carregar a publicação autorizada.");
       const result = await publishPost(supabase, post, post.ig_accounts);
       return new Response(JSON.stringify(result), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -146,6 +160,7 @@ Deno.serve(async (req) => {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (err) {
+    if (err instanceof AcessoNegado) return respostaAcessoNegado(err, corsHeaders);
     return new Response(JSON.stringify({ error: getErrorMessage(err) }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },

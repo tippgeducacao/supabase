@@ -2,7 +2,10 @@
 // Envia mensagem WhatsApp (texto, template, image, video, document, audio) via Meta Cloud API,
 // persiste em ped_conversas_mensagens e atualiza ped_conversas_avulsas.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
-import { urlParaTerceiros } from "../_shared/midiaRecebida.ts";
+import { MidiaInvalida } from "../_shared/midiaRecebida.ts";
+import { exigirAcesso, respostaAcessoNegado, AcessoNegado, type Chamador } from "../_shared/acesso.ts";
+import { criarMidiaEnvio } from "../_shared/midiaEnvioAutorizada.ts";
+import { conferirUrlPublica } from "../_shared/urlMidiaPublica.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -37,29 +40,16 @@ const MEDIA_TIPOS = new Set(["image", "video", "document", "audio"]);
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
+  let quem: Chamador;
+  try { quem = await exigirAcesso(req, { usuario: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
+  if (quem.tipo !== "usuario") return respostaAcessoNegado(new AcessoNegado(403, "Acesso restrito."), corsHeaders);
   try {
-    const authHeader = req.headers.get("Authorization");
-    if (!authHeader?.startsWith("Bearer ")) {
-      return new Response(JSON.stringify({ error: "Unauthorized" }), {
-        status: 401,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
+    const userId = quem.usuarioId;
     const userClient = createClient(SUPABASE_URL, ANON, {
-      global: { headers: { Authorization: authHeader } },
+      global: { headers: { Authorization: `Bearer ${quem.token}` } },
+      auth: { persistSession: false },
     });
-    let userId: string | null = null;
-    try {
-      const { data: userData, error: userErr } = await userClient.auth.getUser();
-      if (!userErr && userData?.user?.id) userId = userData.user.id;
-    } catch (_) {}
-    if (!userId) {
-      return new Response(
-        JSON.stringify({ error: "Não autenticado. Faça login novamente." }),
-        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
-    }
-
     const body = await req.json().catch(() => ({}));
     const {
       conversa_id,
@@ -110,6 +100,15 @@ Deno.serve(async (req) => {
       });
     }
 
+    // A RLS da conversa decide o acesso antes de ler token ou chamar a Meta.
+    const { data: conversa, error: erroConversa } = await userClient
+      .from("ped_conversas_avulsas").select("id").eq("id", conversa_id).maybeSingle();
+    if (erroConversa || !conversa) throw new AcessoNegado(403, "Sem acesso a esta conversa.");
+    const midia = criarMidiaEnvio(quem, {
+      base: SUPABASE_URL, chaveAnon: ANON, chaveServico: SERVICE_ROLE,
+      publico: Deno.env.get("PUBLIC_SUPABASE_URL") || "https://api.ppgeducacao.site",
+      conferirExterna: async (url) => { await conferirUrlPublica(url); },
+    }, body?.midia_origem);
     const admin = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 
     // Template: carrega o cadastro ANTES de resolver a conta — é ele que decide POR QUAL
@@ -209,13 +208,13 @@ Deno.serve(async (req) => {
         template: {
           name: template_name,
           language: { code: template_lang || "pt_BR" },
-          components: Array.isArray(template_components) ? template_components : [],
+          components: await midia.componentes(Array.isArray(template_components) ? template_components : []),
         },
       };
     } else {
       // Media: image, video, document, audio
       // `whatsapp-anexos` privado (30/10/2026): a Meta baixa pelo link, então vai assinado (10 min).
-      const mediaObj: Record<string, unknown> = { link: await urlParaTerceiros(String(media_url)) };
+      const mediaObj: Record<string, unknown> = { link: await midia.paraTerceiros(String(media_url)) };
       if (tipo === "document" && media_filename) mediaObj.filename = media_filename;
       if ((tipo === "image" || tipo === "video" || tipo === "document") && caption) {
         mediaObj.caption = String(caption).slice(0, 1024);
@@ -230,16 +229,7 @@ Deno.serve(async (req) => {
       (waPayload as Record<string, unknown>).context = { message_id: String(reply_to_wa_message_id) };
     }
 
-    if (tipo === "audio") {
-      try {
-        const head = await fetch(media_url, { method: "HEAD" });
-        console.log("[whatsapp-send-message] audio HEAD:", media_url, "status:", head.status, "content-type:", head.headers.get("content-type"), "content-length:", head.headers.get("content-length"));
-      } catch (e) {
-        console.log("[whatsapp-send-message] audio HEAD failed:", String(e));
-      }
-    }
-
-    console.log("[whatsapp-send-message] -> Meta payload:", JSON.stringify(waPayload));
+    // Não registrar URLs assinadas ou conteúdo de mensagens em logs.
     const r = await fetch(`${META_GRAPH}/${phoneNumberId}/messages`, {
       method: "POST",
       headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
@@ -328,6 +318,8 @@ Deno.serve(async (req) => {
       { headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   } catch (e) {
+    if (e instanceof AcessoNegado) return respostaAcessoNegado(e, corsHeaders);
+    if (e instanceof MidiaInvalida) return new Response(JSON.stringify({ error: e.message }), { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     const msg = e instanceof Error ? e.message : String(e);
     console.log("[whatsapp-send-message] fatal:", msg);
     return new Response(JSON.stringify({ error: msg }), {

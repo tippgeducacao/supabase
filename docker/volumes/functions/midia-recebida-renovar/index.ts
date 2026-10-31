@@ -8,7 +8,7 @@
 // Para cada item, a mensagem `id` é lida COM O TOKEN DA PESSOA (vale a RLS da conversa) e o
 // `caminho` tem de estar nos anexos dela. Só então assina, pela service role, por 24 h.
 import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
-import { assinarCaminho, caminhoRecebido } from "../_shared/midiaRecebida.ts";
+import { assinarCaminho, caminhoRecebido, caminhoSeguro } from "../_shared/midiaRecebida.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -27,7 +27,8 @@ type Anexo = { url?: string | null; url_storage?: string | null; caminho?: strin
 function caminhosDaMensagem(anexos: unknown): Set<string> {
   const s = new Set<string>();
   for (const a of (Array.isArray(anexos) ? anexos : []) as Anexo[]) {
-    if (typeof a?.caminho === "string") s.add(a.caminho);
+    // Campo caminho isolado não é prova: só a URL do nosso bucket, protegida
+    // contra escrita humana pela migration 20261031183000, autoriza renovar.
     for (const u of [a?.url, a?.url_storage]) {
       const c = caminhoRecebido(u);
       if (c) s.add(c);
@@ -56,7 +57,7 @@ Deno.serve(async (req) => {
     if (!TABELAS.has(tabela)) return json({ error: "Tabela não permitida." }, 400);
     const validos = itens
       .map((i) => ({ id: String(i?.id ?? ""), caminho: String(i?.caminho ?? "") }))
-      .filter((i) => /^[0-9a-f-]{36}$/i.test(i.id) && i.caminho && !i.caminho.includes(".."))
+      .filter((i) => /^[0-9a-f-]{36}$/i.test(i.id) && caminhoSeguro(i.caminho))
       .slice(0, MAX_ITENS);
     if (!validos.length) return json({ links: {} });
 

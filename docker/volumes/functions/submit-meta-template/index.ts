@@ -1,6 +1,8 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
 import { META_API, buildComponents } from '../_shared/pedWaTemplateMeta.ts';
-import { exigirAcesso, respostaAcessoNegado } from '../_shared/acesso.ts';
+import { AcessoNegado, exigirAcesso, respostaAcessoNegado } from '../_shared/acesso.ts';
+
+import { exigirPedagogico, contaAutorizada } from "./acesso.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -12,7 +14,15 @@ Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
 
   // Só a tela Templates WA do Pedagógico chama (token do colaborador).
-  try { await exigirAcesso(req, { usuario: true }); }
+  let quem: Awaited<ReturnType<typeof exigirAcesso>>;
+  try { quem = await exigirAcesso(req, { usuario: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
+
+  if (quem.tipo !== "usuario") return new Response(null, { status: 403, headers: corsHeaders });
+  const comoUsuario = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_ANON_KEY")!, {
+    global: { headers: { Authorization: `Bearer ${quem.token}` } }, auth: { persistSession: false },
+  });
+  try { await exigirPedagogico(comoUsuario, quem.usuarioId); }
   catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   const supabase = createClient(
@@ -31,7 +41,7 @@ Deno.serve(async (req) => {
       });
     }
 
-    const { data: template, error: tErr } = await supabase
+    const { data: template, error: tErr } = await comoUsuario
       .from('ped_wa_templates')
       .select('*')
       .eq('id', template_id)
@@ -52,7 +62,11 @@ Deno.serve(async (req) => {
     // uma cópia na WABA pedagógica, enquanto o envio (que resolve pela coluna) continuaria
     // apontando para a do podcast.
     let acct: { id?: string; waba_id?: string; access_token?: string } | null = null;
-    const contaPedida = wa_account_id ?? template.wa_account_id;
+    const { data: configs, error: erroConfigs } = await supabase.from('ped_configuracoes')
+      .select('chave, valor').in('chave', ['wa_account_id_pedagogico', 'wa_account_id_podcast', 'wa_account_id_pedagogico_migracao']);
+    if (erroConfigs) throw new AcessoNegado(503, 'Não foi possível conferir a conta do Pedagógico.');
+    const padrao = configs?.find((c: any) => c.chave === 'wa_account_id_pedagogico')?.valor || null;
+    const contaPedida = contaAutorizada(wa_account_id, template.wa_account_id, padrao, (configs ?? []).map((c: any) => c.valor).filter(Boolean));
     if (contaPedida) {
       // Token efetivo pela RPC quando a conta pedida é a EM PRODUÇÃO (ela resolve o token
       // pela conta do CRM); fora disso, lê a linha direto.
@@ -71,11 +85,10 @@ Deno.serve(async (req) => {
         if (token) acct = { id: dona.id, waba_id: dona.waba_id, access_token: token };
       }
     }
-    if (!acct) {
-      const { data: account, error: accErr } = await supabase.rpc('get_wa_account_pedagogico');
-      if (accErr) throw accErr;
-      acct = Array.isArray(account) ? account[0] : account;
-    }
+    // Conta pedida inválida/inativa não cai silenciosamente na conta de produção.
+    if (!acct) return new Response(JSON.stringify({ ok: false, error: 'Conta indisponível para este template.' }), {
+      status: 422, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
     const waba_id = acct?.waba_id;
     const access_token = acct?.access_token;
     const contaId = acct?.id ?? null;
@@ -164,6 +177,7 @@ Deno.serve(async (req) => {
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
     );
   } catch (e) {
+    if (e instanceof AcessoNegado) return respostaAcessoNegado(e, corsHeaders);
     const msg = e instanceof Error ? e.message : 'unknown error';
     return new Response(JSON.stringify({ ok: false, error: msg }), {
       status: 500,

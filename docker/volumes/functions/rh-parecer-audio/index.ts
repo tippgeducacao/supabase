@@ -12,6 +12,8 @@
 // decisão sobre uma pessoa sai de um resumo automático que ninguém leu.
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.0';
+import { AcessoNegado, exigirAcesso, respostaAcessoNegado } from '../_shared/acesso.ts';
+import { caminhoParecerValido, conferirEntrevista } from './acesso.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
@@ -188,21 +190,26 @@ Deno.serve(async (req) => {
   if (req.method !== 'POST') return json({ ok: false, error: 'use POST' }, 405);
 
   try {
-    const auth = req.headers.get('Authorization') ?? '';
-    if (!auth.startsWith('Bearer ')) return json({ ok: false, error: 'não autenticado' }, 401);
-    const token = auth.replace(/^Bearer\s+/i, '');
-    if (token !== SERVICE_ROLE) {
-      const { data, error } = await admin.auth.getUser(token);
-      if (error || !data?.user) return json({ ok: false, error: 'sessão inválida' }, 401);
-    }
+    const quem = await exigirAcesso(req, {
+      usuario: true, servico: true, rpcPermissao: 'rh_pode_ver_contratacao',
+    });
 
     const { audio_path, oportunidade_id, candidato = 'o candidato', area = 'não informada' } =
       await req.json().catch(() => ({}));
-    if (!audio_path || !oportunidade_id) {
-      return json({ ok: false, error: 'audio_path e oportunidade_id são obrigatórios' }, 400);
+    if (!caminhoParecerValido(audio_path, oportunidade_id)) {
+      return json({ ok: false, error: 'O áudio precisa pertencer à oportunidade informada.' }, 400);
     }
 
-    const { data: arquivo, error: errDl } = await admin.storage.from('rh-parecer').download(audio_path);
+    // Login e permissão precedem o custo de IA. Leitura do arquivo e gravação do áudio
+    // usam a sessão do solicitante para a RLS conferir novamente o recurso.
+    const cliente = quem.tipo === 'usuario'
+      ? createClient(SUPABASE_URL, Deno.env.get('SUPABASE_ANON_KEY') || SERVICE_ROLE, {
+          global: { headers: { Authorization: `Bearer ${quem.token}` } },
+          auth: { persistSession: false },
+        })
+      : admin;
+    await conferirEntrevista(cliente, oportunidade_id);
+    const { data: arquivo, error: errDl } = await cliente.storage.from('rh-parecer').download(audio_path);
     if (errDl || !arquivo) return json({ ok: false, error: 'não achei o áudio no storage' }, 404);
 
     const mime = arquivo.type || 'audio/webm';
@@ -221,14 +228,18 @@ Deno.serve(async (req) => {
     const parecer = resumo.status === 'fulfilled' ? resumo.value : '';
     const fichaOk = ficha.status === 'fulfilled' ? ficha.value : { ...FICHA_VAZIA };
 
-    await admin.rpc('rh_entrevista_guardar_audio', {
+    const { data: guardado, error: erroGuardar } = await cliente.rpc('rh_entrevista_guardar_audio', {
       p_oportunidade_id: oportunidade_id,
       p_audio_path: audio_path,
       p_transcricao: transcricao,
     });
+    if (erroGuardar || guardado !== true) {
+      throw new Error('Não foi possível vincular a transcrição à entrevista.');
+    }
 
     return json({ ok: true, transcricao, parecer, ficha: fichaOk });
   } catch (e) {
+    if (e instanceof AcessoNegado) return respostaAcessoNegado(e, cors);
     console.error('[rh-parecer-audio]', e);
     return json({ ok: false, error: e instanceof Error ? e.message : String(e) }, 500);
   }

@@ -1,6 +1,8 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.3";
-import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
+import { AcessoNegado, exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
+
+import { contextoAutorizado, listasAutorizadas, metricasAutorizadas, type ContextoIa } from "./acesso.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -89,17 +91,22 @@ const TOOLS = [
   },
 ];
 
-async function executeTool(toolName: string, input: any, supabaseAdmin: any): Promise<string> {
+export async function executeTool(toolName: string, input: any, cliente: any, contexto: ContextoIa): Promise<string> {
   try {
+    const listas = await listasAutorizadas(cliente, contexto);
+    if (!listas.size) return "Este canal não tem listas autorizadas para esta consulta.";
+    const idsListas = [...listas.keys()];
+    input = { ...input, department_id: contexto.departamentoId };
     switch (toolName) {
       case "query_tasks": {
-        let query = supabaseAdmin
+        let query = cliente
           .from("gt_tasks")
           .select("id, title, priority, due_date, completed_at, assignee_id, status_id, is_archived, gt_task_lists!inner(id, gt_projects!inner(department_id))")
           .eq("is_archived", false)
+          .in("list_id", idsListas)
           .eq("gt_task_lists.gt_projects.department_id", input.department_id)
           .order("created_at", { ascending: false })
-          .limit(input.limit || 20);
+          .limit(Math.max(1, Math.min(100, Number(input.limit) || 20)));
 
         if (input.is_overdue) {
           query = query.lt("due_date", new Date().toISOString().slice(0, 10)).is("completed_at", null);
@@ -119,7 +126,7 @@ async function executeTool(toolName: string, input: any, supabaseAdmin: any): Pr
         const assigneeIds = [...new Set((data || []).map((t: any) => t.assignee_id).filter(Boolean))];
         let nameMap: Record<string, string> = {};
         if (assigneeIds.length) {
-          const { data: profiles } = await supabaseAdmin.from("profiles").select("id, name").in("id", assigneeIds);
+          const { data: profiles } = await cliente.from("profiles").select("id, name").in("id", assigneeIds);
           if (profiles) nameMap = Object.fromEntries(profiles.map((p: any) => [p.id, p.name]));
         }
 
@@ -148,9 +155,10 @@ async function executeTool(toolName: string, input: any, supabaseAdmin: any): Pr
           since.setDate(since.getDate() - 7);
         }
 
-        const { data, error } = await supabaseAdmin
+        const { data, error } = await cliente
           .from("gt_activity_log")
-          .select("action, field_changed, old_value, new_value, created_at, user_id, task_id")
+          .select("action, field_changed, old_value, new_value, created_at, user_id, task_id, gt_tasks!inner(list_id)")
+          .in("gt_tasks.list_id", idsListas)
           .gte("created_at", since.toISOString())
           .order("created_at", { ascending: false })
           .limit(30);
@@ -159,7 +167,7 @@ async function executeTool(toolName: string, input: any, supabaseAdmin: any): Pr
         const userIds = [...new Set((data || []).map((a: any) => a.user_id).filter(Boolean))];
         let nameMap: Record<string, string> = {};
         if (userIds.length) {
-          const { data: profiles } = await supabaseAdmin.from("profiles").select("id, name").in("id", userIds);
+          const { data: profiles } = await cliente.from("profiles").select("id, name").in("id", userIds);
           if (profiles) nameMap = Object.fromEntries(profiles.map((p: any) => [p.id, p.name]));
         }
 
@@ -176,46 +184,20 @@ async function executeTool(toolName: string, input: any, supabaseAdmin: any): Pr
       }
 
       case "query_metrics": {
-        const { data, error } = await supabaseAdmin
-          .from("gt_v_collaborator_metrics")
-          .select("*")
-          .eq("department_id", input.department_id);
-        if (error) return `Erro: ${error.message}`;
-
-        let filtered = data || [];
-        if (input.user_name) {
-          filtered = filtered.filter((m: any) => m.name?.toLowerCase().includes(input.user_name.toLowerCase()));
-        }
-
-        return JSON.stringify({
-          colaboradores: filtered.map((m: any) => ({
-            nome: m.name,
-            abertas: m.open_tasks,
-            atrasadas: m.overdue_tasks,
-            concluidas_mes: m.completed_this_month,
-            no_prazo: `${m.on_time_rate}%`,
-            media_dias: m.avg_completion_days,
-          })),
-        });
+        return JSON.stringify(await metricasAutorizadas(cliente, idsListas, input.user_name));
       }
 
       case "create_task": {
-        // Find a list in the department
-        let listId = input.list_id;
-        if (!listId && input.department_id) {
-          const { data: lists } = await supabaseAdmin
-            .from("gt_task_lists")
-            .select("id, gt_projects!inner(department_id)")
-            .eq("gt_projects.department_id", input.department_id)
-            .limit(1);
-          if (lists && lists.length > 0) listId = lists[0].id;
+        // A IA não escolhe uma lista fora do contexto nem cria em lista só de leitura.
+        const listId = input.list_id || [...listas].find(([, p]) => p === "edit" || p === "full_edit")?.[0];
+        if (!listId || !["edit", "full_edit"].includes(listas.get(listId) ?? "")) {
+          return "Sem permissão para criar tarefa nesta lista.";
         }
-        if (!listId) return "Erro: Nenhuma lista encontrada para criar a tarefa.";
 
         // Find assignee by name
         let assigneeId = null;
         if (input.assignee_name) {
-          const { data: profiles } = await supabaseAdmin
+          const { data: profiles } = await cliente
             .from("profiles")
             .select("id, name")
             .ilike("name", `%${input.assignee_name}%`)
@@ -223,8 +205,9 @@ async function executeTool(toolName: string, input: any, supabaseAdmin: any): Pr
           if (profiles && profiles.length > 0) assigneeId = profiles[0].id;
         }
 
-        const { data, error } = await supabaseAdmin.from("gt_tasks").insert({
+        const { data, error } = await cliente.from("gt_tasks").insert({
           list_id: listId,
+          created_by: contexto.usuarioId,
           title: input.title,
           assignee_id: assigneeId,
           priority: input.priority || "normal",
@@ -245,41 +228,45 @@ async function executeTool(toolName: string, input: any, supabaseAdmin: any): Pr
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
-  try { await exigirAcesso(req, { usuario: true }); }
+  let quem: Awaited<ReturnType<typeof exigirAcesso>>;
+  try { quem = await exigirAcesso(req, { usuario: true }); }
   catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   try {
-    const { message, channel_id, user_id, department_id } = await req.json();
+    if (quem.tipo !== "usuario") throw new AcessoNegado(403, "Login necessário.");
+    const { message, channel_id } = await req.json();
     if (!message) return new Response(JSON.stringify({ error: "Missing message" }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
-    const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+    if (typeof channel_id !== "string" || !channel_id) return new Response(JSON.stringify({ error: "Informe o canal." }), { status: 400, headers: corsHeaders });
+    const comoUsuario = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_ANON_KEY")!, {
+      global: { headers: { Authorization: `Bearer ${quem.token}` } }, auth: { persistSession: false },
+    });
+    const contexto = await contextoAutorizado(comoUsuario, quem.usuarioId, channel_id);
 
     // Use Anthropic if key available, otherwise Lovable AI Gateway
     let aiResponse: string;
 
     if (ANTHROPIC_API_KEY) {
-      aiResponse = await callAnthropic(message, department_id, supabaseAdmin);
+      aiResponse = await callAnthropic(message, contexto, comoUsuario);
     } else if (LOVABLE_API_KEY) {
-      aiResponse = await callLovableAI(message, department_id, supabaseAdmin);
+      aiResponse = await callLovableAI(message, contexto, comoUsuario);
     } else {
       aiResponse = "⚠️ O agente IA não está configurado. Configure a chave ANTHROPIC_API_KEY ou LOVABLE_API_KEY.";
     }
 
-    // Post response to chat
-    if (channel_id) {
-      await supabaseAdmin.from("gt_chat_messages").insert({
-        channel_id,
-        user_id: null,
-        content: aiResponse,
-        message_type: "system",
-        mentions: [],
-      });
-    }
+    // A service role só registra a resposta, via RPC que revalida o canal na transação.
+    // Nenhuma ferramenta da IA recebe este cliente privilegiado.
+    const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+    const { error: erroResposta } = await admin.rpc("gt_ia_registrar_resposta", {
+      p_canal: contexto.canalId, p_usuario: contexto.usuarioId, p_conteudo: aiResponse,
+    });
+    if (erroResposta) throw new AcessoNegado(erroResposta.code === "42501" ? 403 : 503, "Não foi possível registrar a resposta neste canal.");
 
     return new Response(JSON.stringify({ response: aiResponse }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (e: any) {
+    if (e instanceof AcessoNegado) return respostaAcessoNegado(e, corsHeaders);
     console.error("ai-internal-agent error:", e);
     return new Response(JSON.stringify({ error: e.message }), {
       status: 500,
@@ -288,8 +275,8 @@ serve(async (req) => {
   }
 });
 
-async function callAnthropic(message: string, departmentId: string, supabaseAdmin: any): Promise<string> {
-  let messages: any[] = [{ role: "user", content: message }];
+async function callAnthropic(message: string, contexto: ContextoIa, cliente: any): Promise<string> {
+  const messages: any[] = [{ role: "user", content: message }];
   let maxIterations = 5;
 
   while (maxIterations-- > 0) {
@@ -323,8 +310,8 @@ async function callAnthropic(message: string, departmentId: string, supabaseAdmi
       const toolResults: any[] = [];
       for (const block of data.content) {
         if (block.type === "tool_use") {
-          const input = { ...block.input, department_id: departmentId };
-          const result = await executeTool(block.name, input, supabaseAdmin);
+          const input = { ...block.input, department_id: contexto.departamentoId };
+          const result = await executeTool(block.name, input, cliente, contexto);
           toolResults.push({ type: "tool_result", tool_use_id: block.id, content: result });
         }
       }
@@ -340,13 +327,13 @@ async function callAnthropic(message: string, departmentId: string, supabaseAdmi
   return "Processamento interrompido após muitas iterações.";
 }
 
-async function callLovableAI(message: string, departmentId: string, supabaseAdmin: any): Promise<string> {
+async function callLovableAI(message: string, contexto: ContextoIa, cliente: any): Promise<string> {
   const toolsDef = TOOLS.map(t => ({
     type: "function",
     function: { name: t.name, description: t.description, parameters: t.input_schema },
   }));
 
-  let messages: any[] = [
+  const messages: any[] = [
     { role: "system", content: SYSTEM_PROMPT },
     { role: "user", content: message },
   ];
@@ -381,8 +368,8 @@ async function callLovableAI(message: string, departmentId: string, supabaseAdmi
 
     if (msg.tool_calls && msg.tool_calls.length > 0) {
       for (const tc of msg.tool_calls) {
-        const input = { ...JSON.parse(tc.function.arguments), department_id: departmentId };
-        const result = await executeTool(tc.function.name, input, supabaseAdmin);
+        const input = { ...JSON.parse(tc.function.arguments), department_id: contexto.departamentoId };
+        const result = await executeTool(tc.function.name, input, cliente, contexto);
         messages.push({ role: "tool", tool_call_id: tc.id, content: result });
       }
       continue;

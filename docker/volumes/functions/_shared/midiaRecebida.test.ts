@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { caminhoRecebido, expiracaoDoLink, paraHostPublico, precisaRenovar, urlBaixavel, urlParaTerceiros } from "./midiaRecebida";
+import { assinarObjeto, caminhoRecebido, expiracaoDoLink, objetoPrivado, paraHostPublico, precisaRenovar, urlBaixavel, urlParaTerceiros } from "./midiaRecebida";
 
 const b64 = (o: unknown) => btoa(JSON.stringify(o)).replace(/=+$/, "");
 const assinado = (caminho: string, exp: number) =>
@@ -60,9 +60,32 @@ describe("mídia recebida em bucket privado (29/10/2026)", () => {
     expect((init.headers as Record<string, string>).Authorization).toBe("Bearer k");
   });
 
-  it("falha ao assinar devolve o link original", async () => {
+  it("falha ao assinar interrompe o envio sem tentar o link original", async () => {
     const fetchImpl = vi.fn(async () => new Response("x", { status: 500 }));
     const velho = assinado("a/b.ogg", 1);
-    expect(await urlBaixavel(velho, { base: "http://kong:8000", chave: "k", fetchImpl })).toBe(velho);
+    await expect(urlBaixavel(velho, { base: "http://kong:8000", chave: "k", fetchImpl })).rejects.toThrow("HTTP 500");
+  });
+
+  it.each(["../rh-admissional/x.pdf", "%2e%2e/rh-admissional/x.pdf", "%252e%252e%252frh-admissional/x.pdf", "crm/%2e%2e/../x.pdf", "crm\\..\\x.pdf"])("recusa travessia antes de pedir assinatura: %s", async (caminho) => {
+    const fetchImpl = vi.fn();
+    const url = `https://api.ppgeducacao.site/storage/v1/object/public/whatsapp-recebidos/${caminho}`;
+    await expect(urlBaixavel(url, { base: "http://kong:8000", chave: "k", fetchImpl })).rejects.toThrow("não permitido");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("a assinatura direta também confina bucket e caminho", async () => {
+    const fetchImpl = vi.fn();
+    const deps = { base: "http://kong:8000", chave: "k", fetchImpl };
+    await expect(assinarObjeto("rh-admissional", "x.pdf", 600, deps)).rejects.toThrow();
+    await expect(assinarObjeto("whatsapp-recebidos", "../rh-admissional/x.pdf", 600, deps)).rejects.toThrow();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("não transforma Storage de outro host numa assinatura nossa", async () => {
+    const fetchImpl = vi.fn();
+    const url = "https://externo.example/storage/v1/object/public/whatsapp-recebidos/a.pdf";
+    expect(objetoPrivado(url)).toBeNull();
+    expect(await urlBaixavel(url, { base: "http://kong:8000", chave: "k", fetchImpl })).toBe(url);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
