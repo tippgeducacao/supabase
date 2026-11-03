@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { IG_AVISO_FORA_DO_PRAZO, IG_PORTFOLIO_URL, IG_WA_ACCOUNT_ID } from '../_shared/igWhatsapp';
+import { ehRecusaDoRecibo, IG_AVISO_FORA_DO_PRAZO, IG_PORTFOLIO_URL, IG_WA_ACCOUNT_ID } from '../_shared/igWhatsapp';
 import { jidsDoLead, prepararPortfolioInstagram } from './portfolioInstagram';
 
 // Banco simulado: só o que o módulo toca (a RPC, a memória do agente e a devolução).
@@ -39,6 +39,43 @@ const entrada = (enviar: any, extra = {}) => ({
 
 let enviar: ReturnType<typeof vi.fn>;
 beforeEach(() => { enviar = vi.fn(async () => ({ ok: true })); });
+
+describe('recibo pelo número dos SDRs (03/11/2026)', () => {
+  const ANTIGO = '0a17bea3-869d-4a95-bbc7-d0a5755e5b05';
+
+  it('o recibo sai pelo PPG Educação (SDRs)', () => {
+    expect(IG_WA_ACCOUNT_ID).toBe('ec23b8dc-1261-4809-b709-95d71b1c93f1');
+  });
+
+  it('quem recebeu o recibo pelo número antigo ainda ganha o PDF ao responder nele', async () => {
+    const { admin } = banco(PEND);
+    const envio = await prepararPortfolioInstagram(admin, entrada(enviar, { accountId: ANTIGO }));
+    expect(admin.rpc).toHaveBeenCalledWith('ig_portfolio_reivindicar', { p_wa_account_id: ANTIGO, p_telefone: '5546999882268' });
+    await envio;
+    expect(enviar).toHaveBeenCalledTimes(1);
+  });
+
+  it('outro número não consulta a pendência', async () => {
+    const { admin } = banco(PEND);
+    expect(await prepararPortfolioInstagram(admin, entrada(enviar, { accountId: 'outra-conta' }))).toBeNull();
+    expect(admin.rpc).not.toHaveBeenCalled();
+  });
+
+  it('botão "Não me notifique": não reivindica, não manda PDF', async () => {
+    const { admin, escritas } = banco(PEND);
+    expect(await prepararPortfolioInstagram(admin, entrada(enviar, { texto: 'Não me notifique' }))).toBeNull();
+    expect(admin.rpc).not.toHaveBeenCalled();
+    expect(escritas).toEqual([]);
+    expect(enviar).not.toHaveBeenCalled();
+  });
+
+  it('"Sim, é meu número" e qualquer outra resposta seguem liberando o PDF', () => {
+    expect(ehRecusaDoRecibo('Sim, é meu número')).toBe(false);
+    expect(ehRecusaDoRecibo('não me notifique ')).toBe(true);
+    expect(ehRecusaDoRecibo('nao me notifique mais tarde')).toBe(false);
+    expect(ehRecusaDoRecibo(null)).toBe(false);
+  });
+});
 
 describe('cadastro do agente para quem veio do Instagram (caso Jucileia, 28/09/2026)', () => {
   it('sem cadastro: cria, com o nome do lead e a fonte — senão o João sai calado', async () => {

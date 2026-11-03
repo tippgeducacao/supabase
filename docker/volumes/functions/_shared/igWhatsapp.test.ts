@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { aberturaComContexto, areaDoRecibo, componentesDoRecibo, dataDoRecibo, instrucaoForaDoPrazo, linkDoWhatsapp, nomeDoRecibo, notaParaOAgente } from './igWhatsapp';
 
-describe('recibo do Instagram: os três espaços do comprovante_cadastro_utility', () => {
+describe('recibo do Instagram: os três espaços do recibo', () => {
   it('{{1}}: primeiro nome; perfil de marca vira o @; nunca vazio', () => {
     expect(nomeDoRecibo('Carla', 'carla.vet', 'Carla Souza')).toBe('Carla');
     expect(nomeDoRecibo(null, 'jsmimos', 'JS MIMOS')).toBe('@jsmimos');
@@ -94,7 +94,7 @@ describe('link do WhatsApp no fim do roteiro (28/09/2026)', () => {
     expect(linkDoWhatsapp('(46) 9 9938-5100')).toBe('https://wa.me/5546999385100?text=Oi');
   });
   it('sem número utilizável, o do recibo de hoje', () => {
-    expect(linkDoWhatsapp(null)).toBe('https://wa.me/5546999012001?text=Oi');
-    expect(linkDoWhatsapp('abc')).toBe('https://wa.me/5546999012001?text=Oi');
+    expect(linkDoWhatsapp(null)).toBe('https://wa.me/5546999241126?text=Oi');
+    expect(linkDoWhatsapp('abc')).toBe('https://wa.me/5546999241126?text=Oi');
   });
 });

@@ -4,16 +4,26 @@
 //
 // Por que um RECIBO e não o template do portfólio: nas 5 BMs a Meta converte em
 // MARKETING tudo que apresenta os cursos, mesmo pedido pela pessoa; o recibo de cadastro
-// (comprovante_cadastro_utility) segue UTILIDADE. Ele abre a conversa; a resposta da
+// (hoje cadastro_pos_registrado_utility) segue UTILIDADE. Ele abre a conversa; a resposta da
 // pessoa abre a janela de 24 h e o PDF vai como mensagem comum, sem template.
 // ⚠️ O texto do recibo é FIXO (aprovado na Meta): só os três espaços mudam. Editar o
 // template o manda de volta para revisão, e ele pode voltar MARKETING.
 import { limiteFormatura } from "../crm-agente-sdr/elegibilidadeFormatura.ts";
 import { LINK_ESCOLA_GRATUITA } from "../crm-agente-sdr/escolaGratuita.ts";
 
-/** PPGVET Educação - Pós-graduação (46 9 9901-2001): GREEN, nome aprovado, recibo UTILIDADE. */
-export const IG_WA_ACCOUNT_ID = "0a17bea3-869d-4a95-bbc7-d0a5755e5b05";
-export const IG_WA_NUMERO_EXIBIDO = "(46) 9 9901-2001";
+/**
+ * PPG Educação (SDRs - Escola/Curso), 46 9 9924-1126. Desde 03/11/2026 o Instagram é atendido
+ * pelos SDRs (pedido do Gustavo): o recibo sai por este número e a resposta cai no SAC - SDRs.
+ */
+export const IG_WA_ACCOUNT_ID = "ec23b8dc-1261-4809-b709-95d71b1c93f1";
+export const IG_WA_NUMERO_EXIBIDO = "(46) 9 9924-1126";
+
+/**
+ * Números em que a resposta da pessoa ainda pode liberar o PDF: o atual e o de antes de
+ * 03/11/2026 (PPGVET Educação - Pós-graduação, 46 9 9901-2001). Quem recebeu o recibo pelo
+ * número antigo responde nele; sem isso o portfólio prometido nunca chegaria.
+ */
+export const IG_WA_CONTAS_PORTFOLIO = [IG_WA_ACCOUNT_ID, "0a17bea3-869d-4a95-bbc7-d0a5755e5b05"];
 
 /**
  * Link que abre a conversa com o número do recibo já com o "Oi" digitado — no fim do
@@ -28,7 +38,9 @@ export function linkDoWhatsapp(numeroDisplay: string | null | undefined): string
   return `https://wa.me/${d}?text=Oi`;
 }
 
-export const IG_RECIBO_TEMPLATE = "comprovante_cadastro_utility";
+// O comprovante_cadastro_utility não existe na WABA do número dos SDRs. Este tem as mesmas três
+// variáveis, já é UTILIDADE aprovado lá e traz os botões "Sim, é meu número" e "Não me notifique".
+export const IG_RECIBO_TEMPLATE = "cadastro_pos_registrado_utility";
 export const IG_RECIBO_IDIOMA = "pt_BR";
 
 export const IG_PORTFOLIO_URL =
@@ -57,7 +69,13 @@ export function areaDoRecibo(area: string | null | undefined): string {
   return /vet/i.test(String(area ?? "")) ? "Medicina Veterinária" : "Veterinária e Agro";
 }
 
-/** {{3}} do recibo ("realizado em {{3}}"): a data de hoje em Brasília + a origem. */
+/** O botão "Não me notifique" do recibo: quem aperta não recebe o PDF nem a IA. */
+export function ehRecusaDoRecibo(texto: string | null | undefined): boolean {
+  const limpo = String(texto ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
+  return limpo === "nao me notifique";
+}
+
+/** {{3}} do recibo ("registrada em {{3}}"): a data de hoje em Brasília + a origem. */
 export function dataDoRecibo(agora: Date = new Date()): string {
   const br = new Date(agora.getTime() - 3 * 60 * 60 * 1000);
   const [ano, mes, dia] = br.toISOString().slice(0, 10).split("-");

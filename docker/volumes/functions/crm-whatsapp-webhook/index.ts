@@ -1272,6 +1272,7 @@ Deno.serve(async (req) => {
                   accountId,
                   telefone: phoneDigits,
                   remotejid: `${canonicalBrDigits(phoneDigits)}@s.whatsapp.net`,
+                  texto: conteudo,
                   timestampSeg: Number(msg?.timestamp) || Math.floor(Date.now() / 1000),
                   leadId,
                   oportunidadeId,

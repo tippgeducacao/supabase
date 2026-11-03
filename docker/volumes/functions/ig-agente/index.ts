@@ -211,7 +211,7 @@ async function zerarConversa(c: Conversa) {
 // ── WhatsApp capturado: CRM + RECIBO (25/09/2026) ─────────────────────────────
 // 1. lead + card no funil 1.5 INSTAGRAM na etapa de etapaCrmInstagram() e "Data prevista
 //    de formação" (RPC ig_whatsapp_capturar);
-// 2. o RECIBO comprovante_cadastro_utility pelo número PPGVET Educação - Pós-graduação.
+// 2. o RECIBO (IG_RECIBO_TEMPLATE) pelo número dos SDRs, PPG Educação (desde 03/11/2026).
 //    O template do portfólio vira MARKETING em qualquer BM; o recibo é UTILIDADE. O PDF
 //    vai quando a pessoa responder no WhatsApp: crm-whatsapp-webhook → portfolioInstagram.ts.
 // Roda ANTES da resposta no direct: a IA só diz "te mandei" se o recibo saiu mesmo.

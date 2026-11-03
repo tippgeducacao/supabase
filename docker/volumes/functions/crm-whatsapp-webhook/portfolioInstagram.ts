@@ -20,7 +20,8 @@ import {
   IG_PORTFOLIO_ARQUIVO,
   IG_PORTFOLIO_LEGENDA,
   IG_PORTFOLIO_URL,
-  IG_WA_ACCOUNT_ID,
+  IG_WA_CONTAS_PORTFOLIO,
+  ehRecusaDoRecibo,
   mesesAteFormatura,
   notaParaOAgente,
 } from "../_shared/igWhatsapp.ts";
@@ -40,6 +41,8 @@ type Entrada = {
   accountId: string;
   telefone: string;
   remotejid: string;
+  /** Texto da mensagem: o botão "Não me notifique" do recibo não libera o PDF. */
+  texto?: string | null;
   /** Relógio da Meta da mensagem da pessoa (segundos). */
   timestampSeg: number;
   leadId: string | null;
@@ -98,7 +101,8 @@ export async function garantirLeadDoAgente(
 
 // deno-lint-ignore no-explicit-any
 export async function prepararPortfolioInstagram(admin: any, e: Entrada): Promise<Promise<void> | null> {
-  if (e.accountId !== IG_WA_ACCOUNT_ID) return null;
+  if (!IG_WA_CONTAS_PORTFOLIO.includes(e.accountId)) return null;
+  if (ehRecusaDoRecibo(e.texto)) return null;
 
   const { data, error } = await admin.rpc("ig_portfolio_reivindicar", {
     p_wa_account_id: e.accountId,

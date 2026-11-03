@@ -219,7 +219,7 @@ describe('ig-agente: o roteiro do direct', () => {
     expect(init.headers.Authorization).toBe(`Bearer ${SERVICE}`);
     expect(JSON.parse(init.body)).toEqual({
       wa_account_id: IG_WA_ACCOUNT_ID, telefone: '5546999882268', tipo: 'template',
-      template_name: 'comprovante_cadastro_utility', template_lang: 'pt_BR',
+      template_name: 'cadastro_pos_registrado_utility', template_lang: 'pt_BR',
       template_components: [{ type: 'body', parameters: [
         { type: 'text', text: 'Gustavo' }, { type: 'text', text: 'Veterinária e Agro' }, { type: 'text', text: '25/09/2026, pelo Instagram' },
       ] }],
@@ -230,7 +230,7 @@ describe('ig-agente: o roteiro do direct', () => {
     expect(ordem).toEqual(['recibo', 'direct']);
     expect(textosEnviados()).toEqual([TEXTOS.confirmacaoWhatsapp()]);
     // 28/09: o número virou link que abre a conversa com o Oi pronto.
-    expect(TEXTOS.confirmacaoWhatsapp()).toContain('https://wa.me/5546999012001?text=Oi');
+    expect(TEXTOS.confirmacaoWhatsapp()).toContain('https://wa.me/5546999241126?text=Oi');
 
     // O PDF fica pendente até a pessoa responder no WhatsApp (o webhook procura pelo telefone).
     expect(marcaDoRecibo()!.payload).toMatchObject({ telefone: '5546999882268', recibo_erro: null, portfolio_enviado_em: null });
