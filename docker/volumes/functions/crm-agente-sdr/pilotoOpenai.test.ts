@@ -26,6 +26,19 @@ describe('provedor do piloto, comum ao atendimento e follow-up', () => {
     expect(await selecionarProvedorDoLead(banco(config), '46988166051')).toMatchObject({ modelo: 'gpt-6-luna', esforco: 'high' });
     expect(await selecionarProvedorDoLead(banco(config), '47988166051')).toBeNull();
   });
+  it('o ensaio de modelo vale só para o telefone da lista, nunca para a fatia', async () => {
+    const config = { luna_telefones: ['5546988166051'], luna_percentual: 100, openai_modelo_piloto: 'gpt-6-luna',
+      openai_ensaio_telefones: ['5546988166051'], openai_ensaio_modelo: 'gpt-6.1-terra' };
+    expect(await selecionarProvedorDoLead(banco(config), '46988166051')).toMatchObject({ modelo: 'gpt-6.1-terra', esforco: 'high', origem: 'lista' });
+    expect(await selecionarProvedorDoLead(banco(config), '5511912345678')).toMatchObject({ modelo: 'gpt-6-luna', origem: 'percentual' });
+    // Telefone na lista de ensaio mas fora da lista da Luna não entra: cairia na fatia com outro modelo.
+    const foraDaLista = { ...config, luna_telefones: [], openai_ensaio_telefones: ['5511912345678'] };
+    expect(await selecionarProvedorDoLead(banco(foraDaLista), '5511912345678')).toMatchObject({ modelo: 'gpt-6-luna', origem: 'percentual' });
+  });
+  it.each([null, undefined, 'gpt-6-luna', 'modelo-nao-aprovado'])('modelo de ensaio fora da lista própria é ignorado: %s', async (modelo) => {
+    const config = { luna_telefones: ['5546988166051'], openai_modelo_piloto: 'gpt-6-luna', openai_ensaio_telefones: ['5546988166051'], openai_ensaio_modelo: modelo };
+    expect(await selecionarProvedorDoLead(banco(config), '46988166051')).toMatchObject({ modelo: 'gpt-6-luna' });
+  });
   it.each([null, undefined, 'modelo-nao-aprovado'])('sem substituição válida preserva o modelo do ambiente: %s', async (modelo) => {
     expect(await selecionarProvedorDoLead(banco({ luna_telefones: ['5546988166051'], openai_modelo_piloto: modelo }), '46988166051'))
       .toMatchObject({ modelo: 'gpt-5.6-luna' });

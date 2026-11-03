@@ -1,6 +1,6 @@
 import { provedorAnthropicModelo, provedorOpenai, type ProvedorIA } from './agente.ts';
 import { phoneVariants } from './conta.ts';
-import { modeloOpenaiPermitido } from './modelosOpenai.ts';
+import { modeloOpenaiEnsaioPermitido, modeloOpenaiPermitido } from './modelosOpenai.ts';
 
 /** Modelos da Anthropic que o piloto por telefone (`claude_modelo_piloto`) aceita. */
 export const MODELOS_CLAUDE_PILOTO = ['claude-haiku-5-5', 'claude-sonnet-5', 'claude-sonnet-5-5'] as const;
@@ -50,6 +50,10 @@ export async function selecionarProvedorDoLead(supabase: any, telefone: string):
     if (provedor?.formato !== 'openai') return provedor;
     provedor = { ...provedor, origem: naLista ? 'lista' : 'percentual' };
     if (modeloOpenaiPermitido(data.openai_modelo_piloto)) provedor = { ...provedor, modelo: data.openai_modelo_piloto };
+    // Ensaio de modelo (03/11/2026): exige estar também na lista da Luna, nunca só na fatia.
+    if (naLista && casa(data.openai_ensaio_telefones) && modeloOpenaiEnsaioPermitido(data.openai_ensaio_modelo)) {
+      provedor = { ...provedor, modelo: data.openai_ensaio_modelo };
+    }
     return data.openai_raciocinio_encadeado === true
       ? { ...provedor, raciocinio: true, memoriaRaciocinio: new Map() }
       : provedor;
