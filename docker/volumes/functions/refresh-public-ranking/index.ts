@@ -25,7 +25,7 @@ serve(async (req) => {
     let logado = !!token && token === supabaseKey;
     if (!logado && token) {
       const { data, error: erroUsuario } = await supabase.auth.getUser(token);
-      logado = !erroUsuario && !!data?.user;
+      logado = !erroUsuario && data?.user?.role === "authenticated";
     }
     if (!logado) {
       return new Response(JSON.stringify({ error: 'Login necessário', success: false }), {

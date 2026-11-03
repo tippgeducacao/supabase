@@ -170,7 +170,8 @@ async function chamadorLogado(req: Request): Promise<boolean> {
   if (!token) return false
   if (token === SERVICE_ROLE) return true
   const { data, error } = await supabase.auth.getUser(token)
-  return !error && !!data?.user
+  // Conta de fora (Portal da IES, role ies_portal) não usa o proxy.
+  return !error && data?.user?.role === 'authenticated'
 }
 
 const ageSeconds = (fetchedAt: string): number =>

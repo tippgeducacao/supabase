@@ -84,7 +84,7 @@ Deno.serve(async (req) => {
     return json({ ok: false, codigo: "nao_autorizado", erro: "Entre no sistema de novo." });
   }
   const { data: u } = await admin.auth.getUser(jwt);
-  const userId = u?.user?.id;
+  const userId = u?.user?.role === "authenticated" ? u.user.id : undefined; // conta da IES não envia
   if (!userId) return json({ ok: false, codigo: "nao_autorizado", erro: "Sessão expirada — entre de novo." });
 
   // deno-lint-ignore no-explicit-any

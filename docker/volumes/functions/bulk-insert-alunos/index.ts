@@ -22,7 +22,7 @@ Deno.serve(async (req) => {
     let autorizado = !!authToken && authToken === serviceKey;
     if (!autorizado && authToken) {
       const { data: u } = await supabase.auth.getUser(authToken);
-      autorizado = !!u?.user?.id;
+      autorizado = !!u?.user?.id && u.user.role === "authenticated"; // conta de fora (Portal da IES) não entra
     }
     if (!autorizado) {
       return new Response(

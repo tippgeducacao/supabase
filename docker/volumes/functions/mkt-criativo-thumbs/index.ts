@@ -84,7 +84,7 @@ Deno.serve(async (req) => {
     // Gate "logado" (mesmo padrão do mkt-criativo-variacao). A tela é interna.
     const jwt = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
     const { data: userData } = jwt ? await sb.auth.getUser(jwt) : { data: { user: null } };
-    if (!userData?.user?.id) {
+    if (!userData?.user?.id || userData.user.role !== "authenticated") {
       return new Response(JSON.stringify({ error: "Não autenticado." }), {
         status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });

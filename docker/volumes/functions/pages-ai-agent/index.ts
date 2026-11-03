@@ -126,7 +126,7 @@ Deno.serve(async (req) => {
     const jwt = authHeader.replace(/^Bearer\s+/i, "").trim();
     if (!jwt) return json({ error: "Não autenticado." }, 401);
     const { data: userData, error: userErr } = await supabase.auth.getUser(jwt);
-    if (userErr || !userData?.user) return json({ error: "Sessão inválida." }, 401);
+    if (userErr || !userData?.user || userData.user.role !== "authenticated") return json({ error: "Sessão inválida." }, 401);
 
     const { blocks = [], messages = [], catalog = {} } = (await req.json()) as ReqBody;
     if (!Array.isArray(messages) || messages.length === 0) {

@@ -12,7 +12,7 @@ function deps(over: Partial<DependenciasAcesso> = {}): DependenciasAcesso {
   return {
     chaveServico: SERVICO,
     chaveAnon: ANON,
-    usuarioDoToken: async (t) => (t === "token-da-maria" ? { id: "maria", anonimo: false } : null),
+    usuarioDoToken: async (t) => (t === "token-da-maria" ? { id: "maria", anonimo: false, papel: "authenticated" } : null),
     rpcComoUsuario: async () => true,
     ...over,
   };
@@ -61,6 +61,17 @@ describe("conferência de acesso das edges (29/10/2026)", () => {
     expect(await status(decidirAcesso(cab("Bearer token-da-maria"), { usuario: true, rpcPermissao: "is_financial_user" }, nega))).toBe(403);
     const falha = deps({ rpcComoUsuario: async () => null });
     expect(await status(decidirAcesso(cab("Bearer token-da-maria"), { usuario: true, rpcPermissao: "is_financial_user" }, falha))).toBe(503);
+  });
+
+  it("conta do Portal da IES (role ies_portal) não passa em edge do sistema, nem com RPC", async () => {
+    const d = deps({ usuarioDoToken: async () => ({ id: "ies", anonimo: false, papel: "ies_portal" }) });
+    expect(await status(decidirAcesso(cab("Bearer t"), { usuario: true }, d))).toBe(403);
+    expect(await status(decidirAcesso(cab("Bearer t"), { usuario: true, rpcPermissao: "x" }, d))).toBe(403);
+    const colaborador = deps({ usuarioDoToken: async () => ({ id: "c", anonimo: false, papel: "authenticated" }) });
+    expect(await status(decidirAcesso(cab("Bearer t"), { usuario: true }, colaborador))).toBe("usuario");
+    // Papel ausente não é colaborador: fecha (o GoTrue sempre manda o role).
+    const semPapel = deps({ usuarioDoToken: async () => ({ id: "x", anonimo: false }) });
+    expect(await status(decidirAcesso(cab("Bearer t"), { usuario: true }, semPapel))).toBe(403);
   });
 
   it("falha ao conferir a sessão vira 503, não acesso liberado", async () => {

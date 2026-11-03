@@ -26,8 +26,12 @@ export class AcessoNegado extends Error {
 export interface DependenciasAcesso {
   chaveServico: string;
   chaveAnon: string;
-  /** Usuário dono do token, ou null se o token não é de sessão válida. Lança se não deu para conferir. */
-  usuarioDoToken: (token: string) => Promise<{ id: string; anonimo: boolean } | null>;
+  /**
+   * Usuário dono do token, ou null se o token não é de sessão válida. Lança se não deu para conferir.
+   * `papel` é o `role` da conta no Auth: colaborador = "authenticated"; a conta do Portal da IES
+   * nasce "ies_portal" (03/11/2026) e não pode chamar edge do sistema.
+   */
+  usuarioDoToken: (token: string) => Promise<{ id: string; anonimo: boolean; papel?: string | null } | null>;
   /** Resultado da RPC chamada como o usuário: true/false, ou null se falhou. */
   rpcComoUsuario: (token: string, rpc: string) => Promise<boolean | null>;
 }
@@ -73,13 +77,18 @@ export async function decidirAcesso(
     throw new AcessoNegado(401, "Login necessário.");
   }
 
-  let usuario: { id: string; anonimo: boolean } | null;
+  let usuario: { id: string; anonimo: boolean; papel?: string | null } | null;
   try {
     usuario = await deps.usuarioDoToken(token);
   } catch {
     throw new AcessoNegado(503, "Não foi possível conferir a sessão.");
   }
   if (!usuario?.id || usuario.anonimo) throw new AcessoNegado(401, "Sessão inválida. Entre novamente.");
+  // Conta de fora (Portal da IES, 03/11/2026): logada, mas não é colaborador. Nenhuma edge do
+  // sistema a aceita — o portal dela fala só com as RPCs ies_portal_*.
+  if (usuario.papel !== "authenticated") {
+    throw new AcessoNegado(403, "Esta conta não acessa as funções do sistema.");
+  }
 
   if (opcoes.rpcPermissao) {
     let pode: boolean | null;

@@ -185,7 +185,7 @@ async function autorizado(req: Request, admin: Admin): Promise<boolean> {
   if (SERVICE_ROLE && iguaisTempoConstante(token, SERVICE_ROLE)) return true;
   try {
     const { data, error } = await admin.auth.getUser(token);
-    return !error && !!data?.user;
+    return !error && data?.user?.role === "authenticated"; // conta da IES não gera
   } catch {
     return false;
   }

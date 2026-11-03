@@ -100,7 +100,7 @@ Deno.serve(async (req) => {
     const authToken = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
     if (!authToken || authToken === SERVICE_ROLE) return json({ error: "não autorizado" }, 401);
     const { data: u } = await admin.auth.getUser(authToken);
-    if (!u?.user?.id) return json({ error: "não autorizado" }, 401);
+    if (!u?.user?.id || u.user.role !== "authenticated") return json({ error: "não autorizado" }, 401);
 
     const { data: msg, error: msgErr } = await admin
       .from("sac_mensagens")

@@ -18,7 +18,7 @@ Deno.serve(async (req) => {
     const token = req.headers.get("Authorization")?.match(/^Bearer ([^\s]+)$/i)?.[1];
     if (!token) return json({ error: "Entre no sistema para consultar segmentos." }, 401);
     const { data: { user }, error: authError } = await supabase.auth.getUser(token);
-    if (authError || !user || user.is_anonymous) return json({ error: "Sessão inválida. Entre novamente." }, 401);
+    if (authError || !user || user.is_anonymous || user.role !== "authenticated") return json({ error: "Sessão inválida. Entre novamente." }, 401);
 
     const { query, segmento_id } = await req.json();
     let segmento: SegmentoEmail;

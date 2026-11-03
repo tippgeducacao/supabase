@@ -134,7 +134,8 @@ Deno.serve(async (req) => {
     const authHeader = req.headers.get("authorization");
     if (authHeader) {
       const { data: userData } = await supabase.auth.getUser(authHeader.replace(/^Bearer\s+/i, ""));
-      usuarioId = userData?.user?.id ?? null;
+      // Conta de fora (Portal da IES, role ies_portal) não usa a IA do sistema.
+      usuarioId = userData?.user?.role === "authenticated" ? userData.user.id : null;
     }
     // Sugestão de texto não expõe dado de ninguém, mas é chamada paga: exige sessão.
     if (!usuarioId) return json({ error: "Faça login para usar a IA." }, 401);

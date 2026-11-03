@@ -192,7 +192,7 @@ serve(async (req) => {
           auth: { persistSession: false, autoRefreshToken: false },
         }).auth.getUser(token)
       : { data: null as any };
-    if (!auth?.user) {
+    if (!auth?.user || auth.user.role !== "authenticated") {
       return new Response(JSON.stringify({ error: "Sessão inválida. Entre de novo no sistema." }), {
         status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });

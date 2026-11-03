@@ -44,7 +44,8 @@ Deno.serve(async (req) => {
     // um usuário poderia editar variação alheia / injetar linhas em outro user_id).
     const jwt = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
     const { data: userData } = jwt ? await sb.auth.getUser(jwt) : { data: { user: null } };
-    const user_id = userData?.user?.id;
+    // Conta de fora (Portal da IES, role ies_portal) não entra.
+    const user_id = userData?.user?.role === "authenticated" ? userData.user.id : undefined;
     if (!user_id) {
       return new Response(JSON.stringify({ error: "Não autenticado." }), {
         status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },

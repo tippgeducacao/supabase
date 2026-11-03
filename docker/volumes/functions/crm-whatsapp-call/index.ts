@@ -78,7 +78,7 @@ Deno.serve(async (req) => {
   if (jwt !== SERVICE_ROLE) {
     try {
       const { data: u } = await admin.auth.getUser(jwt);
-      atendenteId = u?.user?.id ?? null;
+      atendenteId = u?.user?.role === "authenticated" ? u.user.id : null; // conta da IES não liga
     } catch { /* token de serviço */ }
     if (!atendenteId) return json({ error: "não autenticado" }, 401);
   }

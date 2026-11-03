@@ -128,7 +128,7 @@ Deno.serve(async (req) => {
       global: { headers: { Authorization: authHeader } },
     });
     const { data: userData, error: userErr } = await userClient.auth.getUser();
-    if (userErr || !userData?.user?.id) {
+    if (userErr || !userData?.user?.id || userData.user.role !== "authenticated") {
       return jsonResp({ error: "Não autenticado. Faça login novamente." }, 401);
     }
 

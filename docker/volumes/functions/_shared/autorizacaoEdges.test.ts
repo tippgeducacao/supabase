@@ -87,7 +87,7 @@ beforeAll(async () => {
   vi.stubGlobal("fetch", vi.fn(async (url: string | URL, init?: RequestInit) => {
     const destino = String(url);
     estado.eventos.push({ tipo: "rede", destino, metodo: init?.method });
-    if (destino === "https://supabase.invalid/auth/v1/user") return Response.json({ id: "usuario-teste", is_anonymous: false });
+    if (destino === "https://supabase.invalid/auth/v1/user") return Response.json({ id: "usuario-teste", is_anonymous: false, role: "authenticated" });
     if (destino === "https://supabase.invalid/rest/v1/rpc/crm_pode_ler_atendimentos") return Response.json(estado.atendimento);
     if (destino.startsWith("https://supabase.invalid/storage/v1/object/sign/")) return Response.json({ error: "sem acesso" }, { status: 403 });
     if (destino === "https://api.anthropic.com/v1/messages") {

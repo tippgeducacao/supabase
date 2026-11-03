@@ -49,8 +49,8 @@ export function exigirAcesso(req: Request, opcoes: OpcoesAcesso): Promise<Chamad
         // 4xx do GoTrue = token ruim (sessão inválida/expirada); o resto = não deu para conferir.
         if (r.status >= 400 && r.status < 500) return null;
         if (!r.ok) throw new Error(`GoTrue ${r.status}`);
-        const u = (await r.json()) as { id?: string; is_anonymous?: boolean };
-        return u?.id ? { id: u.id, anonimo: !!u.is_anonymous } : null;
+        const u = (await r.json()) as { id?: string; is_anonymous?: boolean; role?: string };
+        return u?.id ? { id: u.id, anonimo: !!u.is_anonymous, papel: u.role ?? null } : null;
       },
       rpcComoUsuario: async (token, rpc) => {
         const r = await fetch(`${url}/rest/v1/rpc/${encodeURIComponent(rpc)}`, {

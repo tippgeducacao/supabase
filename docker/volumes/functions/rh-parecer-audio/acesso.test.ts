@@ -48,7 +48,7 @@ beforeAll(async () => {
   });
   vi.stubGlobal("fetch", vi.fn(async (url: string) => {
     estado.eventos.push({ tipo: "rede", destino: String(url) });
-    if (String(url).endsWith("/auth/v1/user")) return Response.json({ id: "usuario-sintetico" });
+    if (String(url).endsWith("/auth/v1/user")) return Response.json({ id: "usuario-sintetico", role: "authenticated" });
     if (String(url).endsWith("/rest/v1/rpc/rh_pode_ver_contratacao")) {
       return estado.erroPermissao ? Response.json({}, { status: 500 }) : Response.json(estado.permitido);
     }

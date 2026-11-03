@@ -67,7 +67,7 @@ Deno.serve(async (req) => {
       Deno.env.get("SUPABASE_ANON_KEY")!,
       { global: { headers: { Authorization: auth } } },
     ).auth.getUser();
-    if (!userData?.user) return json({ error: "não autenticado" }, 401);
+    if (!userData?.user || userData.user.role !== "authenticated") return json({ error: "não autenticado" }, 401);
 
     const p = (await req.json()) as Payload;
     const ids = Array.from(new Set((p.destinatarios ?? []).filter(Boolean)));
