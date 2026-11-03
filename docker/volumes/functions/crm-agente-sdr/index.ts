@@ -1267,7 +1267,8 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
         tel.registrar('tool_exec', {
           tool: tu.name,
           input: resumir(tu.input, 800),
-          output: resumir(output, 1200),
+          // 8000: o chat mostra este retorno no (i); com 1200, 20% chegavam cortados.
+          output: resumir(output, 8000),
           ...(repetida ? { repetida: true } : {}),
         }, Date.now() - inicioTool);
         if (tu.name === 'confirmar_agendamento') confirmacaoPendente = confirmacaoDoResultado(output) ?? confirmacaoPendente;

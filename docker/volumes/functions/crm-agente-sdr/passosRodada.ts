@@ -587,7 +587,7 @@ export async function executarFerramenta(
     ? { id: chamada.id, resultado: AVISO_CONSULTA_REPETIDA }
     : await executarTool(deps.supabase, chamada, ctx, { comDados: true });
   deps.tel.registrar('tool_exec', {
-    tool: chamada.name, input: resumir(chamada.input, 800), output: resumir(output, 1200),
+    tool: chamada.name, input: resumir(chamada.input, 800), output: resumir(output, 8000),
     ...(repetida ? { repetida: true } : {}), agente_pelo_n8n: true,
   }, Date.now() - inicio);
   const { enviosMateriais, compatibilidadeIndisponivel, perguntaFormacaoPendente, ultimaElegibilidade } = ctx;
