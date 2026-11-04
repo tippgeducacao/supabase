@@ -4,7 +4,9 @@
 //   - quem MARCOU reunião de cada pós, com qualquer resultado (retroalimenta o público daquela pós);
 //   - os alunos compradores de todas as pós (exclusão e semente);
 //   - os leads por profissão do formulário (veterinários e zootecnistas), semente do semelhante;
-//   - os semelhantes 1% BR, dos veterinários e zootecnistas e dos alunos compradores.
+//   - a soma de públicos do catálogo (regra uniao: compradores + reuniões de bovinos), semente do
+//     semelhante que entra nos conjuntos de bovinos;
+//   - os semelhantes 1% BR, dos veterinários e zootecnistas e dos compradores + reuniões de bovinos.
 // O catálogo é a tabela meta_publicos: público novo é INSERT, não deploy. As linhas saem do
 // banco JÁ em SHA-256 (meta_publicos_linhas); e-mail, telefone e nome crus não passam por aqui.
 // Ver docs/Marketing — Mídia Paga.md → "Públicos do CRM na Meta".
@@ -55,7 +57,7 @@ type Publico = {
   chave: string;
   nome: string;
   descricao: string | null;
-  regra: "reunioes" | "alunos" | "profissao" | "semelhante";
+  regra: "reunioes" | "alunos" | "profissao" | "semelhante" | "uniao";
   origem_chave: string | null;
   semelhanca: number | null;
   pais: string;
