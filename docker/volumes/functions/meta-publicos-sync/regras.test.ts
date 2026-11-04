@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  acaoDaLista, corpoDoLote, dividirEmLotes, especificacaoSemelhante, ESQUEMA, mensagemDeErroMeta,
+  acaoDaLista, corpoDoLote, dividirEmLotes, especificacaoSemelhante, ESQUEMA, eventoDoItem, mensagemDeErroMeta,
   novaSessao, type Linha,
 } from "./regras";
 
@@ -105,5 +105,28 @@ describe("novaSessao", () => {
     const s = novaSessao(Date.UTC(2026, 10, 4), 0.999);
     expect(Number.isSafeInteger(s)).toBe(true);
     expect(s).toBeGreaterThan(0);
+  });
+});
+
+describe("eventoDoItem", () => {
+  it("rodada sem mudança não gera evento", () => {
+    expect(eventoDoItem({ acao: "atualizar", entraram: 0, sairam: 0, total: 490 })).toBeNull();
+  });
+  it("gente entrando ou saindo vira 'atualizado' com os números", () => {
+    expect(eventoDoItem({ acao: "atualizar", entraram: 12, sairam: 3, total: 499 })).toEqual({
+      tipo: "atualizado", resumo: null, entraram: 12, sairam: 3, total: 499,
+    });
+  });
+  it("público novo vira 'criado'", () => {
+    expect(eventoDoItem({ acao: "criar", entraram: 490, sairam: 0, total: 490 })?.tipo).toBe("criado");
+    expect(eventoDoItem({ acao: "adotar" })?.resumo).toContain("já existia");
+  });
+  it("erro vence tudo, inclusive a criação que aconteceu antes de falhar", () => {
+    expect(eventoDoItem({ acao: "criar", erro: "Token sem permissão (código 200)" })).toEqual({
+      tipo: "erro", resumo: "Token sem permissão (código 200)", entraram: null, sairam: null, total: null,
+    });
+  });
+  it("aviso vira 'aviso'", () => {
+    expect(eventoDoItem({ acao: "atualizar", aviso: "a Meta ainda está processando" })?.tipo).toBe("aviso");
   });
 });

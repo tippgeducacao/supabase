@@ -94,3 +94,41 @@ export function especificacaoSemelhante(semelhanca: number, pais: string): strin
   if (!/^[A-Z]{2}$/.test(pais)) throw new Error("país fora do formato ISO de 2 letras");
   return JSON.stringify({ ratio: Math.round(semelhanca * 100) / 100, country: pais });
 }
+
+export type TipoEvento = "criado" | "atualizado" | "erro" | "aviso";
+
+export interface EventoDoItem {
+  tipo: TipoEvento;
+  resumo: string | null;
+  entraram: number | null;
+  sairam: number | null;
+  total: number | null;
+}
+
+/**
+ * O evento "para conferir" que uma rodada gera para um público, ou null quando nada mudou.
+ * Erro e aviso vêm antes de tudo: um público criado cuja carga falhou é um erro a conferir.
+ */
+export function eventoDoItem(item: Record<string, unknown>): EventoDoItem | null {
+  const numero = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const texto = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
+  const erro = texto(item.erro);
+  if (erro) return { tipo: "erro", resumo: erro, entraram: null, sairam: null, total: null };
+  const aviso = texto(item.aviso);
+  if (aviso) return { tipo: "aviso", resumo: aviso, entraram: null, sairam: null, total: null };
+  if (item.acao === "criar" || item.acao === "adotar") {
+    return {
+      tipo: "criado",
+      resumo: item.acao === "adotar" ? "Público que já existia na conta com o mesmo nome" : null,
+      entraram: numero(item.entraram),
+      sairam: numero(item.sairam),
+      total: numero(item.total),
+    };
+  }
+  const entraram = numero(item.entraram) ?? 0;
+  const sairam = numero(item.sairam) ?? 0;
+  if (entraram > 0 || sairam > 0) {
+    return { tipo: "atualizado", resumo: null, entraram, sairam, total: numero(item.total) };
+  }
+  return null;
+}

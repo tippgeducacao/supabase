@@ -15,8 +15,13 @@
 // estiver num conjunto ativo.
 //
 // Quem pode chamar: o cron, com o segredo do cofre no cabeçalho x-meta-publicos-cron
-// (conferido por meta_publicos_validar_cron; o segredo não sai do banco), ou a chave de
-// serviço exata.
+// (conferido por meta_publicos_validar_cron; o segredo não sai do banco), a chave de serviço
+// exata, ou quem está logado no painel "Públicos da Meta" do Portal Marketing e passa em
+// meta_publicos_pode_gerenciar (Marketing OU diretoria/admin, a régua dos Lançamentos).
+//
+// Cada mudança num público vira um evento em meta_publicos_eventos, que fica "para conferir"
+// no painel até alguém conferir: público criado, gente que entrou ou saiu, erro e aviso da Meta.
+// A cada rodada a edge também grava o nome da conta e da BM em meta_publicos_contas.
 //
 // Corpo (JSON, tudo opcional):
 //   { "modo": "simular" }            conta as linhas de cada público; NÃO fala com a Meta
@@ -29,9 +34,10 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
+import { corsHeaders } from "../_shared/cors.ts";
 import {
-  acaoDaLista, corpoDoLote, dividirEmLotes, especificacaoSemelhante, mensagemDeErroMeta, novaSessao,
-  type Linha,
+  acaoDaLista, corpoDoLote, dividirEmLotes, especificacaoSemelhante, eventoDoItem, mensagemDeErroMeta,
+  novaSessao, type Linha,
 } from "./regras.ts";
 
 const API = "https://graph.facebook.com/v26.0";
@@ -62,7 +68,7 @@ type RespostaLinhas = {
 type Item = Record<string, unknown>;
 
 const json = (corpo: unknown, status = 200) =>
-  new Response(JSON.stringify(corpo), { status, headers: { "Content-Type": "application/json" } });
+  new Response(JSON.stringify(corpo), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
 class ErroMeta extends Error {}
 
@@ -120,11 +126,13 @@ function resumoDoStatus(st: Item) {
 }
 
 Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
   if (req.method !== "POST") return json({ ok: false, erro: "Método não permitido" }, 405);
 
   const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 
-  let origem: "cron" | "servico" = "servico";
+  let origem: "cron" | "servico" | "painel" = "servico";
+  let usuarioId: string | null = null;
   const segredoCron = req.headers.get("x-meta-publicos-cron");
   if (segredoCron) {
     const { data, error } = await admin.rpc("meta_publicos_validar_cron", { p_segredo: segredoCron });
@@ -132,9 +140,17 @@ Deno.serve(async (req) => {
     origem = "cron";
   } else {
     try {
-      await exigirAcesso(req, { servico: true });
+      const quem = await exigirAcesso(req, {
+        servico: true,
+        usuario: true,
+        rpcPermissao: "meta_publicos_pode_gerenciar",
+      });
+      if (quem.tipo === "usuario") {
+        origem = "painel";
+        usuarioId = quem.usuarioId;
+      }
     } catch (e) {
-      return respostaAcessoNegado(e);
+      return respostaAcessoNegado(e, corsHeaders);
     }
   }
 
@@ -155,6 +171,9 @@ Deno.serve(async (req) => {
   });
   if (erroExec) return json({ ok: false, erro: mensagem(erroExec) }, 500);
   if (!execucao) return json({ ok: false, erro: "Já há uma rodada de envio em andamento (menos de 30 min)." }, 409);
+  if (usuarioId) {
+    await admin.from("meta_publicos_execucoes").update({ disparado_por: usuarioId }).eq("id", execucao);
+  }
 
   const itens: Item[] = [];
   let status: "ok" | "parcial" | "erro" = "ok";
@@ -206,6 +225,23 @@ Deno.serve(async (req) => {
       if (e) throw e;
       if (!data?.access_token) throw new Error(`Sem token ativo da conta ${conta} em meta_accounts`);
       tokens.set(conta, data.access_token as string);
+    }
+
+    // Nome da conta e da BM para o painel. Falhar aqui não derruba a rodada.
+    for (const [conta, token] of tokens) {
+      try {
+        const r = await metaGet(`act_${conta}`, token, "name,business{id,name}");
+        const bm = r.business as { id?: string; name?: string } | undefined;
+        await admin.from("meta_publicos_contas").upsert({
+          ad_account_id: conta,
+          nome_conta: (r.name as string | undefined) ?? null,
+          bm_id: bm?.id ?? null,
+          bm_nome: bm?.name ?? null,
+          atualizado_em: new Date().toISOString(),
+        });
+      } catch (e) {
+        console.warn(`meta-publicos-sync: conta/BM ${conta}:`, mensagem(e));
+      }
     }
 
     // ── listar: o que já existe na conta ───────────────────────────────────────────────────
@@ -354,6 +390,14 @@ Deno.serve(async (req) => {
         .from("meta_publicos")
         .update({ ultima_sincronizacao_em: new Date().toISOString(), ultimo_resultado: item })
         .eq("id", p.id);
+      // O que mudou fica "para conferir" no painel. Rodada sem mudança não gera evento.
+      const evento = eventoDoItem(item);
+      if (evento) {
+        const { error: eEv } = await admin
+          .from("meta_publicos_eventos")
+          .insert({ publico_id: p.id, execucao_id: execucao, criado_por: usuarioId, ...evento });
+        if (eEv) console.error("meta-publicos-sync: evento", p.chave, eEv.message);
+      }
     }
     if (itens.length && itens.every((i) => i.erro)) status = "erro";
   } catch (e) {
