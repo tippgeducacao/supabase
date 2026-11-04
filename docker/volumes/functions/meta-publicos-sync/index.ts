@@ -25,8 +25,9 @@
 //
 // Corpo (JSON, tudo opcional):
 //   { "modo": "simular" }            conta as linhas de cada público; NÃO fala com a Meta
-//   { "modo": "listar" }             lê da Meta, sem enviar nada: os públicos da conta e o status
-//                                    de cada público do catálogo (o cron de 3 em 3 horas usa este)
+//   { "modo": "listar" }             lê da Meta, sem enviar nada: os públicos da conta, o status
+//                                    de cada público do catálogo e a BM de toda conta ativa (o cron
+//                                    de 3 em 3 horas usa este)
 //   { "modo": "envio" }              (padrão) cria o que falta e atualiza as listas
 //   { "chaves": ["reunioes_cmcb"] }  restringe a rodada a esses públicos do catálogo
 //
@@ -229,8 +230,21 @@ Deno.serve(async (req) => {
       tokens.set(conta, data.access_token as string);
     }
 
-    // Nome da conta e da BM para o painel. Falhar aqui não derruba a rodada.
-    for (const [conta, token] of tokens) {
+    // Nome da conta e da BM para o painel. No modo "listar" (o cron de 3 em 3 horas) entram TODAS as
+    // contas ativas, não só as que têm público: o seletor de BM da tela mostra cada BM antes de ela
+    // ganhar o primeiro público. Falhar aqui não derruba a rodada.
+    const contasDoPainel = new Map(tokens);
+    if (modo === "listar") {
+      const { data: ativas, error: eAtivas } = await admin
+        .from("meta_accounts")
+        .select("ad_account_id, access_token")
+        .eq("is_active", true);
+      if (eAtivas) console.warn("meta-publicos-sync: contas ativas:", mensagem(eAtivas));
+      for (const a of (ativas ?? []) as { ad_account_id: string; access_token: string | null }[]) {
+        if (a.access_token && !contasDoPainel.has(a.ad_account_id)) contasDoPainel.set(a.ad_account_id, a.access_token);
+      }
+    }
+    for (const [conta, token] of contasDoPainel) {
       try {
         const r = await metaGet(`act_${conta}`, token, "name,business{id,name}");
         const bm = r.business as { id?: string; name?: string } | undefined;
