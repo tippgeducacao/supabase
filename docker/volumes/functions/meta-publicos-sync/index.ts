@@ -31,6 +31,9 @@
 //                                    de 3 em 3 horas usa este)
 //   { "modo": "envio" }              (padrão) cria o que falta e atualiza as listas
 //   { "chaves": ["reunioes_cmcb"] }  restringe a rodada a esses públicos do catálogo
+//   { "modo": "excluir", "chaves": [...] }  APAGA da Meta esses públicos e os tira do catálogo. Só o
+//                                    cron ou o serviço, só com as chaves ditas nome por nome, e
+//                                    nunca a origem de um semelhante ativo.
 //
 // Token: o da conta em meta_accounts (CA 01 I VETERINARIOS é o mesmo do sync-meta-ads e do
 // meta-crm-capi). Ele não sai do servidor nem entra no registro da rodada.
@@ -39,8 +42,8 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 import { corsHeaders } from "../_shared/cors.ts";
 import {
-  acaoDaLista, corpoDoLote, dividirEmLotes, especificacaoSemelhante, eventoDoItem, mensagemDeErroMeta,
-  novaSessao, type Linha,
+  acaoDaLista, corpoDoLote, dividirEmLotes, especificacaoSemelhante, eventoDoItem, impedimentoParaExcluir,
+  mensagemDeErroMeta, modoDoCorpo, novaSessao, type Linha,
 } from "./regras.ts";
 
 const API = "https://graph.facebook.com/v26.0";
@@ -164,10 +167,16 @@ Deno.serve(async (req) => {
   } catch {
     corpo = {};
   }
-  const modo = corpo.modo === "simular" || corpo.modo === "listar" ? corpo.modo : "envio";
+  const modo = modoDoCorpo(corpo.modo);
   const chaves = Array.isArray(corpo.chaves)
     ? corpo.chaves.filter((c): c is string => typeof c === "string")
     : null;
+
+  // Apagar não tem volta: só o cron ou o serviço, e só os públicos ditos nome por nome.
+  if (modo === "excluir") {
+    if (origem === "painel") return json({ ok: false, erro: "Apagar público não é feito pelo painel." }, 403);
+    if (!chaves?.length) return json({ ok: false, erro: "Para apagar, diga as chaves dos públicos." }, 400);
+  }
 
   const { data: execucao, error: erroExec } = await admin.rpc("meta_publicos_iniciar", {
     p_modo: modo,
@@ -278,6 +287,45 @@ Deno.serve(async (req) => {
             .eq("id", p.id);
         }
       }
+      return await fechar();
+    }
+
+    // ── excluir: apaga da Meta e tira do catálogo ──────────────────────────────────────────
+    if (modo === "excluir") {
+      for (const p of publicos) {
+        const item: Item = { chave: p.chave, nome: p.nome, acao: "excluir" };
+        itens.push(item);
+        try {
+          const impedimento = impedimentoParaExcluir(p.chave, todos);
+          if (impedimento) throw new Error(impedimento);
+          if (p.meta_audience_id) {
+            const url = new URL(`${API}/${p.meta_audience_id}`);
+            url.searchParams.set("access_token", tokens.get(p.ad_account_id)!);
+            await lerMeta(await fetch(url, { method: "DELETE", signal: AbortSignal.timeout(60_000) }));
+          }
+          // Sai do catálogo (as rodadas só olham o ativo) e o id vai para o histórico: se um dia o
+          // público voltar, ele nasce de novo em vez de apontar para um id apagado.
+          const agora = new Date().toISOString();
+          const { error: e } = await admin
+            .from("meta_publicos")
+            .update({
+              ativo: false,
+              meta_audience_id: null,
+              updated_at: agora,
+              ultimo_resultado: {
+                ...(p.ultimo_resultado ?? {}),
+                excluido: { meta_audience_id: p.meta_audience_id, em: agora, execucao },
+              },
+            })
+            .eq("id", p.id);
+          if (e) throw e;
+          Object.assign(item, { excluido: true, meta_audience_id: p.meta_audience_id });
+        } catch (e) {
+          item.erro = mensagem(e);
+          falhou();
+        }
+      }
+      if (itens.length && itens.every((i) => i.erro)) status = "erro";
       return await fechar();
     }
 

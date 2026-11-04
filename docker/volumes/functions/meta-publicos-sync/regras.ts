@@ -132,3 +132,20 @@ export function eventoDoItem(item: Record<string, unknown>): EventoDoItem | null
   }
   return null;
 }
+
+/** O modo pedido no corpo. Qualquer outra coisa é "envio", o padrão do cron de segunda. */
+export function modoDoCorpo(modo: unknown): "simular" | "listar" | "excluir" | "envio" {
+  return modo === "simular" || modo === "listar" || modo === "excluir" ? modo : "envio";
+}
+
+/**
+ * Por que este público não pode ser apagado agora, ou null quando pode. A origem de um semelhante
+ * ativo fica: apagá-la derruba o semelhante (a Meta recusa, ou ele para de se atualizar).
+ */
+export function impedimentoParaExcluir(
+  chave: string,
+  catalogo: { chave: string; nome: string; origem_chave: string | null }[],
+): string | null {
+  const dependente = catalogo.find((p) => p.origem_chave === chave && p.chave !== chave);
+  return dependente ? `é a origem de "${dependente.nome}": apague esse semelhante antes` : null;
+}

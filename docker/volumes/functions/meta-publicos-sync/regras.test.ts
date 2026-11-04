@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  acaoDaLista, corpoDoLote, dividirEmLotes, especificacaoSemelhante, ESQUEMA, eventoDoItem, mensagemDeErroMeta,
-  novaSessao, type Linha,
+  acaoDaLista, corpoDoLote, dividirEmLotes, especificacaoSemelhante, ESQUEMA, eventoDoItem, impedimentoParaExcluir,
+  mensagemDeErroMeta, modoDoCorpo, novaSessao, type Linha,
 } from "./regras";
 
 const linha = (i: number): Linha => [`e${i}`, `t${i}`, "fn", "ln", "br"];
@@ -128,5 +128,35 @@ describe("eventoDoItem", () => {
   });
   it("aviso vira 'aviso'", () => {
     expect(eventoDoItem({ acao: "atualizar", aviso: "a Meta ainda está processando" })?.tipo).toBe("aviso");
+  });
+});
+
+describe("modoDoCorpo", () => {
+  it("aceita simular, listar e excluir; o resto é envio", () => {
+    expect(modoDoCorpo("simular")).toBe("simular");
+    expect(modoDoCorpo("listar")).toBe("listar");
+    expect(modoDoCorpo("excluir")).toBe("excluir");
+    expect(modoDoCorpo("envio")).toBe("envio");
+    expect(modoDoCorpo(undefined)).toBe("envio");
+    expect(modoDoCorpo("apagar")).toBe("envio");
+  });
+});
+
+describe("impedimentoParaExcluir", () => {
+  const catalogo = [
+    { chave: "veterinarios_zootecnistas", nome: "CRM · Leads · Veterinários e zootecnistas", origem_chave: null },
+    { chave: "semelhante_veterinarios_1", nome: "CRM · Semelhante 1% BR · Veterinários e zootecnistas", origem_chave: "veterinarios_zootecnistas" },
+    { chave: "alunos_compradores", nome: "CRM · Alunos compradores (todas as pós)", origem_chave: null },
+  ];
+
+  it("a origem de um semelhante ativo não pode ser apagada", () => {
+    expect(impedimentoParaExcluir("veterinarios_zootecnistas", catalogo)).toBe(
+      'é a origem de "CRM · Semelhante 1% BR · Veterinários e zootecnistas": apague esse semelhante antes',
+    );
+  });
+
+  it("o semelhante e a lista sem dependente podem", () => {
+    expect(impedimentoParaExcluir("semelhante_veterinarios_1", catalogo)).toBeNull();
+    expect(impedimentoParaExcluir("alunos_compradores", catalogo)).toBeNull();
   });
 });
