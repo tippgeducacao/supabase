@@ -25,7 +25,8 @@
 //
 // Corpo (JSON, tudo opcional):
 //   { "modo": "simular" }            conta as linhas de cada público; NÃO fala com a Meta
-//   { "modo": "listar" }             lista os públicos que já existem na conta (só leitura)
+//   { "modo": "listar" }             lê da Meta, sem enviar nada: os públicos da conta e o status
+//                                    de cada público do catálogo (o cron de 3 em 3 horas usa este)
 //   { "modo": "envio" }              (padrão) cria o que falta e atualiza as listas
 //   { "chaves": ["reunioes_cmcb"] }  restringe a rodada a esses públicos do catálogo
 //
@@ -55,6 +56,7 @@ type Publico = {
   pais: string;
   ad_account_id: string;
   meta_audience_id: string | null;
+  ultimo_resultado: Record<string, unknown> | null;
 };
 
 type RespostaLinhas = {
@@ -184,7 +186,7 @@ Deno.serve(async (req) => {
   try {
     const { data: catalogo, error } = await admin
       .from("meta_publicos")
-      .select("id, chave, nome, descricao, regra, origem_chave, semelhanca, pais, ad_account_id, meta_audience_id")
+      .select("id, chave, nome, descricao, regra, origem_chave, semelhanca, pais, ad_account_id, meta_audience_id, ultimo_resultado")
       .eq("ativo", true)
       .order("ordem");
     if (error) throw error;
@@ -249,6 +251,17 @@ Deno.serve(async (req) => {
       for (const [conta, token] of tokens) {
         const porNome = await publicosNaConta(conta, token);
         itens.push({ conta, publicos: [...porNome.values()] });
+        // O painel mostra o tamanho e o status que a Meta deu na ÚLTIMA leitura. Sem renovar aqui,
+        // uma lista que ficou pronta depois do envio seguiria "processando" até a segunda seguinte.
+        const porId = new Map([...porNome.values()].map((a) => [String(a.id), a]));
+        for (const p of publicos.filter((x) => x.ad_account_id === conta && x.meta_audience_id)) {
+          const lida = porId.get(p.meta_audience_id!);
+          if (!lida) continue;
+          await admin
+            .from("meta_publicos")
+            .update({ ultimo_resultado: { ...(p.ultimo_resultado ?? {}), meta: resumoDoStatus(lida) } })
+            .eq("id", p.id);
+        }
       }
       return await fechar();
     }
