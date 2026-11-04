@@ -3,7 +3,8 @@
 // O CRM monta e mantém, na conta de anúncios, os públicos que o tráfego usa nos conjuntos:
 //   - quem MARCOU reunião de cada pós, com qualquer resultado (retroalimenta o público daquela pós);
 //   - os alunos compradores de todas as pós (exclusão e semente);
-//   - o semelhante 1% BR dos alunos compradores.
+//   - os leads por profissão do formulário (veterinários e zootecnistas), semente do semelhante;
+//   - os semelhantes 1% BR, dos veterinários e zootecnistas e dos alunos compradores.
 // O catálogo é a tabela meta_publicos: público novo é INSERT, não deploy. As linhas saem do
 // banco JÁ em SHA-256 (meta_publicos_linhas); e-mail, telefone e nome crus não passam por aqui.
 // Ver docs/Marketing — Mídia Paga.md → "Públicos do CRM na Meta".
@@ -51,7 +52,7 @@ type Publico = {
   chave: string;
   nome: string;
   descricao: string | null;
-  regra: "reunioes" | "alunos" | "semelhante";
+  regra: "reunioes" | "alunos" | "profissao" | "semelhante";
   origem_chave: string | null;
   semelhanca: number | null;
   pais: string;
@@ -342,8 +343,10 @@ Deno.serve(async (req) => {
         let invalidos = 0;
         for (const lote of dividirEmLotes(r.linhas)) {
           const resp = await metaPost(`${audiencia}/${endpoint}`, corpoDoLote(lote, sessao, r.linhas.length, token));
-          recebidos += Number(resp.num_received ?? 0);
-          invalidos += Number(resp.num_invalid_entries ?? 0);
+          // Na mesma sessão a Meta devolve o ACUMULADO: somar lote a lote contava a lista de novo a
+          // cada lote (24.084 linhas em 3 lotes viravam 54.084 "recebidos" em 04/11/2026).
+          recebidos = Math.max(recebidos, Number(resp.num_received ?? 0));
+          invalidos = Math.max(invalidos, Number(resp.num_invalid_entries ?? 0));
         }
         Object.assign(item, { recebidos, invalidos });
 
