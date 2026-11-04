@@ -1,7 +1,7 @@
 // Públicos do CRM na Meta (Públicos Personalizados de lista de clientes) · 04/11/2026.
 //
 // O CRM monta e mantém, na conta de anúncios, os públicos que o tráfego usa nos conjuntos:
-//   - quem COMPARECEU a reunião de cada pós (retroalimenta o público daquela pós);
+//   - quem MARCOU reunião de cada pós, com qualquer resultado (retroalimenta o público daquela pós);
 //   - os alunos compradores de todas as pós (exclusão e semente);
 //   - o semelhante 1% BR dos alunos compradores.
 // O catálogo é a tabela meta_publicos: público novo é INSERT, não deploy. As linhas saem do
