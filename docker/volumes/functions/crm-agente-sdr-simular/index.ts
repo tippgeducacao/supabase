@@ -19,7 +19,11 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3';
 import { blocosDoPrompt } from '../crm-agente-sdr/conjuntoPrompt.ts';
 import { AGENTE_CAMPANHA_DIRETA } from '../crm-agente-sdr/prompts-campanha-direta.ts';
 import { AGENTE_AULA, montarVarsAula } from '../crm-agente-sdr/prompts-aula.ts';
-import { carregarTools, chamarAgentePrincipal, chamarRouter, MODELO_AGENTE, provedorAnthropicModelo, provedorDeepseek, provedorOpenai } from '../crm-agente-sdr/agente.ts';
+import { carregarTools, chamarAgentePrincipal, chamarRouter, executarPedidoPrincipal, montarPedidoPrincipal, MODELO_AGENTE, provedorAnthropicModelo, provedorDeepseek, provedorOpenai } from '../crm-agente-sdr/agente.ts';
+import { exigirAcesso } from '../_shared/acesso.ts';
+import { semDadosPrivados, type RegistroModelo } from '../crm-agente-sdr/capturaModelo.ts';
+import { executarEnsaio, validarPedidoLaboratorio } from './laboratorio.ts';
+import type { DependenciasSimulacao } from './simulacao.ts';
 import { type LeituraJev, rotearComJev } from '../crm-agente-sdr/routerJev.ts';
 import { carregarDiasSemAtendimento, encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoCurso, notaDoNome, renderPrompt } from '../crm-agente-sdr/contexto.ts';
 import { comBlocoDaEscola, comPresenteEscola } from '../crm-agente-sdr/escolaGratuita.ts';
@@ -62,10 +66,16 @@ const supabase = createClient(SUPABASE_URL, SERVICE_ROLE);
 // `ferramentas_reais`: número que não existe (DDD 00), então nenhuma leitura casa com lead de produção.
 const TELEFONE_SINTETICO = '5500000000000';
 
+const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-followup-key, x-ppg-sdr-segredo', 'Access-Control-Allow-Methods': 'POST, OPTIONS' };
 const json = (data: unknown, status = 200) =>
-  new Response(JSON.stringify(data, null, 2), { status, headers: { 'Content-Type': 'application/json' } });
+  new Response(JSON.stringify(data, null, 2), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
 async function autorizado(req: Request): Promise<boolean> {
+  // O painel usa o JWT da pessoa; segredos legados continuam só no servidor/n8n.
+  if (req.headers.has('Authorization') && !req.headers.has('x-followup-key') && !req.headers.has('x-ppg-sdr-segredo')) {
+    try { await exigirAcesso(req, { usuario: true, rpcPermissao: 'is_supervisor_diretor_admin_user' }); return true; }
+    catch { return false; }
+  }
   const { data } = await supabase.from('crm_agente_sdr_config').select('followup_secret').eq('id', 1).maybeSingle();
   const segredo = data?.followup_secret ?? '';
   if (segredo && req.headers.get('x-followup-key') === segredo) return true;
@@ -302,15 +312,24 @@ async function mockTool(nome: string, input: any, mocks: any, ficha: FichaSimula
 }
 
 Deno.serve(async (req) => {
-  if (req.method === 'OPTIONS') return new Response('ok');
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405);
   if (!(await autorizado(req))) return json({ error: 'unauthorized' }, 401);
 
   let entrada;
+  let laboratorio: { acao: 'preparar' | 'executar'; pedido?: ReturnType<typeof validarPedidoLaboratorio> } | null = null;
   try {
     const bruto = await req.text();
     if (bruto.length > MAX_CARACTERES_SIMULACAO) return json({ error: 'limite de 200000 caracteres excedido' }, 400);
-    entrada = validarEntradaSimulacao(JSON.parse(bruto));
+    const corpo = JSON.parse(bruto);
+    if (corpo.laboratorio) {
+      if (!['preparar', 'executar'].includes(corpo.laboratorio.acao)) throw new Error('Ação de laboratório inválida.');
+      laboratorio = { acao: corpo.laboratorio.acao,
+        ...(corpo.laboratorio.acao === 'executar' ? { pedido: validarPedidoLaboratorio(corpo.laboratorio.pedido) } : {}) };
+      // O rascunho escolhe a persona explicitamente; preparar não faz chamada paga de router.
+      corpo.usar_router = false;
+    }
+    entrada = validarEntradaSimulacao(corpo);
   } catch (e) {
     return json({ error: e instanceof SyntaxError ? 'payload inválido' : (e as Error).message }, 400);
   }
@@ -396,7 +415,7 @@ Deno.serve(async (req) => {
   };
 
   try {
-    const resultado = await executarSimulacao(entrada, {
+    const dependencias: DependenciasSimulacao = {
       prepararRodada: async (messages, turno) => {
         falaDoTurno = falasDoLead(messages).at(-1);
         saudouNoTurno = false;
@@ -581,7 +600,22 @@ Deno.serve(async (req) => {
         }
         return resposta;
       },
-    });
+    };
+    if (laboratorio) {
+      if (laboratorio.acao === 'preparar') {
+        const messages = [...entrada.historico_inicial, { role: 'user' as const, content: entrada.mensagens[0] }];
+        const rodada = await dependencias.prepararRodada(messages, 1);
+        const { pedido, origens } = montarPedidoPrincipal({ ...rodada, tools: rodada.tools as any[], messages, contextoFicha: dependencias.fichaDaVolta?.(messages), conjunto: entrada.prompt });
+        return json({ ok: true, pedido: semDadosPrivados(pedido), origens, agente: rodada.agente, provedor: entrada.provedor });
+      }
+      const capturas: RegistroModelo[] = [];
+      const resultado = await executarEnsaio(laboratorio.pedido!, entrada, dependencias,
+        (p) => executarPedidoPrincipal({ ...p, model: MODELO_AGENTE, max_tokens: 8192, thinking: { type: 'adaptive' } }, {
+          provedor: provedorAlternativo, observarModelo: (r) => { capturas.push(r); },
+        }));
+      return json({ ...resultado, capturas, provedor: entrada.provedor, ferramentas_reais: entrada.ferramentas_reais ? [...TOOLS_REAIS_NO_TESTE] : [] });
+    }
+    const resultado = await executarSimulacao(entrada, dependencias);
     return json({
       ...resultado, modelo: resultado.chamadas.at(-1)?.modelo ?? provedorAlternativo?.modelo ?? MODELO_AGENTE, provedor: entrada.provedor, esforco: provedorAlternativo?.esforco ?? null,
       raciocinio_encadeado: provedorAlternativo?.formato === 'openai' && provedorAlternativo.raciocinio === true,

@@ -3,6 +3,7 @@
 
 // deno-lint-ignore-file no-explicit-any
 import { PROMPT_ROUTER } from './prompts.ts';
+import { observarSemInterromper, type ObservadorModelo } from './capturaModelo.ts';
 import type { Msg } from './historico.ts';
 import { INSTRUCAO_MEMORIA_HUMANA } from './memoriaHumana.ts';
 import { INSTRUCAO_DISPONIBILIDADE_CONTATO } from './disponibilidadeContato.ts';
@@ -77,6 +78,7 @@ export async function chamarAnthropic(
   extraHeaders: Record<string, string> = {},
   provedor: ProvedorIA | null = null,
   prazoMs?: number,
+  observarModelo?: ObservadorModelo,
 ): Promise<any> {
   const alternativo = provedor;
   const base = alternativo?.base ?? 'https://api.anthropic.com';
@@ -140,7 +142,16 @@ export async function chamarAnthropic(
   // 22/09/2026: o piloto parou após tools, com fetch sem limite e sem resposta.
   // O legado conserva seu contrato; OpenAI e fallback explícito têm prazo finito.
   const limite = prazoMs ?? (openai ? PRAZO_MODELO_PILOTO_MS : undefined);
-  return limite === undefined ? executar() : comPrazoModelo(executar, limite);
+  try {
+    const resposta = await (limite === undefined ? executar() : comPrazoModelo(executar, limite));
+    await observarSemInterromper(observarModelo, { pedido: body, enviado: pedidoOpenai ?? semRaciocinioOpenai(corpoAnthropic), resposta, provedor: alternativo?.nome ?? 'anthropic' });
+    return resposta;
+  } catch (e) {
+    // O texto de erro do provedor pode ecoar dados; só o status é guardado na captura.
+    const status = /HTTP (\d{3})/.exec(String((e as Error)?.message ?? ''))?.[1];
+    await observarSemInterromper(observarModelo, { pedido: body, enviado: pedidoOpenai ?? semRaciocinioOpenai(corpoAnthropic), provedor: alternativo?.nome ?? 'anthropic', erro: status ? `HTTP ${status}` : 'falha de comunicação com o modelo' });
+    throw e;
+  }
 }
 
 // ── Router: decide validação × qualificador (tool forçada, sem thinking) ─────
@@ -192,8 +203,9 @@ export async function chamarRouter(
   historicoLimpo: Msg[],
   aoResponder?: (metadados: MetadadosRespostaRouter) => void,
   provedor: ProvedorIA | null = null,
+  observarModelo?: ObservadorModelo,
 ): Promise<'agente_validacao' | 'agente_qualificador'> {
-  const resp = await chamarAnthropic(pedidoRouter(historicoLimpo), { 'anthropic-beta': 'structured-outputs-2025-11-13' }, provedor);
+  const resp = await chamarAnthropic(pedidoRouter(historicoLimpo), { 'anthropic-beta': 'structured-outputs-2025-11-13' }, provedor, undefined, observarModelo);
 
   // O harness observa modelo/uso sem receber conteúdo ou pensamento do router.
   aoResponder?.({ model: resp.model, usage: resp.usage,
@@ -214,6 +226,7 @@ export async function chamarRouter(
 // cache do histórico. NUNCA voltar com ele pro system (entre o prompt e as messages
 // ele estourava qualquer cache de mensagem a cada minuto).
 export type OpcoesPedidoPrincipal = {
+  observarModelo?: ObservadorModelo;
   promptAgente: string;
   contextoTemporal: string;
   contextoEntregaMateriais?: string;
@@ -265,7 +278,7 @@ export function respostaSemModelo(opts: Pick<OpcoesPedidoPrincipal, 'messages' |
  * recebe este pedido traduzido para a Responses API e faz a chamada ele mesmo). Ordem e
  * breakpoints de cache descritos acima — a montagem é uma só para os dois caminhos.
  */
-export function montarPedidoPrincipal(opts: OpcoesPedidoPrincipal): { pedido: Record<string, any>; ferramentasDisponiveis: Set<string>; contexto: string[] } {
+export function montarPedidoPrincipal(opts: OpcoesPedidoPrincipal): { pedido: Record<string, any>; ferramentasDisponiveis: Set<string>; contexto: string[]; origens: { system: string[]; ferramentas: string } } {
   const falhaCompatibilidade = opts.comFicha && !opts.regrasSubstitutas && ultimaCompatibilidadeFalhou(opts.messages);
   // O MESMO pedido, na MESMA ordem; só muda de onde vem o texto (29/09/2026: a Luna tem a sua cópia,
   // prompts-luna.ts, para ser cortada sem mexer no João dos outros leads).
@@ -349,7 +362,14 @@ export function montarPedidoPrincipal(opts: OpcoesPedidoPrincipal): { pedido: Re
     messages,
     tools,
   };
-  return { pedido, ferramentasDisponiveis, contexto };
+  const base = opts.conjunto === 'luna' ? 'prompts-luna.ts' : 'instruções do agente SDR';
+  const origens = { system: opts.regrasSubstitutas ? ['Persona do agente', 'Regras substitutas deste ensaio'] : [
+    'Persona renderizada pelo fluxo (inclui nome, curso e notas)', `Memória humana · ${base}`, `Fatos do lead · ${base}`,
+    `Disponibilidade de contato · ${base}`, `Eventos · ${base}`,
+    ...(opts.comFicha ? [`Ficha do atendimento · ${base}`, `Voz do João · ${base}`] : []),
+    `Canal de resposta · ${base}`,
+  ], ferramentas: opts.conjunto === 'luna' || opts.provedor?.formato === 'openai' ? 'tools-luna.ts · catálogo por persona' : 'lista_tools_claude + descricoesTools.ts' };
+  return { pedido, ferramentasDisponiveis, contexto, origens };
 }
 
 // ── Canal da resposta: a fala ao lead só sai por responder_ao_cliente ─────────
@@ -404,14 +424,21 @@ export function respostaDepoisDaCorrecao(resposta: any, decisao: DecisaoCanal, c
 export async function chamarAgentePrincipal(opts: OpcoesPedidoPrincipal): Promise<any> {
   const semModelo = respostaSemModelo(opts);
   if (semModelo) return semModelo;
-  const { pedido, ferramentasDisponiveis } = montarPedidoPrincipal(opts);
+  const { pedido, origens } = montarPedidoPrincipal(opts);
+  return executarPedidoPrincipal(pedido, { ...opts, observarModelo: opts.observarModelo
+    ? (r) => opts.observarModelo!({ ...r, origens }) : undefined });
+}
+
+/** Mesmo canal/correção na produção e na cópia editável do laboratório. */
+export async function executarPedidoPrincipal(pedido: Record<string, any>, opts: Pick<OpcoesPedidoPrincipal, 'provedor' | 'prazoModeloMs' | 'observarModelo'> = {}): Promise<any> {
+  const ferramentasDisponiveis = new Set<string>((pedido.tools ?? []).map((t: any) => t.name));
   const provedor = opts.provedor ?? null;
-  const resposta = await chamarAnthropic(pedido, {}, provedor, opts.prazoModeloMs);
+  const resposta = await chamarAnthropic(pedido, {}, provedor, opts.prazoModeloMs, opts.observarModelo);
   const decisao = decisaoDoCanal(resposta, ferramentasDisponiveis);
   if (decisao.tipo !== 'corrigir') return normalizarRespostaCanal(resposta, decisao);
   let corrigida: any = null;
   try {
-    corrigida = await chamarAnthropic(pedidoCorrecaoDoCanal(pedido), {}, provedor, opts.prazoModeloMs);
+    corrigida = await chamarAnthropic(pedidoCorrecaoDoCanal(pedido), {}, provedor, opts.prazoModeloMs, opts.observarModelo);
   } catch {
     // Erro do provedor pode carregar prompt/credencial. Registra-se só o motivo.
   }

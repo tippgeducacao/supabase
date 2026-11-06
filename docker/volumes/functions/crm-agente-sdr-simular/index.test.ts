@@ -35,6 +35,38 @@ beforeEach(() => {
   mocks.fetch.mockRejectedValue(new Error('Rede inesperada'));
 });
 
+describe('acesso do laboratório pelo painel', () => {
+  it('nega JWT público ou usuário fora da gestão antes de chamar IA', async () => {
+    for (const gestao of [null, false]) {
+      mocks.fetch.mockImplementation(async (url: string) => {
+        if (url.endsWith('/auth/v1/user')) return gestao === null ? Response.json({}, { status: 401 }) : Response.json({ id: 'usuario-sintetico', role: 'authenticated' });
+        if (url.endsWith('/rpc/is_supervisor_diretor_admin_user')) return Response.json(false);
+        throw new Error('Nenhuma chamada paga é permitida');
+      });
+      const resposta = await handler(new Request('https://harness.invalid', { method: 'POST', headers: { Authorization: 'Bearer token-sintetico' }, body: '{}' }));
+      expect(resposta.status).toBe(401);
+    }
+    expect(mocks.from).not.toHaveBeenCalled();
+  });
+  it('gestão logada monta o pedido real sem usar segredo do front e sem chamada paga', async () => {
+    mocks.fetch.mockImplementation(async (url: string) => {
+      if (url.endsWith('/auth/v1/user')) return Response.json({ id: 'usuario-sintetico', role: 'authenticated' });
+      if (url.endsWith('/rpc/is_supervisor_diretor_admin_user')) return Response.json(true);
+      throw new Error('Preparar não chama o modelo');
+    });
+    const resposta = await handler(new Request('https://harness.invalid', { method: 'POST', headers: { Authorization: 'Bearer token-sintetico' }, body: JSON.stringify({
+      persona: 'validacao', prompt: 'luna', mensagens: ['Olá, quero saber mais.'], laboratorio: { acao: 'preparar' },
+    }) }));
+    expect(resposta.status).toBe(200);
+    expect(resposta.headers.get('Access-Control-Allow-Origin')).toBe('*');
+    const data = await resposta.json();
+    expect(data.pedido.system.length).toBeGreaterThan(0);
+    expect(data.pedido.tools.some((t: { name: string }) => t.name === 'responder_ao_cliente')).toBe(true);
+    expect(data.origens.system).toHaveLength(data.pedido.system.length);
+    expect(mocks.fetch.mock.calls.every(([url]) => !String(url).includes('api.anthropic.com'))).toBe(true);
+  });
+});
+
 describe('contrato do mock de consulta de valor', () => {
   it('reutiliza memória entre tools do turno, renova no próximo e não a passa ao Claude', async () => {
     const agente = await import('../crm-agente-sdr/agente');

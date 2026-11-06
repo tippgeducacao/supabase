@@ -100,6 +100,7 @@ import { rodarEsteiraFollowup } from './followup.ts';
 import { contextoEspecialidadeCannabis } from './especialidadeCannabis.ts';
 import { rodarEsteiraFollowupTemplate } from './followup-template.ts';
 import { criarTelemetria, resumir, type Telemetria } from './eventos.ts';
+import { observadorDaRodada, observarSemInterromper, type ObservadorModelo } from './capturaModelo.ts';
 import { type AgenteRouter, carregarConfigRouterJev, type LeituraJev, leituraDoRouter, pedidoJevRouter, rotearComJev } from './routerJev.ts';
 import { blocoDaLeitura, carregarConfigLeituraJev, efeitosDaLeitura, leituraDasRespostas, lerLeadComJev, type LeituraLead, pedidoJevLeitura } from './leituraJev.ts';
 import { carregarModoTrocaNumero, carregarSinalTrocaDeNumero, comNotaNoContexto, comNotaParaRouter, notaTrocaDeNumero, resumoDoSinal, sinalInerte, type SinalTrocaDeNumero } from './trocaDeNumero.ts';
@@ -652,12 +653,12 @@ type PreRouter = NonNullable<Awaited<ReturnType<typeof prepararAntesDoRouter>>>[
 type DecisaoRouter = { agente: AgenteRouter | null; ms: number; jev?: LeituraJev; fonte?: string };
 
 // Router do sistema (produção): Jev na frente quando ligado, Luna/Claude de reserva. Erro = agente: null.
-async function rotearNoSistema(pre: PreRouter, provedor: ProvedorIA | null, registrarUsoRouter: (m: MetadadosRespostaRouter) => void): Promise<DecisaoRouter> {
+async function rotearNoSistema(pre: PreRouter, provedor: ProvedorIA | null, registrarUsoRouter: (m: MetadadosRespostaRouter) => void, observarModelo?: ObservadorModelo): Promise<DecisaoRouter> {
   const inicio = Date.now();
   const jev: { leitura?: LeituraJev } = {};
   try {
     const historicoRouter = limparParaRouter(comNotaParaRouter(await carregarHistorico(supabase, pre.remotejid), pre.notaTroca));
-    const agente = await rotearComJev(historicoRouter, pre.configJev, () => chamarRouter(historicoRouter, registrarUsoRouter, provedor),
+    const agente = await rotearComJev(historicoRouter, pre.configJev, () => chamarRouter(historicoRouter, registrarUsoRouter, provedor, observarModelo),
       { nota: pre.notaTroca, aoLerJev: (l) => { jev.leitura = l; } });
     return { agente, ms: Date.now() - inicio, ...(jev.leitura ? { jev: jev.leitura } : {}) };
   } catch (e) {
@@ -882,7 +883,8 @@ async function prepararRodada(remotejid: string, itensDoLote: any[], tel: Teleme
       .then((h) => lerLeadComJev(limparParaRouter(h), pre.itens.map((i: any) => String(i?.mensagem ?? '')).filter(Boolean)))
       .catch(() => null)
     : Promise.resolve(null);
-  const decisao = pre.precisaRouter ? await rotearNoSistema(pre, provedor, registrarUsoRouter) : null;
+  const observarRouter = await observadorDaRodada(supabase, remotejid, tel.rodadaId, 'router');
+  const decisao = pre.precisaRouter ? await rotearNoSistema(pre, provedor, registrarUsoRouter, observarRouter) : null;
   const depois = await definirAgente(pre, provedor, tel, decisao, true);
   const doUltimoCom = (campo: string): any =>
     [...pre.itens].reverse().find((i: any) => i?.[campo] != null)?.[campo] ?? null;
@@ -903,6 +905,7 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
   if (!preparo) return;
   // `let`: o loop reatribui parte delas (provedor no fallback, lead, contexto…), como antes.
   let { inicioRodada, conteudo, doUltimoCom, telefone, provedor, registrarFalaAposEnvio, conjuntoPrompt, ctx, lead, pedidoPorPalavraChave, aberturaControlada, desdeLimpeza, sinalTroca, aulaPiloto, aulaDaCampanha, aplicarTroca, configLeitura, leituraPromessa, promptAgente, tools, contextoEfetivo, agenteEfetivo, estaNaEscola, reuniaoMarcadaNaAgenda: marcadaNaAgenda, notaReunioes, regrasSubstitutas } = preparo;
+  const observarModelo = await observadorDaRodada(supabase, remotejid, tel.rodadaId, agenteEfetivo);
   // Reunião criada ou remarcada NESTA rodada: a agenda lida no preparo ainda não a conhece.
   let agendouNestaRodada = false;
   // Agente no n8n: a Luna é chamada pelo webhook do n8n (o router, feito no preparo, não).
@@ -1186,7 +1189,7 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
     //   falharem, sai uma frase operacional ("não consegui concluir agora…").
     let resp: any;
     try {
-      resp = await chamarAgentePrincipal({ ...pedidoPrincipal, provedor });
+      resp = await chamarAgentePrincipal({ ...pedidoPrincipal, provedor, observarModelo });
     } catch (e) {
       // Provedor alternativo fora do ar (ou recusando o pedido) NÃO pode calar o João: a volta
       // é refeita no Claude e o resto da rodada fica nele. As tools são as mesmas — a tabela
@@ -1198,7 +1201,7 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
         if (!provedor) throw e;
         tel.registrar('provedor_ia_fallback', { de: provedor.nome, para: 'anthropic', volta: rodada + 1, motivo: String((e as Error)?.message ?? e).slice(0, 500) });
         provedor = null;
-        resp = await chamarAgentePrincipal({ ...pedidoPrincipal, provedor: null,
+        resp = await chamarAgentePrincipal({ ...pedidoPrincipal, provedor: null, observarModelo,
           ...(ctx.ficha ? { prazoModeloMs: PRAZO_MODELO_PILOTO_MS } : {}) });
       } catch (falhaReserva) {
         if (!ctx.ficha) throw falhaReserva;
@@ -1264,6 +1267,8 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
         const output = repetida
           ? { id: tu.id, resultado: AVISO_CONSULTA_REPETIDA }
           : await executarFerramenta(tu, ctx);
+        await observarSemInterromper(observarModelo, { tipo: 'ferramenta', pedido: { tool: tu.name, input: tu.input },
+          enviado: {}, resposta: output, provedor: 'executor' });
         tel.registrar('tool_exec', {
           tool: tu.name,
           input: resumir(tu.input, 800),

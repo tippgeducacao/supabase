@@ -419,6 +419,9 @@ export function extrairUso(usage: unknown): Record<string, number> {
 type BlocoModelo = { type: string; text?: string; id?: string; name?: string; input?: unknown; [campo: string]: unknown };
 type Rodada = { promptAgente: string; contextoTemporal: string; tools: unknown[]; agente: string; comFicha?: boolean; instrucaoFicha?: string };
 export type DependenciasSimulacao = {
+  /** Somente a cópia autenticada do laboratório: mantém blocos de ferramentas do pedido capturado. */
+  historicoLaboratorio?: Msg[];
+  entradaLaboratorio?: Msg;
   prepararRodada: (messages: Msg[], turno: number) => Promise<Rodada>;
   chamarPrincipal: (opts: {
     promptAgente: string; contextoTemporal: string; tools: unknown[]; messages: Msg[]; contextoFicha?: string; comFicha?: boolean; instrucaoFicha?: string;
@@ -437,7 +440,7 @@ export type DependenciasSimulacao = {
 };
 
 export async function executarSimulacao(entrada: EntradaSimulacao, deps: DependenciasSimulacao) {
-  const messages: Msg[] = entrada.historico_inicial.map((m) => ({ ...m }));
+  const messages: Msg[] = structuredClone(deps.historicoLaboratorio ?? entrada.historico_inicial);
   const transcript: Record<string, unknown>[] = [];
   const chamadas: Record<string, unknown>[] = [];
   const limites: { turno: number; motivo: string }[] = [];
@@ -445,7 +448,7 @@ export async function executarSimulacao(entrada: EntradaSimulacao, deps: Depende
 
   for (const [indice, msgLead] of entrada.mensagens.entries()) {
     const turno = indice + 1;
-    messages.push({ role: 'user', content: msgLead });
+    messages.push(indice === 0 && deps.entradaLaboratorio ? structuredClone(deps.entradaLaboratorio) : { role: 'user', content: msgLead });
     transcript.push({ quem: 'lead', texto: msgLead, turno });
     const rodada = await deps.prepararRodada(messages, turno);
     agente = rodada.agente;
