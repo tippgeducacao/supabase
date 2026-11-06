@@ -69,6 +69,29 @@ export function statusDoLog(r: ResultadoAcaoEmail): string {
 }
 
 /**
+ * Processa os itens com no máximo `concorrencia` em voo ao mesmo tempo (06/11/2026). Em série, uma
+ * rodada de 40 itens levava ~20 s e a fila andava a ~2 e-mails/s — um disparo de 20 mil pessoas
+ * levava a tarde inteira, com o Resend aceitando ~10/s. Cada trabalhador pega o PRÓXIMO item da
+ * lista (ordem de chegada preservada) e, antes de pegar, pergunta `deveParar()`: orçamento de
+ * tempo estourado ou freio do limite por segundo. O que não começou continua `pendente` (a reserva
+ * do item é atômica dentro de `processarItemFila`, então duas rodadas sobrepostas não o duplicam).
+ */
+export async function processarEmParalelo<T>(
+  itens: T[], concorrencia: number, tarefa: (item: T) => Promise<void>, deveParar: () => boolean,
+): Promise<void> {
+  let proximo = 0;
+  const trabalhador = async () => {
+    while (!deveParar()) {
+      const indice = proximo++;
+      if (indice >= itens.length) return;
+      await tarefa(itens[indice]);
+    }
+  };
+  const n = Math.max(1, Math.min(Math.floor(concorrencia) || 1, itens.length));
+  await Promise.all(Array.from({ length: n }, trabalhador));
+}
+
+/**
  * O Resend recusou por requisições por SEGUNDO (`rate_limit_exceeded`) mesmo depois das
  * repetições do `email-send` (06/11/2026). O despachante PARA a rodada: seguir com os outros
  * 39 itens do lote só os queimaria como `erro` contra o mesmo limite (era a rajada de 12–15

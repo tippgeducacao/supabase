@@ -9,19 +9,25 @@
 // de execuções no mesmo instante. Uma chamada HTTP por lead soltaria o lote inteiro em
 // paralelo — foi exatamente o que a Meta puniu com 130429 no WhatsApp em 23/09/2026. Aqui o
 // motor só grava a linha (`crm_fluxo_email_envios`) e o cron `crm-fluxo-email-dispatch`
-// chama esta função a cada minuto, que envia em série, em ritmo de ~1 por segundo.
+// chama esta função a cada 20 s, que envia em ritmo controlado (~6 por segundo desde 06/11/2026;
+// antes era em série, ~1–2 por segundo).
 //
 // Só o banco chama: exige a chave de serviço EXATA (o runtime self-hosted não lê
 // verify_jwt por função). Qualquer outra credencial recebe 401 antes de ler a fila.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
-import { ehLimitePorSegundoDoProvedor, processarItemFila, statusDoLog, type ItemFilaEmail } from "./despacho.ts";
+import { ehLimitePorSegundoDoProvedor, processarEmParalelo, processarItemFila, statusDoLog, type ItemFilaEmail } from "./despacho.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 // Mesmo teto do imap-sync-inbox: o worker self-hosted morre por volta de 60 s.
 const ORCAMENTO_MS = 40_000;
-const LOTE = 40;
+// 06/11/2026: eram 40 itens em série por rodada de 20 s (~2 e-mails/s) e a fila de 27 mil itens
+// só esvaziava à noite. Agora 4 envios ao mesmo tempo e lote de 120 por rodada ≈ 6 e-mails/s,
+// abaixo dos ~10/s que o Resend aceita nesta conta (medido nos logs). O limite por segundo, se
+// vier, é repetido pelo provedor e, persistindo, freia a rodada.
+const LOTE = 120;
+const CONCORRENCIA = 4;
 
 const json = (corpo: unknown, status = 200) =>
   new Response(JSON.stringify(corpo), { status, headers: { "Content-Type": "application/json" } });
@@ -45,9 +51,7 @@ Deno.serve(async (req) => {
   const contagem: Record<string, number> = {};
   let freio = false; // limite por segundo do Resend persistente: para a rodada (ver despacho.ts)
 
-  for (const item of (fila ?? []) as ItemFilaEmail[]) {
-    if (Date.now() - inicio > ORCAMENTO_MS) break; // o resto fica para o próximo minuto
-    if (freio) break; // o resto continua `pendente` e sai na rodada seguinte
+  const processar = async (item: ItemFilaEmail) => {
     const resultado = await processarItemFila(item, {
       nucleo: {
         carregarLead: async (id) => {
@@ -108,7 +112,18 @@ Deno.serve(async (req) => {
       },
     });
     contagem[resultado.status] = (contagem[resultado.status] ?? 0) + 1;
-  }
+  };
+
+  // CONCORRENCIA envios ao mesmo tempo (era 1). O erro de UM item não derruba os que estão em voo:
+  // ele é contado e o item fica como estava (a linha `processando` não se repete, como sempre).
+  await processarEmParalelo((fila ?? []) as ItemFilaEmail[], CONCORRENCIA, async (item) => {
+    try {
+      await processar(item);
+    } catch (e) {
+      contagem.excecao = (contagem.excecao ?? 0) + 1;
+      console.error("crm-fluxo-email: item falhou", item.id, e instanceof Error ? e.message : String(e));
+    }
+  }, () => freio /* o resto continua `pendente` */ || Date.now() - inicio > ORCAMENTO_MS /* e o resto fica para a próxima rodada */);
 
   // O cron descarta o retorno; sem log não há como saber o efeito de uma rodada.
   console.log("crm-fluxo-email", JSON.stringify({ lidos: fila?.length ?? 0, ...contagem, ...(freio ? { freio_limite_por_segundo: true } : {}), ms: Date.now() - inicio }));

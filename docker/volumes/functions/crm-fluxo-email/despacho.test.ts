@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { contextoDoItem, ehLimitePorSegundoDoProvedor, processarItemFila, statusDoLog, type DependenciasFila, type ItemFilaEmail } from "./despacho.ts";
+import { contextoDoItem, ehLimitePorSegundoDoProvedor, processarEmParalelo, processarItemFila, statusDoLog, type DependenciasFila, type ItemFilaEmail } from "./despacho.ts";
 
 const FLUXO = "66666666-6666-4666-8666-666666666666";
 const EXEC = "77777777-7777-4777-8777-777777777777";
@@ -139,6 +139,58 @@ describe("automações de funil (CRM V2) e do SAC 2.0 na mesma fila (02/10/2026)
     expect(contextoDoItem(item())).toEqual({
       tipo: "fluxo", id: FLUXO, namespace: "crm-fluxo-email/v1", partesChave: [FLUXO, EXEC, "2"],
     });
+  });
+});
+
+describe("envio em paralelo controlado (06/11/2026): a fila de 27 mil itens andava a ~2 e-mails/s", () => {
+  const dormir = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+  it("nunca passa do máximo em voo, processa TODOS os itens e começa na ordem de chegada", async () => {
+    const itens = Array.from({ length: 30 }, (_, i) => i);
+    let emVoo = 0; let pico = 0;
+    const comecou: number[] = []; const terminou: number[] = [];
+    await processarEmParalelo(itens, 4, async (i) => {
+      comecou.push(i); emVoo++; pico = Math.max(pico, emVoo);
+      await dormir(i % 3);
+      emVoo--; terminou.push(i);
+    }, () => false);
+    expect(pico).toBe(4);
+    expect(comecou).toEqual(itens); // FIFO: o item N só começa depois do N-1
+    expect([...terminou].sort((a, b) => a - b)).toEqual(itens);
+  });
+
+  it("deveParar interrompe NOVOS itens; os que já estavam em voo terminam e o resto não é tocado", async () => {
+    const itens = Array.from({ length: 20 }, (_, i) => i);
+    const tocados: number[] = []; const concluidos: number[] = [];
+    let parar = false;
+    await processarEmParalelo(itens, 3, async (i) => {
+      tocados.push(i);
+      if (i === 5) parar = true; // o freio dispara no meio da rodada
+      await dormir(2);
+      concluidos.push(i);
+    }, () => parar);
+    expect(concluidos.sort((a, b) => a - b)).toEqual(tocados.sort((a, b) => a - b)); // ninguém ficou pela metade
+    expect(tocados).toContain(5);
+    expect(tocados.length).toBeLessThan(itens.length); // sobraram itens `pendente` para a próxima rodada
+    expect(Math.max(...tocados)).toBeLessThan(5 + 3 + 1); // só os que já tinham sido pegos antes do freio
+  });
+
+  it("já parado antes de começar: não toca em nada", async () => {
+    const tarefa = vi.fn(async () => {});
+    await processarEmParalelo([1, 2, 3], 4, tarefa, () => true);
+    expect(tarefa).not.toHaveBeenCalled();
+  });
+
+  it("lista vazia, concorrência maior que a lista e valores tortos", async () => {
+    const tarefa = vi.fn(async () => {});
+    await processarEmParalelo([], 4, tarefa, () => false);
+    expect(tarefa).not.toHaveBeenCalled();
+    await processarEmParalelo(["a", "b"], 50, tarefa, () => false);
+    expect(tarefa).toHaveBeenCalledTimes(2);
+    tarefa.mockClear();
+    await processarEmParalelo(["a", "b", "c"], 0, tarefa, () => false); // 0/NaN vira 1: em série
+    await processarEmParalelo(["d"], Number.NaN, tarefa, () => false);
+    expect(tarefa).toHaveBeenCalledTimes(4);
   });
 });
 
