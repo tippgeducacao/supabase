@@ -100,6 +100,7 @@ import { rodarEsteiraFollowup } from './followup.ts';
 import { contextoEspecialidadeCannabis } from './especialidadeCannabis.ts';
 import { rodarEsteiraFollowupTemplate } from './followup-template.ts';
 import { criarTelemetria, resumir, type Telemetria } from './eventos.ts';
+import { capturarEntradaAgente } from '../_shared/capturaEntradaSdr.ts';
 import { observadorDaRodada, observarSemInterromper, type ObservadorModelo } from './capturaModelo.ts';
 import { type AgenteRouter, carregarConfigRouterJev, type LeituraJev, leituraDoRouter, pedidoJevRouter, rotearComJev } from './routerJev.ts';
 import { blocoDaLeitura, carregarConfigLeituraJev, efeitosDaLeitura, leituraDasRespostas, lerLeadComJev, type LeituraLead, pedidoJevLeitura } from './leituraJev.ts';
@@ -883,7 +884,7 @@ async function prepararRodada(remotejid: string, itensDoLote: any[], tel: Teleme
       .then((h) => lerLeadComJev(limparParaRouter(h), pre.itens.map((i: any) => String(i?.mensagem ?? '')).filter(Boolean)))
       .catch(() => null)
     : Promise.resolve(null);
-  const observarRouter = await observadorDaRodada(supabase, remotejid, tel.rodadaId, 'router');
+  const observarRouter = await observadorDaRodada(supabase, remotejid, tel.rodadaId, 'router', pre.itens.map((i: any) => i.msg_id).filter(Boolean));
   const decisao = pre.precisaRouter ? await rotearNoSistema(pre, provedor, registrarUsoRouter, observarRouter) : null;
   const depois = await definirAgente(pre, provedor, tel, decisao, true);
   const doUltimoCom = (campo: string): any =>
@@ -905,7 +906,7 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
   if (!preparo) return;
   // `let`: o loop reatribui parte delas (provedor no fallback, lead, contexto…), como antes.
   let { inicioRodada, conteudo, doUltimoCom, telefone, provedor, registrarFalaAposEnvio, conjuntoPrompt, ctx, lead, pedidoPorPalavraChave, aberturaControlada, desdeLimpeza, sinalTroca, aulaPiloto, aulaDaCampanha, aplicarTroca, configLeitura, leituraPromessa, promptAgente, tools, contextoEfetivo, agenteEfetivo, estaNaEscola, reuniaoMarcadaNaAgenda: marcadaNaAgenda, notaReunioes, regrasSubstitutas } = preparo;
-  const observarModelo = await observadorDaRodada(supabase, remotejid, tel.rodadaId, agenteEfetivo);
+  const observarModelo = await observadorDaRodada(supabase, remotejid, tel.rodadaId, agenteEfetivo, itensDoLote.map(i => i.msg_id).filter(Boolean));
   // Reunião criada ou remarcada NESTA rodada: a agenda lida no preparo ainda não a conhece.
   let agendouNestaRodada = false;
   // Agente no n8n: a Luna é chamada pelo webhook do n8n (o router, feito no preparo, não).
@@ -2138,7 +2139,13 @@ Deno.serve(async (req) => {
   let payload: any;
   try { payload = await req.json(); } catch { return json({ error: 'payload inválido' }, 400); }
 
+  // Preserva o que chegou antes de os gates canonizarem o telefone.
+  const entradaRecebida = structuredClone(payload);
   const barrado = await gatesDeEntrada(payload);
+  const respostaEntrada = barrado ?? json({ ok: true });
+  const captura = capturarEntradaAgente(supabase, entradaRecebida, respostaEntrada, barrado ? undefined : structuredClone(payload));
+  if (typeof EdgeRuntime !== 'undefined' && EdgeRuntime?.waitUntil) EdgeRuntime.waitUntil(captura);
+  else await captura;
   if (barrado) return barrado;
 
   // ▸ Passou nos gates: dispara o nó 2 em segundo plano e responde 200 para o webhook.

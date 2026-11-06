@@ -1,13 +1,13 @@
 // 06/11/2026: captura opt-in do pedido efetivo, sem cabeçalhos, credenciais ou pensamento privado.
 // O corpo canônico permite repetir o ensaio; `enviado` mostra a tradução entregue ao provedor.
 export type RegistroModelo = {
-  tipo?: 'modelo' | 'ferramenta';
+  tipo?: 'modelo' | 'ferramenta' | 'entrada';
   pedido: Record<string, unknown>;
   enviado: Record<string, unknown>;
   resposta?: Record<string, unknown>;
   provedor: string;
   erro?: string;
-  origens?: { system: string[]; ferramentas: string };
+  origens?: { system?: string[]; ferramentas?: string; mensagens_entrada?: string[] };
 };
 export type ObservadorModelo = (
   registro: RegistroModelo,
@@ -26,12 +26,21 @@ export function semDadosPrivados<T>(valor: T): T {
           ].includes(v?.type),
       )
       .map(semDadosPrivados) as T;
+  // Links de mídia podem carregar credenciais na query. O caminho ainda permite
+  // identificar a mídia; o token não pertence a uma captura de diagnóstico.
+  if (typeof valor === 'string') {
+    // A Meta entrega respostas de Flow como JSON dentro de uma string.
+    if (/^\s*[\[{]/.test(valor) && /"(?:flow_token|access_token|authorization|api_key|token)"\s*:/i.test(valor)) {
+      try { return JSON.stringify(semDadosPrivados(JSON.parse(valor))) as T; } catch { /* Texto comum. */ }
+    }
+    return valor.replace(/([?&](?:token|access_token|api_key|apikey|key|secret|signature|sig)=)[^&\s"<>]+/gi, '$1[omitido]') as T;
+  }
   if (!valor || typeof valor !== "object") return valor;
   return Object.fromEntries(
     Object.entries(valor)
       .filter(
         ([k]) =>
-          !/^(authorization|x-api-key|api_key|chave|segredo|signature|encrypted_content|reasoning_content)$/i.test(
+          !/^(authorization|cookie|set-cookie|x-api-key|x-hub-signature-256|x-ppg-sdr-segredo|api_?key|access_token|refresh_token|token|flow_token|password|secret|chave|segredo|signature|encrypted_content|reasoning_content)$/i.test(
             k,
           ),
       )
@@ -74,6 +83,7 @@ export async function observadorDaRodada(
   remotejid: string,
   rodadaId: string,
   agente: string,
+  mensagensEntrada: string[] = [],
 ): Promise<ObservadorModelo | undefined> {
   try {
     const { data, error } = await banco
@@ -90,13 +100,13 @@ export async function observadorDaRodada(
           remotejid,
           rodada_id: rodadaId,
           agente,
-        tipo: tipo ?? 'modelo',
+          tipo: tipo ?? 'modelo',
           pedido,
           enviado,
           resposta: resposta ?? null,
           provedor,
           erro: erro ?? null,
-          origens: origens ?? null,
+          origens: mensagensEntrada.length ? { ...origens, mensagens_entrada: mensagensEntrada } : origens ?? null,
         });
       if (falha) throw new Error("captura indisponível");
     };

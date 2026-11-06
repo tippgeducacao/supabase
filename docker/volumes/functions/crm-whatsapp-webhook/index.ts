@@ -12,6 +12,8 @@ import { CABECALHO_SEGREDO_N8N, carregarDesvioN8n, vaiParaN8n } from "../_shared
 import { FalhaDefinitivaMidia, gravarMidiaInbound, linkDaMidiaGravada } from "../_shared/waMediaInbound.ts";
 import { BUCKET_RECEBIDOS } from "../_shared/midiaRecebida.ts";
 
+import { iniciarCapturaWebhook, type CapturaWebhook } from "../_shared/capturaEntradaSdr.ts";
+
 declare const EdgeRuntime: { waitUntil?: (p: Promise<unknown>) => void } | undefined;
 
 const corsHeaders = {
@@ -534,7 +536,7 @@ function canonicalBrDigits(raw: string): string {
 
 // Repassa a mensagem inbound normalizada pro n8n (buffer + roteador do agente SDR).
 // Awaited com timeout; em qualquer erro só loga — nunca derruba o webhook (Meta espera 200).
-async function relayToN8n(payload: Record<string, unknown>): Promise<void> {
+async function relayToN8n(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
   // Desvio por número: RH vai pro agente de RH, aluno pro assistente pedagógico, todo o resto
   // segue pro João.
   const ehRh = payload?.wa_account_id === (await contaDoRh());
@@ -546,7 +548,7 @@ async function relayToN8n(payload: Record<string, unknown>): Promise<void> {
   const desvio = !ehRh && !ehAluno ? await carregarDesvioN8n(rhLookup) : null;
   const paraN8n = vaiParaN8n(desvio, payload?.remotejid ?? payload?.telefone);
   const destino = ehRh ? AGENTE_RH_URL : ehAluno ? AGENTE_ALUNO_URL : paraN8n ? desvio!.url : N8N_INBOUND_URL;
-  if (!destino) return;
+  if (!destino) return { decisao: "destino_indisponivel" };
   const rotulo = ehRh ? "RH" : ehAluno ? "aluno" : paraN8n ? "n8n-luna" : "n8n";
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 10000);
@@ -564,8 +566,10 @@ async function relayToN8n(payload: Record<string, unknown>): Promise<void> {
       signal: ctrl.signal,
     });
     if (!res.ok) console.log(`[crm-whatsapp-webhook] relay ${rotulo} respondeu ${res.status}`);
+    return { decisao: res.ok ? "encaminhada" : "falha_no_relay", destino: ehRh ? "crm-agente-rh" : ehAluno ? "crm-agente-aluno" : paraN8n ? "n8n" : "crm-agente-sdr", status_http: res.status, body: await res.json().catch(() => null) };
   } catch (e) {
     console.log(`[crm-whatsapp-webhook] relay ${rotulo} falhou:`, e instanceof Error ? e.message : String(e));
+    return { decisao: "falha_no_relay", motivo: ctrl.signal.aborted ? "tempo_esgotado" : "falha_de_rede" };
   } finally {
     clearTimeout(timer);
   }
@@ -733,6 +737,15 @@ Deno.serve(async (req) => {
     console.warn("[crm-whatsapp-webhook] CRM_META_APP_SECRET ausente — validação de assinatura DESATIVADA (configurar no Dokploy)");
   }
 
+  let capturaEntrada: CapturaWebhook | undefined;
+  const responderComCaptura = async (resposta: Response) => {
+    const captura = capturaEntrada?.finalizar(resposta);
+    if (captura) {
+      if (typeof EdgeRuntime !== "undefined" && EdgeRuntime?.waitUntil) EdgeRuntime.waitUntil(captura);
+      else await captura;
+    }
+    return resposta;
+  };
   try {
     let payload: any = null;
     try { payload = JSON.parse(rawBody); } catch { payload = null; }
@@ -740,6 +753,8 @@ Deno.serve(async (req) => {
 
     console.log("[crm-whatsapp-webhook] payload recebido:", JSON.stringify(payload).slice(0, 500));
 
+    capturaEntrada = await iniciarCapturaWebhook(admin, payload,
+      META_APP_SECRETS.length ? "validada" : "nao_configurada", req.headers.get("content-type"));
     const entries = payload?.entry ?? [];
     let processedMessages = 0;
     let processedStatuses = 0;
@@ -810,6 +825,10 @@ Deno.serve(async (req) => {
         // O do pedagógico NUNCA, nem com a flag ligada por engano: resposta de professor a
         // convite de aula não pode virar rodada do João.
         const accountIaAtivo = accountRows?.[0]?.agente_ia_ativo === true && !doPedagogico;
+        for (const mensagem of value?.messages ?? []) capturaEntrada.anotar(mensagem?.id, {
+          conta: { id: accountId ?? null, phone_number_id: phoneNumberId, agente_ia_ativo: accountIaAtivo, persona: accountRows?.[0]?.agente_ia_persona ?? null },
+          ...(!accountId ? { decisao: doPedagogico ? "encaminhada_ao_pedagogico" : "conta_nao_encontrada" } : {}),
+        });
         if (!accountId) {
           // Número do pedagógico sem conta no CRM (os antigos, fora da BM 08): segue só
           // para o pipeline dele, como sempre foi.
@@ -1074,6 +1093,10 @@ Deno.serve(async (req) => {
              ⚠️ Só vem na PRIMEIRA mensagem da conversa. A Meta não reenvia:
              perdeu aqui, perdeu para sempre. Por isso a gravação é no ato, e
              best-effort — falhar a atribuição NUNCA pode derrubar o inbound. */
+          capturaEntrada.anotar(msgId, { mensagem_tratada: { conteudo: conteudoComQuote, tipo: msgType,
+            quoted: quotedId ? { id: quotedId, conteudo: quotedConteudo } : null, caption, anexos, interactive_reply: interactiveReply },
+            ...(midiaFalha ? { falha_midia: midiaFalha } : {}),
+          });
           const adReferral = extrairReferral(msg);
           if (adReferral) {
             try {
@@ -1174,6 +1197,7 @@ Deno.serve(async (req) => {
                 .limit(1);
               retryBenigno = (jaGravada?.length ?? 0) > 0;
             }
+            capturaEntrada.anotar(msgId, { decisao: retryBenigno ? "mensagem_duplicada" : "falha_ao_gravar", codigo_banco: code });
             if (retryBenigno) {
               console.log("[crm-whatsapp-webhook] msg duplicada (retry meta), ignorada:", msgId);
             } else if (doPedagogico) {
@@ -1307,14 +1331,17 @@ Deno.serve(async (req) => {
             const redelivery = idadeS > RELAY_IDADE_MAX_S;
 
             if (interactiveReply?.tipo === "call_permission_reply") {
+              capturaEntrada.anotar(msgId, { decisao: "permissao_de_ligacao" });
               // Clique em "Permitir ligações" não é fala do lead. Repassar ao agente faria
               // o João responder a um botão de sistema com texto de venda.
               console.log(`[crm-whatsapp-webhook] resposta de permissão de ligação — relay ao agente pulado`);
             } else if (interactiveReply?.tipo === "nfm_reply") {
+              capturaEntrada.anotar(msgId, { decisao: "resposta_de_formulario" });
               // Idem: é a ramificação do SAC v2 (trigger em onb_avaliacao_d15) quem decide o
               // que acontece com a nota — o assistente de IA não precisa (nem deve) reagir.
               console.log(`[crm-whatsapp-webhook] resposta de Flow (avaliação) — relay ao agente pulado`);
             } else if (accountIaAtivo && redelivery) {
+              capturaEntrada.anotar(msgId, { decisao: "mensagem_antiga", idade_segundos: idadeS });
               console.warn(
                 `[crm-whatsapp-webhook] inbound de ${from} tem ${Math.round(idadeS / 60)}min ` +
                 `(limite ${Math.round(RELAY_IDADE_MAX_S / 60)}min) — redelivery da Meta, ` +
@@ -1344,7 +1371,7 @@ Deno.serve(async (req) => {
                 }
               }
             } else if (accountIaAtivo) {
-              await relayToN8n({
+              const entradaAgente = {
                 remotejid: `${canonicalBrDigits(phoneDigits)}@s.whatsapp.net`,
                 id: msgId,
                 timestamp: Number(msg?.timestamp) || Math.floor(Date.now() / 1000),
@@ -1369,8 +1396,12 @@ Deno.serve(async (req) => {
                 agente_ia_persona: accountRows?.[0]?.agente_ia_persona ?? 'qualificador',
                 lead_id: leadId,
                 oportunidade_id: oportunidadeId,
-              });
+              };
+              capturaEntrada.anotar(msgId, { payload: entradaAgente, decisao: "encaminhando" });
+              const resultadoRelay = await relayToN8n(entradaAgente);
+              capturaEntrada.anotar(msgId, { ...resultadoRelay });
             } else {
+              capturaEntrada.anotar(msgId, { decisao: doPedagogico ? "atendimento_pedagogico" : "ia_desligada_no_numero" });
               console.log(`[crm-whatsapp-webhook] número ${phoneNumberId} sem agente IA — relay pulado (atendimento humano)`);
             }
           }
@@ -1461,19 +1492,19 @@ Deno.serve(async (req) => {
     // Falha de persistência NUNCA responde 200: a Meta reentrega e a mensagem se salva.
     // A reentrega do que já gravou cai no "retry benigno" acima, então é idempotente.
     if (falhasPersistencia > 0) {
-      return json({
+      return responderComCaptura(json({
         ok: false,
         erro: "falha ao persistir inbound",
         falhas: falhasPersistencia,
         messages: processedMessages,
-      }, 503);
+      }, 503));
     }
-    return json({ ok: true, messages: processedMessages, statuses: processedStatuses, alertas: processedAlertas, chamadas: processedChamadas });
+    return responderComCaptura(json({ ok: true, messages: processedMessages, statuses: processedStatuses, alertas: processedAlertas, chamadas: processedChamadas }));
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error("[crm-whatsapp-webhook] erro de processamento:", msg);
     // Antes devolvíamos 200 aqui pra evitar retry da Meta — mas isso transforma qualquer
     // exceção em perda silenciosa de mensagem. Erro é erro: 500 e a Meta reentrega.
-    return json({ ok: false, processed: false, erro: msg }, 500);
+    return responderComCaptura(json({ ok: false, processed: false, erro: msg }, 500));
   }
 });
