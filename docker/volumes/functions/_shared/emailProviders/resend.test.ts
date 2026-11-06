@@ -116,14 +116,14 @@ describe("ResendProvider", () => {
       expect(ms).toBeLessThan(1_500);
     });
 
-    it("desiste depois de 2 repetições e devolve o erro de limite (o disparador ainda pausa a campanha)", async () => {
+    it("desiste depois de 4 repetições e devolve o erro de limite (o disparador ainda pausa a campanha)", async () => {
       const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => limite());
       const esperar = vi.fn<(ms: number) => Promise<void>>().mockResolvedValue();
       const erro = await new ResendProvider({ apiKey: "teste", fetcher, esperar }).send(EMAIL).catch((e) => e);
       expect(erro).toMatchObject({ codigo: "rate_limit_exceeded", status: 429, rateLimited: true });
       expect(erro.message).not.toMatch(/segredo/);
-      expect(fetcher).toHaveBeenCalledTimes(3);
-      expect(esperar).toHaveBeenCalledTimes(2);
+      expect(fetcher).toHaveBeenCalledTimes(5);
+      expect(esperar).toHaveBeenCalledTimes(4);
     });
 
     it("repeticoesRateLimit: 0 desliga a repetição", async () => {

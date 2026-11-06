@@ -7,7 +7,7 @@ export interface OpcoesResend {
   timeoutMs?: number;
   /**
    * Tentativas EXTRAS quando o Resend recusa por requisições por segundo
-   * (`rate_limit_exceeded`). Padrão 2; 0 desliga. Cota diária/mensal NUNCA repete.
+   * (`rate_limit_exceeded`). Padrão 4; 0 desliga. Cota diária/mensal NUNCA repete.
    */
   repeticoesRateLimit?: number;
   /** Espera injetável (testes). Padrão: setTimeout. */
@@ -19,7 +19,9 @@ function lerEnv(chave: string): string | undefined {
   return g.Deno?.env.get(chave)?.trim();
 }
 
-const REPETICOES_RATE_LIMIT_PADRAO = 2;
+// 06/11/2026: 2 não bastava — com a conta no teto de 10 req/s (despachante + outros remetentes nos minutos
+// múltiplos de 5), 9 envios ainda caíam por 3.298. Com 4 a espera total chega a ~6 s só quando há 429.
+const REPETICOES_RATE_LIMIT_PADRAO = 4;
 const ESPERA_RATE_LIMIT_PADRAO_MS = 1_100;
 const ESPERA_RATE_LIMIT_MAXIMA_MS = 3_000;
 
