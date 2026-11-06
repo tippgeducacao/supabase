@@ -69,6 +69,20 @@ export function statusDoLog(r: ResultadoAcaoEmail): string {
 }
 
 /**
+ * O Resend recusou por requisições por SEGUNDO (`rate_limit_exceeded`) mesmo depois das
+ * repetições do `email-send` (06/11/2026). O despachante PARA a rodada: seguir com os outros
+ * 39 itens do lote só os queimaria como `erro` contra o mesmo limite (era a rajada de 12–15
+ * tentativas por segundo vista nos logs). Os itens que ficam continuam `pendente` e saem na
+ * rodada seguinte (a cada 20 s). Cota diária/mensal e a trava do PPGVET têm outro `codigo` e
+ * NÃO entram aqui — para elas o comportamento segue o de sempre.
+ */
+export function ehLimitePorSegundoDoProvedor(resposta: { status: number; corpo: unknown }): boolean {
+  if (resposta.status !== 429) return false;
+  const corpo = resposta.corpo;
+  return !!corpo && typeof corpo === "object" && (corpo as { codigo?: unknown }).codigo === "rate_limit_exceeded";
+}
+
+/**
  * De onde veio a linha → o que vai para `emails_enviados.contexto_tipo/contexto_id` e o que
  * compõe a chave de idempotência. O fluxo mantém exatamente o contexto de antes (mudar o
  * namespace invalidaria as reservas existentes).

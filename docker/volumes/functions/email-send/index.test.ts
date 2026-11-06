@@ -195,13 +195,27 @@ describe("email-send integrado ao Resend", () => {
     expect(insercoes).toBe(0);
   });
 
-  it("propaga 429 para pausar campanha sem fallback", async () => {
-    fetcher.mockResolvedValue(new Response(JSON.stringify({ name: "rate_limit_exceeded" }), { status: 429 }));
+  it("limite por segundo persistente: repete 2× (06/11/2026) e só então propaga 429 para pausar a campanha", async () => {
+    env.RESEND_RATE_LIMIT_ESPERA_MS = "0";
+    fetcher.mockImplementation(async () => new Response(JSON.stringify({ name: "rate_limit_exceeded" }), { status: 429 }));
     const resposta = await atender(requisicao());
     expect(resposta.status).toBe(429);
     expect(await resposta.json()).toMatchObject({ rate_limited: true, codigo: "rate_limit_exceeded" });
     expect(log.status).toBe("falhou");
-    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    // mesma chave nas 3 tentativas: o Resend reconhece a requisição, nunca duplica
+    expect(new Set(fetcher.mock.calls.map(([, init]) => new Headers(init?.headers).get("Idempotency-Key")))).toEqual(new Set(["email-send/log-1"]));
+  });
+
+  it("limite por segundo passageiro: a repetição entrega e o log fica `enviado`, sem falha", async () => {
+    env.RESEND_RATE_LIMIT_ESPERA_MS = "0";
+    fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ name: "rate_limit_exceeded" }), { status: 429 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "resend-2" })));
+    const resposta = await atender(requisicao());
+    expect(resposta.status).toBe(200);
+    expect(await resposta.json()).toMatchObject({ ok: true, provider_message_id: "resend-2" });
+    expect(log).toMatchObject({ status: "enviado", provider_message_id: "resend-2" });
+    expect(fetcher).toHaveBeenCalledTimes(2);
   });
 });
 

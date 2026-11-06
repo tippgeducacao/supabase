@@ -5,12 +5,39 @@ export interface OpcoesResend {
   apiKey?: string;
   fetcher?: typeof fetch;
   timeoutMs?: number;
+  /**
+   * Tentativas EXTRAS quando o Resend recusa por requisições por segundo
+   * (`rate_limit_exceeded`). Padrão 2; 0 desliga. Cota diária/mensal NUNCA repete.
+   */
+  repeticoesRateLimit?: number;
+  /** Espera injetável (testes). Padrão: setTimeout. */
+  esperar?: (ms: number) => Promise<void>;
 }
 
 function lerEnv(chave: string): string | undefined {
   const g = globalThis as { Deno?: { env: { get(k: string): string | undefined } } };
   return g.Deno?.env.get(chave)?.trim();
 }
+
+const REPETICOES_RATE_LIMIT_PADRAO = 2;
+const ESPERA_RATE_LIMIT_PADRAO_MS = 1_100;
+const ESPERA_RATE_LIMIT_MAXIMA_MS = 3_000;
+
+/**
+ * Quanto esperar antes de repetir um envio recusado por `rate_limit_exceeded` (06/11/2026).
+ * A janela do Resend é de 1 s: respeita `Retry-After` (em segundos, com teto) e soma um
+ * sorteio de até 500 ms para os despachantes paralelos não voltarem todos no mesmo instante.
+ * `RESEND_RATE_LIMIT_ESPERA_MS` (ambiente das edges) fixa o valor — usado nos testes.
+ */
+export function esperaAposRateLimit(cabecalhos: Headers, aleatorio: () => number = Math.random): number {
+  const fixo = lerEnv("RESEND_RATE_LIMIT_ESPERA_MS");
+  if (fixo !== undefined && fixo !== "" && Number.isFinite(Number(fixo)) && Number(fixo) >= 0) return Number(fixo);
+  const segundos = Number(cabecalhos.get("retry-after"));
+  const base = Number.isFinite(segundos) && segundos > 0 ? segundos * 1_000 : ESPERA_RATE_LIMIT_PADRAO_MS;
+  return Math.min(base, ESPERA_RATE_LIMIT_MAXIMA_MS) + Math.floor(aleatorio() * 500);
+}
+
+const dormir = (ms: number) => new Promise<void>((resolver) => setTimeout(resolver, ms));
 
 export function temCredencialResend(): boolean {
   return !!lerEnv("RESEND_API_KEY");
@@ -61,27 +88,40 @@ async function requisitarResend(
   init: RequestInit,
   opcoes: OpcoesResend,
   aoAceitar?: (cabecalhos: Headers) => void,
+  repeticoesRateLimit = 0,
 ): Promise<unknown> {
   const apiKey = (opcoes.apiKey ?? lerEnv("RESEND_API_KEY"))?.trim();
   if (!apiKey) throw new ErroEnvio("Configure a chave de API do Resend no servidor.", {
     codigo: "resend_sem_credencial", repetivel: false,
   });
-  try {
-    const resposta = await (opcoes.fetcher ?? fetch)(`https://api.resend.com${caminho}`, {
-      ...init,
-      headers: { ...init.headers, Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      signal: AbortSignal.timeout(opcoes.timeoutMs ?? 20_000),
-      redirect: "error",
-    });
-    const corpo: unknown = await resposta.json().catch(() => null);
-    if (!resposta.ok) throw traduzirErro(resposta.status, corpo);
-    aoAceitar?.(resposta.headers);
-    return corpo;
-  } catch (erro) {
-    if (erro instanceof ErroEnvio) throw erro;
-    throw new ErroEnvio("Não foi possível confirmar a resposta do Resend. Confira o resultado no provedor antes de reenviar.", {
-      codigo: "resend_resultado_incerto", repetivel: false,
-    });
+  for (let tentativa = 0; ; tentativa++) {
+    try {
+      const resposta = await (opcoes.fetcher ?? fetch)(`https://api.resend.com${caminho}`, {
+        ...init,
+        headers: { ...init.headers, Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        signal: AbortSignal.timeout(opcoes.timeoutMs ?? 20_000),
+        redirect: "error",
+      });
+      const corpo: unknown = await resposta.json().catch(() => null);
+      if (!resposta.ok) {
+        const erro = traduzirErro(resposta.status, corpo);
+        // Só o limite por SEGUNDO repete: o Resend recusou ANTES de aceitar o e-mail (nada foi
+        // enviado) e a mesma Idempotency-Key segue junto, então não há risco de duplicar.
+        // 429 de cota diária/mensal tem outro código e nunca entra aqui.
+        if (erro.codigo === "rate_limit_exceeded" && tentativa < repeticoesRateLimit) {
+          await (opcoes.esperar ?? dormir)(esperaAposRateLimit(resposta.headers));
+          continue;
+        }
+        throw erro;
+      }
+      aoAceitar?.(resposta.headers);
+      return corpo;
+    } catch (erro) {
+      if (erro instanceof ErroEnvio) throw erro;
+      throw new ErroEnvio("Não foi possível confirmar a resposta do Resend. Confira o resultado no provedor antes de reenviar.", {
+        codigo: "resend_resultado_incerto", repetivel: false,
+      });
+    }
   }
 }
 
@@ -112,7 +152,8 @@ export class ResendProvider implements EmailProvider {
           ...(a.contentType ? { content_type: a.contentType } : {}),
         })) } : {}),
       }),
-    }, this.opcoes, (cabecalhos) => { usoMensalConta = lerUsoMensalResend(cabecalhos); });
+    }, this.opcoes, (cabecalhos) => { usoMensalConta = lerUsoMensalResend(cabecalhos); },
+    this.opcoes.repeticoesRateLimit ?? REPETICOES_RATE_LIMIT_PADRAO);
     const id = corpo && typeof corpo === "object" && "id" in corpo ? corpo.id : undefined;
     if (typeof id !== "string" || !/^[a-zA-Z0-9_-]{1,256}$/.test(id)) {
       throw new ErroEnvio("O Resend respondeu sem identificar o envio. Confira o resultado antes de reenviar.", {

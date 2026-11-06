@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { contextoDoItem, processarItemFila, statusDoLog, type DependenciasFila, type ItemFilaEmail } from "./despacho.ts";
+import { contextoDoItem, ehLimitePorSegundoDoProvedor, processarItemFila, statusDoLog, type DependenciasFila, type ItemFilaEmail } from "./despacho.ts";
 
 const FLUXO = "66666666-6666-4666-8666-666666666666";
 const EXEC = "77777777-7777-4777-8777-777777777777";
@@ -139,6 +139,23 @@ describe("automações de funil (CRM V2) e do SAC 2.0 na mesma fila (02/10/2026)
     expect(contextoDoItem(item())).toEqual({
       tipo: "fluxo", id: FLUXO, namespace: "crm-fluxo-email/v1", partesChave: [FLUXO, EXEC, "2"],
     });
+  });
+});
+
+describe("freio do limite por segundo do Resend (06/11/2026)", () => {
+  it("só o rate_limit_exceeded persistente freia a rodada", () => {
+    expect(ehLimitePorSegundoDoProvedor({ status: 429, corpo: { codigo: "rate_limit_exceeded", rate_limited: true } })).toBe(true);
+  });
+  it.each([
+    ["trava do PPGVET", 429, { codigo: "ppgvet_reserva_resend", rate_limited: true }],
+    ["cota mensal do Resend", 429, { codigo: "monthly_quota_exceeded", rate_limited: true }],
+    ["cota diária do Resend", 429, { codigo: "daily_quota_exceeded", rate_limited: true }],
+    ["erro do provedor", 502, { codigo: "rate_limit_exceeded" }],
+    ["sucesso", 200, { ok: true, log_id: "x" }],
+    ["corpo ausente", 429, null],
+    ["corpo que não é objeto", 429, "rate_limit_exceeded"],
+  ])("não freia em: %s", (_nome, status, corpo) => {
+    expect(ehLimitePorSegundoDoProvedor({ status, corpo })).toBe(false);
   });
 });
 

@@ -14,7 +14,7 @@
 // Só o banco chama: exige a chave de serviço EXATA (o runtime self-hosted não lê
 // verify_jwt por função). Qualquer outra credencial recebe 401 antes de ler a fila.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
-import { processarItemFila, statusDoLog, type ItemFilaEmail } from "./despacho.ts";
+import { ehLimitePorSegundoDoProvedor, processarItemFila, statusDoLog, type ItemFilaEmail } from "./despacho.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -43,9 +43,11 @@ Deno.serve(async (req) => {
 
   const agora = () => new Date().toISOString();
   const contagem: Record<string, number> = {};
+  let freio = false; // limite por segundo do Resend persistente: para a rodada (ver despacho.ts)
 
   for (const item of (fila ?? []) as ItemFilaEmail[]) {
     if (Date.now() - inicio > ORCAMENTO_MS) break; // o resto fica para o próximo minuto
+    if (freio) break; // o resto continua `pendente` e sai na rodada seguinte
     const resultado = await processarItemFila(item, {
       nucleo: {
         carregarLead: async (id) => {
@@ -72,7 +74,9 @@ Deno.serve(async (req) => {
             headers: { "Content-Type": "application/json", Authorization: `Bearer ${SERVICE_ROLE}` },
             body: JSON.stringify(body),
           });
-          return { ok: resposta.ok, status: resposta.status, corpo: await resposta.json().catch(() => null) };
+          const corpo = await resposta.json().catch(() => null);
+          if (ehLimitePorSegundoDoProvedor({ status: resposta.status, corpo })) freio = true;
+          return { ok: resposta.ok, status: resposta.status, corpo };
         },
         // As variáveis já chegam resolvidas pelo motor do fluxo.
         resolverVariavel: (modelo) => modelo,
@@ -107,6 +111,6 @@ Deno.serve(async (req) => {
   }
 
   // O cron descarta o retorno; sem log não há como saber o efeito de uma rodada.
-  console.log("crm-fluxo-email", JSON.stringify({ lidos: fila?.length ?? 0, ...contagem, ms: Date.now() - inicio }));
+  console.log("crm-fluxo-email", JSON.stringify({ lidos: fila?.length ?? 0, ...contagem, ...(freio ? { freio_limite_por_segundo: true } : {}), ms: Date.now() - inicio }));
   return json({ ok: true, lidos: fila?.length ?? 0, resultados: contagem });
 });
