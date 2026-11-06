@@ -139,6 +139,30 @@ describe("ação de e-mail da integração", () => {
     expect((await executarAcaoEmail(entrada(), deps)).status).toBe("enviado");
   });
 
+  // 06/11/2026 (Tortuga): e-mail só de imagens NÃO pode ser barrado, tenha ou não `alt`.
+  it.each([
+    ["só imagens com alt vazio (o caso do Tortuga)", '<html><head><title>Mais Rúmen</title><style>body{margin:0}</style></head><body><a href="https://exemplo.com/p"><img src="https://x/a.jpg" alt="" width="552"></a><img src="https://x/b.png" alt=""></body></html>'],
+    ["imagem sem o atributo alt", '<html><body><img src="https://x/a.jpg"></body></html>'],
+    ["imagem com alt só de espaço", "<html><body><img src='https://x/a.jpg' alt='   '></body></html>"],
+    ["imagem com src sem aspas", "<html><body><img src=https://x/a.jpg></body></html>"],
+  ])("envia e-mail %s", async (_nome, html) => {
+    template.corpo_html = html;
+    const r = await executarAcaoEmail(entrada(), deps);
+    expect(r.status).toBe("enviado");
+    expect(deps.enviar).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["imagem com src vazio", '<html><body><img src="" alt="Banner"></body></html>'],
+    ["só CSS, comentário e nbsp", "<html><head><style>p{color:red}</style></head><body><!-- nada -->&nbsp;</body></html>"],
+  ])("continua recusando e-mail vazio: %s", async (_nome, html) => {
+    template.corpo_html = html;
+    const r = await executarAcaoEmail(entrada(), deps);
+    expect(r).toMatchObject({ status: "ignorado", motivo: "template_incompleto" });
+    expect(deps.reservar).not.toHaveBeenCalled();
+    expect(deps.enviar).not.toHaveBeenCalled();
+  });
+
   it("não consome a reserva quando um link dinâmico usa protocolo inseguro", async () => {
     template.corpo_html = '<p>Olá {{nome}}.</p><a href="{{link}}">Abrir</a>';
     const pedido = entrada();

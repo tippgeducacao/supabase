@@ -115,7 +115,10 @@ function conteudoEmailLegivel(html: string): boolean {
   const texto = corpo
     .replace(/<!--[\s\S]*?-->/g, "").replace(/<[^>]*>/g, "")
     .replace(/&(?:nbsp|#160|#x0*a0);/gi, " ").trim();
-  return !!texto || /<img\b[^>]*\balt\s*=\s*(?:"[^"\s][^"]*"|'[^'\s][^']*')[^>]*>/i.test(corpo);
+  // Imagem é conteúdo, com ou sem `alt` (06/11/2026): e-mail só de imagens é legítimo e NÃO pode
+  // ser barrado — a regra anterior exigia `alt` preenchido e ignorou 20.770 pessoas do fluxo
+  // Tortuga (4 imagens, `alt=""`). Só o e-mail VAZIO (sem texto e sem nenhuma imagem) é recusado.
+  return !!texto || /<img\b[^>]*\bsrc\s*=\s*["']?\s*[^\s"'>]/i.test(corpo);
 }
 
 /** `exigirValor = false` (fluxo/automação): variável sem valor sai em branco, não invalida. */
