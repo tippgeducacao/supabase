@@ -20,14 +20,19 @@ import { ehLimitePorSegundoDoProvedor, processarEmParalelo, processarItemFila, s
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-// Mesmo teto do imap-sync-inbox: o worker self-hosted morre por volta de 60 s.
-const ORCAMENTO_MS = 40_000;
+// O worker self-hosted morre por volta de 60 s (mesmo teto do imap-sync-inbox). Mas o orçamento que
+// manda é o de SOBREPOSIÇÃO: o cron dispara a cada 20 s e, com rodadas de ~20 s, duas rodadas liam
+// os MESMOS itens (`duplicado: 58` e `62` de 120 no log de 06/11 18:06 UTC) — a reserva atômica
+// evitava o envio em dobro, mas metade do trabalho ia fora. Por isso nenhum item NOVO começa depois
+// de 16 s: a rodada termina antes do próximo disparo, e o item que já está em voo leva 1–2 s.
+const ORCAMENTO_MS = 16_000;
 // 06/11/2026: eram 40 itens em série por rodada de 20 s (~2 e-mails/s) e a fila de 27 mil itens
-// só esvaziava à noite. Agora 4 envios ao mesmo tempo e lote de 120 por rodada ≈ 6 e-mails/s,
-// abaixo dos ~10/s que o Resend aceita nesta conta (medido nos logs). O limite por segundo, se
-// vier, é repetido pelo provedor e, persistindo, freia a rodada.
-const LOTE = 120;
-const CONCORRENCIA = 4;
+// só esvaziava à noite. Agora 6 envios ao mesmo tempo; o lote (160) é só o teto — quem manda é o
+// orçamento de tempo: ~6 × 16 s / 0,65 s ≈ 150 itens por rodada ≈ 7 e-mails/s, abaixo dos ~10/s
+// que o Resend aceita nesta conta (medido nos logs). O limite por segundo, se vier, é repetido pelo
+// provedor e, persistindo, freia a rodada.
+const LOTE = 160;
+const CONCORRENCIA = 6;
 
 const json = (corpo: unknown, status = 200) =>
   new Response(JSON.stringify(corpo), { status, headers: { "Content-Type": "application/json" } });
