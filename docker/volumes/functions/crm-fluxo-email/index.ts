@@ -27,12 +27,16 @@ const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 // de 16 s: a rodada termina antes do próximo disparo, e o item que já está em voo leva 1–2 s.
 const ORCAMENTO_MS = 16_000;
 // 06/11/2026: eram 40 itens em série por rodada de 20 s (~2 e-mails/s) e a fila de 27 mil itens
-// só esvaziava à noite. Agora 6 envios ao mesmo tempo; o lote (160) é só o teto — quem manda é o
-// orçamento de tempo: ~6 × 16 s / 0,65 s ≈ 150 itens por rodada ≈ 7 e-mails/s, abaixo dos ~10/s
-// que o Resend aceita nesta conta (medido nos logs). O limite por segundo, se vier, é repetido pelo
+// só esvaziava à noite. Agora 4 envios ao mesmo tempo; o lote (160) é só o teto — quem manda é o
+// orçamento de tempo (~4 × 16 s / 0,95 s ≈ 67 itens por rodada ≈ 3,5 e-mails/s).
+// ⚠️ NÃO suba a concorrência sem olhar a SOBREPOSIÇÃO: nos minutos múltiplos de 5 outras rotinas
+// disparam o despachante junto com o cron e 2–3 rodadas rodam ao mesmo tempo (log de 06/11 19:00:59
+// UTC: três rodadas com `freio_limite_por_segundo`). Com 6 em voo (18 com 3 rodadas) o Resend, que
+// aceita 10 req/s nesta conta (confirmado no painel), recusou 57 envios em 1 h, 7 por rajada. Com 4,
+// até 2 rodadas sobrepostas (≈ 8/s) cabem no limite. O limite por segundo, se vier, é repetido pelo
 // provedor e, persistindo, freia a rodada.
 const LOTE = 160;
-const CONCORRENCIA = 6;
+const CONCORRENCIA = 4;
 
 const json = (corpo: unknown, status = 200) =>
   new Response(JSON.stringify(corpo), { status, headers: { "Content-Type": "application/json" } });
