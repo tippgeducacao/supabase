@@ -1,6 +1,7 @@
 // 10/09/2026: regra comercial confirmada pelo responsável pelo SDR. O campo
 // cursos.modalidade significa tipo de curso, NÃO online/semipresencial. O portal
 // comercial também contém divergências; não usá-lo para inferir essa modalidade.
+import { consultarCattleClinic } from './cattleClinic.ts';
 const SEMIPRESENCIAIS = new Set([
   '482013e3-7634-4b7d-8e5e-73416548ca5c', // Clínica Médica e Cirúrgica de Bovinos
   'd391cef0-f4d6-4b1d-a32d-2238427fbe9c', // Reprodução, Nutrição e Gestão de Bovinos (3em1)
@@ -53,6 +54,8 @@ function catalogoIndisponivel() {
 // Somente leitura. Nenhuma similaridade autoriza adotar outra área como interesse.
 // O resolver legado chega a devolver Bovinos para "clínica ... pequenos animais".
 export async function consultarCatalogo(supabase: BancoCatalogo, alvo = '') {
+  const cursoLivre = consultarCattleClinic(alvo);
+  if (cursoLivre) return cursoLivre;
   try {
     return await consultarCatalogoInterno(supabase, alvo);
   } catch {

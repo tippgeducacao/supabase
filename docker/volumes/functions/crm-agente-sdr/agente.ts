@@ -3,6 +3,7 @@
 
 // deno-lint-ignore-file no-explicit-any
 import { PROMPT_ROUTER } from './prompts.ts';
+import { INSTRUCAO_CATTLE_CLINIC, mencionaCattleClinic } from './cattleClinic.ts';
 import { observarSemInterromper, type ObservadorModelo } from './capturaModelo.ts';
 import type { Msg } from './historico.ts';
 import { INSTRUCAO_MEMORIA_HUMANA } from './memoriaHumana.ts';
@@ -369,6 +370,12 @@ export function montarPedidoPrincipal(opts: OpcoesPedidoPrincipal): { pedido: Re
     ...(opts.comFicha ? [`Ficha do atendimento · ${base}`, `Voz do João · ${base}`] : []),
     `Canal de resposta · ${base}`,
   ], ferramentas: opts.conjunto === 'luna' || opts.provedor?.formato === 'openai' ? 'tools-luna.ts · catálogo por persona' : 'lista_tools_claude + descricoesTools.ts' };
+  // Só acrescenta a referência quando o produto/link aparece no contexto desta conversa.
+  // Regras substitutas são ensaios editáveis: preservar o conteúdo escolhido pelo usuário.
+  if (!opts.regrasSubstitutas && mencionaCattleClinic(JSON.stringify([opts.promptAgente, opts.messages, opts.contextoFicha]))) {
+    system.push({ type: 'text', text: INSTRUCAO_CATTLE_CLINIC });
+    origens.system.push('Produto Cattle Clinic · cattleClinic.ts · gestão 09/11/2026');
+  }
   return { pedido, ferramentasDisponiveis, contexto, origens };
 }
 

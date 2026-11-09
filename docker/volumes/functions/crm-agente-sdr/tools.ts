@@ -31,6 +31,7 @@ import { temDorFinanceira } from './objecaoFinanceira.ts';
 import { conferirHorarioDaFerramenta } from './travasDeterministicas.ts';
 import { montarRetornoInformacoes } from './envioMateriais.ts';
 import { consultarCatalogo } from './catalogoCursos.ts';
+import { consultarCattleClinic } from './cattleClinic.ts';
 import {
   type LinhaDaMatriz, aceitaQualquerFormacao, chaveFormacao, formacoesDaLista, linhaDoCurso, semPontuacao, soParaVeterinario,
 } from './linhaDaMatriz.ts';
@@ -974,6 +975,9 @@ async function exclusivaParaOutraFormacao(supabase: any, input: any, cadastro: u
 }
 
 async function verificarCompatibilidade(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
+  const cursoLivre = consultarCattleClinic(input?.curso_interesse);
+  if (cursoLivre) return { ...cursoLivre, id: toolUseId, pode_cursar: true,
+    resultado: 'Curso livre aberto a pessoas sem graduação. Não é aprovação de elegibilidade para uma pós-graduação.' };
   const confirmarConclusao = (pergunta: string) => ({
     id: toolUseId, output: 'CONFIRMAR_CONCLUSAO', compativel: null, pode_cursar: null,
     ...(ctx.soInformar ? {} : { pergunta }),
