@@ -137,16 +137,13 @@ describe('agente por passos (o loop desenhado no n8n)', () => {
     expect(m.enviadas).toHaveLength(1);
   });
 
-  it('a Luna falhou: a mesma volta vai para o Claude e o resto da rodada fica nele', async () => {
-    m.claude.mockResolvedValue({ content: [{ type: 'text', text: 'oi! tudo bem?' }], stop_reason: 'end_turn', usage: {} });
+  it('a Luna falhou: sem reserva no Claude (09/11/2026)', async () => {
     const t = tel();
     const d = deps(t);
-    let s = await P.montarVolta(d, novoEstado());
-    s = await P.lerResposta(d, s.estado, { erro: 'HTTP 500' });
-    expect(m.claude).toHaveBeenCalledTimes(1);
-    expect(s.estado.usarClaude).toBe(true);
-    expect(s).toMatchObject({ acao: 'enviar', texto: 'oi! tudo bem?' });
-    expect(t.eventos.some((ev) => ev.tipo === 'provedor_ia_fallback')).toBe(true);
+    const s = await P.montarVolta(d, novoEstado());
+    await expect(P.lerResposta(d, s.estado, { erro: 'HTTP 429' })).rejects.toThrow('modelo_indisponivel');
+    expect(m.claude).not.toHaveBeenCalled();
+    expect(t.eventos.some((ev) => ev.tipo === 'modelo_indisponivel')).toBe(true);
   });
 
   it('consulta idêntica na mesma resposta não roda de novo', async () => {

@@ -424,11 +424,10 @@ export async function lerResposta(
   }
 
   if (!respostaValida(entrada.resposta)) {
-    // A Luna falhou (HTTP, prazo, corpo inválido): a MESMA volta é refeita no Claude, e o resto da rodada fica nele.
+    // A Luna falhou (HTTP, prazo, corpo inválido): sem reserva no Claude desde 09/11/2026.
     const motivo = String(entrada.erro ?? entrada.resposta?.error?.message ?? 'resposta inválida').slice(0, 500);
-    deps.tel.registrar('provedor_ia_fallback', { de: 'openai', para: 'anthropic', volta: e.volta, motivo });
-    e.usarClaude = true;
-    return await processarResposta(deps, e, ctx, base, await chamarClaude(deps, e, ctx, base));
+    deps.tel.registrar('modelo_indisponivel', { volta: e.volta, provedor: 'openai', motivo });
+    throw new Error(`modelo_indisponivel: ${motivo}`);
   }
 
   const resposta = traduzir(entrada.resposta);

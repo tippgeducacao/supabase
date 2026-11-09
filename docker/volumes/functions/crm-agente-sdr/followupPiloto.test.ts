@@ -133,12 +133,11 @@ describe('follow-up do piloto chega ao mesmo pipeline de voz', () => {
     expect(vi.mocked(chamarAnthropic).mock.calls[0][0].system).toContainEqual({ type: 'text', text: FOLLOWUP_SYSTEM });
     expect(vi.mocked(enviarResposta).mock.calls[0][5]).toMatchObject({ provedorResposta: 'anthropic' });
   });
-  it('fallback de conteúdo para Claude não é falsamente identificado como OpenAI', async () => {
-    vi.mocked(chamarAnthropic).mockRejectedValueOnce(new Error('falha simulada'));
-    expect(await processarFollowupLead(banco, lead, 1)).toBe(true);
-    expect(vi.mocked(chamarAnthropic).mock.calls[1][2]).toBeNull();
-    expect(vi.mocked(chamarAnthropic).mock.calls[1][3]).toBe(45_000);
-    expect(vi.mocked(enviarResposta).mock.calls[0][5]).toMatchObject({ provedorResposta: 'anthropic' });
+  it('Luna falhou: o follow-up não vai para o Claude e nada é enviado (09/11/2026)', async () => {
+    vi.mocked(chamarAnthropic).mockRejectedValueOnce(new Error('OpenAI: HTTP 429'));
+    expect(await processarFollowupLead(banco, lead, 1)).toBe(false);
+    expect(chamarAnthropic).toHaveBeenCalledTimes(1);
+    expect(enviarResposta).not.toHaveBeenCalled();
   });
   it('leva aula e pós vinculada sem carregar o assunto antigo do lead', async () => {
     lead.contexto_campanha = { persona: 'aula', aula_id: 'aula-nova' };

@@ -46,7 +46,6 @@ import { carregarAulaParaFollowup, contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } f
 import { type AulaParaPrompt, semCertificadoAntesDoFim } from './prompts-aula.ts';
 import { carregarModoTrocaNumero, carregarSinalTrocaDeNumero, notaTrocaDeNumero, resumoDoSinal, type SinalTrocaDeNumero } from './trocaDeNumero.ts';
 import { enviarComAberturaNumero, NOTA_ABERTURA_CONTROLADA } from './aberturaTrocaNumero.ts';
-import { PRAZO_MODELO_PILOTO_MS } from './prazoModelo.ts';
 import { carregarDiasSemAtendimento, extrairPrimeiroNome, montarContextoTemporal, quandoFalarComVoce } from './contexto.ts';
 import { INSTRUCAO_MEMORIA_HUMANA } from './memoriaHumana.ts';
 import { carregarStatusMateriais } from './envioMateriais.ts';
@@ -461,15 +460,10 @@ export async function gerarFollowup(
     ],
     messages,
   };
-  let provedor = opcoes?.provedor ?? null;
-  let resp;
-  try { resp = await chamarAnthropic(pedido, {}, provedor); }
-  catch (erro) {
-    if (!provedor) throw erro;
-    tel.registrar('followup_provedor_fallback', { de: 'openai', para: 'anthropic' });
-    provedor = null;
-    resp = await chamarAnthropic(pedido, {}, null, PRAZO_MODELO_PILOTO_MS);
-  }
+  // Sem reserva no Claude desde 09/11/2026 (ver a rodada principal no index.ts): falhou, o erro
+  // sobe e o toque não é consumido.
+  const provedor = opcoes?.provedor ?? null;
+  const resp = await chamarAnthropic(pedido, {}, provedor);
   let out = ['max_tokens', 'refusal'].includes(resp?.stop_reason)
     ? { message: '', final_answer: 'resposta_incompleta', pergunta_id: '' } : parseResposta(resp);
   // Na escolha, o perfil que o modelo leu da conversa vem em pergunta_id; sem perfil reconhecido vale a

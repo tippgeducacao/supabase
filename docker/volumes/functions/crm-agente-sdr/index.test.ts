@@ -534,32 +534,14 @@ describe('SDR: texto de ferramenta nunca vira despedida', () => {
     expect(JSON.stringify(fronteiras.registrar.mock.calls)).not.toContain('CIFRADO_NAO_PERSISTIR');
   });
 
-  it('Luna fora do ar não cala o João: a volta é refeita no Claude e o lead recebe a resposta', async () => {
-    fronteiras.vozAtiva = true;
-    fronteiras.lunaTelefones = ['5511999990001'];
-    fronteiras.provedorOpenai.mockReturnValue(luna);
-    fronteiras.chamarPrincipal
-      .mockRejectedValueOnce(new Error('OpenAI: HTTP 503: upstream'))
-      .mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'certo.' }] });
-    await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
-    expect(fronteiras.chamarPrincipal).toHaveBeenCalledTimes(2);
-    expect(fronteiras.chamarPrincipal.mock.calls[0][0].provedor).toEqual({ ...luna, origem: 'lista' });
-    expect(fronteiras.chamarPrincipal.mock.calls[1][0].provedor).toBeNull();
-    expect(fronteiras.registrar).toHaveBeenCalledWith('provedor_ia_fallback', expect.objectContaining({ de: 'openai', para: 'anthropic' }));
-    expect(fronteiras.registrar.mock.calls.some(([tipo]) => tipo === 'erro')).toBe(false);
-    expect(fronteiras.enviar).toHaveBeenCalledOnce();
-    expect(fronteiras.enviar.mock.calls[0][5]).toMatchObject({ provedorResposta: 'anthropic' });
-  });
-
-  it.each([false, true])('falha do principal e da reserva gera texto operacional respeitando pausa=%s', async (pausar) => {
+  it.each([false, true])('Luna fora do ar: sem Claude de reserva, sai o texto operacional respeitando pausa=%s', async (pausar) => {
     fronteiras.vozAtiva = true;
     fronteiras.lunaTelefones = [payload.telefone];
     fronteiras.provedorOpenai.mockReturnValue(luna);
-    fronteiras.chamarPrincipal.mockRejectedValueOnce(new Error('MODELO_TEMPO_ESGOTADO'))
-      .mockImplementationOnce(async () => { fronteiras.pausaNoDebounce = pausar; throw new Error('saldo indisponível'); });
+    fronteiras.chamarPrincipal.mockImplementationOnce(async () => { fronteiras.pausaNoDebounce = pausar; throw new Error('OpenAI: HTTP 429'); });
     await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
-    expect(fronteiras.chamarPrincipal).toHaveBeenCalledTimes(2);
-    expect(fronteiras.chamarPrincipal.mock.calls[1][0].prazoModeloMs).toBe(45000);
+    expect(fronteiras.chamarPrincipal).toHaveBeenCalledOnce();
+    expect(fronteiras.registrar.mock.calls.some(([tipo]) => tipo === 'provedor_ia_fallback')).toBe(false);
     expect(fronteiras.executar).not.toHaveBeenCalled();
     if (pausar) expect(fronteiras.enviar).not.toHaveBeenCalled();
     else {
