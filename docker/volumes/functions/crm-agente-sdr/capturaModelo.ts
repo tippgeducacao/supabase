@@ -1,4 +1,5 @@
-// 06/11/2026: captura opt-in do pedido efetivo, sem cabeçalhos, credenciais ou pensamento privado.
+// 09/11/2026: pedidos do modelo e ferramentas ficam no histórico automaticamente.
+// Webhook e etapas extras continuam opt-in. Sem credenciais ou pensamento privado.
 // O corpo canônico permite repetir o ensaio; `enviado` mostra a tradução entregue ao provedor.
 export type RegistroModelo = {
   tipo?: 'modelo' | 'ferramenta' | 'entrada' | 'etapa';
@@ -103,15 +104,19 @@ export async function observadorDaRodada(
   agente: string,
   mensagensEntrada: string[] = [],
 ): Promise<ObservadorModelo | undefined> {
+  let detalhesAtivos = false;
   try {
     const { data, error } = await comPrazoCaptura(banco
       .from("crm_sdr_laboratorio_config")
       .select("capturar_ate")
       .eq("remotejid", remotejid)
       .maybeSingle());
-    if (error || !data || Date.parse(data.capturar_ate) <= Date.now())
-      return undefined;
-    return async ({ pedido, enviado, resposta, provedor, erro, origens, tipo }) => {
+    detalhesAtivos = !error && !!data && Date.parse(data.capturar_ate) > Date.now();
+  } catch {
+    // Falha na configuração do diagnóstico não desliga o histórico dos modelos.
+  }
+  return async ({ pedido, enviado, resposta, provedor, erro, origens, tipo }) => {
+      if (!detalhesAtivos && tipo && tipo !== 'modelo' && tipo !== 'ferramenta') return;
       const { error: falha } = await banco
         .from("crm_sdr_laboratorio_capturas")
         .insert({
@@ -127,8 +132,5 @@ export async function observadorDaRodada(
           origens: mensagensEntrada.length ? { ...origens, mensagens_entrada: mensagensEntrada } : origens ?? null,
         });
       if (falha) throw new Error("captura indisponível");
-    };
-  } catch {
-    return undefined;
-  }
+  };
 }

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { observarSemInterromper, observadorDaRodada, semDadosPrivados } from './capturaModelo';
 
-describe('captura opt-in do João', () => {
+describe('histórico automático do João', () => {
   it('mantém instruções e resultados grandes sem cortar e remove pensamento/segredos', async () => {
     const grande = 'retorno da ferramenta '.repeat(1500);
     const original = { pedido: { system: [{ type: 'text', text: 'regra' }], thinking: { type: 'adaptive' }, messages: [{ content: [
@@ -28,11 +28,24 @@ describe('captura opt-in do João', () => {
       await expect(captura).resolves.toBeUndefined();
     } finally { vi.useRealTimers(); }
   });
-  it('não grava sem captura ativa; captura expirada não é renovada por uma mensagem', async () => {
-    const inserir = vi.fn();
+  it('salva cada chamada e ferramenta sem opt-in, sem guardar etapas extras nem renovar a configuração', async () => {
+    const inserir = vi.fn(async (_dados: Record<string, unknown>) => ({}));
     const banco = { from: () => ({ select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { capturar_ate: '2020-01-01' } }) }) }), insert: inserir }) };
-    expect(await observadorDaRodada(banco, 'jid', 'rodada', 'abertura')).toBeUndefined();
-    expect(inserir).not.toHaveBeenCalled();
+    const observar = await observadorDaRodada(banco, 'jid', 'rodada', 'abertura', ['mensagem']);
+    await observarSemInterromper(observar, { pedido: { messages: ['primeira'] }, enviado: {}, provedor: 'teste' });
+    await observarSemInterromper(observar, { tipo: 'ferramenta', pedido: { tool: 'consulta' }, enviado: {}, resposta: { resultado: 'curso' }, provedor: 'teste' });
+    await observarSemInterromper(observar, { pedido: { messages: ['primeira', 'retorno da ferramenta'] }, enviado: {}, provedor: 'teste' });
+    await observarSemInterromper(observar, { tipo: 'etapa', pedido: {}, enviado: {}, provedor: 'teste' });
+    expect(inserir).toHaveBeenCalledTimes(3);
+    expect(inserir.mock.calls[2][0]).toMatchObject({ tipo: 'modelo', rodada_id: 'rodada', origens: { mensagens_entrada: ['mensagem'] } });
     expect(semDadosPrivados(null)).toBeNull();
+  });
+  it('mantém o histórico quando a configuração está ausente ou falha', async () => {
+    for (const config of [{ data: null }, { data: null, error: 'indisponível' }]) {
+      const inserir = vi.fn(async () => ({}));
+      const banco = { from: () => ({ select: () => ({ eq: () => ({ maybeSingle: async () => config }) }), insert: inserir }) };
+      await observarSemInterromper(await observadorDaRodada(banco, 'jid', 'rodada', 'router'), { pedido: {}, enviado: {}, provedor: 'teste' });
+      expect(inserir).toHaveBeenCalledOnce();
+    }
   });
 });
