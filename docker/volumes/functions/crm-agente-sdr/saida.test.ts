@@ -129,6 +129,30 @@ describe('fracionamento determinístico no pipeline de saída', () => {
     expect(registrar).toHaveBeenCalledWith('resposta_chunks', expect.objectContaining({ metodo: 'codigo', total: 1 }));
   });
 
+  it('captura opt-in preserva o texto integral sem alterar o transporte', async () => {
+    transporte.mockResolvedValue(new Response('{}', { status: 200 }));
+    const { capturarEtapa } = await import('./capturaModelo');
+    const capturas = vi.fn();
+    const texto = 'a'.repeat(410);
+    const resultado = await saida.enviarResposta({ telefone: '5511999990001' } as never,
+      texto, vi.fn(), { registrar: vi.fn(), capturarEtapa: (etapa, entrada, retorno) => capturarEtapa(capturas, etapa, entrada, retorno) }, undefined, undefined, 'codigo');
+    expect(resultado.aceitos).toBe(1);
+    expect(transporte).toHaveBeenCalledTimes(1);
+    const envio = capturas.mock.calls.map(c => c[0]).find(c => c.enviado.etapa === 'envio_whatsapp');
+    expect(envio.pedido.texto).toBe(texto);
+    expect(envio.resposta.ok).toBe(true);
+  });
+
+  it('falha no armazenamento da captura não impede o envio', async () => {
+    transporte.mockResolvedValue(new Response('{}', { status: 200 }));
+    const { capturarEtapa } = await import('./capturaModelo');
+    const falha = vi.fn().mockRejectedValue(new Error('captura fora'));
+    const resultado = await saida.enviarResposta({ telefone: '5511999990001' } as never,
+      'mensagem do teste', vi.fn(), { registrar: vi.fn(), capturarEtapa: (etapa, entrada, retorno) => capturarEtapa(falha, etapa, entrada, retorno) }, undefined, undefined, 'codigo');
+    expect(resultado.aceitos).toBe(1);
+    expect(transporte).toHaveBeenCalledTimes(1);
+  });
+
   it('honra pausa antes do primeiro envio, mesmo sem a chamada de chunking', async () => {
     const resultado = await saida.enviarResposta({ telefone: '5511999990001' } as never,
       'claro, vc já trabalha nessa área?', vi.fn(), undefined, async () => true, undefined, 'codigo');

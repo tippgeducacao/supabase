@@ -1,7 +1,7 @@
 // 06/11/2026: captura opt-in do pedido efetivo, sem cabeçalhos, credenciais ou pensamento privado.
 // O corpo canônico permite repetir o ensaio; `enviado` mostra a tradução entregue ao provedor.
 export type RegistroModelo = {
-  tipo?: 'modelo' | 'ferramenta' | 'entrada';
+  tipo?: 'modelo' | 'ferramenta' | 'entrada' | 'etapa';
   pedido: Record<string, unknown>;
   enviado: Record<string, unknown>;
   resposta?: Record<string, unknown>;
@@ -12,6 +12,18 @@ export type RegistroModelo = {
 export type ObservadorModelo = (
   registro: RegistroModelo,
 ) => Promise<void> | void;
+
+// Diagnóstico não pode segurar uma trava nem atrasar a confirmação de um envio.
+// O banco pode continuar concluindo a gravação, mas o atendimento segue após o teto.
+async function comPrazoCaptura<T>(operacao: PromiseLike<T> | T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  try {
+    return await Promise.race([
+      Promise.resolve(operacao),
+      new Promise<never>((_, rejeitar) => { timer = setTimeout(() => rejeitar(new Error('prazo da captura')), 1500); }),
+    ]);
+  } finally { clearTimeout(timer!); }
+}
 
 export function semDadosPrivados<T>(valor: T): T {
   if (Array.isArray(valor))
@@ -54,10 +66,16 @@ export async function observarSemInterromper(
 ) {
   if (!observador) return;
   try {
-    await observador(semDadosPrivados(registro));
+    await comPrazoCaptura(observador(semDadosPrivados(registro)));
   } catch {
     console.log("[sdr] falha ao guardar captura de diagnóstico");
   }
+}
+
+/** Etapas do atendimento usam o mesmo opt-in, sanitização e retenção do pedido. */
+export function capturarEtapa(observador: ObservadorModelo | undefined, etapa: string, entrada: Record<string, unknown>, saida: Record<string, unknown>) {
+  return observarSemInterromper(observador, { tipo: 'etapa', provedor: 'sistema',
+    pedido: entrada, enviado: { etapa }, resposta: saida });
 }
 
 type BancoCaptura = {
@@ -86,11 +104,11 @@ export async function observadorDaRodada(
   mensagensEntrada: string[] = [],
 ): Promise<ObservadorModelo | undefined> {
   try {
-    const { data, error } = await banco
+    const { data, error } = await comPrazoCaptura(banco
       .from("crm_sdr_laboratorio_config")
       .select("capturar_ate")
       .eq("remotejid", remotejid)
-      .maybeSingle();
+      .maybeSingle());
     if (error || !data || Date.parse(data.capturar_ate) <= Date.now())
       return undefined;
     return async ({ pedido, enviado, resposta, provedor, erro, origens, tipo }) => {

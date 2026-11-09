@@ -100,7 +100,7 @@ import { contextoEspecialidadeCannabis } from './especialidadeCannabis.ts';
 import { rodarEsteiraFollowupTemplate } from './followup-template.ts';
 import { criarTelemetria, resumir, type Telemetria } from './eventos.ts';
 import { capturarEntradaAgente } from '../_shared/capturaEntradaSdr.ts';
-import { observadorDaRodada, observarSemInterromper, type ObservadorModelo } from './capturaModelo.ts';
+import { capturarEtapa, observadorDaRodada, observarSemInterromper, type ObservadorModelo } from './capturaModelo.ts';
 import { type AgenteRouter, carregarConfigRouterJev, type LeituraJev, leituraDoRouter, pedidoJevRouter, rotearComJev } from './routerJev.ts';
 import { blocoDaLeitura, carregarConfigLeituraJev, efeitosDaLeitura, leituraDasRespostas, lerLeadComJev, type LeituraLead, pedidoJevLeitura } from './leituraJev.ts';
 import { carregarModoTrocaNumero, carregarSinalTrocaDeNumero, comNotaNoContexto, comNotaParaRouter, notaTrocaDeNumero, resumoDoSinal, sinalInerte, type SinalTrocaDeNumero } from './trocaDeNumero.ts';
@@ -884,6 +884,14 @@ async function prepararRodada(remotejid: string, itensDoLote: any[], tel: Teleme
       .catch(() => null)
     : Promise.resolve(null);
   const observarRouter = await observadorDaRodada(supabase, remotejid, tel.rodadaId, 'router', pre.itens.map((i: any) => i.msg_id).filter(Boolean));
+  if (observarRouter) {
+    tel.capturarEtapa = (etapa, entrada, saida) => capturarEtapa(observarRouter, etapa, entrada, saida);
+    await tel.capturarEtapa('contexto_lead', {
+      nome: pre.lead?.nome ?? null, curso: pre.lead?.curso_interesse_original ?? null,
+      formacao: pre.lead?.formacao_academica ?? null,
+      origem: 'cliente_ppg_leads_sdr + ajustes registrados nesta rodada',
+    }, { variaveis_do_prompt: pre.vars, contexto_temporal: pre.contextoTemporal, persona: pre.persona });
+  }
   const decisao = pre.precisaRouter ? await rotearNoSistema(pre, provedor, registrarUsoRouter, observarRouter) : null;
   const depois = await definirAgente(pre, provedor, tel, decisao, true);
   const doUltimoCom = (campo: string): any =>
@@ -1514,10 +1522,14 @@ async function processarInbound(payload: any): Promise<void> {
   // execução visível se a mídia registrar algum nó (texto puro não gera nada) ou
   // se cair no catch — então não polui a lista com rodadas vazias.
   const telPrep = criarTelemetria(supabase, remotejid);
+  const observarPreparo = await observadorDaRodada(supabase, remotejid, telPrep.rodadaId, 'preparo', [payload.id].filter(Boolean));
   try {
     // Mídia é tratada ANTES do buffer (transcrição/análise), como no n8n.
     // ▸ 1. mídia → texto (transcrição do áudio pelo Gemini, descrição de imagem/documento).
     const tratada = await prepararMensagem(payload, telPrep);
+    await capturarEtapa(observarPreparo, 'normalizacao', {
+      tipo: payload.tipo, conteudo: payload.conteudo, quoted: payload.quoted ?? null,
+    }, tratada);
     // Clique de botão: guarda em qual mensagem foi (cliqueDeBotao.ts). Antes se perdia aqui.
     const clique = cliqueDoPayload(payload);
     await bufferInserir(remotejid, {
@@ -1532,7 +1544,12 @@ async function processarInbound(payload: any): Promise<void> {
     });
 
     // ▸ 2. trava: só uma execução por lead.
-    if (!(await lockClaim(remotejid))) return; // quem segura o lock drena o buffer
+    const ganhouLock = await lockClaim(remotejid);
+    await capturarEtapa(observarPreparo, 'buffer_entrada', { mensagem_id: payload.id, mensagem: tratada.mensagem }, {
+      depositada: true, lock_obtido: ganhouLock,
+      situacao: ganhouLock ? 'aguardando_acumulo' : 'aguardando_execucao_que_ja_possui_a_trava',
+    });
+    if (!ganhouLock) return; // quem segura o lock drena o buffer
 
     try {
       // 16/09/2026: telefone da allowlist de teste (crm_agente_sdr_config.teste_telefones) roda
@@ -1562,16 +1579,20 @@ async function processarInbound(payload: any): Promise<void> {
         }
         const itens = await bufferDrenar(remotejid);
         if (!itens.length) break;
+        telAtual = criarTelemetria(supabase, remotejid);
+        const observarLote = await observadorDaRodada(supabase, remotejid, telAtual.rodadaId, 'buffer', itens.map(i => i.msg_id).filter(Boolean));
+        await capturarEtapa(observarLote, 'buffer_lote', { espera_configurada_s: delaySegundos, espera_ms: esperouMs }, {
+          quantidade: itens.length, mensagens: itens.map(i => ({ id: i.msg_id, mensagem: i.mensagem })),
+        });
         // Pausou durante o debounce (45s)? Não gera nem responde esta leva — o lead
         // fica registrado no histórico mas a IA não fala (defesa em profundidade barata).
         if (audio.estado === 'pausado' || await iaPausada(remotejid)) {
           await persistirEntradasDoLote(supabase, remotejid, itens, true);
-          criarTelemetria(supabase, remotejid).registrar('envio_abortado_pausa', {
+          telAtual.registrar('envio_abortado_pausa', {
             onde: 'pos_debounce', mensagens_preservadas: itens.length,
           });
           break;
         }
-        telAtual = criarTelemetria(supabase, remotejid);
         if (delaySegundos > 0) {
           telAtual.registrar('debounce', { config_s: delaySegundos, mensagens_acumuladas: itens.length }, esperouMs);
         }
@@ -1588,6 +1609,7 @@ async function processarInbound(payload: any): Promise<void> {
         await registrarEntrada(supabase, remotejid, { msg_id: payload.id }, { pausaObservada: true });
       }
     } catch { console.error('[crm-agente-sdr] não foi possível preservar entrada durante pausa'); }
+    await capturarEtapa(observarPreparo, 'erro_processamento', { mensagem_id: payload.id }, { erro: 'Falha no processamento da entrada' });
     console.error(`[crm-agente-sdr] erro processando ${remotejid}:`, e);
     (telAtual ?? telPrep).registrar(
       'erro',

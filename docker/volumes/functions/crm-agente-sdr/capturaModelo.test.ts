@@ -19,6 +19,15 @@ describe('captura opt-in do João', () => {
   it('uma falha na gravação nunca muda a resposta do atendimento', async () => {
     await expect(observarSemInterromper(() => { throw new Error('banco fora'); }, { pedido: {}, enviado: {}, provedor: 'teste' })).resolves.toBeUndefined();
   });
+  it('uma gravação que não responde não segura o atendimento indefinidamente', async () => {
+    vi.useFakeTimers();
+    try {
+      const observar = vi.fn(() => new Promise<void>(() => {}));
+      const captura = observarSemInterromper(observar, { pedido: {}, enviado: {}, provedor: 'teste' });
+      await vi.advanceTimersByTimeAsync(1501);
+      await expect(captura).resolves.toBeUndefined();
+    } finally { vi.useRealTimers(); }
+  });
   it('não grava sem captura ativa; captura expirada não é renovada por uma mensagem', async () => {
     const inserir = vi.fn();
     const banco = { from: () => ({ select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { capturar_ate: '2020-01-01' } }) }) }), insert: inserir }) };

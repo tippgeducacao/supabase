@@ -5,6 +5,9 @@
 // deno-lint-ignore-file no-explicit-any
 export type Telemetria = {
   rodadaId: string;
+  // Só existe durante uma captura opt-in. Guarda o corpo integral, sem ampliar
+  // os eventos resumidos que a operação produz para todos os atendimentos.
+  capturarEtapa?: (etapa: string, entrada: Record<string, unknown>, saida: Record<string, unknown>) => Promise<void>;
   registrar: (tipo: string, dados?: Record<string, unknown>, duracaoMs?: number, erro?: string) => void;
 };
 

@@ -9,6 +9,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { CHUNKING_SYSTEM } from './prompts.ts';
 import type { CtxConversa } from './tools.ts';
+import type { Telemetria } from './eventos.ts';
 import { contemArtefatoAntml, contemAvaliacaoInterna } from './bastidorEditorial.ts';
 import { limparTagsDoCanal } from './canalResposta.ts';
 import { configurarVoz, conferirEstadoVoz, tentarEnviarVoz, type OpcoesVozSdr } from './envioVoz.ts';
@@ -502,7 +503,7 @@ export async function enviarResposta(
   ctx: CtxConversa,
   texto: string,
   renovarLock: () => Promise<void>,
-  tel?: { registrar: (tipo: string, dados?: Record<string, unknown>, duracaoMs?: number, erro?: string) => void },
+  tel?: Pick<Telemetria, 'registrar' | 'capturarEtapa'>,
   pausada?: () => Promise<boolean>,
   voz?: OpcoesVozSdr,
   modoFracionamento: ModoFracionamento = 'modelo',
@@ -572,6 +573,7 @@ export async function enviarResposta(
     }
   }
   const chunks = await fracionarResposta(textoLimpo, modoFracionamento);
+  await tel?.capturarEtapa?.('preparar_resposta', { texto: textoLimpo, metodo: modoFracionamento }, { mensagens: chunks });
   tel?.registrar('resposta_chunks', {
     total: chunks.length,
     metodo: modoFracionamento,
@@ -607,6 +609,7 @@ export async function enviarResposta(
       break;
     }
     const env = await enviarChunk(ctx, chunk, Boolean(plano || abertura));
+    await tel?.capturarEtapa?.('envio_whatsapp', { texto: chunk, delay_s: delay }, { ok: env.ok, status: env.status, desconhecido: env.desconhecido === true });
     if (env.ok) {
       enviados++;
       if (enviados === 1) {
