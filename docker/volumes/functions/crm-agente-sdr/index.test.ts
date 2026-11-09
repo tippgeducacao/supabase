@@ -534,24 +534,17 @@ describe('SDR: texto de ferramenta nunca vira despedida', () => {
     expect(JSON.stringify(fronteiras.registrar.mock.calls)).not.toContain('CIFRADO_NAO_PERSISTIR');
   });
 
-  it.each([false, true])('Luna fora do ar: sem Claude de reserva, sai o texto operacional respeitando pausa=%s', async (pausar) => {
+  it('Luna fora do ar: sem Claude de reserva e sem mensagem ao lead (09/11/2026)', async () => {
     fronteiras.vozAtiva = true;
     fronteiras.lunaTelefones = [payload.telefone];
     fronteiras.provedorOpenai.mockReturnValue(luna);
-    fronteiras.chamarPrincipal.mockImplementationOnce(async () => { fronteiras.pausaNoDebounce = pausar; throw new Error('OpenAI: HTTP 429'); });
+    fronteiras.chamarPrincipal.mockRejectedValueOnce(new Error('OpenAI: HTTP 429'));
     await chamar({ agente_ia_persona: 'recontato', wa_account_id: 'conta-sintetica' });
     expect(fronteiras.chamarPrincipal).toHaveBeenCalledOnce();
     expect(fronteiras.registrar.mock.calls.some(([tipo]) => tipo === 'provedor_ia_fallback')).toBe(false);
     expect(fronteiras.executar).not.toHaveBeenCalled();
-    if (pausar) expect(fronteiras.enviar).not.toHaveBeenCalled();
-    else {
-      expect(fronteiras.enviar).toHaveBeenCalledOnce();
-      const envio = fronteiras.enviar.mock.calls[0];
-      expect(envio[1]).toBe('não consegui concluir sua resposta agora. pode tentar novamente em instantes?');
-      expect(envio[5]).toMatchObject({ provedorResposta: 'anthropic' });
-      expect(envio[6]).toBe('codigo');
-    }
-    expect(fronteiras.registrar).toHaveBeenCalledWith('modelo_indisponivel', expect.objectContaining({ resposta_operacional: true }));
+    expect(fronteiras.enviar).not.toHaveBeenCalled();
+    expect(fronteiras.registrar).toHaveBeenCalledWith('modelo_indisponivel', expect.objectContaining({ provedor: 'openai', motivo: 'OpenAI: HTTP 429' }));
   });
 
   it('canário da Luna usa o debounce DELE, não o zero do telefone de teste nem os 45 s da produção', async () => {

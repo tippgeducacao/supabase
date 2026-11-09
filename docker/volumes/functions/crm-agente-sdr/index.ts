@@ -94,7 +94,6 @@ import { aplicarInscricaoPendente, notaDaInscricao } from './inscricaoNova.ts';
 import { corrigirLinksConhecidos } from './linksConhecidos.ts';
 import { contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from './contextoAulaPiloto.ts';
 import { ehAcaoV9, rotaV9 } from './rotasV9.ts';
-import { RESPOSTA_MODELO_INDISPONIVEL } from './prazoModelo.ts';
 import { contaDoLead, dadosDaConta, personaDaConta } from './conta.ts';
 import { rodarEsteiraFollowup } from './followup.ts';
 import { contextoEspecialidadeCannabis } from './especialidadeCannabis.ts';
@@ -915,8 +914,7 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
   const renovar = lockRenovar(remotejid);
   // 22/09/2026: candidato local, só no agente novo (Luna ou o Claude do piloto, 14/10/2026).
   // Consulta o provedor na HORA da saída: fallback para o Claude de reserva conserva o legado.
-  let respostaOperacional = false;
-  const fracionamentoAtual = () => respostaOperacional || (ctx.ficha && provedor !== null)
+  const fracionamentoAtual = () => (ctx.ficha && provedor !== null)
     ? 'codigo' as const : 'modelo' as const;
 
   // ▸ Regras de encerramento e instruções pós-pausa/retorno: regrasDaRodada.ts (o motor por passos usa as mesmas).
@@ -1186,22 +1184,18 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
       // só redige a pergunta/resposta; não repete cinco consultas sem saldo.
       tools: encerrouPorTool || (ctx.ficha && (ctx.compatibilidadeIndisponivel || ctx.perguntaFormacaoPendente)) ? [] : tools,
     };
-    // ▸ Chama a IA (agente.ts). Se ela falhar, sai uma frase operacional ("não consegui concluir agora…").
+    // ▸ Chama a IA (agente.ts). Se ela falhar, a rodada termina sem mensagem ao lead.
     let resp: any;
     try {
       resp = await chamarAgentePrincipal({ ...pedidoPrincipal, provedor, observarModelo });
     } catch (e) {
       // Sem reserva no Claude desde 09/11/2026: em 08/11 a OpenAI devolveu 429 por 3 h, cada volta
       // foi refeita no Claude e o saldo da Anthropic acabou (deixando sem IA tudo o que usa Claude).
-      // A frase operacional segue as guardas normais de pausa/aceite, sem outra IA, sem áudio e sem
-      // afirmar que tools ou agendamento deram certo.
-      if (!ctx.ficha) throw e;
-      tel.registrar('modelo_indisponivel', { volta: rodada + 1, resposta_operacional: true,
-        provedor: provedor?.nome ?? 'anthropic', motivo: String((e as Error)?.message ?? e).slice(0, 500) });
-      provedor = null;
-      respostaOperacional = true;
-      resp = { content: [{ type: 'text', text: RESPOSTA_MODELO_INDISPONIVEL }], stop_reason: 'end_turn',
-        origem: 'indisponibilidade_modelo', usage: { input_tokens: 0, output_tokens: 0 } };
+      // Sem frase de "não consegui concluir" também (09/11/2026, pedido do Gustavo: 50 leads a
+      // receberam em 08/11): a rodada termina com erro e nada vai ao lead.
+      tel.registrar('modelo_indisponivel', { volta: rodada + 1, provedor: provedor?.nome ?? 'anthropic',
+        motivo: String((e as Error)?.message ?? e).slice(0, 500) });
+      throw e;
     }
     // ▸ NÓ 11 · registra o que a IA respondeu nesta volta (é a linha "IA" na tela de Debug).
     // OUTPUT da IA (não o prompt): o que o modelo gerou nesta volta — raciocínio

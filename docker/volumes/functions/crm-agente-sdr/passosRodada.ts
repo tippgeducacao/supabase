@@ -37,7 +37,7 @@ import { blocoPerguntasRecentes, falasDoLead } from './perguntasRecentes.ts';
 import { alertaFatoSemFonte } from './fatoSemFonte.ts';
 import { alertaSaudacao, garantirSaudacao } from './saudacao.ts';
 import { INSTRUCAO_AULA_PILOTO } from './contextoAulaPiloto.ts';
-import { PRAZO_MODELO_PILOTO_MS, RESPOSTA_MODELO_INDISPONIVEL } from './prazoModelo.ts';
+import { PRAZO_MODELO_PILOTO_MS } from './prazoModelo.ts';
 import { AVISO_CONSULTA_REPETIDA, MemoriaDeConsultas } from './consultaRepetida.ts';
 import { posExclusivaDaConversa, posReprovadaDaConversa, respostaDoEncerramento, toolConcluida, type Encerramento } from './encerramento.ts';
 import { confirmacaoDoResultado, falaEntregaConfirmacao, textoConfirmacaoAgendamento, type ConfirmacaoAgendamento } from './confirmacaoAgendamento.ts';
@@ -381,16 +381,13 @@ export async function montarVolta(deps: DepsPassos, e: EstadoRodada): Promise<Sa
   return { acao: 'chamar_ia', estado: e, pecas: pecasDoPedido(deps, e, base.opts) };
 }
 
-/** O Claude de reserva (a Luna falhou nesta rodada); se ele também falhar, a frase operacional. */
+/** O Claude, quando a Luna não está ativa. Falhou ⇒ erro, sem mensagem ao lead (09/11/2026). */
 async function chamarClaude(deps: DepsPassos, e: EstadoRodada, ctx: CtxConversa, base: BaseDaVolta): Promise<any> {
   try {
     return await chamarAgentePrincipal({ ...base.opts, provedor: null, ...(ctx.ficha ? { prazoModeloMs: PRAZO_MODELO_PILOTO_MS } : {}) });
   } catch (err) {
-    if (!ctx.ficha) throw err;
-    e.respostaOperacional = true;
-    deps.tel.registrar('modelo_indisponivel', { volta: e.volta, resposta_operacional: true });
-    return { content: [{ type: 'text', text: RESPOSTA_MODELO_INDISPONIVEL }], stop_reason: 'end_turn',
-      origem: 'indisponibilidade_modelo', usage: { input_tokens: 0, output_tokens: 0 } };
+    deps.tel.registrar('modelo_indisponivel', { volta: e.volta, provedor: 'anthropic', motivo: String((err as Error)?.message ?? err).slice(0, 500) });
+    throw err;
   }
 }
 
