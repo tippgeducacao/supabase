@@ -99,6 +99,14 @@ export function classificarVisita(entrada: { u?: unknown; r?: unknown } | null |
   const host = pagina.hostname.toLowerCase().replace(/\.$/, "").replace(/^www\./, "");
   if (!hostDaPpg(host)) return null;
 
+  // ⚠️ NAVEGAÇÃO INTERNA não é visita nova (10/11/2026). O utm_source=chatgpt.com segue na URL quando a pessoa passa da
+  // LP para a página de obrigado (o GreatPages repassa a query) ou para outra página do site, e o aviso do navegador é
+  // "uma vez por PÁGINA" por sessão: cada lead que se cadastrava contava DUAS visitas (LP + obrigado) — em 07/11, o
+  // único lead do ChatGPT da semana virou 2 visitas (/pos-saude-unica e /saude-unica-obg). Quem chega de fora tem
+  // referrer do ChatGPT, de outro site ou nenhum; referrer de um site da PPG é a mesma pessoa andando pelo site.
+  const anterior = urlSegura(entrada?.r);
+  if (anterior && hostDaPpg(anterior.hostname.toLowerCase().replace(/\.$/, "").replace(/^www\./, ""))) return null;
+
   const source = limpo(pagina.searchParams.get("utm_source"));
   const medium = limpo(pagina.searchParams.get("utm_medium"));
 

@@ -54,6 +54,19 @@ describe("classificarVisita — o que é visita vinda do ChatGPT", () => {
     expect(visita("https://ppgvet.com.br/poa?utm_source=chatgpt.com", "https://chatgpt.com/")?.via).toBe("utm");
   });
 
+  it("navegação dentro do site não é visita nova (o caso real de 07/11: LP → página de obrigado)", () => {
+    // a LP conta (veio do ChatGPT, ou sem referrer — o app do ChatGPT às vezes não manda)
+    expect(visita("https://www.ppgvet.com.br/pos-saude-unica?utm_source=chatgpt.com", "https://chatgpt.com/")).not.toBeNull();
+    expect(visita("https://www.ppgvet.com.br/pos-saude-unica?utm_source=chatgpt.com")).not.toBeNull();
+    // o obrigado herda a marca na URL, mas veio da própria LP: não soma
+    expect(visita("https://www.ppgvet.com.br/saude-unica-obg?utm_source=chatgpt.com", "https://www.ppgvet.com.br/pos-saude-unica?utm_source=chatgpt.com")).toBeNull();
+    // referrer só com a origem (política do navegador), sem www., ou de outro site da PPG: idem
+    expect(visita("https://www.ppgvet.com.br/cronograma-poa?utm_source=chatgpt.com", "https://ppgvet.com.br/")).toBeNull();
+    expect(visita("https://www.ppgvet.com.br/poa?utm_source=openai", "https://escoladeespecializacao.ppgvet.com.br/x")).toBeNull();
+    // referrer de outro site que não é da PPG não é navegação interna
+    expect(visita("https://www.ppgvet.com.br/poa?utm_source=chatgpt.com", "https://www.bing.com/")).not.toBeNull();
+  });
+
   it("referrer que só PARECE ChatGPT não conta", () => {
     for (const r of ["https://notchatgpt.com/", "https://evil.com/chatgpt.com", "https://chatgpt.com.evil.com/", "http://chatgpt.com/"]) {
       expect(visita("https://ppgvet.com.br/poa", r), r).toBeNull();
