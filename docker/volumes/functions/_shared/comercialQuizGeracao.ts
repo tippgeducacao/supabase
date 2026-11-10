@@ -13,7 +13,10 @@ export const MIN_FICHA_CHARS = 3_000;
 /** Rodada "gerando" mais velha que isso morreu no meio (deploy, queda) e pode ser retomada. */
 export const TRAVA_MINUTOS = 15;
 
-export const CATEGORIAS = ["Produto", "Módulos", "Professores", "Dores", "Script", "Fechamento"] as const;
+/** A certa pode ser no máximo 15% maior que a maior errada. */
+export const FOLGA_TAMANHO_CERTA = 1.15;
+
+export const CATEGORIAS =["Produto", "Módulos", "Professores", "Dores", "Script", "Fechamento"] as const;
 export type Categoria = (typeof CATEGORIAS)[number];
 
 export type StatusGeracao = "gerando" | "parcial" | "pronto" | "sem_conteudo" | "erro";
@@ -133,6 +136,10 @@ export function normalizarQuestoes(
     if (opcoes.length !== 4 || opcoes.some((o) => !o)) continue;
     if (new Set(opcoes.map(normalizarTexto)).size !== 4) continue;
     if (!Number.isInteger(q.correta) || q.correta < 0 || q.correta > 3) continue;
+    // Certa visivelmente mais longa que todas as erradas = acerta-se no chute "pela maior"
+    // (1º lote de 10/11: 9 de 41 passavam de 15%, mesmo com o prompt pedindo tamanhos iguais).
+    const maiorErrada = Math.max(...opcoes.filter((_, i) => i !== q.correta).map((o) => o.length));
+    if (opcoes[q.correta].length > maiorErrada * FOLGA_TAMANHO_CERTA) continue;
     const chave = normalizarTexto(pergunta);
     if (vistas.has(chave)) continue;
     vistas.add(chave);

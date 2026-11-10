@@ -99,6 +99,12 @@ describe("normalizarQuestoes", () => {
     expect(r).toHaveLength(1);
     expect(r[0].category).toBe("Produto");
   });
+  it("descarta quando a certa é bem mais longa que todas as erradas (chute pela maior)", () => {
+    const longa = { ...boa, opcoes: ["Uma resposta bem mais comprida e detalhada", "Curta um", "Curta dois", "Curta três"] };
+    expect(normalizarQuestoes([longa], [], semMistura)).toHaveLength(0);
+    const parelha = { ...boa, opcoes: ["Resposta de tamanho igual A", "Resposta de tamanho igual B", "Resposta de tamanho igual C", "Resposta de tamanho igual D"] };
+    expect(normalizarQuestoes([parelha], [], semMistura)).toHaveLength(1);
+  });
 });
 
 describe("aprovadasNaCega", () => {
