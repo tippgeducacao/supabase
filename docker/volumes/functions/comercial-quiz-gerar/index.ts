@@ -1,29 +1,36 @@
 // comercial-quiz-gerar — quiz dos Materiais de Venda gerado sozinho para pós nova (10/11/2026).
 //
 // Pedido do usuário: "quando uma pós nova é postada o quiz seja feito e apareça lá".
+// Régua de 10/11 (tarde): banco de 150 objetivas + 20 descritivas por pós, tentativa = 35 + 5,
+// para TODAS as pós — inclusive os quizzes feitos à mão, que a edge só COMPLETA (nunca altera
+// nem desliga pergunta existente, nunca mexe no `ativo` deles).
 // Cada chamada roda UM lote numa pós:
-//   1. escolhe a pós (card ativo em comercial_cursos + ficha em comercial_programa_data + sem
-//      quiz feito à mão) — regras em _shared/comercialQuizGeracao.ts;
+//   1. escolhe a pós (card ativo em comercial_cursos, ou quiz já existente, + ficha em
+//      comercial_programa_data) — regras em _shared/comercialQuizGeracao.ts;
 //   2. monta o material: a ficha de venda, o script (se houver) e, do Pedagógico, as aulas e os
 //      professores da pós. Ficha curta demais = "sem_conteudo" (a IA inventaria) e espera;
-//   3. a IA escreve até 20 perguntas de múltipla escolha SÓ com o que está no material;
-//   4. conferência ÀS CEGAS: outra chamada responde cada pergunta sem o gabarito, só com o
-//      material; fica só a que ela acertou (método que mais achou erro na Academy, 05/10);
-//   5. grava (gerada_por_ia = true); com 40 a aba "Quiz" liga; para em 100.
+//   3. decide o tipo do lote (proximoTipo): objetivas até 35, depois as 20 descritivas, depois
+//      as objetivas até 150;
+//   4. objetivas: a IA escreve até 20 SÓ com o que está no material; conferência ÀS CEGAS
+//      (outra chamada responde sem o gabarito; fica só a que ela acertou — método que mais
+//      achou erro na Academy, 05/10);
+//      descritivas: a IA escreve pergunta + resposta esperada; um JUIZ confere se tudo que a
+//      resposta esperada afirma está no material; fica só a aprovada;
+//   5. grava (gerada_por_ia = true); quiz novo liga a aba com 35 + 5.
 //
 // Portas: cron de 10 em 10 min (segredo do Vault no cabeçalho x-comercial-quiz-cron-secret —
 // a chave de serviço do banco NÃO é a do runtime, ver docs/SECURITY.md 14/10) ou admin
 // comercial logado (is_comercial_admin), que pode mandar { program_id } para forçar uma pós.
-// Nunca mexe em quiz de origem 'manual' (os 16 de 28/09).
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { corsHeaders } from "../_shared/cors.ts";
 import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 import {
-  CATEGORIAS, MAX_LOTES, MIN_FICHA_CHARS, TRAVA_MINUTOS,
-  aprovadasNaCega, escolherPrograma, estadoDepoisDoLote, fichaSemVisual, motivoParaPular,
-  normalizarQuestoes, tamanhoDoLote,
-  type Candidato, type ConfigQuiz, type QuestaoIA, type QuestaoPronta,
+  ALVO_DESC, ALVO_MC, CATEGORIAS, MAX_LOTES, MIN_FICHA_CHARS, TRAVA_MINUTOS,
+  aprovadasNaCega, aprovadasNoJuiz, escolherPrograma, estadoDepoisDoLote, fichaSemVisual,
+  motivoParaPular, normalizarDescritivas, normalizarQuestoes, proximoTipo, tamanhoDoLote,
+  type Candidato, type ConfigQuiz, type DescritivaIA, type DescritivaPronta, type QuestaoIA,
+  type QuestaoPronta,
 } from "../_shared/comercialQuizGeracao.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -178,6 +185,72 @@ const SISTEMA_CEGA =
   "devolva a letra da alternativa correta. Devolva 'nenhuma' quando o material não sustentar " +
   "nenhuma alternativa OU quando mais de uma alternativa for defensável pelo material.";
 
+const SCHEMA_GERAR_DESC = {
+  type: "object",
+  properties: {
+    questoes: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          pergunta: { type: "string" },
+          resposta_esperada: { type: "string" },
+          categoria: { type: "string", enum: [...CATEGORIAS] },
+        },
+        required: ["pergunta", "resposta_esperada", "categoria"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["questoes"],
+  additionalProperties: false,
+};
+
+const SCHEMA_JUIZ = {
+  type: "object",
+  properties: {
+    vereditos: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: { n: { type: "integer" }, aprovada: { type: "boolean" }, motivo: { type: "string" } },
+        required: ["n", "aprovada", "motivo"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["vereditos"],
+  additionalProperties: false,
+};
+
+const SISTEMA_GERAR_DESC =
+  "Você escreve as perguntas DESCRITIVAS do quiz de treinamento dos VENDEDORES (SDRs e closers) " +
+  "da PPGVet, empresa de pós-graduação para médicos-veterinários, zootecnistas, agrônomos e " +
+  "profissionais do agro. O vendedor responde por escrito e o líder corrige usando a " +
+  "'resposta_esperada'.\n\n" +
+  "Regras:\n" +
+  "- Português do Brasil, claro e direto.\n" +
+  "- Situação real de venda: 'O lead diz X. Descreva como você…', 'Explique, com suas palavras, " +
+  "por que…', 'Como você conduziria…'. Nada de decoreba (isso é papel das objetivas).\n" +
+  "- Use SÓ fatos que estão no MATERIAL. Nunca invente número, preço, duração, nome, título, " +
+  "data ou instituição.\n" +
+  "- 'resposta_esperada': o que uma boa resposta PRECISA conter, em itens concretos tirados do " +
+  "material (módulo, professor, argumento, pergunta do SPIN), mais a conduta consultiva e ética " +
+  "(perguntar em vez de afirmar pelo lead, nunca prometer o que o material não promete, sem " +
+  "pressão nem escassez encenada). 2 a 6 frases.\n" +
+  "- 'categoria': Produto, Módulos, Professores, Dores, Script (abordagem/SPIN) ou Fechamento " +
+  "(objeções, argumentos). Use Script/Fechamento só se o material tiver abordagem, SPIN, " +
+  "objeções ou argumentos.\n" +
+  "- Cubra pontos diferentes do material, sem repetir nem reescrever pergunta que já existe.";
+
+const SISTEMA_JUIZ =
+  "Você é o coordenador comercial revisando perguntas descritivas de um quiz de vendedores. " +
+  "Para cada pergunta, leia a 'resposta esperada' e confira contra o MATERIAL (não use " +
+  "conhecimento de fora). Aprove (aprovada=true) só se: (1) TUDO o que a resposta esperada " +
+  "afirma como fato (números, nomes, módulos, datas, preços, promessas) está no material; (2) um " +
+  "vendedor que estudou o material consegue responder; (3) a conduta pedida é ética e " +
+  "consultiva. Caso contrário, aprovada=false. 'motivo' em uma frase curta.";
+
 type Professor = {
   nome: string;
   titulacao: string | null;
@@ -244,11 +317,12 @@ async function montarMaterial(
   return { texto: partes.join("\n\n").slice(0, MAX_MATERIAL_CHARS), fichaChars };
 }
 
-async function contarAtivas(db: Db, programId: string): Promise<number> {
+async function contarAtivas(db: Db, programId: string, tipo: string): Promise<number> {
   const { count, error } = await db
     .from("comercial_quiz_perguntas")
     .select("id", { count: "exact", head: true })
     .eq("program_id", programId)
+    .eq("type", tipo)
     .eq("ativa", true);
   if (error) throw error;
   return count ?? 0;
@@ -280,30 +354,36 @@ Deno.serve(async (req) => {
   let travado: string | null = null;
 
   try {
-    // 1. Candidatas: card ativo + ficha com program.id.
+    // 1. Candidatas: ficha com program.id + (card ativo OU quiz que já existe — o "bea" de 28/09
+    //    tem ficha cujo slug não bate com card nenhum e mesmo assim aparece no Portal).
     const { data: cursos, error: eCursos } = await db
       .from("comercial_cursos").select("slug, nome, curso_id").eq("ativo", true);
     if (eCursos) throw eCursos;
     const porSlug = new Map((cursos ?? []).map((c: { slug: string; nome: string; curso_id: string | null }) => [c.slug, c]));
-    const { data: fichas, error: eFichas } = await db
-      .from("comercial_programa_data").select("slug, program, script, updated_at")
-      .in("slug", [...porSlug.keys()]);
-    if (eFichas) throw eFichas;
     const { data: configs, error: eCfg } = await db.from("comercial_quiz_config").select("*");
     if (eCfg) throw eCfg;
     const cfgPorId = new Map((configs ?? []).map((c: ConfigQuiz & { program_id: string }) => [c.program_id, c]));
+    const { data: fichasTodas, error: eFichas } = await db
+      .from("comercial_programa_data").select("slug, program, script, updated_at");
+    if (eFichas) throw eFichas;
+    // Ficha de card ativo primeiro: com program.id repetido, ela ganha.
+    // deno-lint-ignore no-explicit-any
+    const fichas = ((fichasTodas ?? []) as any[])
+      .filter((f) => porSlug.has(f.slug) || cfgPorId.has(String(f.program?.id ?? "").trim()))
+      .sort((a, b) => Number(porSlug.has(b.slug)) - Number(porSlug.has(a.slug)));
 
     // deno-lint-ignore no-explicit-any
     const fichaPorId = new Map<string, any>();
     const cands: Candidato[] = [];
-    for (const f of fichas ?? []) {
+    for (const f of fichas) {
       const pid = typeof f.program?.id === "string" ? f.program.id.trim() : "";
       if (!pid || fichaPorId.has(pid)) continue;
       fichaPorId.set(pid, f);
+      const tituloQuiz = (cfgPorId.get(pid) as { title?: string } | undefined)?.title?.replace(/^Quiz\s*[—-]\s*/, "");
       cands.push({
         programId: pid,
         slug: f.slug,
-        nome: porSlug.get(f.slug)?.nome ?? f.slug,
+        nome: porSlug.get(f.slug)?.nome ?? tituloQuiz ?? f.slug,
         fichaAtualizadaEm: f.updated_at,
         config: (cfgPorId.get(pid) as ConfigQuiz | undefined) ?? null,
       });
@@ -312,7 +392,7 @@ Deno.serve(async (req) => {
     let alvo: Candidato | null;
     if (pedido) {
       alvo = cands.find((c) => c.programId === pedido || c.slug === pedido) ?? null;
-      if (!alvo) return json({ ok: false, error: "Pós não encontrada (card ativo com ficha de venda)." }, 404);
+      if (!alvo) return json({ ok: false, error: "Pós não encontrada (card ativo ou quiz existente, com ficha de venda)." }, 404);
       const motivo = motivoParaPular(alvo, agora, true);
       if (motivo) return json({ ok: true, pulado: motivo, program_id: alvo.programId });
     } else {
@@ -320,7 +400,7 @@ Deno.serve(async (req) => {
       if (!alvo) return json({ ok: true, nada_a_fazer: true });
     }
 
-    // 2. Trava (cria a config na 1ª vez, desligada; a aba só liga com 40).
+    // 2. Trava (cria a config na 1ª vez, desligada; a aba só liga com 35 + 5).
     const pid = alvo.programId;
     const ficha = fichaPorId.get(pid);
     const agoraIso = agora.toISOString();
@@ -348,7 +428,6 @@ Deno.serve(async (req) => {
           ...(zerarLotes ? { geracao_lotes: 0 } : {}),
         })
         .eq("program_id", pid)
-        .eq("origem", "automatico")
         .or(`geracao_status.neq.gerando,geracao_tentada_em.lt.${limite}`)
         .select("program_id");
       if (error) throw error;
@@ -371,73 +450,111 @@ Deno.serve(async (req) => {
       return json({ ok: true, program_id: pid, status: "sem_conteudo", ficha_chars: fichaChars });
     }
 
-    // 4. Perguntas que já existem (ativas ou não) — para não repetir.
+    // 4. Perguntas que já existem (ativas ou não) — para não repetir — e o tipo do lote.
     const { data: exist, error: eExist } = await db
-      .from("comercial_quiz_perguntas").select("question, category, ordem, ativa").eq("program_id", pid);
+      .from("comercial_quiz_perguntas").select("question, category, ordem, ativa, type").eq("program_id", pid);
     if (eExist) throw eExist;
-    const existentes = (exist ?? []) as { question: string; category: string; ordem: number; ativa: boolean }[];
-    const ativasAntes = existentes.filter((e) => e.ativa).length;
+    const existentes = (exist ?? []) as { question: string; category: string; ordem: number; ativa: boolean; type: string }[];
+    const mcAntes = existentes.filter((e) => e.ativa && e.type === "multiple-choice").length;
+    const descAntes = existentes.filter((e) => e.ativa && e.type === "descriptive").length;
+    const tipo = proximoTipo(mcAntes, descAntes);
+    const manual = alvo.config?.origem === "manual";
+    if (!tipo) {
+      await db.from("comercial_quiz_config").update({ geracao_status: "pronto", geracao_erro: null }).eq("program_id", pid);
+      travado = null;
+      return json({ ok: true, program_id: pid, status: "pronto", objetivas: mcAntes, descritivas: descAntes });
+    }
+    const descritiva = tipo === "descriptive";
+    const doTipo = existentes.filter((e) => e.type === tipo);
     const porCategoria: Record<string, number> = {};
-    for (const e of existentes) if (e.ativa) porCategoria[e.category] = (porCategoria[e.category] ?? 0) + 1;
-    const quantas = tamanhoDoLote(ativasAntes);
-
-    const apiKey = await chaveAnthropic(db);
+    for (const e of doTipo) if (e.ativa) porCategoria[e.category] = (porCategoria[e.category] ?? 0) + 1;
+    const quantas = tamanhoDoLote(tipo, descritiva ? descAntes : mcAntes);
     const pedidoGerar =
       `# MATERIAL\n${material}\n\n` +
-      (existentes.length
-        ? `# Perguntas que JÁ existem (não repita nem reescreva)\n${existentes.map((e) => `- ${e.question}`).join("\n")}\n\n` +
+      (doTipo.length
+        ? `# Perguntas ${descritiva ? "descritivas" : "objetivas"} que JÁ existem (não repita nem reescreva)\n` +
+          `${doTipo.map((e) => `- ${e.question}`).join("\n")}\n\n` +
           `Já há por categoria: ${JSON.stringify(porCategoria)}. Equilibre puxando para as categorias com menos.\n\n`
         : "") +
-      `Escreva ${quantas} perguntas novas.`;
-    const gerado = (await chamarIA(apiKey, SISTEMA_GERAR, pedidoGerar, SCHEMA_GERAR, "medium", 16000, 170_000)) as {
-      questoes: QuestaoIA[];
-    };
-    const novas: QuestaoPronta[] = normalizarQuestoes(gerado?.questoes ?? [], existentes.map((e) => e.question), embaralhar);
+      `Escreva ${quantas} perguntas ${descritiva ? "descritivas " : ""}novas.`;
 
-    // 5. Conferência às cegas.
-    let aprovadas: QuestaoPronta[] = [];
+    const apiKey = await chaveAnthropic(db);
+    let validas = 0;
     let reprovadas = 0;
-    if (novas.length) {
-      const prova = novas
-        .map((q, i) => `${i + 1}. ${q.question}\n${q.options.map((o) => `   ${o.id}) ${o.text}`).join("\n")}`)
-        .join("\n\n");
-      const cega = (await chamarIA(
-        apiKey, SISTEMA_CEGA, `# MATERIAL\n${material}\n\n# PROVA\n${prova}`, SCHEMA_CEGA, "low", 4000, 90_000,
-      )) as { respostas: { n: number; alternativa: string }[] };
-      ({ aprovadas, reprovadas } = aprovadasNaCega(novas, cega?.respostas ?? []));
+    let linhas: Record<string, unknown>[] = [];
+
+    if (!descritiva) {
+      const gerado = (await chamarIA(apiKey, SISTEMA_GERAR, pedidoGerar, SCHEMA_GERAR, "medium", 16000, 170_000)) as {
+        questoes: QuestaoIA[];
+      };
+      const novas: QuestaoPronta[] = normalizarQuestoes(gerado?.questoes ?? [], doTipo.map((e) => e.question), embaralhar);
+      validas = novas.length;
+
+      // 5. Conferência às cegas.
+      let aprovadas: QuestaoPronta[] = [];
+      if (novas.length) {
+        const prova = novas
+          .map((q, i) => `${i + 1}. ${q.question}\n${q.options.map((o) => `   ${o.id}) ${o.text}`).join("\n")}`)
+          .join("\n\n");
+        const cega = (await chamarIA(
+          apiKey, SISTEMA_CEGA, `# MATERIAL\n${material}\n\n# PROVA\n${prova}`, SCHEMA_CEGA, "low", 4000, 90_000,
+        )) as { respostas: { n: number; alternativa: string }[] };
+        ({ aprovadas, reprovadas } = aprovadasNaCega(novas, cega?.respostas ?? []));
+      }
+      linhas = aprovadas.slice(0, Math.max(0, ALVO_MC - mcAntes)).map((q) => ({
+        type: "multiple-choice",
+        question: q.question,
+        category: q.category,
+        options: q.options,
+        correct_option_id: q.correct_option_id,
+        explanation: q.explanation || null,
+      }));
+    } else {
+      const gerado = (await chamarIA(apiKey, SISTEMA_GERAR_DESC, pedidoGerar, SCHEMA_GERAR_DESC, "medium", 16000, 170_000)) as {
+        questoes: DescritivaIA[];
+      };
+      const novas: DescritivaPronta[] = normalizarDescritivas(gerado?.questoes ?? [], doTipo.map((e) => e.question));
+      validas = novas.length;
+
+      // 5. Juiz: tudo que a resposta esperada afirma está no material?
+      let aprovadas: DescritivaPronta[] = [];
+      if (novas.length) {
+        const lista = novas
+          .map((q, i) => `${i + 1}. PERGUNTA: ${q.question}\n   RESPOSTA ESPERADA: ${q.guideline}`)
+          .join("\n\n");
+        const juiz = (await chamarIA(
+          apiKey, SISTEMA_JUIZ, `# MATERIAL\n${material}\n\n# PERGUNTAS\n${lista}`, SCHEMA_JUIZ, "low", 6000, 90_000,
+        )) as { vereditos: { n: number; aprovada: boolean }[] };
+        ({ aprovadas, reprovadas } = aprovadasNoJuiz(novas, juiz?.vereditos ?? []));
+      }
+      linhas = aprovadas.slice(0, Math.max(0, ALVO_DESC - descAntes)).map((q) => ({
+        type: "descriptive",
+        question: q.question,
+        category: q.category,
+        guideline: q.guideline,
+      }));
     }
 
-    // 6. Grava (sem passar de 100).
-    const cabem = Math.max(0, 100 - ativasAntes);
-    const gravar = aprovadas.slice(0, cabem);
+    // 6. Grava (sem passar do alvo do tipo).
     let ordem = existentes.reduce((m, e) => Math.max(m, e.ordem ?? 0), 0);
-    if (gravar.length) {
+    if (linhas.length) {
       const { error } = await db.from("comercial_quiz_perguntas").insert(
-        gravar.map((q) => ({
-          program_id: pid,
-          type: "multiple-choice",
-          question: q.question,
-          category: q.category,
-          options: q.options,
-          correct_option_id: q.correct_option_id,
-          explanation: q.explanation || null,
-          ativa: true,
-          ordem: ++ordem,
-          gerada_por_ia: true,
-        })),
+        linhas.map((l) => ({ ...l, program_id: pid, ativa: true, ordem: ++ordem, gerada_por_ia: true })),
       );
       if (error) throw error;
     }
 
-    // 7. Estado novo (liga a aba com 40).
-    const ativas = await contarAtivas(db, pid);
+    // 7. Estado novo. Quiz novo liga a aba com 35 + 5; no quiz feito à mão o `ativo` é do admin.
+    const mc = await contarAtivas(db, pid, "multiple-choice");
+    const desc = await contarAtivas(db, pid, "descriptive");
     const lotes = (alvo.config?.geracao_lotes ?? 0) + 1;
-    const est = estadoDepoisDoLote(ativas, lotes, alvo.config?.ativado_auto_em ?? null);
+    const est = estadoDepoisDoLote(mc, desc, lotes, alvo.config?.ativado_auto_em ?? null);
+    const ligar = est.ligar && !manual;
     const { error: eFim } = await db.from("comercial_quiz_config").update({
       geracao_status: est.status,
       geracao_erro: est.erro,
       geracao_lotes: lotes,
-      ...(est.ligar ? { ativo: true, ativado_auto_em: new Date().toISOString() } : {}),
+      ...(ligar ? { ativo: true, ativado_auto_em: new Date().toISOString() } : {}),
     }).eq("program_id", pid);
     if (eFim) throw eFim;
     travado = null;
@@ -445,13 +562,15 @@ Deno.serve(async (req) => {
     return json({
       ok: true,
       program_id: pid,
+      tipo,
       pedidas: quantas,
-      validas: novas.length,
-      reprovadas_na_cega: reprovadas,
-      gravadas: gravar.length,
-      ativas,
+      validas,
+      reprovadas_na_conferencia: reprovadas,
+      gravadas: linhas.length,
+      objetivas: mc,
+      descritivas: desc,
       status: est.status,
-      aba_ligada_agora: est.ligar,
+      aba_ligada_agora: ligar,
     });
   } catch (e) {
     const err = e as Error & { message?: string };

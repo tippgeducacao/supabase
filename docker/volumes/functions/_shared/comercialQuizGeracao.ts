@@ -1,13 +1,21 @@
 // Regras PURAS da geração automática do quiz dos Materiais de Venda (10/11/2026).
 // A edge comercial-quiz-gerar usa isto; sem rede, testável no vitest
 // (comercialQuizGeracao.test.ts). Por quê e como: docs/Portal Comercial.md → "Quiz".
+//
+// Régua do usuário (10/11/2026, tarde): banco de 150 objetivas + 20 descritivas por pós; cada
+// tentativa sorteia 35 objetivas + 5 descritivas = 40. Vale para TODAS as pós — a edge também
+// completa os quizzes feitos à mão, só ACRESCENTANDO (nunca altera nem desliga pergunta existente).
 
-/** Tamanho do sorteio de cada tentativa (comercial_quiz_config.perguntas_por_tentativa). A aba liga aqui. */
-export const MINIMO_PARA_LIGAR = 40;
-/** Alvo do banco, igual aos 16 quizzes feitos à mão em 28/09. */
-export const ALVO_PERGUNTAS = 100;
-/** Teto de lotes: ficha curta não rende 100 sem repetir; para em vez de gastar IA para sempre. */
-export const MAX_LOTES = 15;
+/** Objetivas sorteadas por tentativa (comercial_quiz_config.perguntas_por_tentativa). */
+export const MC_POR_TENTATIVA = 35;
+/** Descritivas sorteadas por tentativa (comercial_quiz_config.descritivas_por_tentativa). */
+export const DESC_POR_TENTATIVA = 5;
+/** Alvo do banco de objetivas. */
+export const ALVO_MC = 150;
+/** Alvo do banco de descritivas. */
+export const ALVO_DESC = 20;
+/** Teto de lotes: ficha curta não rende o banco sem repetir; para em vez de gastar IA para sempre. */
+export const MAX_LOTES = 25;
 /** Ficha com menos que isso (sem os campos visuais) é casca — a IA inventaria. */
 export const MIN_FICHA_CHARS = 3_000;
 /** Rodada "gerando" mais velha que isso morreu no meio (deploy, queda) e pode ser retomada. */
@@ -44,7 +52,6 @@ const MIN = 60_000;
 export function motivoParaPular(c: Candidato, agora: Date, forcado = false): string | null {
   const cfg = c.config;
   if (!cfg) return null;
-  if (cfg.origem === "manual") return "quiz feito à mão (a geração automática não mexe)";
   const t = cfg.geracao_tentada_em ? new Date(cfg.geracao_tentada_em).getTime() : 0;
   const idade = agora.getTime() - t;
   if (cfg.geracao_status === "gerando" && idade < TRAVA_MINUTOS * MIN) return "já tem uma rodada em curso";
@@ -172,25 +179,81 @@ export function aprovadasNaCega(
   return { aprovadas, reprovadas: questoes.length - aprovadas.length };
 }
 
+export type TipoLote = "multiple-choice" | "descriptive";
+
+/** O que gerar agora: primeiro o mínimo de objetivas, depois as descritivas, depois o resto. */
+export function proximoTipo(mc: number, desc: number): TipoLote | null {
+  if (mc < MC_POR_TENTATIVA) return "multiple-choice";
+  if (desc < ALVO_DESC) return "descriptive";
+  if (mc < ALVO_MC) return "multiple-choice";
+  return null;
+}
+
 /** Depois de um lote: status novo e se a aba "Quiz" deve ligar agora. */
 export function estadoDepoisDoLote(
-  ativas: number,
+  mc: number,
+  desc: number,
   lotes: number,
   ativadoAutoEm: string | null,
 ): { status: StatusGeracao; ligar: boolean; erro: string | null } {
-  // Liga uma vez só: se o admin desligar depois, a edge não religa.
-  const ligar = ativas >= MINIMO_PARA_LIGAR && !ativadoAutoEm;
-  if (ativas >= ALVO_PERGUNTAS) return { status: "pronto", ligar, erro: null };
+  // Liga uma vez só: se o admin desligar depois, a edge não religa. (Quiz feito à mão: a
+  // edge não toca em `ativo` — quem decide é o chamador.)
+  const prova = mc >= MC_POR_TENTATIVA && desc >= DESC_POR_TENTATIVA;
+  const ligar = prova && !ativadoAutoEm;
+  if (mc >= ALVO_MC && desc >= ALVO_DESC) return { status: "pronto", ligar, erro: null };
   if (lotes >= MAX_LOTES) {
-    return ativas >= MINIMO_PARA_LIGAR
-      ? { status: "pronto", ligar, erro: `Parou em ${ativas} perguntas: a ficha não rendeu mais sem repetir.` }
-      : { status: "erro", ligar: false, erro: `Só ${ativas} perguntas aprovadas em ${lotes} lotes: a ficha é curta demais.` };
+    return prova
+      ? { status: "pronto", ligar, erro: `Parou em ${mc} objetivas e ${desc} descritivas: a ficha não rendeu mais sem repetir.` }
+      : { status: "erro", ligar: false, erro: `Só ${mc} objetivas e ${desc} descritivas em ${lotes} lotes: a ficha é curta demais.` };
   }
   return { status: "parcial", ligar, erro: null };
 }
 
-/** Quantas perguntas pedir neste lote (com folga para as que caem na conferência). */
-export function tamanhoDoLote(ativas: number): number {
-  const faltam = ALVO_PERGUNTAS - ativas;
-  return Math.max(5, Math.min(20, faltam + 5));
+/** Quantas pedir neste lote (com folga para as que caem na conferência). */
+export function tamanhoDoLote(tipo: TipoLote, ativas: number): number {
+  if (tipo === "descriptive") return Math.max(3, Math.min(12, ALVO_DESC - ativas + 3));
+  return Math.max(5, Math.min(20, ALVO_MC - ativas + 5));
+}
+
+export interface DescritivaIA {
+  pergunta: string;
+  resposta_esperada: string;
+  categoria: string;
+}
+
+export interface DescritivaPronta {
+  question: string;
+  category: Categoria;
+  guideline: string;
+}
+
+/** Valida as descritivas da IA: pergunta e resposta esperada com corpo, sem repetir o banco. */
+export function normalizarDescritivas(brutas: DescritivaIA[], existentes: string[]): DescritivaPronta[] {
+  const vistas = new Set(existentes.map(normalizarTexto));
+  const out: DescritivaPronta[] = [];
+  for (const q of brutas ?? []) {
+    const pergunta = String(q?.pergunta ?? "").trim();
+    const guideline = String(q?.resposta_esperada ?? "").trim();
+    if (pergunta.length < 30 || guideline.length < 80) continue;
+    const chave = normalizarTexto(pergunta);
+    if (vistas.has(chave)) continue;
+    vistas.add(chave);
+    const categoria = (CATEGORIAS as readonly string[]).includes(q.categoria) ? (q.categoria as Categoria) : "Script";
+    out.push({ question: pergunta, category: categoria, guideline });
+  }
+  return out;
+}
+
+/**
+ * Juiz das descritivas: outra chamada leu cada pergunta + resposta esperada contra o material.
+ * Fica só a que ela aprovou (tudo que a resposta esperada afirma está no material e a pergunta é
+ * respondível com ele). `vereditos` indexado pela posição no lote (n, 1-based).
+ */
+export function aprovadasNoJuiz<T>(
+  itens: T[],
+  vereditos: { n: number; aprovada: boolean }[],
+): { aprovadas: T[]; reprovadas: number } {
+  const ok = new Set((vereditos ?? []).filter((v) => v?.aprovada === true).map((v) => Number(v.n)));
+  const aprovadas = itens.filter((_, i) => ok.has(i + 1));
+  return { aprovadas, reprovadas: itens.length - aprovadas.length };
 }

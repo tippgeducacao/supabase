@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_LOTES,
   aprovadasNaCega,
+  aprovadasNoJuiz,
+  normalizarDescritivas,
+  proximoTipo,
   escolherPrograma,
   estadoDepoisDoLote,
   fichaSemVisual,
@@ -34,8 +37,8 @@ describe("motivoParaPular", () => {
   it("pós sem config entra na fila", () => {
     expect(motivoParaPular(cand("x", null), agora)).toBeNull();
   });
-  it("NUNCA mexe em quiz feito à mão, nem forçado", () => {
-    expect(motivoParaPular(cand("x", cfg({ origem: "manual", geracao_status: null })), agora, true)).toMatch(/à mão/);
+  it("quiz feito à mão também entra (a edge só acrescenta até 150 + 20)", () => {
+    expect(motivoParaPular(cand("x", cfg({ origem: "manual", geracao_status: null })), agora)).toBeNull();
   });
   it("rodada em curso trava; morta há mais de 15 min é retomada", () => {
     expect(motivoParaPular(cand("x", cfg({ geracao_status: "gerando", geracao_tentada_em: minAtras(5) })), agora)).not.toBeNull();
@@ -60,9 +63,9 @@ describe("motivoParaPular", () => {
 });
 
 describe("escolherPrograma", () => {
-  it("nova primeiro, depois a tentada há mais tempo; ignora manual", () => {
+  it("nova primeiro, depois a tentada há mais tempo; pronta fica de fora", () => {
     const lista = [
-      cand("manual", cfg({ origem: "manual", geracao_status: null })),
+      cand("pronta", cfg({ geracao_status: "pronto" })),
       cand("velha", cfg({ geracao_tentada_em: minAtras(90) })),
       cand("recente", cfg({ geracao_tentada_em: minAtras(20) })),
       cand("nova", null),
@@ -121,15 +124,51 @@ describe("aprovadasNaCega", () => {
 });
 
 describe("estadoDepoisDoLote", () => {
-  it("liga a aba com 40, uma vez só; pronto com 100", () => {
-    expect(estadoDepoisDoLote(39, 2, null)).toMatchObject({ status: "parcial", ligar: false });
-    expect(estadoDepoisDoLote(40, 3, null)).toMatchObject({ status: "parcial", ligar: true });
-    expect(estadoDepoisDoLote(60, 4, "2026-11-10T00:00:00Z")).toMatchObject({ ligar: false });
-    expect(estadoDepoisDoLote(100, 6, "x")).toMatchObject({ status: "pronto" });
+  it("liga a aba com 35 objetivas + 5 descritivas, uma vez só; pronto com 150 + 20", () => {
+    expect(estadoDepoisDoLote(40, 4, 2, null)).toMatchObject({ status: "parcial", ligar: false });
+    expect(estadoDepoisDoLote(34, 5, 2, null)).toMatchObject({ status: "parcial", ligar: false });
+    expect(estadoDepoisDoLote(35, 5, 3, null)).toMatchObject({ status: "parcial", ligar: true });
+    expect(estadoDepoisDoLote(60, 20, 4, "2026-11-10T00:00:00Z")).toMatchObject({ ligar: false });
+    expect(estadoDepoisDoLote(150, 19, 6, "x")).toMatchObject({ status: "parcial" });
+    expect(estadoDepoisDoLote(150, 20, 6, "x")).toMatchObject({ status: "pronto" });
   });
-  it("teto de lotes: pronto se passou de 40, erro se não", () => {
-    expect(estadoDepoisDoLote(70, MAX_LOTES, "x").status).toBe("pronto");
-    expect(estadoDepoisDoLote(20, MAX_LOTES, null)).toMatchObject({ status: "erro", ligar: false });
+  it("teto de lotes: pronto se já dá prova, erro se não", () => {
+    expect(estadoDepoisDoLote(70, 8, MAX_LOTES, "x").status).toBe("pronto");
+    expect(estadoDepoisDoLote(70, 2, MAX_LOTES, null)).toMatchObject({ status: "erro", ligar: false });
+  });
+});
+
+describe("proximoTipo", () => {
+  it("mínimo de objetivas, depois descritivas, depois completa as objetivas", () => {
+    expect(proximoTipo(0, 0)).toBe("multiple-choice");
+    expect(proximoTipo(35, 0)).toBe("descriptive");
+    expect(proximoTipo(100, 11)).toBe("descriptive");
+    expect(proximoTipo(100, 20)).toBe("multiple-choice");
+    expect(proximoTipo(150, 20)).toBeNull();
+  });
+});
+
+describe("descritivas", () => {
+  const boa = {
+    pergunta: "O lead diz que não tem tempo para estudar. Descreva como você responderia.",
+    resposta_esperada: "O vendedor deve citar as aulas gravadas em até 48 h, a trilha inicial e perguntar qual é a rotina do lead antes de argumentar.",
+    categoria: "Fechamento",
+  };
+  it("valida corpo, repetida e categoria", () => {
+    const r = normalizarDescritivas(
+      [boa, { ...boa }, { ...boa, pergunta: "Curta demais?" }, { ...boa, pergunta: boa.pergunta + " Outra.", resposta_esperada: "curta" },
+        { ...boa, pergunta: "Explique a lógica do combinado na DI, com suas palavras.", categoria: "Outra" }],
+      [],
+    );
+    expect(r).toHaveLength(2);
+    expect(r[0]).toMatchObject({ category: "Fechamento", guideline: boa.resposta_esperada });
+    expect(r[1].category).toBe("Script");
+    expect(normalizarDescritivas([boa], [boa.pergunta.toUpperCase()])).toHaveLength(0);
+  });
+  it("juiz: fica só a aprovada", () => {
+    const { aprovadas, reprovadas } = aprovadasNoJuiz(["x", "y", "z"], [{ n: 1, aprovada: true }, { n: 2, aprovada: false }]);
+    expect(aprovadas).toEqual(["x"]);
+    expect(reprovadas).toBe(2);
   });
 });
 
@@ -137,10 +176,13 @@ describe("auxiliares", () => {
   it("ficha sem campos visuais nem vazios", () => {
     expect(fichaSemVisual({ id: "x", accentBg: "#fff", areaIcon: "🐄", pains: [], title: "T", tagline: "" })).toEqual({ title: "T" });
   });
-  it("lote entre 5 e 20", () => {
-    expect(tamanhoDoLote(0)).toBe(20);
-    expect(tamanhoDoLote(90)).toBe(15);
-    expect(tamanhoDoLote(99)).toBe(6);
-    expect(tamanhoDoLote(100)).toBe(5);
+  it("lote de objetivas entre 5 e 20; de descritivas entre 3 e 12", () => {
+    expect(tamanhoDoLote("multiple-choice", 0)).toBe(20);
+    expect(tamanhoDoLote("multiple-choice", 140)).toBe(15);
+    expect(tamanhoDoLote("multiple-choice", 149)).toBe(6);
+    expect(tamanhoDoLote("multiple-choice", 150)).toBe(5);
+    expect(tamanhoDoLote("descriptive", 0)).toBe(12);
+    expect(tamanhoDoLote("descriptive", 11)).toBe(12);
+    expect(tamanhoDoLote("descriptive", 19)).toBe(4);
   });
 });
