@@ -156,6 +156,19 @@ const SCHEMA_CEGA = {
   additionalProperties: false,
 };
 
+// Vícios achados na revisão dos 3.230 itens (11/11/2026, docs/Portal Comercial.md → "Revisão de 11/11"):
+// 156 repetidas (mesmo fato com outras palavras), 82 decorebas de metadado da ficha e nomes de
+// produto/upsell/professor trocados.
+const REGRAS_REVISAO_11_11 =
+  "- NUNCA pergunte o mesmo fato de uma pergunta que já existe, nem com outras palavras, outra " +
+  "persona de lead ou outro molde: se a resposta certa seria a mesma, é repetida.\n" +
+  "- NUNCA pergunte sobre classificação interna da ficha (severidade alta/média da dor, ícone, " +
+  "cor, ordem, nome de campo ou de arquivo do sistema): isso não ajuda a vender.\n" +
+  "- Nome de produto, upsell, módulo e professor: copie EXATAMENTE como está no material (não " +
+  "troque 'MBA' por 'Pós-Graduação', não renumere módulo, não invente titulação). Não afirme " +
+  "quem é coordenador nem que 'o material não traz' algo sem conferir o material inteiro.\n" +
+  "- Fique no foco DESTA pós: conteúdo que o material atribui a outra pós não entra.";
+
 const SISTEMA_GERAR =
   "Você escreve o quiz de treinamento dos VENDEDORES (SDRs e closers) da PPGVet, empresa de " +
   "pós-graduação para médicos-veterinários, zootecnistas, agrônomos e profissionais do agro. " +
@@ -177,7 +190,8 @@ const SISTEMA_GERAR =
   "- 'categoria': Produto (o que é, para quem, formato), Módulos (conteúdo), Professores, " +
   "Dores (público e problemas), Script (abordagem/SPIN), Fechamento (objeções, argumentos). " +
   "Use Script/Fechamento só se o material tiver abordagem, SPIN, objeções ou argumentos.\n" +
-  "- Cubra o material inteiro, sem repetir ponto nem reescrever pergunta que já existe.";
+  "- Cubra o material inteiro, sem repetir ponto nem reescrever pergunta que já existe.\n" +
+  REGRAS_REVISAO_11_11;
 
 const SISTEMA_CEGA =
   "Você é um vendedor recém-contratado fazendo uma prova sobre o produto. Responda cada " +
@@ -241,7 +255,8 @@ const SISTEMA_GERAR_DESC =
   "- 'categoria': Produto, Módulos, Professores, Dores, Script (abordagem/SPIN) ou Fechamento " +
   "(objeções, argumentos). Use Script/Fechamento só se o material tiver abordagem, SPIN, " +
   "objeções ou argumentos.\n" +
-  "- Cubra pontos diferentes do material, sem repetir nem reescrever pergunta que já existe.";
+  "- Cubra pontos diferentes do material, sem repetir nem reescrever pergunta que já existe.\n" +
+  REGRAS_REVISAO_11_11;
 
 const SISTEMA_JUIZ =
   "Você é o coordenador comercial revisando perguntas descritivas de um quiz de vendedores. " +
