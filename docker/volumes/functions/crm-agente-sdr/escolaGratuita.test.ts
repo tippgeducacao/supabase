@@ -6,6 +6,7 @@ import {
   jaTemOPresente,
   LINK_ESCOLA_GRATUITA,
   linkEscolaWhatsapp,
+  marcarLinkEscola,
   mereceOPresente,
   pediuLinkDaEscola,
   PRESENTE_ESCOLA_ATIVO,
@@ -170,7 +171,7 @@ describe('quem pede o link da Escola recebe o link', () => {
     const texto = `aqui: ${LINK_ESCOLA_GRATUITA}`;
     const r = comLinkPedido(texto, 'Me manda o link', true);
     expect(r.anexou).toBe(false);
-    expect(r.texto).toBe(texto);
+    expect(r.texto).toBe(`aqui: ${linkEscolaWhatsapp('ia')}`);
   });
 
   // Harness 11/09: com horários recém-oferecidos, o modelo leu "me manda o link" como link
@@ -210,5 +211,24 @@ describe('quem pede o link da Escola recebe o link', () => {
     const r = comLinkPedido('beleza.', 'Sim', true);
     expect(r.anexou).toBe(false);
     expect(r.texto).toBe('beleza.');
+  });
+});
+
+describe('marcarLinkEscola', () => {
+  const marcado = linkEscolaWhatsapp('ia');
+  it('põe a UTM no link cru que o modelo escreveu, sem levar a pontuação', () => {
+    expect(marcarLinkEscola('entra aqui: https://escoladeespecializacao.ppgvet.com.br.'))
+      .toBe(`entra aqui: ${marcado}.`);
+  });
+  it('mantém o caminho do link', () => {
+    expect(marcarLinkEscola('https://escoladeespecializacao.ppgvet.com.br/ee-cmmv'))
+      .toBe('https://escoladeespecializacao.ppgvet.com.br/ee-cmmv?utm_source=whatsapp&utm_medium=ia&utm_campaign=escola-de-especializacao');
+  });
+  it('não mexe em link já marcado nem em texto sem link', () => {
+    expect(marcarLinkEscola(`oi ${marcado}`)).toBe(`oi ${marcado}`);
+    expect(marcarLinkEscola('sem link')).toBe('sem link');
+  });
+  it('comLinkPedido marca o link do modelo mesmo sem pedido do lead', () => {
+    expect(comLinkPedido('olha https://escoladeespecializacao.ppgvet.com.br', 'oi', false).texto).toBe(`olha ${marcado}`);
   });
 });

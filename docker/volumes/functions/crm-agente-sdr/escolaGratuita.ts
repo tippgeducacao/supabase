@@ -246,12 +246,34 @@ export function pediuLinkDaEscola(mensagemDoLead: string | null | undefined, con
 const RE_RESPOSTA_ESCOLA = /acesso|escola|biblioteca|cadastro|cursos? gratuit/i;
 const RE_RESPOSTA_REUNIAO = /reuni[ãa]o|meet|\bcall\b|hor[áa]rio|encaixe|agendar|fechar um/i;
 
-/** Garante o endereço na resposta a quem pediu. Só acrescenta; se o modelo já pôs, nada muda. */
+/**
+ * Link da Escola que o MODELO escreveu sem UTM ganha a do WhatsApp (`linkEscolaWhatsapp('ia')`).
+ * Mexe só no endereço; pontuação colada no fim fica onde estava. Link já marcado passa igual.
+ */
+export function marcarLinkEscola(texto: string): string {
+  return texto.replace(/https?:\/\/escoladeespecializacao\.ppgvet\.com\.br[^\s]*/gi, (url) => {
+    if (/utm_/i.test(url)) return url;
+    const [, base, fim] = url.match(/^(.*?)([.,;:!?)]*)$/)!;
+    try {
+      const u = new URL(base);
+      for (const [k, v] of new URL(linkEscolaWhatsapp('ia')).searchParams) u.searchParams.set(k, v);
+      return u.toString() + fim;
+    } catch {
+      return url;
+    }
+  });
+}
+
+/**
+ * Garante o endereço na resposta a quem pediu. Só acrescenta; se o modelo já pôs, nada muda,
+ * exceto a UTM no link que ele escreveu cru (`marcarLinkEscola`). Roda em toda resposta do WhatsApp.
+ */
 export function comLinkPedido(
-  texto: string,
+  textoDoModelo: string,
   mensagemDoLead: string | null | undefined,
   contextoEscola: boolean,
 ): { texto: string; anexou: boolean } {
+  const texto = marcarLinkEscola(textoDoModelo);
   if (!pediuLinkDaEscola(mensagemDoLead, contextoEscola)) return { texto, anexou: false };
   if (jaTemOPresente(texto)) return { texto, anexou: false };
   if (!RE_RESPOSTA_ESCOLA.test(texto) && RE_RESPOSTA_REUNIAO.test(texto)) return { texto, anexou: false };
