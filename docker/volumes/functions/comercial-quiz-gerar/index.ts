@@ -483,7 +483,8 @@ Deno.serve(async (req) => {
     const doTipo = existentes.filter((e) => e.type === tipo);
     const porCategoria: Record<string, number> = {};
     for (const e of doTipo) if (e.ativa) porCategoria[e.category] = (porCategoria[e.category] ?? 0) + 1;
-    const quantas = tamanhoDoLote(tipo, descritiva ? descAntes : mcAntes);
+    const cortouAntes = /max_tokens/.test(alvo.config?.geracao_erro ?? "");
+    const quantas = tamanhoDoLote(tipo, descritiva ? descAntes : mcAntes, cortouAntes);
     const pedidoGerar =
       `# MATERIAL\n${material}\n\n` +
       (doTipo.length

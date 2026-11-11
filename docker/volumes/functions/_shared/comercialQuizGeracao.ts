@@ -36,6 +36,7 @@ export interface ConfigQuiz {
   geracao_tentada_em: string | null;
   geracao_lotes: number;
   ativado_auto_em: string | null;
+  geracao_erro?: string | null;
 }
 
 export interface Candidato {
@@ -210,9 +211,14 @@ export function estadoDepoisDoLote(
 }
 
 /** Quantas pedir neste lote (com folga para as que caem na conferência). */
-export function tamanhoDoLote(tipo: TipoLote, ativas: number): number {
-  if (tipo === "descriptive") return Math.max(3, Math.min(12, ALVO_DESC - ativas + 3));
-  return Math.max(5, Math.min(20, ALVO_MC - ativas + 5));
+// `cortouAntes`: o lote anterior desta pós estourou o max_tokens (11/11, Crédito Rural —
+// material grande + 135 perguntas existentes no pedido fazia o lote de 20 cortar sempre).
+// Sem isso a pós repete o MESMO lote a cada hora e nunca sai do erro; pela metade cabe.
+export function tamanhoDoLote(tipo: TipoLote, ativas: number, cortouAntes = false): number {
+  const n = tipo === "descriptive"
+    ? Math.max(3, Math.min(12, ALVO_DESC - ativas + 3))
+    : Math.max(5, Math.min(20, ALVO_MC - ativas + 5));
+  return cortouAntes ? Math.max(3, Math.ceil(n / 2)) : n;
 }
 
 export interface DescritivaIA {

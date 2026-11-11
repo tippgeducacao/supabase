@@ -185,4 +185,11 @@ describe("auxiliares", () => {
     expect(tamanhoDoLote("descriptive", 11)).toBe(12);
     expect(tamanhoDoLote("descriptive", 19)).toBe(4);
   });
+
+  it("lote anterior cortado (max_tokens) ⇒ metade, com piso de 3", () => {
+    expect(tamanhoDoLote("multiple-choice", 135, true)).toBe(10);
+    expect(tamanhoDoLote("multiple-choice", 150, true)).toBe(3);
+    expect(tamanhoDoLote("descriptive", 0, true)).toBe(6);
+    expect(tamanhoDoLote("descriptive", 19, true)).toBe(3);
+  });
 });
