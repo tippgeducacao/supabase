@@ -36,6 +36,30 @@ beforeEach(() => {
 });
 
 describe('acesso do laboratório pelo painel', () => {
+  it('avalia uma chamada capturada sem consultar cadastro nem executar a tool solicitada', async () => {
+    mocks.fetch.mockImplementation(async (url: string, init: RequestInit) => {
+      if (url !== 'https://api.anthropic.com/v1/messages') throw new Error('Rede comercial proibida');
+      const body = JSON.parse(String(init.body));
+      expect(body.model).toBe('claude-haiku-5-5');
+      expect(body.system[0].text).toBe('instrução congelada');
+      return Response.json({ model: 'claude-haiku-5-5', usage: { input_tokens: 15, output_tokens: 5 },
+        content: [{ type: 'tool_use', id: 'acao', name: 'pausa_ia', input: { tipo: 'sem_graduacao' } }], stop_reason: 'tool_use' });
+    });
+    const resposta = await handler(new Request('https://harness.invalid', { method: 'POST',
+      headers: { 'x-followup-key': 'harness-local' }, body: JSON.stringify({
+        persona: 'validacao', mensagens: ['ignorado em favor da captura'], provedor: 'anthropic',
+        modelo_anthropic: 'claude-haiku-5-5', esforco: 'medium', ferramentas_reais: true,
+        laboratorio: { acao: 'avaliar_chamada', pedido: {
+          system: [{ type: 'text', text: 'instrução congelada' }],
+          messages: [{ role: 'user', content: 'mensagem real neste ponto' }],
+          tools: ['responder_ao_cliente', 'pausa_ia'].map(name => ({ name, description: 'teste', input_schema: { type: 'object' } })),
+        } },
+      }) }));
+    expect(resposta.status).toBe(200);
+    expect(await resposta.json()).toMatchObject({ ok: true, modo: 'chamada_congelada', ferramentas_executadas: false });
+    expect(mocks.fetch).toHaveBeenCalledOnce();
+    expect(mocks.from.mock.calls.map(([t]) => t)).toEqual(['crm_agente_sdr_config']);
+  });
   it('nega JWT público ou usuário fora da gestão antes de chamar IA', async () => {
     for (const gestao of [null, false]) {
       mocks.fetch.mockImplementation(async (url: string) => {

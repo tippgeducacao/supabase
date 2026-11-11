@@ -23,6 +23,8 @@ import { carregarTools, chamarAgentePrincipal, chamarRouter, executarPedidoPrinc
 import { exigirAcesso } from '../_shared/acesso.ts';
 import { semDadosPrivados, type RegistroModelo } from '../crm-agente-sdr/capturaModelo.ts';
 import { executarEnsaio, validarPedidoLaboratorio } from './laboratorio.ts';
+import { avaliarChamadaCongelada } from './avaliacao.ts';
+import { chamarAnthropic } from '../crm-agente-sdr/agente.ts';
 import type { DependenciasSimulacao } from './simulacao.ts';
 import { type LeituraJev, rotearComJev } from '../crm-agente-sdr/routerJev.ts';
 import { carregarDiasSemAtendimento, encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoCurso, notaDoNome, renderPrompt } from '../crm-agente-sdr/contexto.ts';
@@ -317,15 +319,15 @@ Deno.serve(async (req) => {
   if (!(await autorizado(req))) return json({ error: 'unauthorized' }, 401);
 
   let entrada;
-  let laboratorio: { acao: 'preparar' | 'executar'; pedido?: ReturnType<typeof validarPedidoLaboratorio> } | null = null;
+  let laboratorio: { acao: 'preparar' | 'executar' | 'avaliar_chamada'; pedido?: ReturnType<typeof validarPedidoLaboratorio> } | null = null;
   try {
     const bruto = await req.text();
     if (bruto.length > MAX_CARACTERES_SIMULACAO) return json({ error: 'limite de 200000 caracteres excedido' }, 400);
     const corpo = JSON.parse(bruto);
     if (corpo.laboratorio) {
-      if (!['preparar', 'executar'].includes(corpo.laboratorio.acao)) throw new Error('Ação de laboratório inválida.');
+      if (!['preparar', 'executar', 'avaliar_chamada'].includes(corpo.laboratorio.acao)) throw new Error('Ação de laboratório inválida.');
       laboratorio = { acao: corpo.laboratorio.acao,
-        ...(corpo.laboratorio.acao === 'executar' ? { pedido: validarPedidoLaboratorio(corpo.laboratorio.pedido) } : {}) };
+        ...(corpo.laboratorio.acao !== 'preparar' ? { pedido: validarPedidoLaboratorio(corpo.laboratorio.pedido) } : {}) };
       // O rascunho escolhe a persona explicitamente; preparar não faz chamada paga de router.
       corpo.usar_router = false;
     }
@@ -346,6 +348,17 @@ Deno.serve(async (req) => {
     return json({ error: `chave do provedor ${entrada.provedor} ausente no ambiente` }, 400);
   }
 
+  if (laboratorio?.acao === 'avaliar_chamada') {
+    // Uma decisão sobre o pedido histórico. Não executa tools, não reconstrói contexto
+    // com dados atuais e não chama o loop que simula sucessos de ações comerciais.
+    try {
+      return json(await avaliarChamadaCongelada(laboratorio.pedido!, (pedido) =>
+        chamarAnthropic({ ...pedido, model: MODELO_AGENTE, max_tokens: 8192, thinking: { type: 'adaptive' } },
+          {}, provedorAlternativo, 90_000)));
+    } catch {
+      return json({ error: 'Falha na avaliação da chamada; nenhuma ferramenta foi executada.' }, 502);
+    }
+  }
   if (entrada.modo === 'followup') {
     try {
       // Não passar supabase real: a geração recebe um banco bloqueado e telemetria
