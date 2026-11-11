@@ -1,5 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
-import { envolverCliquesNoHtml } from "./links.ts";
+import { envolverCliquesNoHtml, utmDoEmail } from "./links.ts";
+
+describe("UTM do e-mail", () => {
+  it("marca link nosso com email/email e o nome do modelo em slug", () => {
+    expect(utmDoEmail("https://www.ppgvet.com.br/sanidade#form", "03/11 09:00 | Produção de Suínos"))
+      .toBe("https://www.ppgvet.com.br/sanidade?utm_source=email&utm_campaign=03-11-09-00-producao-de-suinos&utm_medium=email#form");
+  });
+  it("não sobrescreve UTM escrita à mão e só completa o que falta", () => {
+    expect(utmDoEmail("https://escoladeespecializacao.ppgvet.com.br/?utm_content=b", "X"))
+      .toBe("https://escoladeespecializacao.ppgvet.com.br/?utm_content=b&utm_source=email&utm_campaign=x&utm_medium=email");
+  });
+  it("deixa link de terceiro e domínio parecido sem UTM", () => {
+    expect(utmDoEmail("https://youtube.com/watch?v=1", "X")).toBe("https://youtube.com/watch?v=1");
+    expect(utmDoEmail("https://portalppgvet.com.br/contrato", "X")).toBe("https://portalppgvet.com.br/contrato");
+  });
+});
 
 /** Assinador falso: o real é HMAC (envioComum.ts), que depende de Deno.env. */
 const rastrear = (href: string) => Promise.resolve(`https://api.test/functions/v1/email-track-click?e=1&t=abc&u=${encodeURIComponent(href)}`);

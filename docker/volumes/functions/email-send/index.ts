@@ -12,7 +12,7 @@
 // domínio que manda o e-mail de aprovação de TCC. Ver docs/E-mail e Caixas.md.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { formatarFrom, linkCliqueEmail, linkDescadastro, tagSegura } from "../_shared/envioComum.ts";
-import { envolverCliquesNoHtml } from "../_shared/emailBuilder/links.ts";
+import { envolverCliquesNoHtml, utmDoEmail } from "../_shared/emailBuilder/links.ts";
 import { urlPublicaEmail } from "../_shared/urlPublicaEmail.ts";
 import { ErroEnvio, obterProvedor, provedorEfetivo } from "../_shared/emailProviders/index.ts";
 import { buscarSupressao, supressaoSeAplica } from "../_shared/supressao.ts";
@@ -222,11 +222,15 @@ Deno.serve(async (req) => {
     let remetenteId = payload.remetente_id ?? null;
     const templateId = payload.template_id ?? null;
     let usoModelo: string | null = null;
+    // Vira o utm_campaign dos links (utmDoEmail).
+    let nomeModelo: string | null = null;
 
     if (modeloCampanha) {
       assunto = modeloCampanha.assunto;
       corpoHtml = modeloCampanha.corpo_html;
       corpoTexto = modeloCampanha.corpo_texto;
+      const { data: nomeAB } = await supabaseAdmin.from("email_templates").select("nome").eq("id", modeloCampanha.id).maybeSingle();
+      nomeModelo = nomeAB?.nome ?? null;
       usoModelo = "marketing";
     } else if (templateId) {
       const { data: tpl, error: tplErr } = await supabaseAdmin
@@ -241,6 +245,7 @@ Deno.serve(async (req) => {
       corpoTexto = tpl.corpo_texto;
       remetenteId = remetenteId ?? tpl.remetente_id;
       usoModelo = tpl.uso ?? null;
+      nomeModelo = tpl.nome ?? null;
       if (contextoDeAutomacao(payload.contexto_tipo) && !tpl.ativo) {
         return new Response(JSON.stringify({ error: "Modelo de e-mail inativo." }), {
           status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -461,7 +466,7 @@ Deno.serve(async (req) => {
       try {
         corpoHtml = await envolverCliquesNoHtml(
           corpoHtml,
-          (href, info) => linkCliqueEmail(basePublicaEmail, log.id, href, info),
+          (href, info) => linkCliqueEmail(basePublicaEmail, log.id, utmDoEmail(href, nomeModelo), info),
           // O descadastro precisa chegar inteiro: tem token próprio e é o que o
           // Gmail aciona no one-click.
           (href) => href.includes("/functions/v1/email-descadastro") || href.includes("/functions/v1/email-track-"),

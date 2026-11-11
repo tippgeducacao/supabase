@@ -19,6 +19,15 @@ import { alguemDoTimeAssume, type Encerramento } from './encerramento.ts';
 export const LINK_ESCOLA_GRATUITA = 'https://escoladeespecializacao.ppgvet.com.br';
 
 /**
+ * O link que SAI no WhatsApp, com UTM no padrão de `src/lib/marketing/utmPadrao.ts`
+ * (WhatsApp individual: source whatsapp, medium = quem mandou). O cru acima fica para o
+ * prompt, a detecção (`jaTemOPresente`) e o webchat: UTM entre os nossos próprios sites
+ * abriria sessão nova na GA4 e apagaria a origem real da visita.
+ */
+export const linkEscolaWhatsapp = (meio: 'ia' | 'automacao'): string =>
+  `${LINK_ESCOLA_GRATUITA}/?utm_source=whatsapp&utm_medium=${meio}&utm_campaign=escola-de-especializacao`;
+
+/**
  * 14/10/2026 (Gustavo): "vamos parar de enviar o link da escola de especialização". Desligado, o
  * convite de despedida sai de todas as personas do WhatsApp: o anexo em código (mereceOPresente), o
  * bloco do prompt (comBlocoDaEscola) e as instruções de despedida (regrasDaRodada.ts). As descrições
@@ -99,7 +108,7 @@ export const CONVITE_ESCOLA = [
     + ' gratuita, que fica à sua disposição de qualquer jeito.',
   'são mais de 10 cursos gratuitos, além de artigos científicos, resumos, e-books,'
     + ' materiais didáticos, aulas abertas de pós-graduação e certificados, tudo num lugar só.',
-  LINK_ESCOLA_GRATUITA,
+  linkEscolaWhatsapp('ia'),
   'é um presente da ppgvet educação pra vc, aproveita.',
 ].join('\n');
 
@@ -247,5 +256,6 @@ export function comLinkPedido(
   if (jaTemOPresente(texto)) return { texto, anexou: false };
   if (!RE_RESPOSTA_ESCOLA.test(texto) && RE_RESPOSTA_REUNIAO.test(texto)) return { texto, anexou: false };
   const base = texto.trimEnd();
-  return { texto: base ? `${base}\n${LINK_ESCOLA_GRATUITA}` : LINK_ESCOLA_GRATUITA, anexou: true };
+  const link = linkEscolaWhatsapp('ia');
+  return { texto: base ? `${base}\n${link}` : link, anexou: true };
 }

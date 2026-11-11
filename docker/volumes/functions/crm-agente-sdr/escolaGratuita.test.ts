@@ -5,6 +5,7 @@ import {
   comPresenteNaDespedida,
   jaTemOPresente,
   LINK_ESCOLA_GRATUITA,
+  linkEscolaWhatsapp,
   mereceOPresente,
   pediuLinkDaEscola,
   PRESENTE_ESCOLA_ATIVO,
@@ -162,7 +163,7 @@ describe('quem pede o link da Escola recebe o link', () => {
   it('acrescenta o endereço à resposta do modelo, sem trocar o texto', () => {
     const r = comLinkPedido('esse acesso é o mesmo de antes, é só entrar com seu cadastro.', 'Me manda o link', true);
     expect(r.anexou).toBe(true);
-    expect(r.texto).toBe(`esse acesso é o mesmo de antes, é só entrar com seu cadastro.\n${LINK_ESCOLA_GRATUITA}`);
+    expect(r.texto).toBe(`esse acesso é o mesmo de antes, é só entrar com seu cadastro.\n${linkEscolaWhatsapp('ia')}`);
   });
 
   it('não duplica quando o modelo já mandou o link', () => {
@@ -192,7 +193,7 @@ describe('quem pede o link da Escola recebe o link', () => {
   it('anexa na mesma frase quando ela fala do cadastro, não da call', () => {
     const r = comLinkPedido('assim que a gente confirmar o cadastro eu te passo', 'Me manda o link', true);
     expect(r.anexou).toBe(true);
-    expect(r.texto).toBe(`assim que a gente confirmar o cadastro eu te passo\n${LINK_ESCOLA_GRATUITA}`);
+    expect(r.texto).toBe(`assim que a gente confirmar o cadastro eu te passo\n${linkEscolaWhatsapp('ia')}`);
   });
 
   // Caso Leandro real: a resposta fala do ACESSO (e também de horário) ⇒ é a Escola, anexa.

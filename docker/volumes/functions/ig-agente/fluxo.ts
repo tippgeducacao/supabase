@@ -24,7 +24,8 @@
 import { avaliarConclusao, limiteFormatura } from "../crm-agente-sdr/elegibilidadeFormatura.ts";
 import { IG_WA_NUMERO_EXIBIDO, linkDoWhatsapp } from "../_shared/igWhatsapp.ts";
 
-export const LINK_ESCOLA = "https://escoladeespecializacao.ppgvet.com.br";
+// UTM no padrão de src/lib/marketing/utmPadrao.ts: direct do Instagram respondido pela IA.
+export const LINK_ESCOLA = "https://escoladeespecializacao.ppgvet.com.br/?utm_source=ig_dm&utm_medium=ia&utm_campaign=escola-de-especializacao";
 /** A IA do direct se apresenta com este nome (decisão do Gustavo, 25/09/2026). */
 export const NOME_AGENTE = "Flávia";
 

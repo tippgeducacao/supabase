@@ -63,6 +63,21 @@ export function aplicarUtm(href: string, utm: Utm | null | undefined): string {
   return `${base}?${query}${hash}`;
 }
 
+/** Só os nossos sites leem UTM (GA4 e formulário do CRM); link de terceiro sai como veio. */
+const NOSSO_SITE = /^https?:\/\/([a-z0-9-]+\.)*(ppgvet|ppgeducacao)\.com\.br(?=[/?#:]|$)/i;
+
+/**
+ * UTM do e-mail no padrão da casa (ver `src/lib/marketing/utmPadrao.ts`):
+ * source e medium `email`, campanha = nome do modelo em slug. Não sobrescreve
+ * o que o autor já pôs no link (é o `aplicarUtm`).
+ */
+export function utmDoEmail(href: string, nomeModelo: string | null | undefined): string {
+  if (!NOSSO_SITE.test(href.trim())) return href;
+  const campanha = (nomeModelo ?? "").normalize("NFD").replace(/[̀-ͯ]/g, "")
+    .toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return aplicarUtm(href, { source: "email", medium: "email", campaign: campanha || null });
+}
+
 /**
  * Envolve o link no redirecionador de cliques.
  * O destino vai percent-encodado num parâmetro para o servidor devolver 302.

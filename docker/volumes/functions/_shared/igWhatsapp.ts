@@ -9,7 +9,7 @@
 // ⚠️ O texto do recibo é FIXO (aprovado na Meta): só os três espaços mudam. Editar o
 // template o manda de volta para revisão, e ele pode voltar MARKETING.
 import { limiteFormatura } from "../crm-agente-sdr/elegibilidadeFormatura.ts";
-import { LINK_ESCOLA_GRATUITA } from "../crm-agente-sdr/escolaGratuita.ts";
+import { linkEscolaWhatsapp } from "../crm-agente-sdr/escolaGratuita.ts";
 
 /**
  * PPG Educação (SDRs - Escola/Curso), 46 9 9924-1126. Desde 03/11/2026 o Instagram é atendido
@@ -183,4 +183,4 @@ export const IG_AVISO_FORA_DO_PRAZO =
   "Como você ainda está na graduação, a pós só pode começar depois da sua formatura (ela exige a graduação"
   + " concluída). A gente te procura quando você estiver terminando o curso! 😉\n\nEnquanto isso, aproveita a"
   + " nossa Escola de Especialização gratuita, com mais de 10 cursos, além de artigos, e-books e podcasts: "
-  + LINK_ESCOLA_GRATUITA;
+  + linkEscolaWhatsapp("automacao");
