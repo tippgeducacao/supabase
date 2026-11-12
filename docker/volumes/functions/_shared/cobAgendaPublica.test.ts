@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAX_BYTES_DO_PEDIDO,
   TOKEN_RE,
   criarFreio,
+  excedeContentLength,
   interpretarPedido,
+  lerTextoComTeto,
   linkDeSala,
   montarEvento,
   motivoConhecido,
@@ -109,23 +112,34 @@ describe("motivoConhecido", () => {
 describe("montarEvento", () => {
   const reuniao = { inicio: "2026-11-13T17:30:00+00:00", fim: "2026-11-13T18:00:00+00:00" };
 
-  it("evento de 30 min com Meet, convidados válidos e a orientação do anfitrião", () => {
+  it("agenda GLOBAL: só o primeiro nome, sem telefone, sem nome completo, sem a fase", () => {
     const e = montarEvento({
       integration_id: INTEGRACAO,
       convidados: ["rafaeldacostacenio@gmail.com", "nao-e-email", 3],
-      nome: "  Maria   da Silva ",
-      telefone: "5546999999999",
-    }, reuniao);
+      primeiro_nome: "Maria",
+      // Campos que não devem vazar mesmo se o banco mandar por engano.
+      nome: "Maria da Silva", telefone: "5546999999999",
+    } as never, reuniao);
     expect(e).toMatchObject({
       integration_id: INTEGRACAO,
-      title: "Renegociação com Maria da Silva",
+      title: "Renegociação com Maria",
       starts_at: reuniao.inicio,
       ends_at: reuniao.fim,
       attendees: ["rafaeldacostacenio@gmail.com"],
       create_meet: true,
     });
-    expect(e!.description).toContain("WhatsApp: 5546999999999");
-    expect(e!.description).toContain("programappgvet@gmail.com");
+    expect(e!.description).toBe(
+      "Quem conduz: entre na sala logado no programappgvet@gmail.com para conseguir admitir o aluno.\nDetalhes no SAC - Cobrança.",
+    );
+    const tudo = JSON.stringify(e);
+    expect(tudo).not.toContain("5546");
+    expect(tudo).not.toContain("Silva");
+    expect(tudo).not.toMatch(/fase/i);
+  });
+
+  it("nome inteiro no lugar do primeiro vira só a primeira palavra", () => {
+    expect(montarEvento({ integration_id: INTEGRACAO, primeiro_nome: "  Ana   Paula Souza " }, reuniao)!.title)
+      .toBe("Renegociação com Ana");
   });
 
   it("sem agenda configurada não cria evento", () => {
@@ -134,8 +148,26 @@ describe("montarEvento", () => {
     expect(montarEvento({ integration_id: INTEGRACAO }, { inicio: "x", fim: "y" })).toBeNull();
   });
 
-  it("sem nome vira Aluno", () => {
-    expect(montarEvento({ integration_id: INTEGRACAO }, reuniao)!.title).toBe("Renegociação com Aluno");
+  it("sem nome o título é só Renegociação", () => {
+    expect(montarEvento({ integration_id: INTEGRACAO }, reuniao)!.title).toBe("Renegociação");
+  });
+});
+
+describe("corpo com teto", () => {
+  it("Content-Length acima de 2 kB é recusado antes de ler", () => {
+    expect(MAX_BYTES_DO_PEDIDO).toBe(2048);
+    expect(excedeContentLength("2049")).toBe(true);
+    expect(excedeContentLength("2048")).toBe(false);
+    expect(excedeContentLength(null)).toBe(false);
+    expect(excedeContentLength("abc")).toBe(false);
+  });
+
+  it("lê até o teto e devolve null quando passa (mesmo sem Content-Length)", async () => {
+    const pequeno = JSON.stringify({ acao: "carregar", token: TOKEN });
+    expect(await lerTextoComTeto(new Response(pequeno).body)).toBe(pequeno);
+    expect(await lerTextoComTeto(new Response("x".repeat(2049)).body)).toBeNull();
+    expect(await lerTextoComTeto(new Response("ç".repeat(1100)).body)).toBeNull(); // 2.200 bytes em UTF-8
+    expect(await lerTextoComTeto(null)).toBe("");
   });
 });
 

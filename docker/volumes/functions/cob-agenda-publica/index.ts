@@ -17,13 +17,17 @@
 // (`_shared/cobAgendaPublica.ts`, testado) e se cria o evento no Google.
 //
 // O Google é SECUNDÁRIO (mesmo princípio do professor-agenda-publica e do RH): a reunião já
-// está gravada quando ele é chamado. Falhou ⇒ o aluno vê a confirmação sem a sala e a
-// cobrança cola o link pelo painel do SAC (`cob_reuniao_atualizar`).
+// está gravada quando ele é chamado. Falhou ⇒ o aluno vê a confirmação sem a sala; a próxima
+// abertura da página tenta de novo (`cob_reuniao_publico_reivindicar_evento`, atômica, 1 a cada
+// 2 min) e a cobrança ainda pode colar o link pelo painel do SAC (`cob_reuniao_atualizar`).
+// O evento vai para uma agenda GLOBAL: só o primeiro nome do aluno, nada de telefone.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.50.0";
 import {
   MAX_BYTES_DO_PEDIDO,
   criarFreio,
+  excedeContentLength,
   interpretarPedido,
+  lerTextoComTeto,
   linkDeSala,
   montarEvento,
   motivoConhecido,
@@ -102,10 +106,15 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return json({ ok: false, motivo: "pedido_invalido" }, 405);
 
+  // Teto de 2 kB: recusa pelo Content-Length declarado e, como ele pode mentir ou faltar,
+  // lê o corpo contando bytes e para assim que passa (nunca o corpo inteiro na memória).
+  if (excedeContentLength(req.headers.get("content-length"), MAX_BYTES_DO_PEDIDO)) {
+    return json({ ok: false, motivo: "pedido_invalido" }, 413);
+  }
   let corpo: unknown;
   try {
-    const texto = await req.text();
-    if (texto.length > MAX_BYTES_DO_PEDIDO) return json({ ok: false, motivo: "pedido_invalido" }, 413);
+    const texto = await lerTextoComTeto(req.body, MAX_BYTES_DO_PEDIDO);
+    if (texto === null) return json({ ok: false, motivo: "pedido_invalido" }, 413);
     corpo = JSON.parse(texto);
   } catch {
     return json({ ok: false, motivo: "pedido_invalido" }, 400);
@@ -122,7 +131,20 @@ Deno.serve(async (req) => {
     if (pedido.acao === "carregar") {
       const { data, error } = await admin.rpc("cob_reuniao_publico_carregar", { p_token: pedido.token });
       if (error) throw error;
-      return json(respostaCarregar(data));
+      const resposta = respostaCarregar(data);
+      // Reunião marcada que ficou SEM SALA (o Google falhou na hora de marcar): tenta de novo.
+      // A RPC reivindica de forma atômica (uma tentativa a cada 2 min, e só se não há evento),
+      // então abrir a página em dois aparelhos ao mesmo tempo não cria dois eventos.
+      if (resposta.ok && resposta.reuniao && resposta.reuniao.status === "marcada"
+          && !resposta.reuniao.link && !resposta.reuniao.passou) {
+        const { data: ev, error: erroEv } = await admin.rpc("cob_reuniao_publico_reivindicar_evento", { p_token: pedido.token });
+        if (erroEv) console.error("[cob-agenda-publica] reivindicar evento:", erroEv.message);
+        else if (ev && typeof ev.inicio === "string" && typeof ev.fim === "string") {
+          const link = await criarEvento(admin, ev, { inicio: ev.inicio, fim: ev.fim });
+          if (link) resposta.reuniao = { ...resposta.reuniao, link };
+        }
+      }
+      return json(resposta);
     }
 
     if (!podeMarcar(ipDe(req))) return json({ ok: false, motivo: "muitas_tentativas" });

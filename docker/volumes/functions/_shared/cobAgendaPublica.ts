@@ -13,8 +13,47 @@ export const TOKEN_RE = /^[0-9a-f]{32}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-/** O pedido da página é pequeno; mais que isto é lixo ou ataque. */
-export const MAX_BYTES_DO_PEDIDO = 2_000;
+/** O pedido da página é pequeno (2 kB); mais que isto é lixo ou ataque. */
+export const MAX_BYTES_DO_PEDIDO = 2_048;
+
+/** `Content-Length` declarado acima do teto ⇒ recusa antes de ler um byte. Ausente/ilegível ⇒ não decide. */
+export function excedeContentLength(valor: string | null | undefined, max: number = MAX_BYTES_DO_PEDIDO): boolean {
+  if (valor == null || valor.trim() === "") return false;
+  const n = Number(valor);
+  return Number.isFinite(n) && n > max;
+}
+
+/**
+ * Lê o corpo com TETO: para de ler (e cancela o resto) assim que passa de `max` bytes, em vez
+ * de carregar o corpo inteiro na memória para só depois medir. `null` = passou do teto.
+ * O `Content-Length` pode mentir (ou faltar, com chunked): o teto vale para o que chega.
+ */
+export async function lerTextoComTeto(
+  corpo: ReadableStream<Uint8Array> | null | undefined,
+  max: number = MAX_BYTES_DO_PEDIDO,
+): Promise<string | null> {
+  if (!corpo) return "";
+  const leitor = corpo.getReader();
+  const pedacos: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await leitor.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > max) {
+      await leitor.cancel().catch(() => undefined);
+      return null;
+    }
+    pedacos.push(value);
+  }
+  const junto = new Uint8Array(total);
+  let pos = 0;
+  for (const p of pedacos) {
+    junto.set(p, pos);
+    pos += p.byteLength;
+  }
+  return new TextDecoder().decode(junto);
+}
 
 export type Motivo =
   | "link_invalido"
@@ -121,8 +160,8 @@ export interface EventoDoBanco {
   reuniao_id?: unknown;
   integration_id?: unknown;
   convidados?: unknown;
-  nome?: unknown;
-  telefone?: unknown;
+  /** Só o PRIMEIRO nome: a agenda é global (todo logado lê o cache de eventos). */
+  primeiro_nome?: unknown;
 }
 
 function texto(v: unknown, max: number): string {
@@ -133,6 +172,10 @@ function texto(v: unknown, max: number): string {
  * Corpo para a `google-calendar-create-event`: evento de 30 min com Meet na agenda
  * "Cobrança - Renegociação" (conta programappgvet). `null` = sem agenda configurada.
  *
+ * ⚠️ PRIVACIDADE: essa agenda é GLOBAL e o `calendar_events_cache` é lido por todo logado
+ * (inclusive o Marketing). Por isso o evento leva só o PRIMEIRO nome: nada de nome completo,
+ * telefone ou fase da cobrança. O resto mora no SAC - Cobrança.
+ *
  * O organizador é o programappgvet: em conta Google pessoal, quem não foi convidado no
  * evento PEDE para entrar e o anfitrião admite. Por isso a descrição diz para quem conduz
  * entrar logado nessa conta.
@@ -140,21 +183,18 @@ function texto(v: unknown, max: number): string {
 export function montarEvento(ev: EventoDoBanco | null | undefined, reuniao: { inicio: string; fim: string }) {
   const integrationId = typeof ev?.integration_id === "string" && UUID_RE.test(ev.integration_id) ? ev.integration_id : null;
   if (!integrationId || !iso(reuniao?.inicio) || !iso(reuniao?.fim)) return null;
-  const nome = texto(ev?.nome, 120) || "Aluno";
-  const telefone = texto(ev?.telefone, 25);
+  // Primeiro nome de verdade: uma palavra só, mesmo que venha o nome inteiro por engano.
+  const primeiro = texto(ev?.primeiro_nome, 60).split(" ")[0] ?? "";
   const convidados = Array.isArray(ev?.convidados)
     ? (ev!.convidados as unknown[]).filter((e): e is string => typeof e === "string" && EMAIL_RE.test(e)).slice(0, 10)
     : [];
   return {
     integration_id: integrationId,
-    title: `Renegociação com ${nome}`,
+    title: primeiro ? `Renegociação com ${primeiro}` : "Renegociação",
     description: [
-      `Aluno(a): ${nome}`,
-      telefone ? `WhatsApp: ${telefone}` : "",
-      "",
-      "Horário escolhido pelo próprio aluno na agenda de renegociação (convite do Rafael pelo 7693, Fase 03).",
       "Quem conduz: entre na sala logado no programappgvet@gmail.com para conseguir admitir o aluno.",
-    ].filter((l, i, arr) => l !== "" || (arr[i - 1] ?? "") !== "").join("\n"),
+      "Detalhes no SAC - Cobrança.",
+    ].join("\n"),
     starts_at: reuniao.inicio,
     ends_at: reuniao.fim,
     attendees: convidados,
