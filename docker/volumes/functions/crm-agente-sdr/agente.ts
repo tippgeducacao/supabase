@@ -43,6 +43,8 @@ export type ProvedorIA =
     /** Piloto do Claude por telefone (pilotoOpenai.ts): só para a telemetria. */
     origem?: 'lista' }
   | { nome: string; formato: 'openai'; base: string; chave: string; modelo: string; esforco: string;
+    /** Modelo exclusivo do loop principal; router, follow-up e elegibilidade conservam o modelo de apoio. */
+    conversa?: { modelo: string; esforco: string };
     /** Devolve o raciocínio cifrado junto com o resultado das tools (provedorOpenai.ts). */
     raciocinio?: boolean;
     /** Privada da rodada: nunca vai para histórico, telemetria ou outro provedor. */
@@ -72,6 +74,14 @@ export function provedorOpenai(): ProvedorIA | null {
     modelo: Deno.env.get('AGENTE_SDR_OPENAI_MODEL') || 'gpt-5.6-luna',
     esforco: Deno.env.get('AGENTE_SDR_OPENAI_EFFORT') || 'high',
   };
+}
+
+// 12/11/2026: Terra medium só na conversa. Resolver aqui mantém também a correção do canal
+// no mesmo modelo, sem misturar preços e raciocínio entre Terra e Luna dentro da volta.
+export function provedorDaConversa(provedor: ProvedorIA | null): ProvedorIA | null {
+  return provedor?.formato === 'openai' && provedor.conversa
+    ? { ...provedor, modelo: provedor.conversa.modelo, esforco: provedor.conversa.esforco }
+    : provedor;
 }
 
 export async function chamarAnthropic(
@@ -439,7 +449,7 @@ export async function chamarAgentePrincipal(opts: OpcoesPedidoPrincipal): Promis
 /** Mesmo canal/correção na produção e na cópia editável do laboratório. */
 export async function executarPedidoPrincipal(pedido: Record<string, any>, opts: Pick<OpcoesPedidoPrincipal, 'provedor' | 'prazoModeloMs' | 'observarModelo'> = {}): Promise<any> {
   const ferramentasDisponiveis = new Set<string>((pedido.tools ?? []).map((t: any) => t.name));
-  const provedor = opts.provedor ?? null;
+  const provedor = provedorDaConversa(opts.provedor ?? null);
   const resposta = await chamarAnthropic(pedido, {}, provedor, opts.prazoModeloMs, opts.observarModelo);
   const decisao = decisaoDoCanal(resposta, ferramentasDisponiveis);
   if (decisao.tipo !== 'corrigir') return normalizarRespostaCanal(resposta, decisao);

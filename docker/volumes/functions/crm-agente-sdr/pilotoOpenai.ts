@@ -1,6 +1,6 @@
 import { provedorAnthropicModelo, provedorOpenai, type ProvedorIA } from './agente.ts';
 import { phoneVariants } from './conta.ts';
-import { modeloOpenaiEnsaioPermitido, modeloOpenaiPermitido } from './modelosOpenai.ts';
+import { ESFORCOS_OPENAI_CONVERSA, MODELOS_OPENAI_CONVERSA, modeloOpenaiEnsaioPermitido, modeloOpenaiPermitido } from './modelosOpenai.ts';
 
 /** Modelos da Anthropic que o piloto por telefone (`claude_modelo_piloto`) aceita. */
 export const MODELOS_CLAUDE_PILOTO = ['claude-haiku-5-5', 'claude-sonnet-5', 'claude-sonnet-5-5'] as const;
@@ -53,6 +53,12 @@ export async function selecionarProvedorDoLead(supabase: any, telefone: string):
     // Ensaio de modelo (03/11/2026): exige estar também na lista da Luna, nunca só na fatia.
     if (naLista && casa(data.openai_ensaio_telefones) && modeloOpenaiEnsaioPermitido(data.openai_ensaio_modelo)) {
       provedor = { ...provedor, modelo: data.openai_ensaio_modelo };
+    } else if ((MODELOS_OPENAI_CONVERSA as readonly string[]).includes(data.openai_modelo_conversa)) {
+      // Só o executor principal aplica esta configuração. A base permanece Luna para
+      // router, follow-up e checagens; NULL permite voltar sem deploy nem reinício.
+      const esforco = (ESFORCOS_OPENAI_CONVERSA as readonly string[]).includes(data.openai_esforco_conversa)
+        ? data.openai_esforco_conversa : 'medium';
+      provedor = { ...provedor, conversa: { modelo: data.openai_modelo_conversa, esforco } };
     }
     return data.openai_raciocinio_encadeado === true
       ? { ...provedor, raciocinio: true, memoriaRaciocinio: new Map() }

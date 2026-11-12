@@ -21,6 +21,24 @@ describe('rotas do formato v9', () => {
     const deps = { supabase: {}, provedorDoLead: async () => null };
     expect((await rotaV9('luna', { remotejid: '5546988166051@s.whatsapp.net', pedido: {} }, deps)).status).toBe(409);
   });
+  it('a chamada principal do v9 usa o modelo e esforço da conversa', async () => {
+    const fetchAnterior = globalThis.fetch;
+    const transporte = vi.fn(async (_url: string, opts: RequestInit) => {
+      const p = JSON.parse(String(opts.body));
+      return Response.json({ model: p.model, status: 'completed', output: [] });
+    });
+    globalThis.fetch = transporte as typeof fetch;
+    try {
+      await rotaV9('luna', { remotejid: '5546988166051@s.whatsapp.net', pedido: { messages: [] } }, {
+        supabase: {}, provedorDoLead: async () => ({ nome: 'openai', formato: 'openai',
+          base: 'https://api.openai.com', chave: 'sintetica', modelo: 'gpt-6-luna', esforco: 'high',
+          conversa: { modelo: 'gpt-6.1-terra', esforco: 'medium' } }),
+      });
+      expect(JSON.parse(String(transporte.mock.calls[0][1].body))).toMatchObject({
+        model: 'gpt-6.1-terra', reasoning: { effort: 'medium' },
+      });
+    } finally { globalThis.fetch = fetchAnterior; }
+  });
 });
 
 describe('contexto da aula no v9', () => {

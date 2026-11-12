@@ -6,7 +6,7 @@ import type { Telemetria } from '../crm-agente-sdr/eventos.ts';
 import type { ProvedorIA } from '../crm-agente-sdr/agente.ts';
 import { type ConfigRouterJev, LIMIAR_PADRAO } from '../crm-agente-sdr/routerJev.ts';
 import type { ConjuntoPrompt } from '../crm-agente-sdr/conjuntoPrompt.ts';
-import { modeloOpenaiPermitido } from '../crm-agente-sdr/modelosOpenai.ts';
+import { modeloOpenaiEnsaioPermitido, modeloOpenaiPermitido } from '../crm-agente-sdr/modelosOpenai.ts';
 import { contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from '../crm-agente-sdr/contextoAulaPiloto.ts';
 import { avaliarEvidenciaSemGraduacao, bloqueioSemEvidenciaGraduacao } from '../crm-agente-sdr/evidenciaFormacao.ts';
 import { respostaDoEncerramento, toolConcluida, type Encerramento } from '../crm-agente-sdr/encerramento.ts';
@@ -117,8 +117,8 @@ export function validarEntradaSimulacao(valor: unknown): EntradaSimulacao {
   if (provedor !== 'anthropic' && provedor !== 'deepseek' && provedor !== 'openai') throw new Error('provedor inválido');
   const esforco = body.esforco ?? null;
   const modeloOpenai = body.modelo_openai ?? null;
-  if (modeloOpenai !== null && (provedor !== 'openai' || !modeloOpenaiPermitido(modeloOpenai))) {
-    throw new Error('modelo_openai só aceita gpt-5.6-luna ou gpt-6-luna com provedor openai');
+  if (modeloOpenai !== null && (provedor !== 'openai' || (!modeloOpenaiPermitido(modeloOpenai) && !modeloOpenaiEnsaioPermitido(modeloOpenai)))) {
+    throw new Error('modelo_openai só aceita gpt-5.6-luna, gpt-6-luna ou gpt-6.1-terra com provedor openai');
   }
   const modeloAnthropic = body.modelo_anthropic ?? null;
   if (modeloAnthropic !== null && (provedor !== 'anthropic' || !MODELOS_ANTHROPIC_SIMULACAO.includes(modeloAnthropic as string))) {

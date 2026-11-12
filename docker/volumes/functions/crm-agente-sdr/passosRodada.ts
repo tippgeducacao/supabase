@@ -20,7 +20,7 @@ import type { Telemetria } from './eventos.ts';
 import { resumir } from './eventos.ts';
 import {
   decisaoDoCanal, montarPedidoPrincipal, pedidoCorrecaoDoCanal, respostaDepoisDaCorrecao, respostaSemModelo,
-  chamarAgentePrincipal, type DecisaoCanal, type OpcoesPedidoPrincipal, type ProvedorIA,
+  chamarAgentePrincipal, provedorDaConversa, type DecisaoCanal, type OpcoesPedidoPrincipal, type ProvedorIA,
 } from './agente.ts';
 import { normalizarRespostaCanal } from './canalResposta.ts';
 import { hidratarRaciocinio, paraPedidoOpenai, paraRespostaAnthropic, registrarRaciocinio, type MemoriaRaciocinio } from './provedorOpenai.ts';
@@ -338,7 +338,7 @@ function pecasDoPedido(deps: DepsPassos, e: EstadoRodada, opts: OpcoesPedidoPrin
 }
 
 function pedidoOpenaiDe(deps: DepsPassos, e: EstadoRodada, pedido: Record<string, any>): Record<string, unknown> {
-  const p = deps.provedor;
+  const p = provedorDaConversa(deps.provedor);
   if (p?.formato !== 'openai') throw new Error('rodada sem a Luna');
   const memoria = memoriaDe(e, deps);
   return paraPedidoOpenai(memoria ? { ...pedido, messages: hidratarRaciocinio((pedido.messages ?? []) as Msg[], memoria) } : pedido,

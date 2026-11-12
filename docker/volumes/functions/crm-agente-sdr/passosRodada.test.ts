@@ -81,6 +81,13 @@ beforeEach(() => {
 });
 
 describe('agente por passos (o loop desenhado no n8n)', () => {
+  it('o pedido externo usa Terra medium sem alterar a configuração de apoio da Luna', async () => {
+    const d = { ...deps(), provedor: { ...luna, conversa: { modelo: 'gpt-6.1-terra', esforco: 'medium' } } };
+    const s = await P.montarVolta(d, novoEstado());
+    expect(s.acao).toBe('chamar_ia');
+    expect(P.montarDasPecas((s as any).pecas)).toMatchObject({ model: 'gpt-6.1-terra', reasoning: { effort: 'medium' } });
+    expect(d.provedor).toMatchObject({ modelo: 'gpt-5.6-luna', esforco: 'high' });
+  });
   it('volta completa: pedido → ferramenta → horário inventado corrigido → fala enviada', async () => {
     const d = deps();
     let s = await P.montarVolta(d, novoEstado());

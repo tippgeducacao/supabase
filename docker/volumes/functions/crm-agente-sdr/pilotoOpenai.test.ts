@@ -35,6 +35,31 @@ describe('provedor do piloto, comum ao atendimento e follow-up', () => {
     const foraDaLista = { ...config, luna_telefones: [], openai_ensaio_telefones: ['5511912345678'] };
     expect(await selecionarProvedorDoLead(banco(foraDaLista), '5511912345678')).toMatchObject({ modelo: 'gpt-6-luna', origem: 'percentual' });
   });
+  it('configura Terra medium só para a conversa sem mudar Luna, fatia ou memória da rodada', async () => {
+    const config = { luna_percentual: 100, openai_modelo_piloto: 'gpt-6-luna', openai_raciocinio_encadeado: true,
+      openai_modelo_conversa: 'gpt-6.1-terra', openai_esforco_conversa: 'medium' };
+    expect(await selecionarProvedorDoLead(banco(config), '5511912345678')).toMatchObject({
+      modelo: 'gpt-6-luna', esforco: 'high', raciocinio: true,
+      conversa: { modelo: 'gpt-6.1-terra', esforco: 'medium' },
+    });
+    expect(await selecionarProvedorDoLead(banco({ ...config, luna_percentual: 0 }), '5511912345678')).toBeNull();
+  });
+  it.each([null, undefined, 'nenhum'])('sem esforço válido da conversa usa medium: %s', async (esforco) => {
+    const p = await selecionarProvedorDoLead(banco({ luna_percentual: 100,
+      openai_modelo_conversa: 'gpt-6.1-terra', openai_esforco_conversa: esforco }), '5511912345678');
+    expect(p).toMatchObject({ conversa: { modelo: 'gpt-6.1-terra', esforco: 'medium' } });
+  });
+  it.each([null, undefined, 'gpt-6.1-sol', 'modelo-nao-aprovado'])('modelo da conversa inválido ou desligado preserva apoio: %s', async (modelo) => {
+    const p = await selecionarProvedorDoLead(banco({ luna_percentual: 100, openai_modelo_conversa: modelo }), '5511912345678');
+    expect(p).not.toHaveProperty('conversa');
+  });
+  it('o ensaio por telefone tem precedência sobre o modelo global da conversa', async () => {
+    const p = await selecionarProvedorDoLead(banco({ luna_telefones: ['5546988166051'],
+      openai_modelo_conversa: 'gpt-6.1-terra', openai_esforco_conversa: 'medium',
+      openai_ensaio_telefones: ['5546988166051'], openai_ensaio_modelo: 'gpt-6.1-terra' }), '46988166051');
+    expect(p).toMatchObject({ modelo: 'gpt-6.1-terra', esforco: 'high' });
+    expect(p).not.toHaveProperty('conversa');
+  });
   it.each([null, undefined, 'gpt-6-luna', 'modelo-nao-aprovado'])('modelo de ensaio fora da lista própria é ignorado: %s', async (modelo) => {
     const config = { luna_telefones: ['5546988166051'], openai_modelo_piloto: 'gpt-6-luna', openai_ensaio_telefones: ['5546988166051'], openai_ensaio_modelo: modelo };
     expect(await selecionarProvedorDoLead(banco(config), '46988166051')).toMatchObject({ modelo: 'gpt-6-luna' });

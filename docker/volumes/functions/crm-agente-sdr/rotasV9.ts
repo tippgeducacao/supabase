@@ -20,7 +20,7 @@ import { blocoElegibilidadeFormatura, limiteFormaturaFormatado } from './elegibi
 import { objecaoDaPos, sobreDaObjecaoDeTempo, toolBuscaCarreira } from './carreiraPos.ts';
 import { type AulaParaPrompt, montarVarsAula } from './prompts-aula.ts';
 import { cursoDaConversa } from './ganchoLote.ts';
-import { carregarTools, chamarAnthropic, MODELO_AGENTE, type ProvedorIA } from './agente.ts';
+import { carregarTools, chamarAnthropic, MODELO_AGENTE, provedorDaConversa, type ProvedorIA } from './agente.ts';
 import { TOOL_RESPONDER_AO_CLIENTE } from './canalResposta.ts';
 import { AULA_V2_ABERTURA, AULA_V2_REGRAS, varsAulaV2 } from './prompts-aula-v2.ts';
 import { buscaCarreiraDaAula, contextoAulaV2, toolsDaAulaV2 } from './aulaV2.ts';
@@ -232,7 +232,7 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
     // Anthropic Claude Sonnet 4.5 → a Luna, ou o Claude do piloto (`claude_telefones`, 14/10/2026) com o
     // mesmo pedido. Entra e sai no formato do Claude.
     case 'luna': {
-      const provedor = await deps.provedorDoLead(soDigitos(corpo?.telefone ?? remotejid));
+      const provedor = provedorDaConversa(await deps.provedorDoLead(soDigitos(corpo?.telefone ?? remotejid)));
       if (!provedor) return { status: 409, corpo: { error: 'telefone fora do canário da Luna e do piloto do Claude' } };
       const pedido = corpo?.pedido ?? {};
       const inicio = Date.now();
