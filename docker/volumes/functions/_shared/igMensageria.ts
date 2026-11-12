@@ -64,16 +64,32 @@ export function enviarTextoIg(
  * comentou, endereçada pelo `comment_id` — é o único jeito de escrever para quem ainda não
  * mandou DM. Regras da Meta (Private Replies): UMA mensagem por comentário; comentário de
  * LIVE só enquanto a transmissão está no ar; não abre a janela de 24h (só a resposta da
- * pessoa abre). O endereço documentado é /<IG_ID>/messages; sem o id da conta, /me.
+ * pessoa abre).
+ *
+ * Endereço: a documentação mostra /<IG_ID>/messages, mas a 1ª tentativa de verdade (12/11/2026,
+ * live no ar, comentário de 34 min antes) voltou HTTP 500 "An unknown error has occurred"
+ * (code 1) por ele. A DM comum, que funciona em produção, vai por /me/messages — então é
+ * por ele que a resposta privada tenta primeiro; se a Meta devolver o erro genérico e
+ * houver o id da conta, tenta UMA vez pelo endereço documentado.
  */
-export function enviarRespostaPrivadaIg(
+export async function enviarRespostaPrivadaIg(
   token: string,
   commentId: string,
   texto: string,
   igUserId: string | null = null,
   f: typeof fetch = fetch,
 ): Promise<ResultadoEnvioIg> {
-  return postarMensagemIg(token, igUserId || "me", { comment_id: commentId }, texto, f);
+  const primeira = await postarMensagemIg(token, "me", { comment_id: commentId }, texto, f);
+  if (primeira.ok || !igUserId || !ehErroGenericoDaMeta(primeira.erro)) return primeira;
+  const segunda = await postarMensagemIg(token, igUserId, { comment_id: commentId }, texto, f);
+  if (segunda.ok) return segunda;
+  // As duas falharam: o erro que vale é o mais específico (o genérico não diz nada).
+  return ehErroGenericoDaMeta(segunda.erro) ? primeira : segunda;
+}
+
+/** "An unknown error has occurred" (code 1/2, HTTP 5xx): a Meta não disse o motivo. */
+export function ehErroGenericoDaMeta(erro: ErroEnvioIg): boolean {
+  return erro.status >= 500 || erro.code === 1 || erro.code === 2;
 }
 
 async function postarMensagemIg(

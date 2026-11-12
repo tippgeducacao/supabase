@@ -541,7 +541,7 @@ describe('ig-agente: comentário de live — a IA abre a conversa (12/11/2026)',
     expect(mocks.classificar).not.toHaveBeenCalled();
     expect(chamadasInstagram()).toHaveLength(1);
     const [url, init] = chamadasInstagram()[0];
-    expect(url).toBe('https://graph.instagram.com/v23.0/17841453422080445/messages');
+    expect(url).toBe('https://graph.instagram.com/v23.0/me/messages');
     expect(JSON.parse(init.body)).toEqual({
       recipient: { comment_id: '17890018740485756' },
       message: { text: 'Oi! Sou a Flávia, da PPGVET 😊 Você já se formou e tá trabalhando, ou ainda tá na graduação?' },
