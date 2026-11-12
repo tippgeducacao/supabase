@@ -7,7 +7,12 @@
 
 import { atualizarAgenteComRatchet, atualizarLead, buscarLead, carregarHistorico, criarLead, jidsDoTelefone } from './historico.ts';
 import { pausaVigente } from './pausa.ts';
-import { carregarDiasSemAtendimento, extrairPrimeiroNome, montarContextoTemporal, notaDoCurso, renderPrompt } from './contexto.ts';
+import {
+  carregarDiasSemAtendimento, encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao,
+  notaDoCurso, renderPrompt,
+} from './contexto.ts';
+import { criarTelemetria } from './eventos.ts';
+import { calcularDelaySegundos, fracionarResposta } from './saida.ts';
 import { notaDoNome } from './nomeDoLead.ts';
 import { contextoEspecialidadeCannabis } from './especialidadeCannabis.ts';
 import { carregarReunioesDoLead, notaDasReunioes } from './reunioesDoLead.ts';
@@ -31,7 +36,7 @@ export const TOOL_BUSCA_CARREIRA = toolBuscaCarreira(null);
 
 export const ACOES_V9 = [
   'lead', 'criar_lead', 'tocar_lead', 'mensagens', 'gravar_mensagem', 'apagar_mensagem', 'agente',
-  'contexto', 'tools', 'luna', 'router_pedido', 'tool', 'enviar_texto', 'limpar', 'carreira',
+  'contexto', 'tools', 'luna', 'router_pedido', 'tool', 'enviar_texto', 'limpar', 'carreira', 'fracionar',
 ] as const;
 export type AcaoV9 = typeof ACOES_V9[number];
 export function ehAcaoV9(v: unknown): v is AcaoV9 {
@@ -74,6 +79,43 @@ async function ctxDoLead(supabase: any, corpo: any, lead: any): Promise<CtxConve
     historicoConversa: await carregarHistorico(supabase, remotejid),
     // A IA de aula v2 lê ferramentas que só informam (soInformar).
     ...(campanha?.persona === 'aula' ? { soInformar: true } : {}),
+  };
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const cortar = (texto: string, max: number) => (texto.length > max ? texto.slice(0, max) + '…' : texto);
+
+/** A rodada do n8n: o fluxo pai gera um id por mensagem do lead e manda em todas as chamadas. */
+export function rodadaDoN8n(corpo: any): string | undefined {
+  const id = String(corpo?.rodada_id ?? '');
+  return UUID.test(id) ? id : undefined;
+}
+
+/**
+ * O evento `llm_chamada` de uma chamada feita pelo agente no n8n (12/11/2026). Mesmos campos da
+ * produção (index.ts), para o Uso de IA e o Debug do Agente somarem os dois caminhos sem tratar
+ * diferente. O pedido é montado INTEIRO no n8n; aqui só se registra o que voltou.
+ */
+export function eventoLlmDoN8n(resposta: any, provedor: ProvedorIA, corpo: any): Record<string, unknown> {
+  const blocos: any[] = Array.isArray(resposta?.content) ? resposta.content : [];
+  const texto = blocos.filter((b) => b?.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('\n');
+  const ferramentas = blocos.filter((b) => b?.type === 'tool_use').map((b) => String(b.name));
+  return {
+    agente_pelo_n8n: true,
+    execucao_n8n: corpo?.execucao_n8n != null ? String(corpo.execucao_n8n) : null,
+    volta: Number.isInteger(corpo?.volta) ? corpo.volta : null,
+    agente: typeof corpo?.agente === 'string' ? corpo.agente : null,
+    provedor: provedor?.nome ?? 'anthropic',
+    modelo: resposta?.model ?? null,
+    stop_reason: resposta?.stop_reason ?? null,
+    tokens_entrada: resposta?.usage?.input_tokens ?? null,
+    tokens_saida: resposta?.usage?.output_tokens ?? null,
+    tokens_pensamento: resposta?.usage?.output_tokens_details?.thinking_tokens ?? null,
+    cache_lido: resposta?.usage?.cache_read_input_tokens ?? null,
+    cache_escrito: resposta?.usage?.cache_creation_input_tokens ?? null,
+    blocos: blocos.map((b) => b?.type),
+    texto: texto ? cortar(texto, 2000) : undefined,
+    tools_decididas: ferramentas.length ? ferramentas : undefined,
   };
 }
 
@@ -147,6 +189,8 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
       const vars: Record<string, string> = {
         nome: extrairPrimeiroNome(lead?.nome), curso_interesse_original: curso,
         curso_com_artigo: cursoDaConversa(curso),
+        // Usada pelo prompt de fechamento; sem ela o n8n mandava o marcador vazio (12/11/2026).
+        pergunta_formacao: montarPerguntaFormacao(encontrarFormacao(lead?.formacao_academica ?? '')),
         ...(aula ? montarVarsAula(aula) : {}),
       };
       const agora = new Date();
@@ -191,12 +235,25 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
       const provedor = await deps.provedorDoLead(soDigitos(corpo?.telefone ?? remotejid));
       if (!provedor) return { status: 409, corpo: { error: 'telefone fora do canário da Luna e do piloto do Claude' } };
       const pedido = corpo?.pedido ?? {};
-      const resposta = await chamarAnthropic(
-        { model: provedor.modelo ?? MODELO_AGENTE, max_tokens: pedido.max_tokens ?? 8192, system: pedido.system, messages: pedido.messages, tools: pedido.tools,
-          // No Claude, o raciocínio da produção (montarPedidoPrincipal); a Luna usa o esforço do provedor.
-          ...(provedor.formato === 'anthropic' ? { thinking: { type: 'adaptive' } } : {}) },
-        {}, provedor);
-      return ok(resposta);
+      const inicio = Date.now();
+      const tel = criarTelemetria(supabase, remotejid, rodadaDoN8n(corpo));
+      try {
+        const resposta = await chamarAnthropic(
+          { model: provedor.modelo ?? MODELO_AGENTE, max_tokens: pedido.max_tokens ?? 8192, system: pedido.system, messages: pedido.messages, tools: pedido.tools,
+            // O router do n8n força a ferramenta de decisão; sem isto o modelo podia responder em texto.
+            ...(pedido.tool_choice ? { tool_choice: pedido.tool_choice } : {}),
+            // Raciocínio: o que o n8n pedir; sem pedido, no Claude vale o da produção (montarPedidoPrincipal)
+            // e a Luna usa o esforço do provedor.
+            ...(pedido.thinking ? { thinking: pedido.thinking } : provedor.formato === 'anthropic' ? { thinking: { type: 'adaptive' } } : {}) },
+          {}, provedor);
+        // A chamada feita pelo n8n aparece no Uso de IA e no Debug do Agente como as da produção.
+        tel.registrar('llm_chamada', eventoLlmDoN8n(resposta, provedor, corpo), Date.now() - inicio);
+        return ok(resposta);
+      } catch (e) {
+        tel.registrar('llm_chamada', { agente_pelo_n8n: true, execucao_n8n: corpo?.execucao_n8n ?? null, agente: corpo?.agente ?? null },
+          Date.now() - inicio, (e as Error)?.message ?? String(e));
+        throw e;
+      }
     }
     // Claude - Agente Router → Jev: o pedido no formato dele + o limiar da config.
     case 'router_pedido': {
@@ -249,6 +306,14 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
       });
       const retorno = await res.json().catch(() => null);
       return { status: res.ok ? 200 : 502, corpo: { enviado: res.ok, status: res.status, retorno } };
+    }
+    // Fraciona a resposta: a MESMA limpeza e divisão em balões da produção (saida.ts), para a conversa
+    // do n8n sair igual. Devolve os balões e a espera antes de cada um; o envio é do n8n (enviar_texto).
+    case 'fracionar': {
+      const texto = String(corpo?.texto ?? '');
+      if (!texto.trim()) return { status: 400, corpo: { error: 'texto vazio' } };
+      const baloes = await fracionarResposta(texto);
+      return ok({ baloes: baloes.map((t, i) => ({ texto: t, espera_segundos: i === 0 ? 0 : calcularDelaySegundos(t) })) });
     }
     // busca_carreira: a linha da tabela de carreira da pós da aula para o perfil que a IA leu do lead.
     case 'carreira': {

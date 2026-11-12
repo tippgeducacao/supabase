@@ -39,3 +39,27 @@ describe('busca_carreira', () => {
     expect(ehAcaoV9('carreira')).toBe(true);
   });
 });
+
+describe('agente no n8n: telemetria e saída (12/11/2026)', () => {
+  it('a chamada do modelo vira llm_chamada com os mesmos campos da produção', async () => {
+    const { eventoLlmDoN8n, rodadaDoN8n } = await import('./rotasV9');
+    const evento = eventoLlmDoN8n({
+      model: 'gpt-5.6-luna', stop_reason: 'tool_use',
+      usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 900, cache_creation_input_tokens: 0 },
+      content: [{ type: 'text', text: 'oi' }, { type: 'tool_use', id: 't1', name: 'consulta_disponibilidade', input: {} }],
+    }, { nome: 'openai', formato: 'openai' } as any, { agente: 'agente_validacao', volta: 2, execucao_n8n: 4812 });
+    expect(evento).toMatchObject({
+      agente_pelo_n8n: true, execucao_n8n: '4812', volta: 2, agente: 'agente_validacao', provedor: 'openai',
+      modelo: 'gpt-5.6-luna', tokens_entrada: 100, tokens_saida: 20, cache_lido: 900,
+      blocos: ['text', 'tool_use'], texto: 'oi', tools_decididas: ['consulta_disponibilidade'],
+    });
+    // Só um UUID de verdade agrupa a rodada; o número da execução do n8n não serve de rodada_id.
+    expect(rodadaDoN8n({ rodada_id: '4812' })).toBeUndefined();
+    expect(rodadaDoN8n({ rodada_id: '3f2b6c1e-8a4d-4c2b-9e1f-0a1b2c3d4e5f' })).toBe('3f2b6c1e-8a4d-4c2b-9e1f-0a1b2c3d4e5f');
+  });
+  it('fracionar é ação do v9 e recusa texto vazio', async () => {
+    expect(ehAcaoV9('fracionar')).toBe(true);
+    const deps = { supabase: {}, provedorDoLead: async () => null };
+    expect((await rotaV9('fracionar', { remotejid: '5546988166051@s.whatsapp.net', texto: '   ' }, deps)).status).toBe(400);
+  });
+});
