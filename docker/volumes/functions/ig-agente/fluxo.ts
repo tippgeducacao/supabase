@@ -121,6 +121,12 @@ export const TEXTOS = {
     nome
       ? `${nome}, você já se formou e tá trabalhando, ou ainda tá na graduação?`
       : "Você já se formou e tá trabalhando, ou ainda tá na graduação?",
+  // Quem COMENTOU numa live ainda não mandou DM: a Meta deixa mandar UMA mensagem só, em
+  // resposta ao comentário. Por isso a apresentação e a pergunta vão no mesmo balão (e sem
+  // o "Tudo ótimo por aqui!", que responde um "tudo bem?" que ninguém fez). Frase aprovada
+  // pelo Gustavo em 12/11/2026.
+  aberturaComentarioDeLive: (nome: string | null) =>
+    `${nome ? `Oi, ${nome}!` : "Oi!"} Sou a ${NOME_AGENTE}, da PPGVET 😊 Você já se formou e tá trabalhando, ou ainda tá na graduação?`,
   reperguntarFormacao:
     "Só pra eu te mandar o material certo: você já tem graduação completa ou ainda tá cursando?",
   // 2ª resposta ainda sem a formação (área de atuação de novo, "produtor rural"…): antes

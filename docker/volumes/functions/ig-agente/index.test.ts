@@ -522,6 +522,96 @@ describe('ig-agente: /reset', () => {
   });
 });
 
+describe('ig-agente: comentário de live — a IA abre a conversa (12/11/2026)', () => {
+  const COMENTARIO = {
+    mid: 'live_comment:17890018740485756', direcao: 'inbound', tipo: 'live_comment', conteudo: '🔴 Comentou na live: pós',
+    metadata: { origem: 'lead', live_comment: true, comment_id: '17890018740485756' }, created_at: INBOUND_EM,
+  };
+  const comentou = () => chamar({ evento: 'live_comment', conta_id: 'conta-1', igsid: '999', mid: COMENTARIO.mid });
+  beforeEach(() => {
+    mocks.estado.config = { modo: 'ligado', usernames_teste: [], debounce_segundos: 0 };
+    mocks.estado.mensagens = [COMENTARIO];
+  });
+
+  it('pessoa nova: responde o comentário com UMA mensagem e deixa o roteiro na pergunta de formação', async () => {
+    mocks.estado.perfil = null; // quem só comentou não tem perfil buscado
+    mocks.estado.conversa = null;
+    expect((await comentou()).status).toBe(200);
+
+    expect(mocks.classificar).not.toHaveBeenCalled();
+    expect(chamadasInstagram()).toHaveLength(1);
+    const [url, init] = chamadasInstagram()[0];
+    expect(url).toBe('https://graph.instagram.com/v23.0/17841453422080445/messages');
+    expect(JSON.parse(init.body)).toEqual({
+      recipient: { comment_id: '17890018740485756' },
+      message: { text: 'Oi! Sou a Flávia, da PPGVET 😊 Você já se formou e tá trabalhando, ou ainda tá na graduação?' },
+    });
+
+    const saida = mocks.estado.escritas.find((w) => w.tabela === 'ig_mensagens');
+    expect(saida).toMatchObject({ op: 'upsert', payload: { mid: 'saida-1', status_entrega: 'sent', direcao: 'outbound' } });
+    expect(saida!.payload.metadata).toMatchObject({
+      origem: 'ia', resposta_privada: true, comment_id: '17890018740485756', fluxo_etapa: 'pergunta_formacao',
+    });
+    expect(gravacaoDaEtapa()!.payload).toMatchObject({ fluxo_etapa: 'pergunta_formacao', fluxo_tentativas: 0 });
+    // O cursor NÃO anda: uma DM que chegou junto continua pendente para a rodada dela.
+    expect(liberacao()).toMatchObject({ p_respondido_ate: null });
+    expect(liberacao().p_tools[0]).toMatchObject({ nome: 'comentario_de_live', proxima: 'pergunta_formacao' });
+  });
+
+  it('com nome de gente no perfil, chama pelo nome', async () => {
+    await comentou();
+    expect(textosEnviados()).toEqual(['Oi, Gustavo! Sou a Flávia, da PPGVET 😊 Você já se formou e tá trabalhando, ou ainda tá na graduação?']);
+  });
+
+  it('quem já conversa com um SDR (conversa começada pelo time): a IA não manda nada', async () => {
+    mocks.estado.conversa = null;
+    mocks.estado.mensagens.unshift({ mid: 'm0', direcao: 'outbound', tipo: 'text', metadata: { origem: 'humano' },
+      conteudo: 'Sou a Flávia aqui da PPGVET! 💜 Vi seu perfil e notei que é da área da veterinária', created_at: '2026-09-24T11:00:00.000Z' });
+    await comentou();
+    expect(mocks.fetch).not.toHaveBeenCalled();
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
+  it('conversa pausada (alguém do time respondeu): a IA não manda nada', async () => {
+    reservas.unshift({ status: 'pausada' });
+    await comentou();
+    expect(mocks.fetch).not.toHaveBeenCalled();
+    expect(liberacao()).toBeUndefined();
+  });
+
+  it.each(['pergunta_interesse', 'whatsapp_enviado', 'escola_enviada'])('roteiro já passou da formação (%s): não pergunta de novo', async (etapa) => {
+    mocks.estado.conversa!.fluxo_etapa = etapa;
+    await comentou();
+    expect(mocks.fetch).not.toHaveBeenCalled();
+    expect(gravacaoDaEtapa()).toBeUndefined();
+    expect(liberacao().p_tools[0]).toMatchObject({ calada: 'roteiro_em_andamento' });
+  });
+
+  it('uma abertura por pessoa: já saiu resposta a um comentário dela → não manda outra', async () => {
+    mocks.estado.mensagens.push({ mid: 'saida-0', direcao: 'outbound', tipo: 'text', status_entrega: 'sent',
+      conteudo: 'Oi! Sou a Flávia…', metadata: { origem: 'ia', resposta_privada: true }, created_at: '2026-09-24T12:00:01.000Z' });
+    await comentou();
+    expect(mocks.fetch).not.toHaveBeenCalled();
+    expect(liberacao().p_tools[0]).toMatchObject({ calada: 'ja_respondeu_comentario' });
+  });
+
+  it('a Meta recusa (live encerrada): grava a falha, não anda a etapa e fica com o SDR', async () => {
+    mocks.fetch.mockResolvedValue(new Response(JSON.stringify({ error: { message: 'fora da janela', code: 10 } }), { status: 400 }));
+    await comentou();
+    const saida = mocks.estado.escritas.find((w) => w.tabela === 'ig_mensagens');
+    expect(saida).toMatchObject({ op: 'insert', payload: { mid: null, status_entrega: 'failed' } });
+    expect(gravacaoDaEtapa()).toBeUndefined();
+    expect(liberacao().p_tools[0].erro_envio).toMatchObject({ code: 10 });
+  });
+
+  it('IA desligada na conta: nada', async () => {
+    mocks.estado.conta = { ativo: true, agente_ia_ativo: false };
+    await comentou();
+    expect(mocks.fetch).not.toHaveBeenCalled();
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+});
+
 describe('ig-agente: eco (mensagem nossa)', () => {
   const eco = () => chamar({ evento: 'echo', conta_id: 'conta-1', igsid: '999', mid: 'e1' });
 

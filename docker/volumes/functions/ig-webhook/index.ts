@@ -255,7 +255,13 @@ async function processarComentarioDeLive(admin: any, contaId: string | null, igU
     const linha = linhaDoComentarioDeLive(contaId, igUserId, value);
     if (!linha) return;
     const { error } = await admin.from("ig_mensagens").upsert(linha, { onConflict: "mid", ignoreDuplicates: true });
-    if (error) console.error("[ig-webhook] comentário de live não virou conversa:", error.message);
+    if (error) {
+      console.error("[ig-webhook] comentário de live não virou conversa:", error.message);
+      return;
+    }
+    // A IA abre a conversa respondendo o comentário (uma mensagem, só com a live no ar).
+    // Quem decide se fala é o ig-agente (gate, pausa, conversa do time, uma vez por pessoa).
+    await dispararAgenteIg({ evento: "live_comment", conta_id: linha.conta_id, igsid: linha.contato_igsid, mid: linha.mid });
   } catch (e) {
     console.error("[ig-webhook] erro comentario de live:", e instanceof Error ? e.message : String(e));
   }

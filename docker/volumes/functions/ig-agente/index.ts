@@ -23,8 +23,8 @@
 // ----------------------------------------------------------------------------
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { avaliarGateIg, conversaComecadaPeloTime, JANELA_CONVERSA_DO_TIME_DIAS } from "../_shared/igAgenteGate.ts";
-import { FILTRO_NAO_SAO_DM } from "../_shared/igComentarioDeLive.ts";
-import { ehTokenInvalido, type ResultadoEnvioIg } from "../_shared/igMensageria.ts";
+import { FILTRO_NAO_SAO_DM, TIPO_COMENTARIO_DE_LIVE } from "../_shared/igComentarioDeLive.ts";
+import { ehTokenInvalido, enviarRespostaPrivadaIg, type ResultadoEnvioIg } from "../_shared/igMensageria.ts";
 import { enviarComDonoDaConversa, ESPERAS_BUSCA_MANYCHAT_IA_MS, humanoAssumiuDuranteBusca } from "../_shared/igManychat.ts";
 import {
   areaDoRecibo,
@@ -36,6 +36,9 @@ import {
   linkDoWhatsapp,
   nomeDoRecibo,
 } from "../_shared/igWhatsapp.ts";
+import {
+  decidirAberturaPorComentario, ehRespostaAComentario, JANELA_ABERTURA_POR_COMENTARIO_MS,
+} from "./comentarioDeLive.ts";
 import { type EtapaFluxo, type Passo, primeiroNomeConfiavel, TEXTOS } from "./fluxo.ts";
 import { atrasoEntreBaloesMs, inicioDaJanela, type LinhaIg } from "./historico.ts";
 import { pausaIgVigente } from "./pausa.ts";
@@ -528,6 +531,97 @@ async function tratarEco(contaId: string, igsid: string, mid: string) {
   if (data?.length) log("humano respondeu pelo app — IA pausada nesta conversa", igsid);
 }
 
+// ── Comentário de live: a IA abre a conversa (12/11/2026) ─────────────────────
+// A pessoa comentou numa live e ainda não mandou DM. A IA responde o comentário com UMA
+// mensagem (resposta privada, `recipient.comment_id`) e deixa o roteiro na pergunta de
+// formação; quando a pessoa responder no direct, a rodada normal continua dali. Quando a
+// IA fica de fora, e por quê: comentarioDeLive.ts.
+async function jaRespondeuComentario(c: Conversa): Promise<boolean> {
+  const desde = new Date(Date.now() - JANELA_ABERTURA_POR_COMENTARIO_MS).toISOString();
+  const { data } = await supabase.from("ig_mensagens").select("direcao, status_entrega, metadata")
+    .eq("conta_id", c.contaId).eq("contato_igsid", c.igsid).eq("direcao", "outbound")
+    .gte("created_at", desde).limit(100);
+  // deno-lint-ignore no-explicit-any
+  return ((data ?? []) as any[]).some(ehRespostaAComentario);
+}
+
+async function tratarComentarioDeLive(contaId: string, igsid: string, mid: string) {
+  const aberta = await abrirConversa(contaId, igsid);
+  if ("motivo" in aberta) {
+    log("gate fechado (comentário de live):", aberta.motivo, igsid);
+    return;
+  }
+  const { conversa } = aberta;
+
+  const { data: comentario } = await supabase.from("ig_mensagens").select("tipo, metadata").eq("mid", mid).maybeSingle();
+  const commentId = String(comentario?.metadata?.comment_id ?? "");
+  if (comentario?.tipo !== TIPO_COMENTARIO_DE_LIVE || !commentId) return;
+
+  // Antes da reserva: é ela que cria a linha em ig_conversa_ia, e a régua da conversa do
+  // time só olha quem ainda não tem linha.
+  if (await ehConversaDoTime(conversa)) {
+    log("comentário de live em conversa do time — a IA fica de fora", igsid);
+    return;
+  }
+
+  // Sem espera e sem nova tentativa: dois comentários seguidos da mesma pessoa — o segundo
+  // encontra a trava e desiste (uma abertura por pessoa). Pausada = alguém do time assumiu.
+  const tokenReserva = crypto.randomUUID();
+  const reserva = await reservar(conversa, tokenReserva);
+  if (reserva?.status !== "reservada") {
+    log("comentário de live sem rodada:", reserva?.status ?? "erro", igsid);
+    return;
+  }
+
+  const registro: Record<string, unknown> = { nome: "comentario_de_live", comment_id: commentId };
+  try {
+    const { data: estado } = await supabase.from("ig_conversa_ia").select("fluxo_etapa")
+      .eq("conta_id", contaId).eq("igsid", igsid).maybeSingle();
+    registro.etapa = estado?.fluxo_etapa ?? "boas_vindas";
+    const decisao = decidirAberturaPorComentario({
+      etapa: estado?.fluxo_etapa,
+      jaRespondeuComentario: await jaRespondeuComentario(conversa),
+    });
+    if (!decisao.abre) {
+      registro.calada = decisao.motivo;
+      log("comentário de live — a IA não abre:", decisao.motivo, igsid);
+    } else {
+      const texto = TEXTOS.aberturaComentarioDeLive(primeiroNomeConfiavel(conversa.nome));
+      const envio = await enviarRespostaPrivadaIg(conversa.token, commentId, texto, conversa.igUserId || null);
+      await registrarSaida(conversa, texto, envio, {
+        origem: "ia", fluxo_etapa: "pergunta_formacao", resposta_privada: true, comment_id: commentId,
+      });
+      if (envio.ok) {
+        registro.proxima = "pergunta_formacao";
+        const { error } = await supabase.from("ig_conversa_ia")
+          .update({ fluxo_etapa: "pergunta_formacao", fluxo_tentativas: 0, updated_at: new Date().toISOString() })
+          .eq("conta_id", contaId).eq("igsid", igsid).eq("reserva_token", tokenReserva);
+        if (error) log("não gravou a etapa do roteiro (comentário de live):", error.message);
+      } else {
+        // Live encerrada, comentário já respondido, token morto: fica com o SDR (o card existe).
+        registro.erro_envio = envio.erro;
+        log("resposta ao comentário de live recusada:", JSON.stringify(envio.erro));
+      }
+    }
+  } catch (e) {
+    registro.erro = (e instanceof Error ? e.message : String(e)).slice(0, 500);
+    log("comentário de live falhou:", registro.erro);
+  }
+
+  // p_respondido_ate NULO de propósito: o cursor não anda. Uma DM de verdade que tenha
+  // chegado junto continua pendente para a rodada DELA responder; o comentário entra
+  // naquela rodada como contexto. Quem impede a 2ª abertura é `jaRespondeuComentario`.
+  const { error } = await supabase.rpc("ig_ia_liberar", {
+    p_conta_id: contaId,
+    p_igsid: igsid,
+    p_token: tokenReserva,
+    p_respondido_ate: null,
+    p_estagio: null,
+    p_tools: [{ ...registro, em: new Date().toISOString() }],
+  });
+  if (error) log("não liberou a trava (comentário de live):", error.message);
+}
+
 // Quem chama: o ig-webhook (service_role) e, desde 28/09/2026, a operação — reenvio a quem
 // ficou sem resposta (a chave do cofre do banco é a do projeto antigo e não vale aqui). Mesma
 // chave do harness do João e do ig-agente-simular: crm_agente_sdr_config.followup_secret,
@@ -557,11 +651,12 @@ Deno.serve(async (req) => {
   const contaId = String(body?.conta_id ?? "");
   const igsid = String(body?.igsid ?? "");
   const mid = String(body?.mid ?? "");
-  if (!contaId || !igsid || !mid || (evento !== "inbound" && evento !== "echo")) {
+  if (!contaId || !igsid || !mid || (evento !== "inbound" && evento !== "echo" && evento !== "live_comment")) {
     return json({ error: "payload inválido" }, 400);
   }
 
-  const trabalho = (evento === "echo" ? tratarEco(contaId, igsid, mid) : tratarInbound(contaId, igsid, mid))
+  const tratar = evento === "echo" ? tratarEco : evento === "live_comment" ? tratarComentarioDeLive : tratarInbound;
+  const trabalho = tratar(contaId, igsid, mid)
     .catch((e) => console.error("[ig-agente] falhou:", e instanceof Error ? e.message : String(e)));
   if (typeof EdgeRuntime !== "undefined" && EdgeRuntime?.waitUntil) {
     EdgeRuntime.waitUntil(trabalho);
