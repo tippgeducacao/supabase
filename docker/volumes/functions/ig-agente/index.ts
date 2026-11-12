@@ -23,6 +23,7 @@
 // ----------------------------------------------------------------------------
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { avaliarGateIg, conversaComecadaPeloTime, JANELA_CONVERSA_DO_TIME_DIAS } from "../_shared/igAgenteGate.ts";
+import { FILTRO_NAO_SAO_DM } from "../_shared/igComentarioDeLive.ts";
 import { ehTokenInvalido, type ResultadoEnvioIg } from "../_shared/igMensageria.ts";
 import { enviarComDonoDaConversa, ESPERAS_BUSCA_MANYCHAT_IA_MS, humanoAssumiuDuranteBusca } from "../_shared/igManychat.ts";
 import {
@@ -492,13 +493,14 @@ async function tratarInbound(contaId: string, igsid: string, mid: string) {
   }
 
   // Quem manda três mensagens seguidas recebe UMA resposta: se chegou outra depois
-  // desta, a execução DELA responde tudo.
+  // desta, a execução DELA responde tudo. Reação e comentário de live não contam: nenhum
+  // dos dois aciona a IA, então a DM ficaria esperando uma execução que não existe.
   if (debounceS > 0) await dormir(debounceS * 1000);
   const { data: ultima } = await supabase.from("ig_mensagens").select("mid")
     .eq("conta_id", contaId)
     .eq("contato_igsid", igsid)
     .eq("direcao", "inbound")
-    .neq("tipo", "reaction")
+    .not("tipo", "in", FILTRO_NAO_SAO_DM)
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();

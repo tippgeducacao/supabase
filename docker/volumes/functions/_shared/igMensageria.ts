@@ -50,17 +50,44 @@ export type ErroEnvioIg = { status: number; code?: number; subcode?: number; mes
 export type ResultadoEnvioIg = { ok: true; mid: string } | { ok: false; erro: ErroEnvioIg };
 
 /** Manda UM texto (até 1000 bytes — quebre antes com `dividirPorBytes`). */
-export async function enviarTextoIg(
+export function enviarTextoIg(
   token: string,
   igsid: string,
   texto: string,
   f: typeof fetch = fetch,
 ): Promise<ResultadoEnvioIg> {
+  return postarMensagemIg(token, "me", { id: igsid }, texto, f);
+}
+
+/**
+ * RESPOSTA PRIVADA a um comentário (12/11/2026, comentário de live): a DM vai para quem
+ * comentou, endereçada pelo `comment_id` — é o único jeito de escrever para quem ainda não
+ * mandou DM. Regras da Meta (Private Replies): UMA mensagem por comentário; comentário de
+ * LIVE só enquanto a transmissão está no ar; não abre a janela de 24h (só a resposta da
+ * pessoa abre). O endereço documentado é /<IG_ID>/messages; sem o id da conta, /me.
+ */
+export function enviarRespostaPrivadaIg(
+  token: string,
+  commentId: string,
+  texto: string,
+  igUserId: string | null = null,
+  f: typeof fetch = fetch,
+): Promise<ResultadoEnvioIg> {
+  return postarMensagemIg(token, igUserId || "me", { comment_id: commentId }, texto, f);
+}
+
+async function postarMensagemIg(
+  token: string,
+  dono: string,
+  recipient: { id: string } | { comment_id: string },
+  texto: string,
+  f: typeof fetch,
+): Promise<ResultadoEnvioIg> {
   try {
-    const r = await f(`${IG_GRAPH_URL}/me/messages`, {
+    const r = await f(`${IG_GRAPH_URL}/${dono}/messages`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ recipient: { id: igsid }, message: { text: texto } }),
+      body: JSON.stringify({ recipient, message: { text: texto } }),
       signal: AbortSignal.timeout(15_000),
     });
     // deno-lint-ignore no-explicit-any

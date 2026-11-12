@@ -12,6 +12,9 @@ function deps(extra: Partial<DepsEnvioIg> = {}) {
   const d: DepsEnvioIg = {
     destino: vi.fn(async () => DESTINO),
     ultimoInbound: vi.fn(async () => new Date(AGORA - 60_000).toISOString()),
+    comentarioDeLive: vi.fn(async () => null),
+    saidaDepois: vi.fn(async () => false),
+    responderComentario: vi.fn(async () => ({ ok: true as const, mid: 'mid-privada' })),
     token: vi.fn(async () => 'IGAA-token'),
     enviar: vi.fn(async () => ({ ok: true as const, mid: `mid-${++n}`, via: 'instagram' as const })),
     gravar: vi.fn(async (linha, enviou) => { gravadas.push({ linha, enviou }); }),
@@ -117,5 +120,82 @@ describe('enviarDoSac', () => {
     expect(r).toMatchObject({ ok: false, codigo: 'falha_envio', enviadas: 1 });
     expect(d.enviar).toHaveBeenCalledTimes(2);
     expect(gravadas.map((g) => g.enviou)).toEqual([true, false]);
+  });
+});
+
+describe('comentário de live: a resposta sai como resposta privada (12/11/2026)', () => {
+  const SEM_DM = { ultimoInbound: vi.fn(async () => null) };
+  const COMENTOU = { commentId: '17890018740485756', criadoEm: new Date(AGORA - 120_000).toISOString() };
+
+  it('só comentou na live: manda UMA mensagem pelo comment_id e grava como humano', async () => {
+    const { d, gravadas } = deps({ ...SEM_DM, comentarioDeLive: vi.fn(async () => COMENTOU) });
+    const r = await enviarDoSac(d, { conversaId: 'c1', texto: 'Oi! Te mando a condição por aqui 😉', autor: AUTOR });
+    expect(r).toEqual({ ok: true, enviadas: 1 });
+    expect(d.responderComentario).toHaveBeenCalledWith(DESTINO, 'IGAA-token', '17890018740485756', 'Oi! Te mando a condição por aqui 😉');
+    expect(d.enviar).not.toHaveBeenCalled();
+    expect(gravadas).toEqual([{
+      enviou: true,
+      linha: {
+        conta_id: 'conta-1', ig_user_id: '1784', contato_igsid: '999', direcao: 'outbound', tipo: 'text',
+        conteudo: 'Oi! Te mando a condição por aqui 😉', mid: 'mid-privada', status_entrega: 'sent',
+        metadata: {
+          is_echo: false, origem: 'humano', via: 'sac', enviado_por_id: 'user-1', enviado_por_nome: 'Ana Atendente',
+          resposta_privada: true, comment_id: '17890018740485756',
+        },
+      },
+    }]);
+  });
+
+  it('a mensagem permitida já saiu: não manda outra', async () => {
+    const { d, gravadas } = deps({ ...SEM_DM, comentarioDeLive: vi.fn(async () => COMENTOU), saidaDepois: vi.fn(async () => true) });
+    const r = await enviarDoSac(d, { conversaId: 'c1', texto: 'e aí?', autor: AUTOR });
+    expect(r).toMatchObject({ ok: false, codigo: 'comentario_ja_respondido' });
+    expect(d.saidaDepois).toHaveBeenCalledWith(DESTINO, COMENTOU.criadoEm);
+    expect(d.responderComentario).not.toHaveBeenCalled();
+    expect(gravadas).toEqual([]);
+  });
+
+  it('texto que não cabe numa mensagem só: recusa antes de mandar', async () => {
+    const { d } = deps({ ...SEM_DM, comentarioDeLive: vi.fn(async () => COMENTOU) });
+    const r = await enviarDoSac(d, { conversaId: 'c1', texto: 'palavra '.repeat(200).trim(), autor: AUTOR });
+    expect(r).toMatchObject({ ok: false, codigo: 'comentario_longo' });
+    expect(d.responderComentario).not.toHaveBeenCalled();
+  });
+
+  it('a live já acabou (a Meta recusa): grava a falha e explica o motivo', async () => {
+    const { d, gravadas } = deps({
+      ...SEM_DM,
+      comentarioDeLive: vi.fn(async () => COMENTOU),
+      responderComentario: vi.fn(async () => ({ ok: false as const, erro: { status: 400, code: 10, message: 'This message is sent outside of allowed window' } })),
+    });
+    const r = await enviarDoSac(d, { conversaId: 'c1', texto: 'oi', autor: AUTOR });
+    expect(r).toMatchObject({ ok: false, codigo: 'comentario_recusado', enviadas: 0 });
+    expect(!r.ok && r.erro).toContain('enquanto a live está no ar');
+    expect(gravadas[0]).toMatchObject({ enviou: false, linha: { mid: null, status_entrega: 'failed', erro: { code: 10 } } });
+  });
+
+  it('a pessoa TAMBÉM mandou DM nas últimas 24h: vale a janela normal, não a resposta privada', async () => {
+    const { d } = deps({ comentarioDeLive: vi.fn(async () => COMENTOU) });
+    const r = await enviarDoSac(d, { conversaId: 'c1', texto: 'oi', autor: AUTOR });
+    expect(r).toEqual({ ok: true, enviadas: 1 });
+    expect(d.enviar).toHaveBeenCalledTimes(1);
+    expect(d.comentarioDeLive).not.toHaveBeenCalled();
+    expect(d.responderComentario).not.toHaveBeenCalled();
+  });
+
+  it('comentário de mais de 24h atrás: janela fechada', async () => {
+    const velho = { ...COMENTOU, criadoEm: new Date(AGORA - JANELA_IG_MS - 1).toISOString() };
+    const { d } = deps({ ...SEM_DM, comentarioDeLive: vi.fn(async () => velho) });
+    expect(await enviarDoSac(d, { conversaId: 'c1', texto: 'oi', autor: AUTOR })).toMatchObject({ codigo: 'janela_fechada' });
+    expect(d.responderComentario).not.toHaveBeenCalled();
+  });
+
+  it('token morto na resposta privada: avisa para reconectar', async () => {
+    const { d } = deps({
+      ...SEM_DM,
+      comentarioDeLive: vi.fn(async () => COMENTOU),
+      responderComentario: vi.fn(async () => ({ ok: false as const, erro: { status: 400, code: 190, message: 'Invalid OAuth access token' } })),
+    });
+    expect(await enviarDoSac(d, { conversaId: 'c1', texto: 'oi', autor: AUTOR })).toMatchObject({ codigo: 'token_invalido' });
   });
 });

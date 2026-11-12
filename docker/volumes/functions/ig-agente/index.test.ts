@@ -71,8 +71,10 @@ function builder(tabela: string) {
       dado = e.conversa;
     } else if (tabela === 'ig_mensagens') {
       if (q.filtros['eq:mid']) dado = e.mensagens.find((m) => m.mid === q.filtros['eq:mid']) ?? null;
-      else if (q.filtros['neq:tipo']) {
-        dado = [...e.mensagens].reverse().find((m) => m.direcao === 'inbound' && m.tipo !== 'reaction') ?? null;
+      else if (q.filtros['not:tipo']) {
+        // `.not("tipo", "in", "(reaction,live_comment)")`: a última DM de verdade.
+        const fora = String(q.filtros['not:tipo']).replace(/[()]/g, '').split(',');
+        dado = [...e.mensagens].reverse().find((m) => m.direcao === 'inbound' && !fora.includes(m.tipo)) ?? null;
       } else dado = e.mensagens;
     }
     if (single) return { data: Array.isArray(dado) ? dado[0] ?? null : dado, error: null };
@@ -88,6 +90,7 @@ function builder(tabela: string) {
     select: () => q,
     eq: (c: string, v: unknown) => { q.filtros[`eq:${c}`] = v; return q; },
     neq: (c: string, v: unknown) => { q.filtros[`neq:${c}`] = v; return q; },
+    not: (c: string, _op: string, v: unknown) => { q.filtros[`not:${c}`] = v; return q; },
     or: (f: string) => { q.filtros.or = f; return q; },
     gte: () => q, lte: () => q, order: () => q, limit: () => q,
     upsert: (p: any) => registrar('upsert', p),
@@ -417,6 +420,12 @@ describe('ig-agente: quando NÃO fala', () => {
 
   it('reação mais nova não rouba a vez da mensagem', async () => {
     mocks.estado.mensagens.push({ mid: 'r1', direcao: 'inbound', tipo: 'reaction', conteudo: '❤️', created_at: '2026-09-24T12:00:03.000Z' });
+    await inbound('m1');
+    expect(mocks.classificar).toHaveBeenCalledTimes(1);
+  });
+
+  it('comentário de live mais novo não rouba a vez da DM (12/11/2026)', async () => {
+    mocks.estado.mensagens.push({ mid: 'live_comment:1', direcao: 'inbound', tipo: 'live_comment', conteudo: '🔴 Comentou na live: Pós', created_at: '2026-09-24T12:00:03.000Z' });
     await inbound('m1');
     expect(mocks.classificar).toHaveBeenCalledTimes(1);
   });

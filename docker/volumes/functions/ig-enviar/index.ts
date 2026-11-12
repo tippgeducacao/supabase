@@ -13,7 +13,9 @@
 // ----------------------------------------------------------------------------
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { corsHeaders } from "../_shared/cors.ts";
+import { FILTRO_NAO_SAO_DM, TIPO_COMENTARIO_DE_LIVE } from "../_shared/igComentarioDeLive.ts";
 import { enviarComDonoDaConversa } from "../_shared/igManychat.ts";
+import { enviarRespostaPrivadaIg } from "../_shared/igMensageria.ts";
 import { type DepsEnvioIg, enviarDoSac, type RespostaEnvioIg } from "./envio.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
@@ -51,10 +53,27 @@ function depsReais(authorization: string): DepsEnvioIg {
     async ultimoInbound(d) {
       const { data } = await admin.from("ig_mensagens").select("created_at")
         .eq("conta_id", d.contaId).eq("contato_igsid", d.igsid)
-        .eq("direcao", "inbound").neq("tipo", "reaction")
+        .eq("direcao", "inbound").not("tipo", "in", FILTRO_NAO_SAO_DM)
         .order("created_at", { ascending: false }).limit(1).maybeSingle();
       return data?.created_at ?? null;
     },
+    async comentarioDeLive(d) {
+      const { data } = await admin.from("ig_mensagens").select("created_at, metadata")
+        .eq("conta_id", d.contaId).eq("contato_igsid", d.igsid)
+        .eq("direcao", "inbound").eq("tipo", TIPO_COMENTARIO_DE_LIVE)
+        .order("created_at", { ascending: false }).limit(1).maybeSingle();
+      const commentId = String(data?.metadata?.comment_id ?? "");
+      return data?.created_at && commentId ? { commentId, criadoEm: data.created_at } : null;
+    },
+    async saidaDepois(d, iso) {
+      const { data } = await admin.from("ig_mensagens").select("id")
+        .eq("conta_id", d.contaId).eq("contato_igsid", d.igsid)
+        .eq("direcao", "outbound").neq("status_entrega", "failed").gt("created_at", iso)
+        .limit(1).maybeSingle();
+      return Boolean(data);
+    },
+    responderComentario: (destino, token, commentId, texto) =>
+      enviarRespostaPrivadaIg(token, commentId, texto, destino.igUserId),
     async token(contaId) {
       const { data } = await admin.from("ig_contas_secrets").select("access_token").eq("conta_id", contaId).maybeSingle();
       return data?.access_token ? String(data.access_token) : null;

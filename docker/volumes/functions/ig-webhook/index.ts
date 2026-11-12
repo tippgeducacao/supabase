@@ -8,7 +8,8 @@
 // POST : eventos. Valida X-Hub-Signature-256 (HMAC do app secret) se
 //        IG_META_APP_SECRET estiver setado. LOG-FIRST: grava o payload cru em
 //        ig_webhook_log ANTES de processar. DMs -> ig_mensagens; comentários ->
-//        ig_comentarios. Sempre responde 200 (não deixar a Meta suspender).
+//        ig_comentarios; comentário de LIVE -> os dois (nasce conversa no SAC,
+//        12/11/2026). Sempre responde 200 (não deixar a Meta suspender).
 //
 // Padrões espelhados de crm-whatsapp-webhook (HMAC + protocolo Meta) e
 // wa-uazapi-webhook (log-first). Deploy por git push (deploy-edges.yml);
@@ -19,6 +20,7 @@
 // ----------------------------------------------------------------------------
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { avaliarGateIg } from "../_shared/igAgenteGate.ts";
+import { linhaDoComentarioDeLive } from "../_shared/igComentarioDeLive.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -243,7 +245,29 @@ async function dispararAgenteIg(corpo: Record<string, string>) {
   }
 }
 
-async function processarComentario(admin: any, contaId: string | null, igUserId: string, value: any) {
+// Comentário de LIVE (12/11/2026): além de ficar em ig_comentarios, entra em ig_mensagens
+// como mensagem da pessoa — o gatilho do SAC cria o contato, a conversa e o card. O
+// comentário da própria conta não abre conversa. Regras e limites da Meta:
+// _shared/igComentarioDeLive.ts.
+async function processarComentarioDeLive(admin: any, contaId: string | null, igUserId: string, value: any) {
+  await processarComentario(admin, contaId, igUserId, value, { live: true });
+  try {
+    const linha = linhaDoComentarioDeLive(contaId, igUserId, value);
+    if (!linha) return;
+    const { error } = await admin.from("ig_mensagens").upsert(linha, { onConflict: "mid", ignoreDuplicates: true });
+    if (error) console.error("[ig-webhook] comentário de live não virou conversa:", error.message);
+  } catch (e) {
+    console.error("[ig-webhook] erro comentario de live:", e instanceof Error ? e.message : String(e));
+  }
+}
+
+async function processarComentario(
+  admin: any,
+  contaId: string | null,
+  igUserId: string,
+  value: any,
+  extra: Record<string, unknown> = {},
+) {
   try {
     if (!value?.id) return;
     await admin.from("ig_comentarios").upsert({
@@ -254,7 +278,7 @@ async function processarComentario(admin: any, contaId: string | null, igUserId:
       autor_igsid: value?.from?.id ?? null,
       autor_username: value?.from?.username ?? null,
       texto: value?.text ?? null,
-      metadata: { media: value?.media ?? null },
+      metadata: { media: value?.media ?? null, ...extra },
     }, { onConflict: "comment_id", ignoreDuplicates: true });
   } catch (e) {
     console.error("[ig-webhook] erro comentario:", e instanceof Error ? e.message : String(e));
@@ -342,11 +366,13 @@ Deno.serve(async (req) => {
         for (const ch of entry.changes) {
           if (ch?.field === "comments") {
             await processarComentario(admin, contaId, igUserId, ch.value);
+          } else if (ch?.field === "live_comments") {
+            await processarComentarioDeLive(admin, contaId, igUserId, ch.value);
           } else if (ch?.field === "messages" && Array.isArray(ch?.value?.messaging)) {
             // fallback: alguns setups entregam DM sob changes.field='messages'
             await processarMensagens(admin, contaId, igUserId, ch.value.messaging);
           }
-          // mentions/live_comments/outros: ficam no log-first p/ refinar sobre dados reais
+          // mentions/outros: ficam no log-first p/ refinar sobre dados reais
         }
       }
     } catch (e) {

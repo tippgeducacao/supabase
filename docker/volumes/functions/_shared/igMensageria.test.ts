@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { bytesUtf8, dividirPorBytes, ehTokenInvalido, enviarTextoIg, IG_GRAPH_URL } from './igMensageria';
+import {
+  bytesUtf8, dividirPorBytes, ehTokenInvalido, enviarRespostaPrivadaIg, enviarTextoIg, IG_GRAPH_URL,
+} from './igMensageria';
 
 describe('dividirPorBytes: limite de 1000 bytes UTF-8 da Meta', () => {
   it('texto curto sai inteiro (e aparado)', () => {
@@ -69,5 +71,29 @@ describe('enviarTextoIg', () => {
     const f = vi.fn().mockRejectedValue(new Error('rede caiu'));
     const r = await enviarTextoIg('T', '1', 'oi', f as unknown as typeof fetch);
     expect(r).toEqual({ ok: false, erro: { status: 0, message: 'rede caiu' } });
+  });
+});
+
+describe('enviarRespostaPrivadaIg: resposta a um comentário (12/11/2026)', () => {
+  it('endereça pelo comment_id, no endereço da conta, e devolve o message_id', async () => {
+    const f = vi.fn().mockResolvedValue(new Response(JSON.stringify({ recipient_id: '123', message_id: 'mid.privada' })));
+    const ok = await enviarRespostaPrivadaIg('TOKEN', '17890018740485756', 'oi', '17841453422080445', f as unknown as typeof fetch);
+    expect(ok).toEqual({ ok: true, mid: 'mid.privada' });
+    const [url, init] = f.mock.calls[0];
+    expect(url).toBe(`${IG_GRAPH_URL}/17841453422080445/messages`);
+    expect(init.headers.Authorization).toBe('Bearer TOKEN');
+    expect(JSON.parse(init.body)).toEqual({ recipient: { comment_id: '17890018740485756' }, message: { text: 'oi' } });
+  });
+
+  it('sem o id da conta usa /me', async () => {
+    const f = vi.fn().mockResolvedValue(new Response(JSON.stringify({ message_id: 'm' })));
+    await enviarRespostaPrivadaIg('T', 'c1', 'oi', null, f as unknown as typeof fetch);
+    expect(f.mock.calls[0][0]).toBe(`${IG_GRAPH_URL}/me/messages`);
+  });
+
+  it('recusa da Meta (live encerrada) volta como erro legível', async () => {
+    const f = vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { message: 'fora da janela', code: 10 } }), { status: 400 }));
+    const r = await enviarRespostaPrivadaIg('T', 'c1', 'oi', '1784', f as unknown as typeof fetch);
+    expect(r).toEqual({ ok: false, erro: { status: 400, code: 10, subcode: undefined, message: 'fora da janela' } });
   });
 });
