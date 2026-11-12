@@ -68,6 +68,17 @@ export type Classificacao = {
   confirmar_conclusao?: string | null;
 };
 
+/** "Não deu para entender nada": o que vale quando ninguém classificou. */
+export const CLASSIFICACAO_NEUTRA: Classificacao = {
+  intencao: "outro",
+  situacao: "nao_informou",
+  area: null,
+  telefone: null,
+  conclusao: null,
+  resposta_pergunta: null,
+  confirmar_conclusao: null,
+};
+
 export type ContextoFluxo = {
   /** Nome do perfil do Instagram (ig_perfis.nome), cru. */
   nomePerfil: string | null;
@@ -113,11 +124,10 @@ export const TEXTOS = {
   reperguntarFormacao:
     "Só pra eu te mandar o material certo: você já tem graduação completa ou ainda tá cursando?",
   // 2ª resposta ainda sem a formação (área de atuação de novo, "produtor rural"…): antes
-  // ia direto para a Escola e o lead saía do roteiro. Frase do Gustavo (26/09/2026).
-  confirmarSemGraduacao: (nome: string | null) =>
-    nome
-      ? `Você não possui graduação? Não consegui entender, ${nome} 😅`
-      : "Você não possui graduação? Não consegui entender 😅",
+  // ia direto para a Escola e o lead saía do roteiro. Era "Você não possui graduação? Não
+  // consegui entender, {nome} 😅" (26/09/2026) — soava como acusação para quem tinha acabado
+  // de responder (31 de 352 conversas em 30 dias). Frase nova do Gustavo (12/11/2026).
+  perguntaQualGraduacao: "Qual a sua graduação?",
   // "A IA está assumindo qualquer coisa na graduação, tinha que perguntar qual é"
   // (Gustavo, 25/09/2026): sem o curso dito, a IA pergunta antes de seguir.
   perguntaCursoFormado: "Show! E qual é a sua formação?",
@@ -341,6 +351,12 @@ function decidirPassoSemApresentacao(etapa: EtapaFluxo, c: Classificacao, ctx: C
       : (ctx.situacaoSalva === "formado" ? "formado" : "estudante");
     const data = situacao === "estudante" ? (lerDataFormacao(c, ctx) ?? ctx.dataSalva ?? null) : null;
     if (c.area) return depoisDoCurso(c, situacao, c.area, data);
+    // "Não tenho formação" aqui desfaz a leitura anterior: desde 12/11/2026 quem responde
+    // "trabalhando já" entra como formado, e é esta pergunta que confere. Sem graduação
+    // não vai para o CRM — Escola, como na etapa anterior.
+    if (c.situacao === "nenhum") {
+      return { mensagens: [TEXTOS.escola], proximaEtapa: "escola_enviada", tentativas: 0 };
+    }
     // Sem curso claro: pergunta de novo UMA vez; depois segue sem ele (não trava).
     if (c.intencao === "pergunta" || (ctx.tentativas < 1 && c.intencao !== "recusa")) {
       return {
@@ -412,15 +428,14 @@ function decidirPassoSemApresentacao(etapa: EtapaFluxo, c: Classificacao, ctx: C
   }
 
   // pergunta_formacao sem resposta clara (cargo e área de trabalho não contam — 26/09):
-  // 1ª vez repergunta; 2ª confirma se é sem graduação ("você não possui graduação? não
-  // consegui entender {nome}", Gustavo 26/09); só na 3ª manda a Escola — o que não custa
-  // nada errar: ninguém vai para o CRM sem saber a formação. Pergunta da pessoa não gasta
-  // a Escola: responde e repergunta.
+  // 1ª vez repergunta; 2ª pergunta direto "Qual a sua graduação?" (Gustavo, 12/11/2026);
+  // só na 3ª manda a Escola — o que não custa nada errar: ninguém vai para o CRM sem saber
+  // a formação. Pergunta da pessoa não gasta a Escola: responde e repergunta.
   if (ctx.tentativas < 1) {
     return { mensagens: comResposta(c, [TEXTOS.reperguntarFormacao]), proximaEtapa: "pergunta_formacao", tentativas: 1 };
   }
   if (ctx.tentativas < 2) {
-    return { mensagens: comResposta(c, [TEXTOS.confirmarSemGraduacao(nome)]), proximaEtapa: "pergunta_formacao", tentativas: 2 };
+    return { mensagens: comResposta(c, [TEXTOS.perguntaQualGraduacao]), proximaEtapa: "pergunta_formacao", tentativas: 2 };
   }
   if (c.intencao === "pergunta") {
     return { mensagens: comResposta(c, [TEXTOS.reperguntarFormacao]), proximaEtapa: "pergunta_formacao", tentativas: ctx.tentativas + 1 };

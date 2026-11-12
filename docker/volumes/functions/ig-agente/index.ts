@@ -315,9 +315,10 @@ async function responderRodada(c: Conversa, tokenReserva: string, reserva: Reser
     if (error) throw new Error(`histórico: ${error.message}`);
 
     // O que esta rodada responde = o que a pessoa mandou depois da última resposta.
-    const { historico, novas } = separarNovas((linhas ?? []) as LinhaIg[], estado?.respondido_ate, estado?.historico_desde);
-    const rodada = await pensarRodada({ estado: antes, historico, novas, nomePerfil: c.nome, linkWhatsapp: await linkDoRecibo() });
+    const { historico, novas, semFala } = separarNovas((linhas ?? []) as LinhaIg[], estado?.respondido_ate, estado?.historico_desde);
+    const rodada = await pensarRodada({ estado: antes, historico, novas, semFala, nomePerfil: c.nome, linkWhatsapp: await linkDoRecibo() });
     if (rodada.erro) log("classificador:", rodada.erro);
+    if (rodada.calada) log("mídia sem texto no meio do roteiro — a IA não responde", c.igsid);
     passo = rodada.passo;
     baloes = rodada.baloes;
     registro = {
@@ -327,6 +328,7 @@ async function responderRodada(c: Conversa, tokenReserva: string, reserva: Reser
       proxima: passo.proximaEtapa,
       modelo: rodada.modelo,
       erro_classificador: rodada.erro,
+      ...(rodada.calada ? { calada: rodada.calada } : {}),
     };
     if (rodada.whatsapp && passo.telefone) {
       const captura = await capturarWhatsapp(c, passo.telefone, rodada.estadoDepois, rodada.whatsapp);

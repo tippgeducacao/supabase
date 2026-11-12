@@ -7,8 +7,8 @@
 //     classificador REAL. Se o harness tivesse o próprio loop, ele passaria a provar outra
 //     coisa que não a produção (foi o que escondeu o caso Matheus no harness do João).
 import { classificar, type ResultadoClassificacao } from "./classificador.ts";
-import { decidirPasso, etapaCrmInstagram, type EtapaFluxo, type Passo } from "./fluxo.ts";
-import { type LinhaIg, montarHistoricoIg, type TurnoHistorico } from "./historico.ts";
+import { CLASSIFICACAO_NEUTRA, decidirPasso, etapaCrmInstagram, type EtapaFluxo, type Passo } from "./fluxo.ts";
+import { type LinhaIg, montarHistoricoIg, soMidiaSemTexto, type TurnoHistorico } from "./historico.ts";
 import { dividirPorBytes } from "../_shared/igMensageria.ts";
 
 /** O que ig_conversa_ia guarda do roteiro (e o simulador guarda em memória). */
@@ -44,6 +44,8 @@ export type ResultadoRodada = ResultadoClassificacao & {
   baloes: string[];
   estadoDepois: EstadoRoteiro;
   whatsapp: PlanoWhatsapp | null;
+  /** A IA escolheu não responder (e o modelo nem foi chamado): o motivo. */
+  calada?: "midia_sem_texto";
 };
 
 function instante(v: string | null | undefined): number {
@@ -59,12 +61,14 @@ export function separarNovas(
   linhas: LinhaIg[],
   respondidoAte: string | null | undefined,
   historicoDesde: string | null | undefined,
-): { historico: TurnoHistorico[]; novas: string[] } {
+): { historico: TurnoHistorico[]; novas: string[]; semFala: boolean } {
   const corte = Math.max(instante(respondidoAte), instante(historicoDesde));
   const ehNova = (l: LinhaIg) => l.direcao === "inbound" && instante(l.created_at) > corte;
+  const linhasNovas = linhas.filter(ehNova);
   return {
     historico: montarHistoricoIg(linhas.filter((l) => !ehNova(l))),
-    novas: montarHistoricoIg(linhas.filter(ehNova)).map((t) => t.text),
+    novas: montarHistoricoIg(linhasNovas).map((t) => t.text),
+    semFala: soMidiaSemTexto(linhasNovas),
   };
 }
 
@@ -93,8 +97,28 @@ export async function pensarRodada(entrada: {
   nomePerfil: string | null;
   /** Link do WhatsApp do recibo; sem ele, o do número padrão. */
   linkWhatsapp?: string;
+  /** A leva só tem mídia sem texto (`separarNovas`). */
+  semFala?: boolean;
 }): Promise<ResultadoRodada> {
   const { estado, historico, novas } = entrada;
+  // Mídia sem texto no meio do roteiro não é resposta (12/11/2026): a IA fica calada, a
+  // etapa e as tentativas ficam como estão e o modelo nem é chamado. Antes, cada reel
+  // gastava uma tentativa da pergunta de formação e a pessoa recebia "Você não possui
+  // graduação?" por ter compartilhado um vídeo. Na ABERTURA (boas_vindas) a IA segue
+  // puxando a conversa: ali não há pergunta pendente para a mídia "não responder".
+  if (entrada.semFala && estado.etapa !== "boas_vindas") {
+    const passo: Passo = { mensagens: [], proximaEtapa: estado.etapa, tentativas: estado.tentativas };
+    return {
+      classificacao: CLASSIFICACAO_NEUTRA,
+      erro: null,
+      modelo: null,
+      passo,
+      baloes: [],
+      estadoDepois: estadoDepois(estado, passo),
+      whatsapp: null,
+      calada: "midia_sem_texto",
+    };
+  }
   const resultado = await classificar(estado.etapa, historico, novas);
   const passo = decidirPasso(estado.etapa, resultado.classificacao, {
     nomePerfil: entrada.nomePerfil,

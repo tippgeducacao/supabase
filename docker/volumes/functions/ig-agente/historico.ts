@@ -63,6 +63,17 @@ export function montarHistoricoIg(linhas: LinhaIg[]): TurnoHistorico[] {
   return turnos.slice(-MAX_MENSAGENS_HISTORICO);
 }
 
+/**
+ * A leva de mensagens da pessoa só tem mídia SEM texto (reel, post, áudio, foto, cartão)?
+ * Quem compartilha um reel não respondeu a pergunta que a IA fez — e a IA não vê o reel nem
+ * ouve o áudio. Medido em 12/11/2026: 15 de 28 conversas que chegaram em "Você não possui
+ * graduação?" eram só isso. Reação não conta (não é fala); texto junto da mídia vale.
+ */
+export function soMidiaSemTexto(linhas: LinhaIg[]): boolean {
+  const falas = linhas.filter((l) => l.direcao === "inbound" && String(l.tipo ?? "text") !== "reaction");
+  return falas.length > 0 && falas.every((l) => !String(l.conteudo ?? "").trim());
+}
+
 /** Pausa antes de cada balão depois do primeiro: parece digitação, sem arrastar a conversa. */
 export function atrasoEntreBaloesMs(texto: string): number {
   const porCaractere = String(texto ?? "").length * 35;

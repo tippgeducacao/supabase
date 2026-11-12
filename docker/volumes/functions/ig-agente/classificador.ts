@@ -9,7 +9,7 @@
 // traduz para a Responses API (provedorOpenai.ts). Se a Luna falhar ou não houver chave,
 // o CLAUDE (AGENTE_SDR_MODEL) responde no lugar — mesma regra do piloto.
 import { chamarAnthropic, type ProvedorIA, provedorOpenai } from "../crm-agente-sdr/agente.ts";
-import type { Classificacao, EtapaFluxo, Intencao, Situacao } from "./fluxo.ts";
+import { CLASSIFICACAO_NEUTRA, type Classificacao, type EtapaFluxo, type Intencao, type Situacao } from "./fluxo.ts";
 import type { TurnoHistorico } from "./historico.ts";
 
 const MODELO_CLAUDE = Deno.env.get("AGENTE_SDR_MODEL") ?? "claude-sonnet-5";
@@ -22,7 +22,11 @@ const O_QUE_A_IA_ACABOU_DE_PERGUNTAR: Record<EtapaFluxo, string> = {
   boas_vindas:
     "A PPGVET mandou a boas-vindas a um novo seguidor (\"Oii, tudo bem?\"). Respostas como \"tudo sim, e você?\" são só cumprimento (intencao = outro).",
   pergunta_formacao:
-    "A IA perguntou se a pessoa já se formou e trabalha, ou se ainda está na graduação. Se a ÚLTIMA pergunta da IA foi \"Você não possui graduação?\", é uma confirmação: \"não tenho\", \"não possuo\", \"sim, não tenho\", \"só o ensino médio\" = nenhum; \"tenho sim\", \"sou formado em…\", \"faço…\" = formado/estudante; \"sim\" ou \"não\" sozinhos são ambíguos = nao_informou. Se a ÚLTIMA pergunta da IA foi \"Você ainda tá cursando?\": \"sim\", \"tô sim, faço zootecnia\" = estudante (com a area, se disse); \"não\", \"tranquei\", \"parei\" = nenhum.",
+    // 12/11/2026: "completa" (depois de "graduação completa ou ainda tá cursando?") e
+    // "Graduação" (depois de "…ou ainda tá na graduação?") voltavam nao_informou — o modelo
+    // lia a mensagem solta, não como resposta à pergunta. 6 conversas reais em 30 dias, 3
+    // formados mandados para a Escola.
+    "A IA perguntou sobre a graduação da pessoa. A pergunta exata é a última fala da PPGVET na conversa, e a mensagem nova é a RESPOSTA a ela: quem repete uma das opções da pergunta escolheu essa opção. Para \"já se formou e tá trabalhando, ou ainda tá na graduação?\" e para \"já tem graduação completa ou ainda tá cursando?\": \"trabalhando já\", \"já atuo\", \"completa\", \"já me formei\" = formado; \"graduação\", \"na graduação ainda\", \"cursando\", \"estudando\" = estudante. Se a última pergunta foi \"Qual a sua graduação?\": o curso que ela disser vai em `area`; só o nome do curso (\"veterinária\", \"agronomia\") = formado; dizendo que ainda cursa (\"faço zootecnia\", \"tô no 5º período de vet\") = estudante; \"não tenho\", \"nenhuma\", \"só o ensino médio\" = nenhum. Se a última pergunta foi \"Você ainda tá cursando?\": \"sim\", \"tô sim, faço zootecnia\" = estudante (com a area, se disse); \"não\", \"tranquei\", \"parei\" = nenhum.",
   pergunta_curso:
     "A IA perguntou QUAL é o curso da graduação da pessoa (a formação dela, ou o curso que ela faz). Preencha `area` com o curso dito (ex.: \"medicina veterinária\", \"zootecnia\"); se ela não disse o curso, null.",
   pergunta_data_formacao:
@@ -40,7 +44,9 @@ const INSTRUCOES = [
   "",
   "situacao (sobre a GRADUAÇÃO, ensino superior, em QUALQUER área):",
   "- formado: já concluiu uma graduação (\"sou vet\", \"me formei em zootecnia\", \"sou médica veterinária\", \"sou formado em agronomia\").",
-  "- estudante: está cursando uma graduação (\"tô no 7º período\", \"faço agronomia\", \"sou estudante de vet\").",
+  "  Pós-graduação, residência, mestrado e doutorado só existem depois da graduação: quem tem ou cursa um deles",
+  "  é formado (\"tô na pós\", \"faço mestrado\", \"fiz residência\", \"sou doutor\").",
+  "- estudante: está cursando uma graduação (\"tô no 7º período\", \"faço agronomia\", \"sou estudante de vet\", \"sou formando\").",
   "- nenhum: disse que não fez nem faz faculdade (ensino médio, só técnico, produtor sem graduação, só curiosidade),",
   "  ou que parou/trancou e não está cursando (\"tranquei no 5º período\", \"parei a faculdade\").",
   "- incompleto: disse que a graduação está INCOMPLETA sem dizer se ainda cursa (\"grau superior incompleto\",",
@@ -50,6 +56,8 @@ const INSTRUCOES = [
   "  Cargo, função ou área de trabalho NÃO dizem se a pessoa tem graduação — nem os que exigem diploma",
   "  (\"sou responsável técnico\", \"trabalho como agrônomo\", \"atuo em bovinocultura de leite\", \"trabalho com",
   "  clínica de pequenos animais\", \"trabalho numa granja\"): é nao_informou, e a IA pergunta.",
+  "  Isso vale para quem DESCREVE o trabalho. Quem só repete a opção de uma pergunta da IA (\"trabalhando já\",",
+  "  \"já atuo\") está respondendo a ela — veja \"Onde a conversa está\".",
   "",
   "intencao:",
   "- aceita: quer receber / topou (\"quero\", \"sim\", \"manda\").",
@@ -91,15 +99,8 @@ export const TOOL_CLASSIFICAR = {
   },
 } as const;
 
-export const CLASSIFICACAO_NEUTRA: Classificacao = {
-  intencao: "outro",
-  situacao: "nao_informou",
-  area: null,
-  telefone: null,
-  conclusao: null,
-  resposta_pergunta: null,
-  confirmar_conclusao: null,
-};
+// Mora em fluxo.ts (módulo puro) desde 12/11/2026: a rodada calada de rodada.ts também usa.
+export { CLASSIFICACAO_NEUTRA };
 
 const INTENCOES: readonly Intencao[] = ["aceita", "recusa", "pergunta", "outro"];
 const SITUACOES: readonly Situacao[] = ["formado", "estudante", "nenhum", "nao_informou", "incompleto"];

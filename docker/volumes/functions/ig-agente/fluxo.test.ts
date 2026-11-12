@@ -144,36 +144,43 @@ describe('pergunta_formacao', () => {
     expect(p.enviarWhatsapp).toBeUndefined();
   });
 
-  it('resposta vaga → repergunta; na 2ª confirma "você não possui graduação?"; só na 3ª a Escola (26/09)', () => {
+  it('resposta vaga → repergunta; na 2ª pergunta "Qual a sua graduação?" (12/11/2026); só na 3ª a Escola', () => {
     expect(passo('pergunta_formacao', {}, { tentativas: 0 })).toMatchObject({
       mensagens: [TEXTOS.reperguntarFormacao], proximaEtapa: 'pergunta_formacao', tentativas: 1,
     });
     expect(passo('pergunta_formacao', {}, { tentativas: 1 })).toMatchObject({
-      mensagens: ['Você não possui graduação? Não consegui entender, Gustavo 😅'], proximaEtapa: 'pergunta_formacao', tentativas: 2,
+      mensagens: ['Qual a sua graduação?'], proximaEtapa: 'pergunta_formacao', tentativas: 2,
     });
     expect(passo('pergunta_formacao', {}, { tentativas: 2 })).toMatchObject({
       mensagens: [TEXTOS.escola], proximaEtapa: 'escola_enviada',
     });
   });
 
-  it('confirmação sem nome confiável sai sem o nome', () => {
+  it('a 2ª pergunta não acusa nem leva o nome: a frase é a mesma para todo perfil', () => {
     expect(passo('pergunta_formacao', {}, { tentativas: 1, nomePerfil: 'JS MIMOS' }).mensagens)
-      .toEqual(['Você não possui graduação? Não consegui entender 😅']);
+      .toEqual(['Qual a sua graduação?']);
+    expect(TEXTOS.perguntaQualGraduacao).not.toMatch(/não possui|não consegui entender/i);
   });
 
-  it('depois da confirmação: "tenho sim, sou vet" segue o roteiro; "não tenho" vai para a Escola', () => {
+  it('depois de "Qual a sua graduação?": "veterinária" segue o roteiro; "não tenho" vai para a Escola', () => {
     expect(passo('pergunta_formacao', { situacao: 'formado', area: 'medicina veterinária' }, { tentativas: 2 }).proximaEtapa)
       .toBe('pergunta_interesse');
     expect(passo('pergunta_formacao', { situacao: 'nenhum' }, { tentativas: 2 }).proximaEtapa).toBe('escola_enviada');
   });
 
-  it('pergunta da pessoa depois da confirmação: responde e repergunta, sem gastar a Escola', () => {
+  it('pergunta da pessoa depois de "Qual a sua graduação?": responde e repergunta, sem gastar a Escola', () => {
     expect(passo('pergunta_formacao', { intencao: 'pergunta', resposta_pergunta: 'Temos MBA, sim!' }, { tentativas: 2 }))
       .toMatchObject({ mensagens: ['Temos MBA, sim!', TEXTOS.reperguntarFormacao], proximaEtapa: 'pergunta_formacao', tentativas: 3 });
   });
 });
 
 describe('pergunta_curso: "qual é a sua graduação?" (25/09/2026)', () => {
+  it('"não tenho formação" desfaz o formado deduzido de "trabalhando já": Escola, sem CRM (12/11/2026)', () => {
+    const p = passo('pergunta_curso', { situacao: 'nenhum' }, { situacaoSalva: 'formado' });
+    expect(p).toMatchObject({ mensagens: [TEXTOS.escola], proximaEtapa: 'escola_enviada' });
+    expect(p.enviarWhatsapp).toBeUndefined();
+  });
+
   it('"tô na graduação" sem curso → "Legal! E qual curso você faz?"', () => {
     expect(passo('pergunta_formacao', { situacao: 'estudante' }, { textoNovo: 'to na graduação' })).toMatchObject({
       mensagens: ['Legal! E qual curso você faz?'], proximaEtapa: 'pergunta_curso', situacao: 'estudante',

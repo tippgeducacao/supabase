@@ -371,6 +371,44 @@ describe('ig-agente: quando NÃO fala', () => {
     expect(mocks.rpc).not.toHaveBeenCalled();
   });
 
+  it('reel sem texto no meio do roteiro: a IA fica calada, não gasta tentativa e o cursor anda (12/11/2026)', async () => {
+    mocks.estado.conversa!.fluxo_etapa = 'pergunta_formacao';
+    mocks.estado.conversa!.fluxo_tentativas = 1;
+    mocks.estado.mensagens = [{ mid: 'm1', direcao: 'inbound', tipo: 'ig_reel', conteudo: null, created_at: INBOUND_EM }];
+    await inbound();
+    expect(mocks.classificar).not.toHaveBeenCalled();
+    expect(chamadasInstagram()).toEqual([]);
+    expect(gravacaoDaEtapa()!.payload).toMatchObject({ fluxo_etapa: 'pergunta_formacao', fluxo_tentativas: 1 });
+    expect(liberacao()).toMatchObject({ p_respondido_ate: INBOUND_EM });
+    expect(liberacao().p_tools[0]).toMatchObject({ calada: 'midia_sem_texto', proxima: 'pergunta_formacao', modelo: null });
+  });
+
+  it('áudio sem texto no pedido do WhatsApp também não é resposta', async () => {
+    mocks.estado.conversa!.fluxo_etapa = 'pergunta_whatsapp';
+    mocks.estado.mensagens = [{ mid: 'm1', direcao: 'inbound', tipo: 'audio', conteudo: '', created_at: INBOUND_EM }];
+    await inbound();
+    expect(mocks.classificar).not.toHaveBeenCalled();
+    expect(chamadasInstagram()).toEqual([]);
+    expect(gravacaoDaEtapa()!.payload).toMatchObject({ fluxo_etapa: 'pergunta_whatsapp', fluxo_tentativas: 0 });
+  });
+
+  it('texto + reel na mesma leva: a pessoa falou, a IA responde', async () => {
+    mocks.estado.conversa!.fluxo_etapa = 'pergunta_formacao';
+    mocks.estado.mensagens = [
+      { mid: 'm0', direcao: 'inbound', tipo: 'text', conteudo: 'sou vet', created_at: '2026-09-24T11:59:58.000Z' },
+      { mid: 'm1', direcao: 'inbound', tipo: 'ig_reel', conteudo: null, created_at: INBOUND_EM },
+    ];
+    await inbound();
+    expect(mocks.classificar).toHaveBeenCalledWith('pergunta_formacao', [], ['sou vet', '[compartilhou um post do Instagram]']);
+    expect(liberacao().p_tools[0].calada).toBeUndefined();
+  });
+
+  it('reel sem texto na ABERTURA: a IA segue puxando a conversa', async () => {
+    mocks.estado.mensagens = [{ mid: 'm1', direcao: 'inbound', tipo: 'ig_reel', conteudo: null, created_at: INBOUND_EM }];
+    await inbound();
+    expect(mocks.classificar).toHaveBeenCalledTimes(1);
+  });
+
   it('chegou mensagem mais nova: a execução dela responde, não esta', async () => {
     mocks.estado.mensagens.push({ mid: 'm2', direcao: 'inbound', tipo: 'text', conteudo: 'e o valor?', created_at: '2026-09-24T12:00:03.000Z' });
     await inbound('m1');

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   atrasoEntreBaloesMs, inicioDaJanela, JANELA_HISTORICO_MS, MAX_MENSAGENS_HISTORICO,
-  montarHistoricoIg,
+  montarHistoricoIg, soMidiaSemTexto,
 } from './historico';
 
 const linha = (direcao: string, conteudo: string | null, tipo = 'text') =>
@@ -62,5 +62,25 @@ describe('atrasoEntreBaloesMs', () => {
   it('fica entre 1,2 s e 4 s', () => {
     expect(atrasoEntreBaloesMs('oi')).toBe(1_200);
     expect(atrasoEntreBaloesMs('x'.repeat(500))).toBe(4_000);
+  });
+});
+
+describe('soMidiaSemTexto: reel, post e áudio sem texto não são resposta (12/11/2026)', () => {
+  it('só mídia sem texto → true', () => {
+    expect(soMidiaSemTexto([linha('inbound', null, 'ig_reel')])).toBe(true);
+    expect(soMidiaSemTexto([linha('inbound', '', 'audio'), linha('inbound', null, 'ig_post')])).toBe(true);
+    expect(soMidiaSemTexto([linha('inbound', '  ', 'unsupported_type')])).toBe(true);
+  });
+
+  it('qualquer texto na leva vale: a pessoa falou', () => {
+    expect(soMidiaSemTexto([linha('inbound', 'sou vet'), linha('inbound', null, 'ig_reel')])).toBe(false);
+    expect(soMidiaSemTexto([linha('inbound', 'olha esse', 'ig_reel')])).toBe(false);
+  });
+
+  it('reação não é fala; leva vazia e saída nossa não contam', () => {
+    expect(soMidiaSemTexto([linha('inbound', '❤', 'reaction')])).toBe(false);
+    expect(soMidiaSemTexto([linha('inbound', '❤', 'reaction'), linha('inbound', null, 'ig_reel')])).toBe(true);
+    expect(soMidiaSemTexto([])).toBe(false);
+    expect(soMidiaSemTexto([linha('outbound', null, 'image')])).toBe(false);
   });
 });
