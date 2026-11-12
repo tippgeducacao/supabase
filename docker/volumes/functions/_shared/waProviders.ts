@@ -136,6 +136,14 @@ export interface WaProvider {
     targetExternalId: string,
     emoji: string,
   ): Promise<WaSendResult>;
+  /** Conversas da linha (inclusive grupos), da mais recente à mais antiga — JSON cru do provedor. */
+  listChats(
+    serverUrl: string,
+    token: string,
+    opts: { limit: number; offset: number; busca?: string; somenteNaoLidas?: boolean; somenteGrupos?: boolean; arquivadas?: boolean },
+  ): Promise<any>;
+  /** Mensagens de UMA conversa, da mais nova à mais antiga — JSON cru do provedor. */
+  findMessages(serverUrl: string, token: string, chatId: string, opts: { limit: number; offset: number }): Promise<any>;
   /** Baixa/decripta a mídia de uma mensagem; devolve URL pública (válida ~2 dias) e/ou base64. */
   downloadMedia(
     serverUrl: string,
@@ -418,6 +426,40 @@ const uazapi: WaProvider = {
         return jidToDigits(pn.includes("@s.whatsapp.net") ? pn : jid.includes("@s.whatsapp.net") ? jid : "");
       })
       .filter((d) => d.length >= 10);
+  },
+
+  async listChats(serverUrl, token, opts) {
+    const body: Record<string, unknown> = {
+      sort: "-wa_lastMsgTimestamp",
+      limit: opts.limit,
+      offset: opts.offset,
+      compact: true,
+      wa_archived: opts.arquivadas === true,
+    };
+    const busca = (opts.busca ?? "").trim();
+    // Com busca o operador é OR entre os filtros — filtro de grupo/não lida entraria no OR e
+    // traria tudo. Nesse caso quem filtra é o chamador, depois (a edge faz).
+    if (!busca && opts.somenteNaoLidas) body.wa_unreadCount = ">0";
+    if (!busca && opts.somenteGrupos) body.wa_isGroup = true;
+    if (busca) {
+      // Nome (contato ou perfil) OU o número/id da conversa; sem operador a Uazapi faz "contém".
+      body.operator = "OR";
+      body.wa_contactName = busca;
+      body.wa_name = busca;
+      body.wa_chatid = busca.replace(/\D/g, "").length >= 4 ? busca.replace(/\D/g, "") : busca;
+      delete body.wa_archived; // busca varre arquivadas também, como no WhatsApp Web
+    }
+    const r = await uazFetch(serverUrl, "/chat/find", "POST", { token }, body, { timeoutMs: 20000, retries: 1 });
+    if (!r.ok) throw new Error(`chat/find HTTP ${r.status}`);
+    return r.json;
+  },
+
+  async findMessages(serverUrl, token, chatId, opts) {
+    const r = await uazFetch(serverUrl, "/message/find", "POST", { token }, {
+      chatid: chatId, limit: opts.limit, offset: opts.offset,
+    }, { timeoutMs: 20000, retries: 1 });
+    if (!r.ok) throw new Error(`message/find HTTP ${r.status}`);
+    return r.json;
   },
 
   async sendMedia(serverUrl, token, numberDigits, opts) {
