@@ -1960,7 +1960,36 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
         // params (builder) OU config (legado SQL). ativar_ia liga o agente João p/ o lead.
         const pc: any = a?.params ?? (a as any)?.config ?? {};
         const templateName = String(pc.template_id ?? pc.template_name ?? "").trim();
+        // BLOQUEIO DURO (12/11/2026): esta ação chama `crm-whatsapp-send` direto, fora de
+        // qualquer motor que leia a régua `crm_bloqueio_disparo`. Uma pessoa bloqueada
+        // (`crm_bloqueio_whatsapp`) que se reinscrevia na LP recebia o template de confirmação
+        // mesmo assim. Lê a tabela por `canon` (o bloqueio é da PESSOA, não do cadastro) e
+        // não envia — nem liga o agente, porque o bloqueio vale para tudo.
+        let pessoaBloqueada = false;
         if (templateName && telCanon && whatsappLead) {
+          try {
+            const { data: canonBloq } = await admin.rpc("fn_canon_ddd8", { p: whatsappLead });
+            const canonStr = typeof canonBloq === "string" ? canonBloq : "";
+            if (canonStr) {
+              const { data: bloq } = await admin
+                .from("crm_bloqueio_whatsapp")
+                .select("canon")
+                .eq("canon", canonStr)
+                .eq("ativo", true)
+                .maybeSingle();
+              pessoaBloqueada = !!bloq;
+            }
+          } catch (e: any) {
+            // Na dúvida, NÃO manda: um template perdido se reenvia; um enviado a quem
+            // pediu para parar não se desfaz.
+            pessoaBloqueada = true;
+            console.error("[crm-lead-webhook] checagem de bloqueio falhou (não envia):", e?.message);
+          }
+          if (pessoaBloqueada) {
+            console.warn("[crm-lead-webhook] enviar_mensagem_whatsapp barrado: pessoa com bloqueio de WhatsApp");
+          }
+        }
+        if (templateName && telCanon && whatsappLead && !pessoaBloqueada) {
           const variaveis = Array.isArray(pc.variaveis) ? pc.variaveis : [];
           const parameters = variaveis
             .map((v: unknown) => resolveWebhookVar(v, dados))
