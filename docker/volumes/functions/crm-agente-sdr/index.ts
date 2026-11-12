@@ -1219,6 +1219,7 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
       provedor: provedor?.nome ?? 'anthropic',
       agente: agenteEfetivo,
       modelo: resp.model ?? null,
+      esforco: resp.esforco ?? null,
       raciocinio_encadeado: resp.raciocinio_encadeado === true,
       raciocinios_reenviados: resp.raciocinios_reenviados ?? 0,
       stop_reason: resp.stop_reason ?? null,

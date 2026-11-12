@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { PRAZO_MODELO_PILOTO_MS } from './prazoModelo';
+import { PRAZO_MODELO_MAX_MS, PRAZO_MODELO_PILOTO_MS } from './prazoModelo';
 import type { ProvedorIA } from './agente';
 
 const transporte = vi.fn<typeof fetch>();
@@ -17,6 +17,22 @@ afterEach(() => vi.useRealTimers());
 afterAll(() => vi.unstubAllGlobals());
 
 describe('prazo HTTP real do piloto, incluindo corpo e retries', () => {
+  it('Terra max tem 90 s para pensar; correção sem raciocínio mantém os 45 s', async () => {
+    const terra = { ...luna, modelo: 'gpt-6.1-terra', esforco: 'max' };
+    transporte.mockImplementation(() => new Promise(() => {}));
+    const p = chamar(pedido, {}, terra);
+    const falha = expect(p).rejects.toThrow('MODELO_TEMPO_ESGOTADO');
+    await vi.advanceTimersByTimeAsync(PRAZO_MODELO_PILOTO_MS);
+    expect(transporte.mock.calls[0][1]?.signal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(PRAZO_MODELO_MAX_MS - PRAZO_MODELO_PILOTO_MS);
+    await falha;
+    const correcao = chamar({ ...pedido, thinking: { type: 'disabled' } }, {}, terra);
+    const falhaCorrecao = expect(correcao).rejects.toThrow('MODELO_TEMPO_ESGOTADO');
+    await vi.advanceTimersByTimeAsync(PRAZO_MODELO_PILOTO_MS);
+    await falhaCorrecao;
+    expect(transporte.mock.calls[1][1]?.signal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
   it('interrompe fetch que nunca resolve e sinaliza cancelamento ao transporte', async () => {
     transporte.mockImplementation(() => new Promise(() => {}));
     const p = chamar(pedido, {}, luna);

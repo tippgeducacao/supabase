@@ -4,7 +4,7 @@ export const MODELOS_OPENAI_PILOTO = ['gpt-5.6-luna', 'gpt-6-luna'] as const;
 export type ModeloOpenaiPiloto = typeof MODELOS_OPENAI_PILOTO[number];
 // O modelo da conversa não amplia o piloto nem muda as chamadas de apoio.
 export const MODELOS_OPENAI_CONVERSA = ['gpt-6.1-terra'] as const;
-export const ESFORCOS_OPENAI_CONVERSA = ['low', 'medium', 'high'] as const;
+export const ESFORCOS_OPENAI_CONVERSA = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 // Ensaio por telefone (03/11/2026): modelo que só os números de `openai_ensaio_telefones` usam.
 // Lista separada de propósito: o piloto acima vale para a fatia inteira do luna_percentual.
 export const MODELOS_OPENAI_ENSAIO = ['gpt-6.1-terra'] as const;

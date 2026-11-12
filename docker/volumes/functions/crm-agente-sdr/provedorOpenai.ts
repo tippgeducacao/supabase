@@ -198,13 +198,17 @@ function itensDaMensagem(m: any, raciocinio = false): any[] {
 }
 
 export function paraPedidoOpenai(body: Record<string, any>, cfg: ConfigOpenai): Record<string, unknown> {
+  const esforco = body.thinking?.type === 'disabled' ? 'none' : cfg.esforco;
   const pedido: Record<string, unknown> = {
     model: cfg.modelo,
     store: false,
     input: (body.messages ?? []).flatMap((m: any) => itensDaMensagem(m, cfg.raciocinio === true)),
-    max_output_tokens: body.max_tokens,
+    // Max também consome tokens internos. O teto antigo de 8K podia encerrar o
+    // raciocínio antes da fala; a reserva de 32K vale só para Terra max (12/11/2026).
+    max_output_tokens: cfg.modelo === 'gpt-6.1-terra' && esforco === 'max'
+      ? Math.max(Number(body.max_tokens) || 0, 32768) : body.max_tokens,
     // thinking desligado na origem (router, correção) = sem raciocínio aqui também.
-    reasoning: { effort: body.thinking?.type === 'disabled' ? 'none' : cfg.esforco },
+    reasoning: { effort: esforco },
   };
   // Com store:false o item já vem cifrado; o include é o pedido explícito, aceito pela API.
   if (cfg.raciocinio === true) pedido.include = ['reasoning.encrypted_content'];

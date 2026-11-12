@@ -1,6 +1,8 @@
 // Prazo inclui fetch, leitura do corpo e retries. Abort sozinho depende do
 // transporte cooperar; o race também libera o worker se ele nunca resolver.
 export const PRAZO_MODELO_PILOTO_MS = 45_000;
+// Max precisa de mais tempo para raciocinar; Luna e correção sem raciocínio ficam em 45 s.
+export const PRAZO_MODELO_MAX_MS = 90_000;
 export const RESPOSTA_MODELO_INDISPONIVEL = 'não consegui concluir sua resposta agora. pode tentar novamente em instantes?';
 
 export async function comPrazoModelo<T>(executar: (sinal: AbortSignal) => Promise<T>, prazoMs: number): Promise<T> {

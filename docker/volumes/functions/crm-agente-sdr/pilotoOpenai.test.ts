@@ -35,12 +35,12 @@ describe('provedor do piloto, comum ao atendimento e follow-up', () => {
     const foraDaLista = { ...config, luna_telefones: [], openai_ensaio_telefones: ['5511912345678'] };
     expect(await selecionarProvedorDoLead(banco(foraDaLista), '5511912345678')).toMatchObject({ modelo: 'gpt-6-luna', origem: 'percentual' });
   });
-  it('configura Terra medium só para a conversa sem mudar Luna, fatia ou memória da rodada', async () => {
+  it.each(['medium', 'xhigh', 'max'])('configura Terra %s só para a conversa sem mudar Luna, fatia ou memória da rodada', async (esforco) => {
     const config = { luna_percentual: 100, openai_modelo_piloto: 'gpt-6-luna', openai_raciocinio_encadeado: true,
-      openai_modelo_conversa: 'gpt-6.1-terra', openai_esforco_conversa: 'medium' };
+      openai_modelo_conversa: 'gpt-6.1-terra', openai_esforco_conversa: esforco };
     expect(await selecionarProvedorDoLead(banco(config), '5511912345678')).toMatchObject({
       modelo: 'gpt-6-luna', esforco: 'high', raciocinio: true,
-      conversa: { modelo: 'gpt-6.1-terra', esforco: 'medium' },
+      conversa: { modelo: 'gpt-6.1-terra', esforco },
     });
     expect(await selecionarProvedorDoLead(banco({ ...config, luna_percentual: 0 }), '5511912345678')).toBeNull();
   });

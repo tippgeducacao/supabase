@@ -453,6 +453,7 @@ async function processarResposta(
     provedor: lunaAtiva(e, deps) ? 'openai' : 'anthropic',
     agente: e.agenteEfetivo,
     modelo: resp.model ?? null,
+    esforco: provedorDaConversa(deps.provedor)?.esforco ?? null,
     raciocinio_encadeado: resp.raciocinio_encadeado === true,
     raciocinios_reenviados: resp.raciocinios_reenviados ?? 0,
     stop_reason: resp.stop_reason ?? null,

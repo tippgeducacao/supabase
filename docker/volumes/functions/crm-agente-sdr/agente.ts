@@ -12,7 +12,7 @@ import { INSTRUCAO_EVENTOS } from './instrucaoEventos.ts';
 import { descreverToolsSdr } from './descricoesTools.ts';
 import { respostaParaFalhaCatalogo } from './falhaCatalogo.ts';
 import { INSTRUCAO_FALHA_COMPATIBILIDADE, respostaAoAceiteAposFalha, ultimaCompatibilidadeFalhou } from './falhaCompatibilidade.ts';
-import { comPrazoModelo, PRAZO_MODELO_PILOTO_MS } from './prazoModelo.ts';
+import { comPrazoModelo, PRAZO_MODELO_MAX_MS, PRAZO_MODELO_PILOTO_MS } from './prazoModelo.ts';
 import { INSTRUCAO_FATOS_DO_LEAD } from './fatosLead.ts';
 import { blocosDoPrompt, type ConjuntoPrompt } from './conjuntoPrompt.ts';
 import { FERRAMENTAS, FERRAMENTAS_POR_AGENTE } from './tools-luna.ts';
@@ -135,7 +135,8 @@ export async function chamarAnthropic(
       sinal?.throwIfAborted();
       if (!openai) return dados;
       if (memoria) registrarRaciocinio(memoria, dados);
-      const resposta = paraRespostaAnthropic(dados, openai);
+      const resposta = { ...paraRespostaAnthropic(dados, openai),
+        esforco: body.thinking?.type === 'disabled' ? 'none' : openai.esforco };
       return memoria ? { ...resposta, raciocinio_encadeado: true, raciocinios_reenviados: raciociniosReenviados } : resposta;
     }
     // Um erro de validação pode ecoar o input. Na cadeia cifrada não levar esse
@@ -152,7 +153,8 @@ export async function chamarAnthropic(
   };
   // 22/09/2026: o piloto parou após tools, com fetch sem limite e sem resposta.
   // O legado conserva seu contrato; OpenAI e fallback explícito têm prazo finito.
-  const limite = prazoMs ?? (openai ? PRAZO_MODELO_PILOTO_MS : undefined);
+  const terraMax = openai?.modelo === 'gpt-6.1-terra' && openai.esforco === 'max' && body.thinking?.type !== 'disabled';
+  const limite = prazoMs ?? (openai ? terraMax ? PRAZO_MODELO_MAX_MS : PRAZO_MODELO_PILOTO_MS : undefined);
   try {
     const resposta = await (limite === undefined ? executar() : comPrazoModelo(executar, limite));
     await observarSemInterromper(observarModelo, { pedido: body, enviado: pedidoOpenai ?? semRaciocinioOpenai(corpoAnthropic), resposta, provedor: alternativo?.nome ?? 'anthropic' });
@@ -431,6 +433,7 @@ export function respostaDepoisDaCorrecao(resposta: any, decisao: DecisaoCanal, c
   if (!corrigida) return normalizarRespostaCanal(resposta, { tipo: 'bloquear', motivo: 'falha_na_correcao' }, motivo);
   return normalizarRespostaCanal({
     ...corrigida, usage: somarUsoModelo(resposta.usage, corrigida.usage),
+    esforco: resposta.esforco ?? corrigida.esforco,
     ...(resposta.raciocinio_encadeado || corrigida.raciocinio_encadeado ? {
       raciocinio_encadeado: true,
       raciocinios_reenviados: (resposta.raciocinios_reenviados ?? 0) + (corrigida.raciocinios_reenviados ?? 0),

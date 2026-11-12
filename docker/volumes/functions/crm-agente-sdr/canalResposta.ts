@@ -116,6 +116,8 @@ export function normalizarRespostaCanal(
   const paradasConhecidas = ['end_turn', 'tool_use', 'max_tokens', 'stop_sequence', 'pause_turn', 'refusal', 'model_context_window_exceeded'];
   return {
     model: typeof resposta.model === 'string' ? resposta.model : undefined,
+    ...(typeof resposta.esforco === 'string' && ['none', 'low', 'medium', 'high', 'xhigh', 'max'].includes(resposta.esforco)
+      ? { esforco: resposta.esforco } : {}),
     usage: somarUsoModelo(resposta.usage),
     // Só contagem local e flag atravessam; o Map e o item cifrado nunca saem do adaptador.
     ...(resposta.raciocinio_encadeado === true ? {
