@@ -38,6 +38,24 @@ function json(body: unknown, status = 200) {
 const texto = (v: unknown, max: number) => String(v ?? '').trim().slice(0, max);
 const CODIGO = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
+/**
+ * O setor de quem indicou, como a página escreve: os departamentos do RH vêm em caixa alta e
+ * com sigla ("TI", "ADM / FINANCEIRO"), e a página não deve adivinhar a grafia.
+ */
+const DEPARTAMENTO_PUBLICO: Record<string, string> = {
+  'TI': 'Tecnologia',
+  'ADM / FINANCEIRO': 'Administrativo e Financeiro',
+  'COMERCIAL': 'Comercial',
+  'B2B': 'B2B',
+  'MARKETING': 'Marketing',
+  'PEDAGÓGICO': 'Pedagógico',
+};
+const departamentoPublico = (d: unknown) => {
+  const bruto = String(d ?? '').trim();
+  if (!bruto) return null;
+  return DEPARTAMENTO_PUBLICO[bruto.toUpperCase()] ?? bruto.charAt(0).toUpperCase() + bruto.slice(1).toLowerCase();
+};
+
 /** O que a página pode saber de cada recusa do banco. */
 const MOTIVOS_PUBLICOS = new Set(['link', 'nome', 'telefone', 'setor', 'limite']);
 
@@ -69,7 +87,7 @@ Deno.serve(async (req) => {
         nome: data.nome,
         primeiro_nome: data.primeiro_nome,
         foto: data.foto ?? null,
-        departamento: data.departamento ?? null,
+        departamento: departamentoPublico(data.departamento),
         setores: Array.isArray(data.setores) ? data.setores : [],
       });
     }
