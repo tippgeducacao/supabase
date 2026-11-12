@@ -1,4 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
+import { exigirAcesso, respostaAcessoNegado } from '../_shared/acesso.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -28,6 +29,11 @@ function normalize(a: any) {
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
+
+  // Devolve CPF, nascimento, celular e e-mail dos alunos do SIGA: só Financeiro/gestão logado
+  // (mesma régua da irmã siga-vencidos). Estava aberta a qualquer um até 12/11/2026.
+  try { await exigirAcesso(req, { usuario: true, rpcPermissao: 'is_financial_user', servico: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   const supabase = createClient(
     Deno.env.get('SUPABASE_URL')!,

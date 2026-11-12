@@ -12,6 +12,7 @@
 //   { ok: true, grupos: number, enviados: number, falhas: number, details: [...] }
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
+import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -63,6 +64,11 @@ function sanitizeWaParam(s: string | null | undefined): string {
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+
+  // Dispara WhatsApp para professores e muda o status dos convites: só logado (a tela do
+  // Despacho Semestral) ou a chave de serviço. Estava aberta a qualquer um até 12/11/2026.
+  try { await exigirAcesso(req, { usuario: true, servico: true }); }
+  catch (e) { return respostaAcessoNegado(e, corsHeaders); }
 
   const supabase = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
   const details: any[] = [];

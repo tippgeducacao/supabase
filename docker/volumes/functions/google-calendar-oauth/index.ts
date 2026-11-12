@@ -1,9 +1,14 @@
+// acesso: publico — callback de OAuth do Google: só age com state ASSINADO (HMAC do client secret), no prazo de 15 min, emitido pelo START, que exige login
 // Google Calendar OAuth: start + callback
-// - GET ?action=start&integration_id=...  -> redirect to Google
+// - GET ?action=start&integration_id=...  -> redirect to Google (exige login)
 // - GET /callback?code=...&state=...      -> exchange code, store tokens, close popup
+//   O state é assinado desde 12/11/2026 (_shared/googleOAuthState.ts): antes era base64 puro e
+//   qualquer um plantava a própria conta Google numa integração da casa. docs/SECURITY.md.
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { atualizacaoAgendaDescoberta } from '../_shared/atualizacaoAgendaDescoberta.ts';
+import { conferirStateGoogle, criarStateGoogle } from '../_shared/googleOAuthState.ts';
+import { escaparHtml } from '../_shared/escaparHtml.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -162,13 +167,9 @@ Deno.serve(async (req) => {
       const mode = parseMode(url.searchParams.get('mode'));
       const scopes = buildScopes(mode);
 
-      // state = base64({ integration_id, user_id, mode, nonce })
-      const state = btoa(JSON.stringify({
-        i: integrationId,
-        u: userId,
-        m: mode,
-        n: crypto.randomUUID(),
-      }));
+      // state ASSINADO (HMAC com o client secret, prazo de 15 min): o callback recusa qualquer
+      // state que não tenha saído daqui.
+      const state = await criarStateGoogle(CLIENT_SECRET, { integrationId, usuarioId: userId, modo: mode });
 
       const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
       authUrl.searchParams.set('client_id', CLIENT_ID);
@@ -202,13 +203,14 @@ Deno.serve(async (req) => {
     }
     if (!code || !stateRaw) return htmlResponse(closePopupHtml(false, 'missing_code_or_state'), 400);
 
-    let state: { i: string; u: string; m?: OAuthMode };
-    try {
-      state = JSON.parse(atob(stateRaw));
-    } catch {
-      return htmlResponse(closePopupHtml(false, 'invalid_state'), 400);
+    // Confere assinatura e prazo ANTES de trocar o código (fechado por padrão).
+    const conf = await conferirStateGoogle(CLIENT_SECRET, stateRaw);
+    if (!conf.ok) {
+      console.warn('[oauth-callback] state recusado', conf.motivo);
+      return htmlResponse(closePopupHtml(false, conf.motivo === 'vencido' ? 'state_expired' : 'invalid_state'), 400);
     }
-    const mode: OAuthMode = state.m === 'email' || state.m === 'calendar' ? state.m : 'full';
+    const state = conf.state;
+    const mode: OAuthMode = state.m;
 
     // Exchange code -> tokens
     const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
@@ -400,15 +402,20 @@ Deno.serve(async (req) => {
   }
 });
 
+// O texto de erro pode vir da URL (?error=...): escapar SEMPRE antes de pôr no HTML, e o JSON
+// do <script> sem "<" cru (senão "</script>" fecha a tag). Injeção achada em 12/11/2026.
+
 function closePopupHtml(success: boolean, error?: string) {
-  const payload = JSON.stringify({ source: 'google-calendar-oauth', success, error });
+  const erro = typeof error === 'string' ? error.slice(0, 200) : undefined;
+  const payload = JSON.stringify({ source: 'google-calendar-oauth', success, error: erro })
+    .replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026');
   // Send postMessage immediately, then close popup quickly to avoid racing with parent re-render
   return `<!doctype html><html><head><meta charset="utf-8"><title>${success ? 'Conectado' : 'Erro'}</title>
 <style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#0b0b0c;color:#fff;text-align:center;padding:20px}</style>
 </head><body>
 <div>
 <h2>${success ? '✅ Agenda conectada!' : '❌ Falha na conexão'}</h2>
-<p>${success ? 'Pode fechar esta janela...' : (error || 'Tente novamente.')}</p>
+<p>${success ? 'Pode fechar esta janela...' : escaparHtml(erro || 'Tente novamente.')}</p>
 </div>
 <script>
 (function(){
