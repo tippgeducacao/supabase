@@ -4,6 +4,13 @@ import { corsHeaders } from '../_shared/cors.ts';
 /**
  * A agenda de entrevistas, aberta ao CANDIDATO.
  *
+ * Três links, a mesma edge (13/11/2026):
+ *  - CAMPANHA (`/processo-seletivo/campanha/<código>`, corpo com `campanha`): um só, gerado
+ *    quando a campanha é publicada. Mostra os horários livres da campanha sem pedir nada; a
+ *    pessoa diz nome e WhatsApp só ao confirmar. Pedido do Rafael: "um link somente com os
+ *    horários disponíveis e boa, sem regras e complicações".
+ *  - PESSOAL e ANTIGO, abaixo.
+ *
  * Desde 13/11/2026 o link é PESSOAL (`/processo-seletivo/agendar/<token>`), igual ao da
  * renegociação da cobrança: quem abre já vê o primeiro nome e os horários dele, sem digitar
  * nada. O corpo traz `token`; o dono é `rh_agenda_publica_por_token`. Pedido do Rafael:
@@ -64,19 +71,79 @@ function json(body: unknown, status = 200) {
  */
 const DIAS_COM_HORARIO = 3;
 
+/** "2026-11-13", no fuso de Brasília: é a data que a campanha usa. */
+function hojeEmSaoPaulo() {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Sao_Paulo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
 
   try {
     const body = await req.json().catch(() => ({}));
     const acao = String(body?.acao ?? 'carregar');
+    const campanha = String(body?.campanha ?? '').trim().toLowerCase();
     const token = String(body?.token ?? '').trim().toLowerCase();
     const nome = String(body?.nome ?? '').trim();
 
     const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
     let candidato: any = null;
+    // No link da campanha os horários são os da campanha e a pessoa só diz quem é ao
+    // confirmar; nos outros dois, os horários são a agenda DO candidato.
+    let livres: Horario[] = [];
+    let forcar = false;
 
-    if (token) {
+    if (campanha) {
+      // ── Link da campanha (13/11/2026): um só, abre direto nos horários livres ──
+      // Pedido do Rafael: "um link somente com os horários disponíveis e boa, sem regras".
+      if (!/^[0-9a-f]{12}$/.test(campanha)) return json({ ok: false, motivo: 'campanha_encerrada' });
+
+      const { data: cfg, error: erroCfg } = await admin
+        .from('rh_entrevista_config')
+        .select('campanha_codigo, agenda_publica_ate')
+        .eq('id', true)
+        .maybeSingle();
+      if (erroCfg) throw erroCfg;
+      if (
+        !cfg ||
+        cfg.campanha_codigo !== campanha ||
+        !cfg.agenda_publica_ate ||
+        String(cfg.agenda_publica_ate) < hojeEmSaoPaulo()
+      ) {
+        return json({ ok: false, motivo: 'campanha_encerrada' });
+      }
+
+      const { data: daCampanha, error: erroCampanha } = await admin.rpc('rh_entrevista_horarios_da_rodada');
+      if (erroCampanha) throw erroCampanha;
+      livres = (daCampanha ?? []) as Horario[];
+
+      if (acao === 'carregar') return json({ ok: true, horarios: livres });
+      if (acao !== 'marcar') return json({ ok: false, motivo: 'acao_invalida' }, 400);
+
+      // Quem é, só agora: o WhatsApp (o número que recebeu a mensagem) e, se o número não
+      // achar ninguém, o nome. Qualquer card aberto do funil de RH: sem lista de fora.
+      const whatsapp = String(body?.whatsapp ?? '').replace(/\D/g, '');
+      if (!nome || whatsapp.length < 10) return json({ ok: false, motivo: 'contato_incompleto' });
+
+      const { data: achado, error: erroContato } = await admin.rpc('rh_agenda_publica_por_contato', {
+        p_whatsapp: whatsapp,
+        p_nome: nome,
+      });
+      if (erroContato) throw erroContato;
+      candidato = Array.isArray(achado) ? achado[0] : achado;
+      if ((candidato?.achados ?? 0) > 1) return json({ ok: false, motivo: 'contato_ambiguo' });
+      if (!candidato?.oportunidade_id) return json({ ok: false, motivo: 'contato_nao_encontrado' });
+
+      // O horário vale para quem tem o link, seja qual for a etapa do card. Forçar só pula a
+      // conferência da agenda DO candidato: o horário é conferido abaixo contra os livres da
+      // campanha, e o índice único de rh_entrevistas continua impedindo dois no mesmo horário.
+      forcar = true;
+    } else if (token) {
       // ── Link pessoal ──────────────────────────────────────────────────────────
       if (!/^[0-9a-f]{32}$/.test(token)) return json({ ok: false, motivo: 'link_invalido' });
 
@@ -115,34 +182,36 @@ Deno.serve(async (req) => {
       }
     }
 
-    // A agenda DESTE candidato: rodada para o monitor convocado, faixas padrão para os demais.
-    // A regra mora no banco, que é o mesmo lugar onde `rh_entrevista_marcar` a confere.
-    const { data: livresRaw, error: erroHorarios } = await admin.rpc('rh_entrevista_horarios_do_candidato', {
-      p_oportunidade_id: candidato.oportunidade_id,
-      p_dias_com_horario: DIAS_COM_HORARIO,
-    });
-    if (erroHorarios) throw erroHorarios;
-    const livres = (livresRaw ?? []) as Horario[];
-
-    const jaMarcada = candidato.entrevista_inicio
-      ? {
-          inicio: candidato.entrevista_inicio,
-          fim: candidato.entrevista_fim,
-          modalidade: candidato.entrevista_modalidade ?? 'presencial',
-          link: candidato.entrevista_link ?? null,
-        }
-      : null;
-
-    if (acao === 'carregar') {
-      return json({
-        ok: true,
-        primeiro_nome: candidato.primeiro_nome,
-        horarios: livres,
-        entrevista: jaMarcada,
+    if (!campanha) {
+      // A agenda DESTE candidato: rodada para o monitor convocado, faixas padrão para os demais.
+      // A regra mora no banco, que é o mesmo lugar onde `rh_entrevista_marcar` a confere.
+      const { data: livresRaw, error: erroHorarios } = await admin.rpc('rh_entrevista_horarios_do_candidato', {
+        p_oportunidade_id: candidato.oportunidade_id,
+        p_dias_com_horario: DIAS_COM_HORARIO,
       });
-    }
+      if (erroHorarios) throw erroHorarios;
+      livres = (livresRaw ?? []) as Horario[];
 
-    if (acao !== 'marcar') return json({ ok: false, motivo: 'acao_invalida' }, 400);
+      const jaMarcada = candidato.entrevista_inicio
+        ? {
+            inicio: candidato.entrevista_inicio,
+            fim: candidato.entrevista_fim,
+            modalidade: candidato.entrevista_modalidade ?? 'presencial',
+            link: candidato.entrevista_link ?? null,
+          }
+        : null;
+
+      if (acao === 'carregar') {
+        return json({
+          ok: true,
+          primeiro_nome: candidato.primeiro_nome,
+          horarios: livres,
+          entrevista: jaMarcada,
+        });
+      }
+
+      if (acao !== 'marcar') return json({ ok: false, motivo: 'acao_invalida' }, 400);
+    }
 
     // ── Marcar ────────────────────────────────────────────────────────────────
 
@@ -164,7 +233,7 @@ Deno.serve(async (req) => {
       p_oportunidade_id: candidato.oportunidade_id,
       p_inicio: inicio,
       p_por: 'candidato',
-      p_forcar: false,
+      p_forcar: forcar,
       p_modalidade: modalidade,
       p_link: null,
     });
