@@ -81,3 +81,55 @@ describe('agente no n8n: telemetria e saída (12/11/2026)', () => {
     expect((await rotaV9('fracionar', { remotejid: '5546988166051@s.whatsapp.net', texto: '   ' }, deps)).status).toBe(400);
   });
 });
+
+describe('agente no n8n: pedido em peças (13/11/2026)', () => {
+  it('prompt, histórico e contexto viram system e messages como na produção', async () => {
+    const { montarPedidoDoN8n } = await import('./rotasV9');
+    const pedido = montarPedidoDoN8n({
+      max_tokens: 8192, tools: [{ name: 'consulta_pos_disponiveis' }],
+      prompt: ['BLOCO DA ETAPA', 'BASE COMUM', '  '],
+      contexto: 'AGORA: quinta, 13/11/2026',
+      historico: [
+        { role: 'assistant', content: 'olá, aqui é o João' }, // conversa que começa pelo template
+        { role: 'user', content: 'oi' },
+        { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'consulta_pos_disponiveis', input: {} }] },
+        { role: 'assistant', content: [{ type: 'tool_use', id: 't2', name: 'envia_informacoes', input: {} }] }, // sem resultado: sai
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] },
+      ],
+    });
+    expect(pedido.system).toEqual([
+      { type: 'text', text: 'BLOCO DA ETAPA' },
+      { type: 'text', text: 'BASE COMUM', cache_control: { type: 'ephemeral' } },
+    ]);
+    expect(pedido.messages[0]).toEqual({ role: 'user', content: '[início de conversa]' });
+    const texto = JSON.stringify(pedido.messages);
+    expect(texto).toContain('"t1"');
+    expect(texto).not.toContain('"t2"');
+    const ult = pedido.messages[pedido.messages.length - 1];
+    expect(ult.role).toBe('user');
+    expect(ult.content[0]).toMatchObject({ type: 'tool_result', tool_use_id: 't1', cache_control: { type: 'ephemeral' } });
+    expect(ult.content[1].text).toMatch(/^\[CONTEXTO TEMPORAL DO SISTEMA[\s\S]*AGORA: quinta, 13\/11\/2026$/);
+    expect(pedido.tools).toEqual([{ name: 'consulta_pos_disponiveis' }]);
+    expect(pedido).not.toHaveProperty('historico');
+    expect(pedido).not.toHaveProperty('prompt');
+  });
+  it('router: só o diálogo em texto, sem contexto; pedido antigo passa como veio', async () => {
+    const { montarPedidoDoN8n } = await import('./rotasV9');
+    const router = montarPedidoDoN8n({
+      prompt: ['PROMPT DO ROUTER'], historico_so_dialogo: true, contexto: 'não entra',
+      historico: [
+        { role: 'user', content: 'quero às 14h' },
+        { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'consulta_disponibilidade', input: {} }] },
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'tenho 14h ou 16h' }] },
+      ],
+    });
+    expect(router.messages).toEqual([
+      { role: 'user', content: 'quero às 14h' },
+      { role: 'assistant', content: 'tenho 14h ou 16h' },
+      { role: 'user', content: '[INTERNAL_MARKER_FOLLOWUP_AUTO_IGNORE]' },
+    ]);
+    const antigo = { max_tokens: 512, system: [{ type: 'text', text: 'x' }], messages: [{ role: 'user', content: 'oi' }] };
+    expect(montarPedidoDoN8n(antigo)).toEqual(antigo);
+  });
+});

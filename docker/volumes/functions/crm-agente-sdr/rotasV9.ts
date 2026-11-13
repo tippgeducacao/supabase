@@ -5,7 +5,7 @@
 // Autorização: a mesma do resto das rotas do n8n (segredo do desvio + telefone na lista de teste),
 // feita no index.ts antes de chegar aqui. Lead de verdade não passa por estas rotas.
 
-import { atualizarAgenteComRatchet, atualizarLead, buscarLead, carregarHistorico, criarLead, jidsDoTelefone } from './historico.ts';
+import { atualizarAgenteComRatchet, atualizarLead, buscarLead, carregarHistorico, criarLead, jidsDoTelefone, limparParaRouter, sanitizarHistorico } from './historico.ts';
 import { pausaVigente } from './pausa.ts';
 import {
   carregarDiasSemAtendimento, encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao,
@@ -20,7 +20,7 @@ import { blocoElegibilidadeFormatura, limiteFormaturaFormatado } from './elegibi
 import { objecaoDaPos, sobreDaObjecaoDeTempo, toolBuscaCarreira } from './carreiraPos.ts';
 import { type AulaParaPrompt, montarVarsAula } from './prompts-aula.ts';
 import { cursoDaConversa } from './ganchoLote.ts';
-import { carregarTools, chamarAnthropic, MODELO_AGENTE, provedorDaConversa, type ProvedorIA } from './agente.ts';
+import { carregarTools, chamarAnthropic, MODELO_AGENTE, provedorDaConversa, type ProvedorIA, ROTULO_CONTEXTO_TEMPORAL } from './agente.ts';
 import { TOOL_RESPONDER_AO_CLIENTE } from './canalResposta.ts';
 import { AULA_V2_ABERTURA, AULA_V2_REGRAS, varsAulaV2 } from './prompts-aula-v2.ts';
 import { buscaCarreiraDaAula, contextoAulaV2, toolsDaAulaV2 } from './aulaV2.ts';
@@ -117,6 +117,42 @@ export function eventoLlmDoN8n(resposta: any, provedor: ProvedorIA, corpo: any):
     texto: texto ? cortar(texto, 2000) : undefined,
     tools_decididas: ferramentas.length ? ferramentas : undefined,
   };
+}
+
+/**
+ * O pedido EM PEÇAS do agente no n8n (13/11/2026). No canvas cada peça é uma raia que se lê sozinha:
+ * `prompt` (os blocos de texto, na ordem), `historico` (as linhas de conversation_history como
+ * estão no banco), `contexto` (o texto do sistema sobre o lead) e `tools`. Aqui elas viram
+ * `system` e `messages` com as MESMAS funções da produção — parear tool_use com tool_result,
+ * fundir turnos e colar o contexto no fim do último turno é ajuste de formato, não decisão do agente,
+ * e antes morava num nó de código de 73 linhas dentro do n8n.
+ * - `historico_so_dialogo: true` (o router): só o diálogo em texto, sem contexto colado.
+ * - Pedido que já traz `messages` (formato antigo) passa como veio.
+ */
+export function montarPedidoDoN8n(pedido: any): any {
+  if (!pedido || typeof pedido !== 'object') return {};
+  const { prompt, historico, contexto, historico_so_dialogo, ...resto } = pedido;
+  const saida: any = { ...resto };
+  if (Array.isArray(prompt)) {
+    const textos = prompt.map((p: unknown) => String(p ?? '')).filter((p: string) => p.trim() !== '');
+    // O cache fecha no último bloco do prompt: o que vem depois (histórico, contexto) muda a cada rodada.
+    saida.system = textos.map((text: string, i: number) =>
+      (i === textos.length - 1 ? { type: 'text', text, cache_control: { type: 'ephemeral' } } : { type: 'text', text }));
+  }
+  if (!Array.isArray(historico)) return saida;
+  const brutas = historico.filter((m: any) => m && m.role);
+  if (historico_so_dialogo === true) { saida.messages = limparParaRouter(brutas); return saida; }
+  const messages: any[] = sanitizarHistorico(brutas);
+  // Conversa que começa pelo template (fala nossa): um turno do lead antes, sem perder o template.
+  if (!messages.length || messages[0].role !== 'user') messages.unshift({ role: 'user', content: '[início de conversa]' });
+  // Contexto do lead: no FIM do último turno, depois do bloco que fecha o cache (como a produção).
+  const ult = messages[messages.length - 1];
+  const blocos: any[] = Array.isArray(ult.content) ? ult.content.map((b: any) => ({ ...b })) : [{ type: 'text', text: String(ult.content) }];
+  if (blocos.length) blocos[blocos.length - 1] = { ...blocos[blocos.length - 1], cache_control: { type: 'ephemeral' } };
+  if (typeof contexto === 'string' && contexto.trim() !== '') blocos.push({ type: 'text', text: ROTULO_CONTEXTO_TEMPORAL + contexto });
+  messages[messages.length - 1] = { ...ult, content: blocos };
+  saida.messages = messages;
+  return saida;
 }
 
 export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ status: number; corpo: unknown }> {
@@ -234,7 +270,7 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
     case 'luna': {
       const provedor = provedorDaConversa(await deps.provedorDoLead(soDigitos(corpo?.telefone ?? remotejid)));
       if (!provedor) return { status: 409, corpo: { error: 'telefone fora do canário da Luna e do piloto do Claude' } };
-      const pedido = corpo?.pedido ?? {};
+      const pedido = montarPedidoDoN8n(corpo?.pedido);
       const inicio = Date.now();
       const tel = criarTelemetria(supabase, remotejid, rodadaDoN8n(corpo));
       try {

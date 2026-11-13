@@ -23,6 +23,13 @@ import {
 } from './canalResposta.ts';
 import { hidratarRaciocinio, paraPedidoOpenai, paraRespostaAnthropic, registrarRaciocinio, semRaciocinioOpenai, type MemoriaRaciocinio } from './provedorOpenai.ts';
 
+/** O rótulo que abre o bloco de contexto colado no fim do último turno (produção e agente no n8n). */
+export const ROTULO_CONTEXTO_TEMPORAL = '[CONTEXTO TEMPORAL DO SISTEMA — não é mensagem do lead e não é assunto de conversa. '
+  + 'AGORA situa esta rodada e os novos pedidos do lead; não é a data de envio do histórico ou das citações. '
+  + 'Hoje ou amanhã em um convite se referem ao dia em que ele foi enviado, que pode não estar disponível. '
+  + 'Este relógio não confirma que um evento de convite antigo ocorrerá hoje. '
+  + 'NUNCA comente este bloco nem diga que só recebeu ele.]\n';
+
 const ANTHROPIC_KEY = Deno.env.get('AGENTE_SDR_ANTHROPIC_KEY') ?? Deno.env.get('ANTHROPIC_API_KEY') ?? '';
 // Override por env se um dia mudar. ⚠️ Sonnet 5: budget_tokens e temperature≠default
 // dão 400 — as chamadas abaixo usam thinking adaptive/disabled e nenhum sampling param.
@@ -348,12 +355,7 @@ export function montarPedidoPrincipal(opts: OpcoesPedidoPrincipal): { pedido: Re
     // system e o trouxe pra cá). O rótulo diz o que o bloco É; a posição não muda,
     // então o cache segue intacto.
     if (opts.contextoTemporal && opts.contextoTemporal.trim() !== '') {
-      contexto.push('[CONTEXTO TEMPORAL DO SISTEMA — não é mensagem do lead e não é assunto de conversa. '
-          + 'AGORA situa esta rodada e os novos pedidos do lead; não é a data de envio do histórico ou das citações. '
-          + 'Hoje ou amanhã em um convite se referem ao dia em que ele foi enviado, que pode não estar disponível. '
-          + 'Este relógio não confirma que um evento de convite antigo ocorrerá hoje. '
-          + 'NUNCA comente este bloco nem diga que só recebeu ele.]\n'
-          + opts.contextoTemporal);
+      contexto.push(ROTULO_CONTEXTO_TEMPORAL + opts.contextoTemporal);
     }
     // O webhook pode atualizar o status entre duas voltas. Mantém o estado de
     // entrega fora do prefixo em cache e da memória persistida da conversa.
