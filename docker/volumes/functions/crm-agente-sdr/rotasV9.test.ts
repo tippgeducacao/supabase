@@ -133,3 +133,40 @@ describe('agente no n8n: pedido em peças (13/11/2026)', () => {
     expect(montarPedidoDoN8n(antigo)).toEqual(antigo);
   });
 });
+
+describe('agente no n8n: as quatro personas (13/11/2026)', () => {
+  it('persona na ordem da produção: no-show › aula › número de anúncio › pós', async () => {
+    const { personaDoN8n } = await import('./rotasV9');
+    expect(personaDoN8n({ modo_recontato: true }, true, 'campanha_direta')).toBe('recontato');
+    expect(personaDoN8n({}, false, 'recontato')).toBe('recontato');
+    expect(personaDoN8n({}, true, 'campanha_direta')).toBe('aula');
+    expect(personaDoN8n({}, false, 'campanha_direta')).toBe('campanha_direta');
+    expect(personaDoN8n({}, false, 'qualificador')).toBe('qualificador');
+    expect(personaDoN8n(null, false, undefined)).toBe('qualificador');
+  });
+  it('coleta do anúncio só está feita com nome E formação', async () => {
+    const { coletaFeitaDoLead } = await import('./rotasV9');
+    expect(coletaFeitaDoLead({ nome: 'Ana', formacao_academica: 'Medicina Veterinária' })).toBe(true);
+    expect(coletaFeitaDoLead({ nome: 'Ana', formacao_academica: '  ' })).toBe(false);
+    expect(coletaFeitaDoLead({ nome: null, formacao_academica: 'Zootecnia' })).toBe(false);
+    expect(coletaFeitaDoLead(null)).toBe(false);
+  });
+  it('tools do número de anúncio: persona própria na abertura, qualificador + atualizar_dados_lead no fechamento', async () => {
+    const consultas: string[] = [];
+    const tabela: Record<string, any[]> = {
+      agente_campanha_direta: [{ name: 'atualizar_dados_lead' }, { name: 'verificar_compatibilidade_curso' }],
+      agente_validacao: [{ name: 'consulta_pos_disponiveis' }],
+      agente_qualificador: [{ name: 'confirmar_agendamento' }],
+    };
+    const agente = await import('./agente');
+    const espiao = vi.spyOn(agente, 'carregarTools').mockImplementation(async (_s: any, nome: string) => { consultas.push(nome); return tabela[nome] ?? []; });
+    try {
+      const deps = { supabase: {}, provedorDoLead: async () => null };
+      const jid = '5546988166051@s.whatsapp.net';
+      const nomes = async (corpo: any) => ((await rotaV9('tools', { remotejid: jid, ...corpo }, deps)).corpo as any).tools.map((t: any) => t.name);
+      expect(await nomes({ agente: 'agente_validacao', persona: 'campanha_direta' })).toEqual(['atualizar_dados_lead', 'verificar_compatibilidade_curso', 'responder_ao_cliente']);
+      expect(await nomes({ agente: 'agente_qualificador', persona: 'campanha_direta' })).toEqual(['confirmar_agendamento', 'atualizar_dados_lead', 'responder_ao_cliente']);
+      expect(await nomes({ agente: 'agente_validacao' })).toEqual(['consulta_pos_disponiveis', 'responder_ao_cliente']);
+    } finally { espiao.mockRestore(); }
+  });
+});

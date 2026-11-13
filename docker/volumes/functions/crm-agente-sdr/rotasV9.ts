@@ -26,6 +26,7 @@ import { AULA_V2_ABERTURA, AULA_V2_REGRAS, varsAulaV2 } from './prompts-aula-v2.
 import { buscaCarreiraDaAula, contextoAulaV2, toolsDaAulaV2 } from './aulaV2.ts';
 import { type CtxConversa, executarTool } from './tools.ts';
 import { contaDoLead } from './conta.ts';
+import { montarDossieRecontato } from './prompts-recontato.ts';
 import { limparConversaDeTeste } from './limparTeste.ts';
 import { carregarConfigRouterJev, pedidoJevRouter } from './routerJev.ts';
 
@@ -117,6 +118,23 @@ export function eventoLlmDoN8n(resposta: any, provedor: ProvedorIA, corpo: any):
     texto: texto ? cortar(texto, 2000) : undefined,
     tools_decididas: ferramentas.length ? ferramentas : undefined,
   };
+}
+
+/**
+ * Qual persona atende, na MESMA ordem da produção (index.ts, nó 7): no-show (recontato) › aula ›
+ * número de anúncio (campanha direta) › pós. O lead em `modo_recontato` manda mesmo que o número
+ * seja outro; a aula vence o número de anúncio.
+ */
+export type PersonaN8n = 'recontato' | 'aula' | 'campanha_direta' | 'qualificador';
+export function personaDoN8n(lead: any, temAula: boolean, personaDoNumero: unknown): PersonaN8n {
+  if (lead?.modo_recontato === true || personaDoNumero === 'recontato') return 'recontato';
+  if (temAula) return 'aula';
+  return personaDoNumero === 'campanha_direta' ? 'campanha_direta' : 'qualificador';
+}
+
+/** Número de anúncio: o router só pode promover ao fechamento depois de nome E formação coletados. */
+export function coletaFeitaDoLead(lead: any): boolean {
+  return Boolean(String(lead?.nome ?? '').trim() && String(lead?.formacao_academica ?? '').trim());
 }
 
 /**
@@ -217,7 +235,8 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
       const telefone = soDigitos(corpo?.telefone ?? remotejid);
       const campanha = lead?.contexto_campanha ?? null;
       const aula = campanha?.persona === 'aula' && campanha.aula_id ? await carregarAula(supabase, campanha.aula_id) : null;
-      const persona = lead?.modo_recontato === true ? 'recontato' : aula ? 'aula' : 'qualificador';
+      // A persona do NÚMERO (recontato, campanha_direta) vem do fluxo pai; a do lead, do cadastro.
+      const persona = personaDoN8n(lead, Boolean(aula), corpo?.persona);
       // Na aula, o curso é o da aula em TUDO (vars, nota do curso, Cannabis). Até 02/10/2026 o
       // contexto levava o do cadastro (Bovinos) junto com o da aula (Cannabis), e a IA usava o do
       // cadastro nas ferramentas. Sem aula, segue o do cadastro.
@@ -247,17 +266,32 @@ export async function rotaV9(acao: AcaoV9, corpo: any, deps: Deps): Promise<{ st
         + contextoEspecialidadeCannabis(curso) + notaDasReunioes(reunioes, agora);
       // DADOS COLETADOS, missão da aula e nota do ramo: as mesmas peças da produção com a v2 (aulaV2.ts).
       contexto += await contextoAulaV2(supabase, lead, aula, agora);
+      // No-show: o contexto é o relógio + o dossiê da reunião que ele não compareceu (como a produção).
+      if (persona === 'recontato') {
+        const dossie = montarDossieRecontato(lead?.contexto_recontato);
+        if (dossie) contexto = `${montarContextoTemporal(await carregarDiasSemAtendimento(supabase))}\n\n${dossie}`;
+      }
       // O texto da abertura de aula vem do sistema (prompts-aula-v2.ts): o n8n e a produção leem o mesmo.
       const varsV2 = aula ? { ...vars, ...varsAulaV2(aula.curso_nome) } : vars;
       const textosAula = aula ? { prompt_aula_v2: renderPrompt(AULA_V2_ABERTURA, varsV2), regras_aula_v2: renderPrompt(AULA_V2_REGRAS, varsV2) } : {};
       // As variáveis vão também soltas: o prompt no n8n as lê como {{ $json.nome }}.
-      return ok({ ...vars, persona, agente_atual: lead?.agente_atual ?? null, vars, contexto, aula, ...textosAula });
+      // varsV2 = vars + as da pós da aula: o texto da aula mora no n8n e as lê soltas, como as outras.
+      return ok({ ...varsV2, persona, coleta_feita: coletaFeitaDoLead(lead), agente_atual: lead?.agente_atual ?? null, vars: varsV2, contexto, aula, ...textosAula });
     }
     // puxa tools do bd: as ferramentas da Luna para o agente, no formato do Claude, + o canal de resposta.
     case 'tools': {
       const provedor = await deps.provedorDoLead(soDigitos(corpo?.telefone ?? remotejid));
       const agente = String(corpo?.agente ?? 'agente_validacao');
       const base = await carregarTools(supabase, agente, provedor, 'luna');
+      // Número de anúncio (toolsDaVez da produção): a abertura usa as tools da persona própria; o
+      // fechamento é o qualificador de sempre, ganhando só a atualizar_dados_lead (ordem estável: no fim).
+      if (corpo?.persona === 'campanha_direta' && agente !== 'agente_aula') {
+        const daCampanha = await carregarTools(supabase, 'agente_campanha_direta', provedor, 'luna');
+        if (agente !== 'agente_qualificador') return ok({ agente, tools: [...daCampanha, TOOL_RESPONDER_AO_CLIENTE] });
+        const nomes = new Set(base.map((t: any) => t?.name));
+        const extras = daCampanha.filter((t: any) => t?.name === 'atualizar_dados_lead' && !nomes.has(t.name));
+        return ok({ agente, tools: [...base, ...extras, TOOL_RESPONDER_AO_CLIENTE] });
+      }
       if (agente !== 'agente_aula') return ok({ agente, tools: [...base, TOOL_RESPONDER_AO_CLIENTE] });
       // Na aula: descrições enxutas + busca_carreira da pós da aula + canal (aulaV2.ts, o mesmo da produção).
       const lead = await buscarLead(supabase, remotejid);
