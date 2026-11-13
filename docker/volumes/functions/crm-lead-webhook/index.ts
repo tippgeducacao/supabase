@@ -1012,7 +1012,7 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
     if (email) {
       const { data } = await admin
         .from("leads")
-        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, fonte_referencia, meta_campaign_id, meta_campaign_name, meta_adset_id, meta_adset_name, meta_ad_id, meta_ad_name, meta_form_id, meta_form_name, meta_platform, utm_source, utm_medium, utm_campaign, utm_content, utm_term, utm_id, gclid, fbclid, ttclid, arquivado, arquivado_em")
+        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, fonte_referencia, meta_campaign_id, meta_campaign_name, meta_adset_id, meta_adset_name, meta_ad_id, meta_ad_name, meta_form_id, meta_form_name, meta_platform, utm_source, utm_medium, utm_campaign, utm_content, utm_term, utm_id, gclid, gbraid, wbraid, fbclid, ttclid, arquivado, arquivado_em")
         .eq("email", email)
         .limit(1);
       existing = data?.[0] ?? null;
@@ -1026,7 +1026,7 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
       if (canonId) {
         const { data } = await admin
           .from("leads")
-          .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, fonte_referencia, meta_campaign_id, meta_campaign_name, meta_adset_id, meta_adset_name, meta_ad_id, meta_ad_name, meta_form_id, meta_form_name, meta_platform, utm_source, utm_medium, utm_campaign, utm_content, utm_term, utm_id, gclid, fbclid, ttclid, arquivado, arquivado_em")
+          .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, fonte_referencia, meta_campaign_id, meta_campaign_name, meta_adset_id, meta_adset_name, meta_ad_id, meta_ad_name, meta_form_id, meta_form_name, meta_platform, utm_source, utm_medium, utm_campaign, utm_content, utm_term, utm_id, gclid, gbraid, wbraid, fbclid, ttclid, arquivado, arquivado_em")
           .eq("id", canonId as string)
           .maybeSingle();
         existing = data ?? null;
@@ -1945,7 +1945,7 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
         if (Object.keys(desejado).length) {
           const { data: atual } = await admin
             .from("leads")
-            .select("fonte, fonte_referencia, utm_source, utm_medium, utm_campaign, utm_content, utm_term, utm_id, gclid, fbclid, ttclid")
+            .select("fonte, fonte_referencia, utm_source, utm_medium, utm_campaign, utm_content, utm_term, utm_id, gclid, gbraid, wbraid, fbclid, ttclid")
             .eq("id", leadId)
             .maybeSingle();
           const patch = atual ? complementarPrimeiraAtribuicao(atual, { ...inUtm, ...desejado }) : {};

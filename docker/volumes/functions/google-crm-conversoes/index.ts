@@ -1,7 +1,7 @@
 // Etapas do CRM → Google Ads (conversões offline pela Data Manager API) · 27/10/2026.
 //
 // Uma vez por dia (pg_cron), manda ao Google Ads as etapas dos leads de origem GOOGLE que têm
-// gclid: crm_reuniao_agendada, crm_reuniao_realizada e crm_matricula. Cada etapa vai para a sua
+// gclid, gbraid ou wbraid (os dois últimos: clique no iPhone, desde 13/11/2026): crm_reuniao_agendada, crm_reuniao_realizada e crm_matricula. Cada etapa vai para a sua
 // ação de conversão na conta 974-490-0197 ("CRM - Reunião agendada/realizada/Matrícula"), todas
 // SECUNDÁRIAS: aparecem nos relatórios por campanha/palavra-chave e não mexem no lance.
 // Irmã da meta-crm-capi (mesma régua de etapas); ver docs/Marketing — Mídia Paga.md.
@@ -88,7 +88,9 @@ type Pendente = {
   lead_id: string;
   etapa: string;
   event_time: string;
-  gclid: string;
+  gclid: string | null;
+  gbraid: string | null;
+  wbraid: string | null;
   email: string | null;
   telefone: string | null;
   valor: number | string | null; // só na matrícula, em BRL (prop_valor_final)
@@ -99,8 +101,13 @@ export async function montarEvento(p: Pendente) {
   if (p.email) ids.push({ emailAddress: await sha256(emailGoogle(p.email)) });
   const tel = telefoneGoogle(p.telefone);
   if (tel) ids.push({ phoneNumber: await sha256(tel) });
+  // Manda todo click ID que existir: a Data Manager API pede "pelo menos um" e o Google Ads
+  // aceita qualquer combinação, usando gclid > wbraid > gbraid (doc no docs/Marketing — Mídia Paga.md).
+  const adIdentifiers = Object.fromEntries(
+    (["gclid", "gbraid", "wbraid"] as const).filter((k) => p[k]).map((k) => [k, p[k]]),
+  );
   return {
-    adIdentifiers: { gclid: p.gclid },
+    adIdentifiers,
     eventTimestamp: new Date(p.event_time).toISOString(),
     transactionId: p.event_id,
     ...(Number(p.valor) > 0 ? { conversionValue: Number(p.valor), currency: "BRL" } : {}),

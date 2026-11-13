@@ -247,6 +247,20 @@ describe("webhook integrado: captura UTM no entrypoint real", () => {
     expect(gravacoes.leads[0]).toMatchObject({ ttclid, utm_id: "campanha" });
   });
 
+  it.each(["body", "query", "url"])("grava gbraid e wbraid (Google Ads no iPhone) enviados por %s, no contato e na chegada", async modo => {
+    const wbraid = "w".repeat(600);
+    const body = modo === "body" ? { gbraid: "0AAAAA-Gb", wbraid } : modo === "url" ? { URL: `https://ppgvet.com.br/?gbraid=0AAAAA-Gb&wbraid=${wbraid}` } : {};
+    await enviar(body, modo === "query" ? `&gbraid=0AAAAA-Gb&wbraid=${wbraid}` : "");
+    expect(gravacoes.leads[0]).toMatchObject({ gbraid: "0AAAAA-Gb", wbraid });
+    expect(gravacoes.crm_webhook_logs[0].resultado).toMatchObject({ rastreamento: { gbraid: "0AAAAA-Gb", wbraid } });
+  });
+
+  it("contato existente sem clique recebe o wbraid (fill-if-empty), como o gclid", async () => {
+    contato = { id: "lead-chat", nome: "Contato sintético", email: "sintetico@example.com", fonte: "Webchat LP", origem_criacao: "webchat" };
+    await enviar({ URL: "https://ppgvet.com.br/?wbraid=clique-iphone" });
+    expect(gravacoes["leads:update"]?.[0]).toMatchObject({ wbraid: "clique-iphone" });
+  });
+
   it("captação do chat da LP lê a UTM de origem_url sem trocar a página do contato", async () => {
     const origem = "https://www.ppgvet.com.br/pos-clinica-e-cirurgia?utm_source=tiktok&utm_medium=paid&utm_campaign=LP_LEAD_POS-CLINICACIRURGIA-COMERCIAL-mensal&utm_id=1876&ttclid=clique-chat";
     await enviar({ telefone: "11999998888", curso: "Clínica Médica", fonte: "Webchat", pagina: "www.ppgvet.com.br", origem_url: origem });

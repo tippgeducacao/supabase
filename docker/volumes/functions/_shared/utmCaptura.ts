@@ -4,6 +4,8 @@
 export const CAMPOS_RASTREAMENTO = [
   "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "utm_id",
   "gclid", "fbclid", "ttclid",
+  // 13/11/2026: clique do Google Ads no iPhone (iOS 14+), no lugar do gclid.
+  "gbraid", "wbraid",
 ] as const;
 
 type CampoRastreamento = typeof CAMPOS_RASTREAMENTO[number];
@@ -13,6 +15,9 @@ const ALIASES: Partial<Record<CampoRastreamento, string>> = {
   utm_campaign: "utm_campaing",
   utm_content: "utm_contet",
 };
+
+/** Click ID de anúncio: valor opaco, comparado cru e sem o limite de 255 das UTMs. */
+const ehClickId = (campo: string) => campo.endsWith("clid") || campo.endsWith("braid");
 
 export function limparValorRastreamento(valor: unknown, limite = 4096): string | undefined {
   if (typeof valor !== "string" && typeof valor !== "number") return undefined;
@@ -41,11 +46,14 @@ export function extrairRastreamento({
     for (const campo of CAMPOS_RASTREAMENTO) {
       // Click IDs são opacos e podem exceder 255 caracteres; truncá-los quebra a
       // associação com o anúncio. As colunas são text, com limite defensivo de 4 KiB.
-      const limite = campo.endsWith("clid") ? 4096 : 255;
+      const limite = ehClickId(campo) ? 4096 : 255;
       const valor = limparValorRastreamento(minusculas[campo], limite) ?? limparValorRastreamento(minusculas[ALIASES[campo] ?? ""], limite);
       // GreatPages é o fallback legado do formulário, não um canal de aquisição.
       // Só source usa esta régua: campanha/conteúdo podem ter esse nome literal.
       if (campo === "utm_source" && valor?.toLowerCase() === "greatpages") continue;
+      // Click ID começando com "{" ou "__" é placeholder de link mal montado ("{gclid}",
+      // "__gclid__"), não clique: 60 de 75 leads "Google sem UTM" eram isso (13/11/2026).
+      if (ehClickId(campo) && valor && /^(?:\{|__)/.test(valor)) continue;
       if (!resultado[campo] && valor) resultado[campo] = valor;
     }
   }
@@ -113,8 +121,8 @@ export function podeComplementarAtribuicao(atual: Record<string, unknown>, entra
   // Além de campanha, conteúdo/clique diferentes identificam outro toque. Não misturar
   // nem mesmo quando as duas visitas vieram do mesmo canal ou da mesma campanha.
   for (const campo of CAMPOS_RASTREAMENTO) {
-    const valorAnterior = campo.endsWith("clid") || campo === "utm_id" ? anterior[campo] : normalizar(anterior[campo]);
-    const valorNovo = campo.endsWith("clid") || campo === "utm_id" ? nova[campo] : normalizar(nova[campo]);
+    const valorAnterior = ehClickId(campo) || campo === "utm_id" ? anterior[campo] : normalizar(anterior[campo]);
+    const valorNovo = ehClickId(campo) || campo === "utm_id" ? nova[campo] : normalizar(nova[campo]);
     if (valorAnterior && valorNovo && valorAnterior !== valorNovo) return false;
   }
   for (const campo of ["meta_campaign_id", "meta_adset_id", "meta_ad_id", "meta_form_id"]) {
@@ -123,7 +131,7 @@ export function podeComplementarAtribuicao(atual: Record<string, unknown>, entra
   }
   if (campanhaAnterior && campanhaNova && campanhaAnterior !== campanhaNova) return false;
 
-  const idEmComum = ["utm_id", "ttclid", "gclid", "fbclid", "meta_campaign_id"].some(campo =>
+  const idEmComum = ["utm_id", "ttclid", "gclid", "gbraid", "wbraid", "fbclid", "meta_campaign_id"].some(campo =>
     limparValorRastreamento(atual[campo]) && limparValorRastreamento(atual[campo]) === limparValorRastreamento(entrada[campo]));
   if (campanhaAnterior && !campanhaNova && !idEmComum) return false;
   if (fonteAnterior && !fonteNova && !idEmComum && !(campanhaAnterior && campanhaAnterior === campanhaNova)) return false;
@@ -132,9 +140,9 @@ export function podeComplementarAtribuicao(atual: Record<string, unknown>, entra
   // não deve fazer a origem Meta antiga mudar silenciosamente pelo trigger do banco.
   if (!fonteAnterior) {
     const canalAnterior = canal(normalizar(atual.fonte_referencia)) ?? canal(normalizar(atual.fonte))
-      ?? (anterior.ttclid ? "tiktok" : anterior.gclid ? "google" : anterior.fbclid ? "meta" : undefined);
+      ?? (anterior.ttclid ? "tiktok" : anterior.gclid || anterior.gbraid || anterior.wbraid ? "google" : anterior.fbclid ? "meta" : undefined);
     const canalNovo = canal(fonteNova)
-      ?? (nova.ttclid ? "tiktok" : nova.gclid ? "google" : nova.fbclid ? "meta" : undefined);
+      ?? (nova.ttclid ? "tiktok" : nova.gclid || nova.gbraid || nova.wbraid ? "google" : nova.fbclid ? "meta" : undefined);
     if (canalAnterior && canalAnterior !== canalNovo && !idEmComum) return false;
     if (!Object.keys(anterior).length && !canalAnterior) {
       const fonteDeclarada = normalizar(atual.fonte_referencia) ?? normalizar(atual.fonte);

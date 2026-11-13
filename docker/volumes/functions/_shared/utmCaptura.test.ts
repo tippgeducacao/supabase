@@ -46,6 +46,19 @@ describe("captura de rastreamento da chegada", () => {
     expect(extrairRastreamento({ urls: [`https://ppgvet.com.br/?ttclid=${prefixo}1`] }).ttclid).toBe(`${prefixo}1`);
     expect(podeComplementarAtribuicao({ ttclid: `${prefixo}1` }, { ttclid: `${prefixo}2` })).toBe(false);
   });
+
+  it("gbraid e wbraid (Google Ads no iPhone) entram como o gclid: longos, crus e de corpo, query ou URL", () => {
+    const longo = "w".repeat(600);
+    expect(extrairRastreamento({ campos: [{ gbraid: "0AAAAA-Gb" }], urls: [`https://ppgvet.com.br/?wbraid=${longo}&gclid=abc`] }))
+      .toEqual({ gbraid: "0AAAAA-Gb", wbraid: longo, gclid: "abc" });
+    expect(temRastreamento({ wbraid: "x" })).toBe(true);
+    // placeholder de link mal montado não é clique (e não bloqueia o clique real de outra fonte)
+    expect(extrairRastreamento({ campos: [{ gclid: "{gclid", gbraid: "__gbraid__", ttclid: "{ttclid}" }], urls: ["https://ppgvet.com.br/?wbraid=%7Bwbraid%7D&gclid=real"] }))
+      .toEqual({ gclid: "real" });
+    // clique diferente é outro toque; o mesmo é identidade em comum
+    expect(podeComplementarAtribuicao({ wbraid: "ABC" }, { wbraid: "abc" })).toBe(false);
+    expect(complementarPrimeiraAtribuicao({ fonte: "GOOGLE", gbraid: "g1" }, { gbraid: "g1", utm_campaign: "pesquisa" })).toEqual({ utm_campaign: "pesquisa" });
+  });
 });
 
 describe("primeira atribuição do contato", () => {
