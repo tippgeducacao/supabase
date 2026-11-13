@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   LUNA_AGENTE_QUALIFICADOR, LUNA_AGENTE_VALIDACAO, LUNA_CANAL_RESPOSTA, LUNA_ELEGIBILIDADE, LUNA_ENVIO_MATERIAIS,
-  LUNA_FICHA, LUNA_MEMORIA_HUMANA, LUNA_PERSONA_ABERTURA, LUNA_PERSONA_FECHAMENTO,
+  LUNA_FICHA, LUNA_MEMORIA_HUMANA, LUNA_PERSONA_ABERTURA, LUNA_PERSONA_FECHAMENTO, LUNA_SAIDAS,
 } from './prompts-luna';
 import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO } from './prompts';
 import { blocosDoPrompt } from './conjuntoPrompt';
@@ -24,8 +24,8 @@ const naSecao = (re: RegExp) => ocorrencias(secaoGanchoLote({ nome: 'Gustavo', c
 
 describe('prompt da Luna: o que o código procura dentro do texto', () => {
   it('as personas completas = persona + elegibilidade + envio de materiais', () => {
-    expect(LUNA_AGENTE_VALIDACAO).toBe(`${LUNA_PERSONA_ABERTURA}\n\n${LUNA_ELEGIBILIDADE}\n\n${LUNA_ENVIO_MATERIAIS}`);
-    expect(LUNA_AGENTE_QUALIFICADOR).toBe(`${LUNA_PERSONA_FECHAMENTO}\n\n${LUNA_ELEGIBILIDADE}\n\n${LUNA_ENVIO_MATERIAIS}`);
+    expect(LUNA_AGENTE_VALIDACAO).toBe(`${LUNA_PERSONA_ABERTURA}\n\n${LUNA_ELEGIBILIDADE}\n\n${LUNA_ENVIO_MATERIAIS}\n\n${LUNA_SAIDAS}`);
+    expect(LUNA_AGENTE_QUALIFICADOR).toBe(`${LUNA_PERSONA_FECHAMENTO}\n\n${LUNA_ELEGIBILIDADE}\n\n${LUNA_ENVIO_MATERIAIS}\n\n${LUNA_SAIDAS}`);
   });
 
   it('memória humana cita o marcador que o código grava no histórico', () => {

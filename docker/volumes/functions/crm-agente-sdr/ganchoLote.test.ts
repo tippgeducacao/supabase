@@ -32,7 +32,9 @@ describe('gancho do primeiro lote no João de vendas (canário)', () => {
       expect(r.prompt).not.toContain('Feche puxando a confirmação');
     }
     const campanha = comGanchoDoLote(renderPrompt(AGENTE_CAMPANHA_DIRETA, vars), { nome: 'Gustavo', curso: vars.curso_interesse_original });
-    expect(campanha.trocas.fecho).toBeGreaterThanOrEqual(1);
+    // A campanha atual já nasce com o lote correto; só o conjunto legado precisa da troca.
+    expect(campanha.trocas.fecho).toBe(0);
+    expect(campanha.prompt).toContain('primeiro lote promocional');
   });
   it('o nome do curso sai do jeito que se fala', () => {
     expect(nomeDeConversa('MBA GESTÃO DA PECUÁRIA LEITERA')).toBe('MBA em gestão da pecuária leitera');

@@ -320,12 +320,13 @@ function toolsDoAgente(agente: string, provedor: ProvedorIA | null): Promise<any
 // números, só ganhando a atualizar_dados_lead — o lead pode corrigir o nome lá também.
 // ⚠️ Ordem estável: os extras entram sempre no fim (a ordem das tools compõe o
 // prefixo do prompt cache; ordem variável = cache miss silencioso).
-async function toolsDaVez(agenteEfetivo: string, ehCampanha: boolean, provedor: ProvedorIA | null): Promise<any[]> {
+export async function toolsDaVez(agenteEfetivo: string, ehCampanha: boolean, provedor: ProvedorIA | null): Promise<any[]> {
   if (!ehCampanha) return await toolsDoAgente(agenteEfetivo, provedor);
   if (agenteEfetivo === 'agente_validacao') return await toolsDoAgente('agente_campanha_direta', provedor);
   const base = await toolsDoAgente(agenteEfetivo, provedor);
   const extras = (await toolsDoAgente('agente_campanha_direta', provedor))
-    .filter((t: any) => t?.name === 'atualizar_dados_lead');
+    // 13/11/2026: o qualificador já tem coleta no catálogo; não ofereça duas funções de mesmo nome.
+    .filter((t: any) => t?.name === 'atualizar_dados_lead' && !base.some((b: any) => b.name === t.name));
   return [...base, ...extras];
 }
 

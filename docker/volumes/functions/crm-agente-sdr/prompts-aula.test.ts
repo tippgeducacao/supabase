@@ -71,10 +71,8 @@ describe("AGENTE_AULA composto a partir do João de vendas", () => {
     expect(trocadas).toEqual(["Papel", "O que você pode e não pode", "Fluxo da conversa", "Oferta de cronograma aceita", "Exemplos de condução"]);
   });
 
-  it("herda as regras de vendas ao vivo e troca só o que é da aula", () => {
-    // herdado (não copiado): regras de ouro, horários, objeções, desinteresse, regras finais
-    for (const titulo of ["Regra de ouro nº 2: horário só vem da ferramenta", "## Regras de horário", "## Como ler o retorno de consulta_objecoes",
-      "## Quando o lead pede tempo pra analisar o material", "## Quando o lead não quer, pede humano ou pede ligação", "## Regras finais"]) {
+  it("usa os blocos comuns atuais sem herdar comandos antigos de vendas", () => {
+    for (const titulo of ["## ELEGIBILIDADE", "## ENVIO DE MATERIAIS", "## SAÍDAS E CONTINUIDADE"]) {
       expect(AGENTE_AULA).toContain(titulo);
     }
     // próprio da aula

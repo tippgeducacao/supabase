@@ -83,7 +83,14 @@ export function instrucaoResultadoMaterial(status: StatusMaterial, reenvioAgenda
   if (opcoes.soFatos && (status === 'aceito' || status === 'entregue' || status === 'lido')) {
     return 'Cronograma enviado ao lead.' + notaInterna + naoNarre + semValor;
   }
-  const roteiro = `FALA AO LEAD, com estas palavras: "${FALA_CRONOGRAMA_ENVIADO}" Em seguida, salvo se a formação ou o prazo dele já foram REPROVADOS nesta conversa (aí não convide) ou se essa explicação da condição exclusiva já foi dita nesta conversa (aí não repita): "${falaConviteDepoisDoCronograma(opcoes.condicao ?? 'a condição promocional exclusiva')}"`;
+  const roteiro = `FALA AO LEAD, com estas palavras: "${FALA_CRONOGRAMA_ENVIADO}"`;
+  // 13/11/2026: recuperação de acesso não segue o convite imediato do envio normal.
+  // A ordem das condições impede que "te enviei" venha acompanhado de duas instruções opostas.
+  const proximoPasso = ` Se ele acabou de recusar a conversa com o monitor e só quis o material, diga só a fala do envio e pare: não convide nem ofereça horários.`
+    + ' Se esta tentativa RECUPERA ACESSO porque ele disse que não recebeu, não encontrou ou não conseguiu abrir, pergunte se conseguiu abrir e aguarde antes de retomar Meet, leitura ou análise; não use o convite do envio normal nesta rodada.'
+    + ` Somente no ENVIO NORMAL, sem essas situações, sem formação/prazo REPROVADOS e sem repetir uma explicação já dada, emende: "${falaConviteDepoisDoCronograma(opcoes.condicao ?? 'a condição promocional exclusiva')}".`
+    + ` Nesse envio normal, se a compatibilidade já está APROVADA nesta conversa, na mesma mensagem chame consulta_disponibilidade e ofereça até três horários reais pra essa conversa, sem esperar ele confirmar que abriu; sem APROVADO, feche com "${PERGUNTA_CONVITE_SEM_HORARIO}" ou siga a pendência real da ficha.`
+    + ' Se houver novo relato de não recebimento ou dificuldade de acesso, reenvie pela ferramenta sem contradizer o lead; isso não autoriza repetição na mesma rodada.';
   switch (status) {
     case 'nao_solicitado': return 'Nenhum cronograma foi solicitado ou enviado nesta chamada.';
     // 19/09/2026 (decisão do usuário, vale para todos): "te enviei o cronograma", não "solicitei o
@@ -92,11 +99,7 @@ export function instrucaoResultadoMaterial(status: StatusMaterial, reenvioAgenda
     // 09/10/2026: "aguarde a confirmação de acesso antes de retomar a agenda" segurava o convite e
     // a conversa morria no "chegou?" (Luna: 22 aprovados, 1 agendamento em 08/10). Com a
     // compatibilidade aprovada, o envio já leva os horários.
-    case 'aceito': return roteiro
-      + ` Se ele acabou de recusar a conversa com o monitor (respondeu "não" ao convite e só quis o material), diga só a fala do envio e pare: não convide nem ofereça horários. Senão, se a compatibilidade já está APROVADA nesta conversa, na mesma mensagem chame consulta_disponibilidade e ofereça até três horários reais pra essa conversa, sem esperar ele confirmar que abriu; sem APROVADO, feche com "${PERGUNTA_CONVITE_SEM_HORARIO}".`
-      + semValor + notaInterna + naoNarre;
-    case 'entregue': case 'lido': return roteiro
-      + ` Se ele acabou de recusar a conversa com o monitor (respondeu "não" ao convite e só quis o material), diga só a fala do envio e pare: não convide nem ofereça horários. Senão, se a compatibilidade já está APROVADA nesta conversa, na mesma mensagem chame consulta_disponibilidade e ofereça até três horários reais pra essa conversa; sem APROVADO, feche com "${PERGUNTA_CONVITE_SEM_HORARIO}". Se ele disser que não recebeu ou pedir novamente, reenvie pela ferramenta, sem contradizê-lo.`
+    case 'aceito': case 'entregue': case 'lido': return roteiro + proximoPasso
       + semValor + notaInterna + naoNarre;
     case 'falhou': return 'O cronograma NÃO foi enviado nesta tentativa. Não diga que enviou ou que está acima. O valor integral vai dentro do cronograma: não escreva valor na conversa; se ele perguntou o preço, diga que valor e condição o monitor apresenta na conversa. '
       + (reenvioAgendado
