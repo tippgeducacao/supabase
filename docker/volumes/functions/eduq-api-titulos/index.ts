@@ -72,6 +72,12 @@ async function buscarTitulos(iniIso: string, fimIso: string): Promise<Record<str
       { Chave: "venc_inicio_tr_cp", Valor: isoToBr(iniIso) },
       { Chave: "venc_fim_tr_cp", Valor: isoToBr(fimIso) },
       { Chave: "situacoes_tr_cp", Valor: SITUACOES },
+      // ⚠️ A API exige TODAS as chaves da consulta, inclusive as opcionais. A EDUQ
+      // acrescentou estas duas à consulta 11 depois da entrega do #13129 e, sem elas, a
+      // resposta passou a ser HTTP 500 — a 11 ficou parada de 21/10 a 13/11/2026 (chamado
+      // #13642). Vazio = filtro ignorado. Se a EDUQ incluir outra chave, o sintoma é o mesmo.
+      { Chave: "cpf_tr_cp", Valor: "" },
+      { Chave: "id_aluno_tr_cp", Valor: "" },
     ],
   };
   const res = await fetch(`${EDUQ_BASE}/emissao-consulta-personalizada/obter-dados`, {
@@ -165,6 +171,15 @@ Deno.serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
     );
 
+    // Quantos títulos vivos a nossa base tem nesta janela ANTES do upsert — é a régua
+    // da trava dos fantasmas, lá embaixo.
+    const { count: vivosNaBase, error: errConta } = await supabase
+      .from("eduq_titulos_receber")
+      .select("eduq_fatura_id", { count: "exact", head: true })
+      .gte("vencimento", ini).lte("vencimento", fim)
+      .neq("situacao", "Ausente na EDUQ");
+    if (errConta) throw new Error(`contagem da base falhou: ${errConta.message}`);
+
     // Em lotes: um upsert de milhares de linhas estoura o payload do PostgREST.
     let gravadas = 0;
     const LOTE = 500;
@@ -184,17 +199,35 @@ Deno.serve(async (req) => {
     //
     // Marcamos em vez de apagar: `situacao = 'Ausente na EDUQ'` sai da conta pelo
     // predicado e deixa rastro de que a linha existiu — apagar esconderia o motivo.
-    const { data: sumidos } = await supabase
-      .from("eduq_titulos_receber")
-      .update({ situacao: "Ausente na EDUQ", synced_at: new Date().toISOString() })
-      .gte("vencimento", ini).lte("vencimento", fim)
-      .lt("synced_at", new Date(t0).toISOString())
-      .neq("situacao", "Ausente na EDUQ")
-      .select("eduq_fatura_id");
+    //
+    // ⚠️ TRAVA (13/11/2026): "ausência aqui é ausência lá" só vale se a resposta veio
+    // INTEIRA. Uma resposta vazia ou cortada (filtro que a EDUQ mudou, consulta alterada do
+    // lado deles) marcaria a janela toda como apagada — eram 13.740 títulos, 5.758 em
+    // aberto — e na manhã seguinte o sync da fila de cobrança tiraria esses alunos da
+    // régua como "Pagou — conferir". Se a EDUQ devolver menos da METADE do que já temos
+    // vivo na janela, ninguém é marcado e o retorno avisa. Apagamento real na EDUQ é de
+    // poucos títulos por vez (7 em 09/10/2026), nunca metade da base.
+    const respostaSuspeita = (vivosNaBase ?? 0) > 0 && linhas.length < (vivosNaBase ?? 0) / 2;
+    let sumidos: { eduq_fatura_id: number }[] = [];
+    if (!respostaSuspeita) {
+      const { data, error } = await supabase
+        .from("eduq_titulos_receber")
+        .update({ situacao: "Ausente na EDUQ", synced_at: new Date().toISOString() })
+        .gte("vencimento", ini).lte("vencimento", fim)
+        .lt("synced_at", new Date(t0).toISOString())
+        .neq("situacao", "Ausente na EDUQ")
+        .select("eduq_fatura_id");
+      if (error) throw new Error(`marcação dos ausentes falhou: ${error.message}`);
+      sumidos = data ?? [];
+    }
 
     return new Response(JSON.stringify({
       ok: true, janela: { inicio: ini, fim: fim },
-      ausentes_na_eduq: (sumidos ?? []).length,
+      ausentes_na_eduq: sumidos.length,
+      vivos_na_base_antes: vivosNaBase ?? 0,
+      ausentes_nao_marcados: respostaSuspeita
+        ? `a EDUQ devolveu ${linhas.length} títulos e a base tinha ${vivosNaBase} vivos na janela: resposta suspeita, ninguém foi marcado como ausente`
+        : null,
       recebidos: titulos.length, gravados: gravadas,
       descartados: titulos.length - linhas.length,
       com_melhor_desconto: linhas.filter((l) => l.valor_melhor_desconto != null).length,
