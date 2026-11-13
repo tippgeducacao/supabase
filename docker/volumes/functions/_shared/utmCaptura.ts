@@ -94,6 +94,29 @@ export function rastreamentoDoReferrer(referrer: unknown): Rastreamento {
   }
 }
 
+const BUSCADOR = /(?:^|\.)(?:google|bing|yahoo|duckduckgo|ecosia)\.(?:com|org|net|[a-z]{2})(?:\.[a-z]{2})?$/i;
+// threads.com: o Threads trocou o domínio de threads.net em 2025; os dois chegam.
+const REDE_SOCIAL = /(?:^|\.)(?:instagram\.com|facebook\.com|threads\.net|threads\.com)$/i;
+
+/**
+ * Lead SEM rastro (13/11/2026, decisão do usuário): a página anterior de fora diz se a
+ * pessoa veio da busca ou de uma rede social, sem UTM. Continua SEM UTM (regra do
+ * diretor de 16/07/2026), só com galho próprio — "Orgânico" é captação declarada pelo
+ * time e conta ponto do SDR. Webmail (mail.google.com, mail.yahoo.com) não é busca.
+ */
+export function fonteSemUtmDoReferrer(referrer: unknown): "Busca (sem UTM)" | "Social (sem UTM)" | undefined {
+  if (typeof referrer !== "string" || !referrer.trim()) return undefined;
+  const texto = referrer.trim();
+  try {
+    const url = new URL(/^https?:\/\//i.test(texto) ? texto : `https://${texto}`);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+    const host = url.hostname.toLowerCase();
+    if (BUSCADOR.test(host) && !host.startsWith("mail.")) return "Busca (sem UTM)";
+    if (REDE_SOCIAL.test(host)) return "Social (sem UTM)";
+  } catch { /* Referrer é texto do navegador: inválido não derruba a captação. */ }
+  return undefined;
+}
+
 const normalizar =(valor: unknown) => limparValorRastreamento(valor)?.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 const canal = (valor: string | undefined): string | undefined => {
   if (!valor) return undefined;

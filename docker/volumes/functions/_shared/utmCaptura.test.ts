@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { complementarPrimeiraAtribuicao, extrairRastreamento, podeComplementarAtribuicao, rastreamentoDoReferrer, temRastreamento } from "./utmCaptura";
+import { complementarPrimeiraAtribuicao, extrairRastreamento, fonteSemUtmDoReferrer, podeComplementarAtribuicao, rastreamentoDoReferrer, temRastreamento } from "./utmCaptura";
 
 describe("captura de rastreamento da chegada", () => {
   it.each(["tiktok_aviario", "linkedin_ppgvet", "whatsapp_aves", "ig_petfood"])("recupera %s com campanha e conteúdo enviados somente na URL", fonte => {
@@ -160,5 +160,31 @@ describe("rastreamento da página anterior (Referral_Source)", () => {
     expect(temRastreamento({})).toBe(false);
     expect(temRastreamento({ fbclid: "x" })).toBe(true);
     expect(temRastreamento({ utm_content: "link_in_bio" })).toBe(true);
+  });
+});
+
+describe("fonte do lead SEM rastro pela página anterior de fora (13/11/2026)", () => {
+  it.each([
+    ["https://www.google.com/", "Busca (sem UTM)"],
+    ["https://www.google.com.br/", "Busca (sem UTM)"],
+    ["www.bing.com", "Busca (sem UTM)"],
+    ["https://br.search.yahoo.com/", "Busca (sem UTM)"],
+    ["https://duckduckgo.com/", "Busca (sem UTM)"],
+    ["https://www.ecosia.org/", "Busca (sem UTM)"],
+    ["https://l.instagram.com/?u=https%3A%2F%2Fppgvet.com.br", "Social (sem UTM)"],
+    ["https://www.instagram.com/", "Social (sem UTM)"],
+    ["https://lm.facebook.com/", "Social (sem UTM)"],
+    ["https://m.facebook.com/", "Social (sem UTM)"],
+    ["https://www.threads.net/", "Social (sem UTM)"],
+  ])("%s → %s", (ref, fonte) => {
+    expect(fonteSemUtmDoReferrer(ref)).toBe(fonte);
+  });
+
+  it.each([
+    "https://ppgvet.com.br/", "https://www.ppgeducacao.com.br/x", "https://mail.google.com/", "https://mail.yahoo.com/",
+    "https://www.produtivaassessoriavet.com.br/", "https://google.com.golpe.net/", "https://notinstagram.com/",
+    "Acesso direto", "android-app://com.google.android.gm/", "", null, 42,
+  ])("não classifica %s", ref => {
+    expect(fonteSemUtmDoReferrer(ref)).toBeUndefined();
   });
 });

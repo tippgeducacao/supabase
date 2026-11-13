@@ -61,6 +61,8 @@ const SUB: Record<string, string> = {
   organico_captacao: "ORGÂNICOS › Captação do time (SDR)",
   organico_declarado: "ORGÂNICOS › Declarado no cadastro",
   sem_utm_pagina: "SEM UTM › Formulário de página sem UTM",
+  sem_utm_busca: "SEM UTM › Veio da busca do Google",
+  sem_utm_social: "SEM UTM › Veio do Instagram/Facebook",
   sem_utm_atendimento: "SEM UTM › Atendimento no WhatsApp",
   sem_utm_manual: "SEM UTM › Cadastro manual",
   sem_utm_form_meta: "SEM UTM › Formulário Meta sem marca",

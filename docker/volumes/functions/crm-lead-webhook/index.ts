@@ -57,7 +57,7 @@
 //   { ok:true, lead_id, segmento_aplicado, lead_oportunidade_id, oportunidade_id, duplicado_lote }
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
-import { CAMPOS_RASTREAMENTO, complementarPrimeiraAtribuicao, extrairRastreamento, limparValorRastreamento, podeComplementarAtribuicao, rastreamentoDoReferrer, temRastreamento } from "../_shared/utmCaptura.ts";
+import { CAMPOS_RASTREAMENTO, complementarPrimeiraAtribuicao, extrairRastreamento, fonteSemUtmDoReferrer, limparValorRastreamento, podeComplementarAtribuicao, rastreamentoDoReferrer, temRastreamento } from "../_shared/utmCaptura.ts";
 import { telefoneEnviavel } from "../_shared/telefone.ts";
 import { normalizeWhatsapp } from "./normalizaWhatsapp.ts";
 import { aplicarFiltrosToken, parseTokenWebhook } from "./tokenFiltros.ts";
@@ -929,6 +929,13 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
   if (!temRastreamento(inUtm) && Object.keys(inMeta).length === 0) {
     Object.assign(inUtm, rastreamentoDoReferrer(pickReferralSource(dados)));
   }
+  // 13/11/2026: ainda sem rastro nenhum, a página anterior de FORA diz se veio da busca ou
+  // de rede social. Vira fonte própria do lead NOVO, dentro de SEM UTM (não é "Orgânico":
+  // esse é captação declarada pelo time). O compute_lead_fonte respeita a fonte do
+  // chamador quando `fonte_referencia` está vazia (passo 5). Fonte mapeada vence.
+  const fonteSemUtm = !temRastreamento(inUtm) && Object.keys(inMeta).length === 0
+    ? fonteSemUtmDoReferrer(pickReferralSource(dados))
+    : undefined;
 
   // ── Contato EFETIVO vs IDENTIFICADOR (2026-08-12) ────────────────────────────
   // `email`/`whatsapp` = IDENTIFICADOR (aba Entrada) e servem SÓ pra dedup no passo (5).
@@ -1096,8 +1103,9 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
           // (default 'GreatPages' removido + trigger não força 'Orgânico' sem sinal).
           pagina_nome: inPagina ?? criacaoDefaults.pagina_nome ?? null,
           // Fonte só quando mapeada explicitamente (Mapeamento `lead.fonte` OU valor de
-          // criação); senão NULL, como antes — o trigger compute_lead_fonte decide.
-          ...(inFonte ?? criacaoDefaults.fonte ? { fonte: (inFonte ?? criacaoDefaults.fonte) } : {}),
+          // criação) ou, sem rastro, a da página anterior de fora (`fonteSemUtm`);
+          // senão NULL, como antes — o trigger compute_lead_fonte decide.
+          ...(inFonte ?? criacaoDefaults.fonte ?? fonteSemUtm ? { fonte: (inFonte ?? criacaoDefaults.fonte ?? fonteSemUtm) } : {}),
           ...inMeta,
           ...inUtm,
           // Origem da criação → evento "Criado por <webhook>" na timeline (via trigger).

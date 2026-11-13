@@ -388,6 +388,52 @@ describe("webhook integrado: captura UTM no entrypoint real", () => {
     expect(gravacoes.leads[0]).not.toHaveProperty("fonte_referencia");
   });
 
+  // 13/11/2026: sem rastro nenhum, a página anterior de FORA ganha galho próprio em SEM UTM.
+  it.each([
+    ["https://www.google.com/", "Busca (sem UTM)"],
+    ["https://l.instagram.com/?u=https%3A%2F%2Fwww.ppgvet.com.br%2Fpoa", "Social (sem UTM)"],
+    ["https://m.facebook.com/", "Social (sem UTM)"],
+  ])("sem rastro, vindo de %s, o contato novo nasce com fonte %s e sem fonte_referencia", async (ref, fonte) => {
+    await enviar(envioSemUtm(ref));
+    expect(gravacoes.leads[0]).toMatchObject({ fonte });
+    expect(gravacoes.leads[0]).not.toHaveProperty("fonte_referencia");
+    expect(gravacoes.leads[0]).not.toHaveProperty("utm_source");
+  });
+
+  it("página anterior NOSSA sem UTM não ganha fonte de busca/rede", async () => {
+    await enviar(envioSemUtm("https://www.ppgvet.com.br/"));
+    expect(gravacoes.leads[0]).not.toHaveProperty("fonte");
+  });
+
+  it("com UTM ou clique no envio, a página anterior não define a fonte", async () => {
+    await enviar(envioSemUtm("https://www.google.com/", { utm_source: "google", utm_medium: "cpc" }));
+    expect(gravacoes.leads[0]).toMatchObject({ utm_source: "google" });
+    expect(gravacoes.leads[0]).not.toHaveProperty("fonte");
+    gravacoes = {};
+    contato = null;
+    await enviar(envioSemUtm("https://www.google.com/", { gbraid: "clique-iphone" }));
+    expect(gravacoes.leads[0]).toMatchObject({ gbraid: "clique-iphone" });
+    expect(gravacoes.leads[0]).not.toHaveProperty("fonte");
+  });
+
+  it("fonte mapeada pela integração vence a da página anterior", async () => {
+    integracao.config = { criacaoAutomatica: { habilitada: true, campos: [{ campo: "lead.fonte", valor: "Formulário PS" }] } };
+    await enviar(envioSemUtm("https://www.google.com/"));
+    expect(gravacoes.leads[0]).toMatchObject({ fonte: "Formulário PS" });
+    gravacoes = {};
+    contato = null;
+    integracao.config = {};
+    integracao.field_mapping = { nome: "lead.nome", email: "lead.email", origem: "lead.fonte" };
+    await enviar(envioSemUtm("https://www.instagram.com/", { origem: "Evento presencial" }));
+    expect(gravacoes.leads[0]).toMatchObject({ fonte: "Evento presencial" });
+  });
+
+  it("contato que já existe não ganha a fonte da página anterior (é só do contato novo)", async () => {
+    contato = { id: "lead-antigo", nome: "Contato sintético", email: "sintetico@example.com" };
+    await enviar(envioSemUtm("https://www.google.com/"));
+    expect(gravacoes["leads:update"]?.[0] ?? {}).not.toHaveProperty("fonte");
+  });
+
   it("reenvio de log legado sem snapshot não inventa atribuição com o config atual", async () => {
     logAnterior = { id: "log-legado", criado_em: "2026-09-09T12:00:00Z", resultado: {} };
     integracao.config = { acoes: { itens: [{ tipo: "salvar_utm", params: { utm_source: "tiktok" } }] } };
