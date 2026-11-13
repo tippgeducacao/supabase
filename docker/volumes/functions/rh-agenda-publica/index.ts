@@ -4,9 +4,16 @@ import { corsHeaders } from '../_shared/cors.ts';
 /**
  * A agenda de entrevistas, aberta ao CANDIDATO.
  *
- * O RH manda um link só; quem abre digita o NOME COMPLETO, vê os horários que a casa
- * liberou e escolhe um. Existe porque o agendamento pela conversa do agente não escala: os
- * convocados do PS 01/2026 chegam todos no mesmo dia.
+ * Desde 13/11/2026 o link é PESSOAL (`/processo-seletivo/agendar/<token>`), igual ao da
+ * renegociação da cobrança: quem abre já vê o primeiro nome e os horários dele, sem digitar
+ * nada. O corpo traz `token`; o dono é `rh_agenda_publica_por_token`. Pedido do Rafael:
+ * "retire essa trava de ter que colocar o nome, não precisa disso".
+ *
+ * O link antigo, um só para todo mundo, continua respondendo para quem já o recebeu: sem
+ * `token`, quem abre digita o NOME COMPLETO, vê os horários que a casa liberou e escolhe um.
+ *
+ * Existe porque o agendamento pela conversa do agente não escala: os convocados do PS 01/2026
+ * chegam todos no mesmo dia.
  *
  * Era por telefone até 10/09 e travava gente demais — número trocado, dois chips, inscrição
  * feita com o telefone de outra pessoa. O nome é o que o candidato lê no PDF do resultado.
@@ -63,32 +70,49 @@ Deno.serve(async (req) => {
   try {
     const body = await req.json().catch(() => ({}));
     const acao = String(body?.acao ?? 'carregar');
+    const token = String(body?.token ?? '').trim().toLowerCase();
     const nome = String(body?.nome ?? '').trim();
 
-    // Nome e sobrenome, no mínimo: com uma palavra só, meia dúzia de "Maria" casaria com a
-    // primeira que aparecesse na lista.
-    if (nome.replace(/\s+/g, ' ').split(' ').filter(Boolean).length < 2) {
-      return json({ ok: false, motivo: 'nome_incompleto' });
-    }
-
     const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
+    let candidato: any = null;
 
-    const { data: achado, error: erroCandidato } = await admin.rpc('rh_agenda_publica_por_nome', {
-      p_nome: nome,
-    });
-    if (erroCandidato) throw erroCandidato;
+    if (token) {
+      // ── Link pessoal ──────────────────────────────────────────────────────────
+      if (!/^[0-9a-f]{32}$/.test(token)) return json({ ok: false, motivo: 'link_invalido' });
 
-    const candidato = Array.isArray(achado) ? achado[0] : achado;
+      const { data: achado, error: erroCandidato } = await admin.rpc('rh_agenda_publica_por_token', {
+        p_token: token,
+      });
+      if (erroCandidato) throw erroCandidato;
+      candidato = Array.isArray(achado) ? achado[0] : achado;
 
-    // Homônimo não vira chute: marcar a entrevista no card errado é pior que não marcar.
-    if ((candidato?.achados ?? 0) > 1) {
-      return json({ ok: false, motivo: 'ambiguo' });
-    }
-    // Mesma resposta para "não existe" e "existe mas está fora" (desqualificado, contratado,
-    // monitor não convocado): a diferença entre as duas contaria, a quem tentasse, quem saiu
-    // do processo.
-    if (!candidato?.oportunidade_id) {
-      return json({ ok: false, motivo: 'nao_encontrado' });
+      // Mesma resposta para "link que não existe" e "pessoa que saiu do processo"
+      // (desqualificada, contratada, monitor não convocado fora de campanha).
+      if (!candidato?.oportunidade_id) return json({ ok: false, motivo: 'link_invalido' });
+    } else {
+      // ── Link antigo, por nome ─────────────────────────────────────────────────
+      // Nome e sobrenome, no mínimo: com uma palavra só, meia dúzia de "Maria" casaria com a
+      // primeira que aparecesse na lista.
+      if (nome.replace(/\s+/g, ' ').split(' ').filter(Boolean).length < 2) {
+        return json({ ok: false, motivo: 'nome_incompleto' });
+      }
+
+      const { data: achado, error: erroCandidato } = await admin.rpc('rh_agenda_publica_por_nome', {
+        p_nome: nome,
+      });
+      if (erroCandidato) throw erroCandidato;
+      candidato = Array.isArray(achado) ? achado[0] : achado;
+
+      // Homônimo não vira chute: marcar a entrevista no card errado é pior que não marcar.
+      if ((candidato?.achados ?? 0) > 1) {
+        return json({ ok: false, motivo: 'ambiguo' });
+      }
+      // Mesma resposta para "não existe" e "existe mas está fora" (desqualificado, contratado,
+      // monitor não convocado): a diferença entre as duas contaria, a quem tentasse, quem saiu
+      // do processo.
+      if (!candidato?.oportunidade_id) {
+        return json({ ok: false, motivo: 'nao_encontrado' });
+      }
     }
 
     // A agenda DESTE candidato: rodada para o monitor convocado, faixas padrão para os demais.
