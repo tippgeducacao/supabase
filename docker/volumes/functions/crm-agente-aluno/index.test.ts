@@ -1264,6 +1264,42 @@ describe('crm-agente-aluno: o canal da fala (Gustavo, 15/10/2026)', () => {
     expect(eventos()).toContain('canal:fala_descartada');
   });
 
+  // 13/11/2026: em 09/11 a conta da Anthropic ficou sem crédito e o turno caía no `catch` calado.
+  it('a API caindo (sem crédito) passa para a equipe em vez de calar', async () => {
+    estado.respostasModelo = [{ __status: 400 }];
+    await chamar(C);
+    expect(fila()).toHaveLength(0);
+    expect(eventos()).toContain('transferido:outro');
+    expect(eventos()).toContain('erro');
+    expect(eventos()).not.toContain('respondido');
+    const transf = estado.rpcs.filter((r) => r.nome === 'onb_agente_registrar_transferencia');
+    expect(transf).toHaveLength(1);
+    expect(transf[0].args).toMatchObject({ p_assunto: 'outro' });
+    expect(String((transf[0].args as Linha).p_motivo)).toMatch(/falha técnica/);
+    const erro = estado.consultas.find((c) => c.tabela === 'onb_agente_eventos' && c.op === 'insert' &&
+      (c.dados as Linha).tipo === 'erro');
+    expect(((erro?.dados as Linha).detalhe as Linha).passou_para_equipe).toBe(true);
+  });
+
+  it('a API caindo depois de já ter chamado a equipe no turno não abre uma segunda passagem', async () => {
+    estado.respostasModelo = [
+      { content: [{ type: 'tool_use', id: 't1', name: 'passar_para_atendente', input: { assunto: 'financeiro', motivo: 'boleto' } }] },
+      { __status: 400 },
+    ];
+    await chamar(C);
+    const assuntos = estado.rpcs.filter((r) => r.nome === 'onb_agente_registrar_transferencia')
+      .map((r) => (r.args as Linha).p_assunto);
+    expect(assuntos).toEqual(['financeiro']);
+    expect(eventos()).toContain('erro');
+  });
+
+  it('erro antes das portas (sem saber se alguém já está na conversa) não abre passagem', async () => {
+    estado.contexto = null;
+    await chamar(C);
+    expect(eventos()).toContain('erro');
+    expect(estado.rpcs.filter((r) => r.nome === 'onb_agente_registrar_transferencia')).toHaveLength(0);
+  });
+
   it('fala vazia pelo canal é silêncio escolhido, não erro', async () => {
     estado.respostasModelo = [{ content: [fala('')] }];
     await chamar(C);

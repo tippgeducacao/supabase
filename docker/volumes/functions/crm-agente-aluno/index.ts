@@ -880,6 +880,11 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
   // `try` porque é de lá que o `finally` os lê, e todo `return` de porta passa por ele.
   let ofertaVirouMensagem = false;
   let ofertaOportunidadeId: string | null = null;
+  // Armada só depois de todas as portas (humano no comando, passagem aberta, janela): daí em
+  // diante o aluno ESTAVA para ser respondido, e uma exceção no meio (a API da Anthropic sem
+  // crédito, fora do ar, modelo aposentado) não pode virar silêncio. Fica fora do `try` porque
+  // quem a usa é o `catch`.
+  let passarNaFalha: ((motivo: string) => Promise<boolean>) | null = null;
 
   try {
     if (!semInbound) await dormir(BUFFER_MS);
@@ -1134,6 +1139,21 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
     if (aberta?.id) {
       await evento('pulado:transferencia_aberta', { ...rastro, assunto: aberta.assunto ?? null });
       return;
+    }
+
+    // ⚠️ EXCEÇÃO TAMBÉM NÃO É SILÊNCIO (13/11/2026). Em 09/11, das 8h às 10h22, a conta da
+    // Anthropic ficou sem crédito: ~10 alunos escreveram (um deles pedindo para CANCELAR a pós),
+    // o turno caiu no `catch`, gravou `erro` e saiu calado, com o card parado na coluna da IA.
+    // O "falha não é silêncio" de 16/10 só cobria a fala bloqueada, não a exceção. No turno da
+    // OFERTA ele não perguntou nada: ali não há o que passar.
+    if (!ehOferta) {
+      passarNaFalha = async (motivo: string) => {
+        // Já chamou a equipe neste turno (financeiro, ligação...): essa passagem já põe o card na
+        // fila, uma segunda só faria barulho.
+        if (transferenciaDesteTurno) return false;
+        await passar('outro', motivo);
+        return true;
+      };
     }
 
     // ── A OFERTA PRECISA SABER O QUE ESTÁ OFERECENDO ─────────────────────────
@@ -1861,8 +1881,22 @@ async function processar(payload: any, conta: string, profundidade = 0): Promise
       espera_s: envio.espera, manha: ehManha,
     });
   } catch (e) {
-    await evento('erro', { ...rastro, motivo: e instanceof Error ? e.message : String(e) });
+    const motivo = e instanceof Error ? e.message : String(e);
     console.error('[crm-agente-aluno]', e);
+    let passouParaEquipe = false;
+    if (passarNaFalha) {
+      try {
+        // A passagem grava `transferido:outro`, e é esse evento que leva o card para PAUSADO.
+        passouParaEquipe = await passarNaFalha(
+          `o assistente não conseguiu responder a esta mensagem (falha técnica: ${motivo.slice(0, 160)}), ` +
+          'e ninguém respondeu o aluno ainda',
+        );
+      } catch (e2) {
+        console.error('[crm-agente-aluno] não consegui passar para a equipe:', e2 instanceof Error ? e2.message : String(e2));
+      }
+    }
+    // Continua `erro` (é o que a medição de apagão conta), com a marca de que a equipe foi chamada.
+    await evento('erro', { ...rastro, motivo, passou_para_equipe: passouParaEquipe });
   } finally {
     // ── OFERTA QUE NÃO VIROU MENSAGEM NÃO PODE SEGURAR A VAGA ────────────────
     // ⚠️ Só existe UMA oferta viva por aluno, e `onb_acelerada_agendar` só reabre quando a
