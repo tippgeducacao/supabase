@@ -18,7 +18,7 @@ exports[`ferramentas da Luna: contrato com o código > nome, parâmetros, tipos,
           },
           "periodo_desejado": {
             "enum": [
-              "manhã",
+              "manha",
               "tarde",
               "noite",
               "qualquer",
@@ -232,6 +232,7 @@ exports[`ferramentas da Luna: contrato com o código > nome, parâmetros, tipos,
           "contexto_qualificacao": {
             "enum": [
               "normal",
+              "estudante",
               "estudante_apto",
               "estudante_fora_do_prazo",
               "correcao_sem_formacao",
@@ -369,6 +370,7 @@ exports[`ferramentas da Luna: contrato com o código > nome, parâmetros, tipos,
           "contexto_qualificacao": {
             "enum": [
               "normal",
+              "estudante",
               "estudante_apto",
               "estudante_fora_do_prazo",
               "correcao_sem_formacao",
@@ -409,7 +411,7 @@ exports[`ferramentas da Luna: contrato com o código > nome, parâmetros, tipos,
           },
           "periodo_desejado": {
             "enum": [
-              "manhã",
+              "manha",
               "tarde",
               "noite",
               "qualquer",
@@ -778,6 +780,7 @@ exports[`ferramentas da Luna: contrato com o código > nome, parâmetros, tipos,
           "contexto_qualificacao": {
             "enum": [
               "normal",
+              "estudante",
               "estudante_apto",
               "estudante_fora_do_prazo",
               "correcao_sem_formacao",
@@ -1118,6 +1121,7 @@ exports[`ferramentas da Luna: contrato com o código > nome, parâmetros, tipos,
           "contexto_qualificacao": {
             "enum": [
               "normal",
+              "estudante",
               "estudante_apto",
               "estudante_fora_do_prazo",
               "correcao_sem_formacao",
@@ -1195,6 +1199,64 @@ exports[`ferramentas da Luna: contrato com o código > nome, parâmetros, tipos,
         "required": [
           "tipo",
         ],
+        "type": "object",
+      },
+      "strict": false,
+      "type": "function",
+    },
+    {
+      "name": "atualizar_dados_lead",
+      "parameters": {
+        "properties": {
+          "area_atuacao": {
+            "type": "string",
+          },
+          "atua_na_area": {
+            "enum": [
+              "sim",
+              "nao",
+            ],
+            "type": "string",
+          },
+          "formacao": {
+            "type": "string",
+          },
+          "graduacao_concluida": {
+            "enum": [
+              "sim",
+              "cursando",
+              "nao",
+            ],
+            "type": "string",
+          },
+          "nome": {
+            "type": "string",
+          },
+          "possui_pos": {
+            "enum": [
+              "sim",
+              "nao",
+            ],
+            "type": "string",
+          },
+          "qual_pos": {
+            "type": "string",
+          },
+          "tempo_formacao": {
+            "type": "string",
+          },
+          "vinculo": {
+            "enum": [
+              "clt",
+              "autonomo",
+              "consultor",
+              "proprietario",
+              "servidor_publico",
+              "sem_trabalho",
+            ],
+            "type": "string",
+          },
+        },
         "type": "object",
       },
       "strict": false,
@@ -1279,6 +1341,7 @@ exports[`ferramentas da Luna: contrato com o código > nome, parâmetros, tipos,
           "contexto_qualificacao": {
             "enum": [
               "normal",
+              "estudante",
               "estudante_apto",
               "estudante_fora_do_prazo",
               "correcao_sem_formacao",
@@ -1319,7 +1382,7 @@ exports[`ferramentas da Luna: contrato com o código > nome, parâmetros, tipos,
           },
           "periodo_desejado": {
             "enum": [
-              "manhã",
+              "manha",
               "tarde",
               "noite",
               "qualquer",

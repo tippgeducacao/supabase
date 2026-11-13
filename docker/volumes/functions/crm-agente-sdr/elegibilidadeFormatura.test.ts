@@ -17,6 +17,22 @@ import {
 /** Instante UTC equivalente a uma hora de Brasília (UTC-3). */
 const brt = (iso: string) => new Date(`${iso}-03:00`);
 
+describe('estudante sem decisão antecipada pelo modelo (13/11/2026)', () => {
+  const agora = brt('2026-11-13T10:00:00');
+  it.each(['', '2º semestre', 'estou no quinto período'])('previsão %s exige esclarecimento, sem aprovar ou reprovar', (bruta) => {
+    expect(decidirPrazoEstudante({ contexto_qualificacao: 'estudante', conclusao_graduacao_bruta: bruta }, agora).acao).toBe('pergunta_data');
+  });
+  it('o código interpreta uma previsão dentro da janela', () => {
+    expect(decidirPrazoEstudante({ contexto_qualificacao: 'estudante', conclusao_graduacao_bruta: 'finalizo em janeiro de 2027' }, agora).acao).toBe('segue');
+  });
+  it('o código reprova prazo distante sem depender do rótulo fora_do_prazo', () => {
+    expect(decidirPrazoEstudante({ contexto_qualificacao: 'estudante', conclusao_graduacao_bruta: 'só me formo em dezembro de 2028' }, agora).acao).toBe('reprova');
+  });
+  it('semestre ambíguo não vira data por um MM/AAAA inventado pelo modelo', () => {
+    expect(decidirPrazoEstudante({ contexto_qualificacao: 'estudante', conclusao_graduacao_bruta: '2º semestre', conclusao_graduacao: '12/2026' }, agora).acao).toBe('pergunta_data');
+  });
+});
+
 const emDias = (agora: Date) => {
   const base = new Date(agora.getTime() - 3 * 60 * 60 * 1000);
   return Math.round((limiteFormatura(agora).getTime() - base.getTime()) / 86_400_000);

@@ -12,7 +12,7 @@ import { INSTRUCAO_VOZ } from './vozDoJoao.ts';
 import { INSTRUCAO_CANAL_RESPOSTA } from './canalResposta.ts';
 import {
   LUNA_AGENTE_QUALIFICADOR, LUNA_AGENTE_VALIDACAO, LUNA_CANAL_RESPOSTA, LUNA_DISPONIBILIDADE, LUNA_EVENTOS,
-  LUNA_FATOS_DO_LEAD, LUNA_FICHA, LUNA_MEMORIA_HUMANA, LUNA_VOZ,
+  LUNA_FATOS_DO_LEAD, LUNA_FICHA, LUNA_MEMORIA_HUMANA, LUNA_VOZ, LUNA_ROTEAMENTO_FERRAMENTAS,
 } from './prompts-luna.ts';
 
 export type ConjuntoPrompt = 'producao' | 'luna';
@@ -37,7 +37,7 @@ const PRODUCAO: BlocosDoPrompt = {
 };
 const LUNA: BlocosDoPrompt = {
   validacao: LUNA_AGENTE_VALIDACAO, qualificador: LUNA_AGENTE_QUALIFICADOR, memoriaHumana: LUNA_MEMORIA_HUMANA,
-  fatosDoLead: INSTRUCAO_ALUNO_PPG + '\n\n' + LUNA_FATOS_DO_LEAD, disponibilidade: LUNA_DISPONIBILIDADE, eventos: LUNA_EVENTOS,
+  fatosDoLead: [INSTRUCAO_ALUNO_PPG, LUNA_FATOS_DO_LEAD, LUNA_ROTEAMENTO_FERRAMENTAS].join('\n\n'), disponibilidade: LUNA_DISPONIBILIDADE, eventos: LUNA_EVENTOS,
   ficha: LUNA_FICHA, voz: LUNA_VOZ, canalResposta: LUNA_CANAL_RESPOSTA,
 };
 

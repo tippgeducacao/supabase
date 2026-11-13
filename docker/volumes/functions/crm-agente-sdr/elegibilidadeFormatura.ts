@@ -328,7 +328,9 @@ export function decidirPrazoEstudante(input: {
   conclusao_graduacao_bruta?: unknown;
 }, agora: Date = new Date()): DecisaoPrazo {
   const ctx = input?.contexto_qualificacao;
-  if (ctx !== 'estudante_apto' && ctx !== 'estudante_fora_do_prazo') return { acao: 'segue' };
+  // 13/11/2026: o modelo pode declarar somente o fato (ainda cursa), sem decidir aptidão.
+  // Os dois rótulos antigos continuam aceitos por históricos, webchat e integrações legadas.
+  if (ctx !== 'estudante' && ctx !== 'estudante_apto' && ctx !== 'estudante_fora_do_prazo') return { acao: 'segue' };
 
   const { veredito, leitura, anoAssumido } = avaliarConclusao(
     input?.conclusao_graduacao_bruta, input?.conclusao_graduacao, agora,
@@ -362,10 +364,9 @@ export function instrucaoPerguntarConclusao(porque: 'posicao_no_curso' | 'sem_da
 /** Bloco injetado no contexto temporal das 4 personas (e do webchat). */
 export function blocoElegibilidadeFormatura(agora: Date = new Date()): string {
   return `**ELEGIBILIDADE DE QUEM AINDA CURSA A GRADUAÇÃO (régua interna, NUNCA cite ao lead):**
-Estudante que conclui a graduação **até ${limiteFormaturaFormatado(agora)}** (incluindo TCC) é ELEGÍVEL:
-trate como apto (\`contexto_qualificacao\` = "estudante_apto"), siga o fluxo normal e pode agendar.
-Quem conclui DEPOIS dessa data ainda não pode — encerre pelo caminho do retorno na formatura.
-Use ESTA data, não calcule prazo de cabeça.
+Estudante que conclui a graduação **até ${limiteFormaturaFormatado(agora)}** (incluindo TCC) pode ser elegível; quem conclui DEPOIS segue o retorno na formatura.
+Use \`contexto_qualificacao\` = "estudante" quando esse valor existir no contrato, enviando a previsão literal: o código interpreta a data e decide o prazo. Os rótulos antigos estudante_apto/estudante_fora_do_prazo continuam aceitos em integrações legadas.
+Espere APROVADO para a mesma pós antes de oferecer horário ou agendar. Use ESTA data como referência interna; não calcule outra nem antecipe aprovação.
 ⚠️ A data-limite **pode cair no ANO QUE VEM** — e quando cai, quem conclui até ela é APTO do
 mesmo jeito. "É do ano que vem" NÃO reprova ninguém: o que reprova é concluir DEPOIS da data.
 Ex.: com a data-limite em 31/01/2027, "finalizo em janeiro" é APTO; "finalizo em 2027.1", não.

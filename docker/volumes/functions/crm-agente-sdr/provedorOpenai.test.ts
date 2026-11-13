@@ -465,6 +465,15 @@ describe('carregarTools: cada provedor lê a SUA tabela', () => {
     expect(pedido.tools).toEqual(FERRAMENTAS_POR_AGENTE.agente_validacao.map((a) => FERRAMENTAS[a]));
   });
 
+  it('recontato recebe coleta e retorno reais, e o estudante neutro sobrevive à tradução para a API', async () => {
+    const tools = await agente.carregarTools(banco({}).client, 'agente_recontato', luna);
+    const pedido = paraPedidoOpenai({ messages: [], tools }, { modelo: 'gpt-6.1-terra', esforco: 'medium' }) as { tools: any[] };
+    expect(pedido.tools.find((t) => t.name === 'atualizar_dados_lead')?.parameters.properties.graduacao_concluida.enum).toContain('cursando');
+    expect(pedido.tools.find((t) => t.name === 'agendar_retorno')?.parameters.properties.tipo.enum).toEqual(['analise', 'formatura']);
+    expect(pedido.tools.find((t) => t.name === 'verificar_compatibilidade_curso')?.parameters.properties.contexto_qualificacao.enum).toContain('estudante');
+    expect(pedido.tools.find((t) => t.name === 'consulta_disponibilidade')?.parameters.properties.periodo_desejado.enum).toEqual(['manha', 'tarde', 'noite', 'qualquer']);
+  });
+
   it('openai: quem chama pode mexer no que recebeu sem sujar a fonte', async () => {
     const tools = await agente.carregarTools(banco({}).client, 'agente_validacao', luna);
     tools[0].input_schema.properties = {};

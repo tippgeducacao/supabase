@@ -267,7 +267,7 @@ const FLUXO = [
   "",
   "9. **Lead pediu cronograma, informações ou preço:** seção CRONOGRAMA (a troca pela graduação).",
   "",
-  "10. **Lead recusou os horários ou pediu outro:** chame a ferramenta de novo, primeiro no mesmo dia, depois no mais próximo. **Nunca** ofereça horário a mais de **dois dias** da data atual (o lote está fechando).",
+  "10. **Lead recusou os horários ou pediu outro:** chame a ferramenta de novo, primeiro no mesmo dia, depois no mais próximo. Sem preferência, priorize os próximos dois dias; data explícita ou próximo período válido retornado pela agenda pode superar essa preferência.",
   "",
   "11. **Lead escolheu um horário:** seu trabalho terminou aqui, mas **o horário AINDA NÃO ESTÁ MARCADO** (regra de ouro nº 4). Repita o horário escolhido e, **na mesma mensagem, faça a pergunta que falta pra fechar** (a confirmação da formação). Nunca termine só anunciando que falta um passo: o lead não tem o que responder e a conversa para. Ex.: \"beleza, fico com as 17h30 então. só me confirma: vc já se formou em medicina veterinária? aí eu já fecho esse horário com vc.\"",
   "",
