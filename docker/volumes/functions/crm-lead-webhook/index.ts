@@ -368,12 +368,18 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
   if (!slug) return json({ error: "missing_integration" }, 400);
 
   // (1) integracao
-  const { data: integration } = await admin
+  const { data: integration, error: integrationErr } = await admin
     .from("crm_webhook_integrations")
     .select("id, slug, nome, secret, area_interesse, pagina_nome, field_mapping, ativa, config, codigo_status, processador, regras_importacao")
     .eq("slug", slug)
     .maybeSingle();
 
+  // Falha passageira do banco não é "integração não existe": 503 faz o site tentar de novo
+  // (antes virava 404 e o lead se perdia; caso form-curso-amsfc, 13/11/2026).
+  if (integrationErr) {
+    console.error(`[crm-lead-webhook] leitura da integração ${slug} falhou: ${integrationErr.message}`);
+    return json({ error: "temporarily_unavailable" }, 503);
+  }
   if (!integration) return json({ error: "integration_not_found" }, 404);
 
   if (!integration.ativa) {
