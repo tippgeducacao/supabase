@@ -9,8 +9,10 @@
 //          "Filtros": [{"Chave":"data_inicio_cp","Valor":"dd/mm/aaaa"}, ...]}
 //   resposta: {"sucesso": true, "resultado": "<array JSON como STRING>"}
 // ⚠️ Rate limit: 1 chamada a cada 5 MINUTOS por consulta (erro 500 se antes).
-// ⚠️ O EDUQ NÃO devolve caixa nem data de repasse (o banco é resolvido na aprovação:
-//    default SICOOB + override).
+// Conta da baixa: desde 13/11/2026 a EDUQ devolve `id_conta_bancaria`/`conta_bancaria` (a
+//    conta que recebeu). A função eduq_api_sync_contas grava em todas as linhas do pagamento,
+//    e a aprovação usa como banco (eduq_api_banco_sugerido). Antes disso o banco era adivinhado.
+// Corpo `{"so_conta": true, "inicio", "fim"}`: grava SÓ a conta, sem upsert (carga do histórico).
 //
 // Deploy: git push (deploy-edges.yml). NUNCA "Deploy" do Dokploy.
 // Envs (Dokploy edge-runtime): EDUQ_API_TOKEN (obrigatória), EDUQ_API_BASE (opcional),
@@ -173,6 +175,24 @@ Deno.serve(async (req) => {
     }
 
     const items = await fetchPagamentos(inicio, fim);
+
+    // ── Só a conta da baixa (13/11/2026) ─────────────────────────────────────────
+    // Para gravar a conta no HISTÓRICO sem mexer em mais nada da fila. O caminho normal
+    // reescreve as pendentes e cria linha para pagamento que não estiver na base; este manda
+    // à função só fatura, pagamento e conta. A conta vai para todas as linhas do pagamento,
+    // de qualquer situação (mãe de rateio, parcelas, aprovadas). Pode ser repetido.
+    if (body.so_conta === true) {
+      const contas = items.map((it: any) => ({
+        id_fatura: it.id_fatura != null ? String(it.id_fatura) : null,
+        id_pagamento: it.id_pagamento != null ? String(it.id_pagamento) : null,
+        id_conta_bancaria: it.id_conta_bancaria != null ? String(it.id_conta_bancaria) : null,
+        conta_bancaria: it.conta_bancaria ?? null,
+      }));
+      const { data, error } = await supabase.rpc("eduq_api_sync_contas", { p_items: contas });
+      if (error) throw new Error(`eduq_api_sync_contas: ${error.message}`);
+      return json({ success: true, modo: "so_conta", recebidos: items.length, periodo: { inicio, fim }, ...(data ?? {}) });
+    }
+
     // dedup por eduq_ref (último vence)
     const map = new Map<string, ReturnType<typeof normalize>>();
     for (const it of items) {
@@ -181,13 +201,15 @@ Deno.serve(async (req) => {
     }
     const rows = Array.from(map.values());
 
+    let contaBaixa: unknown = null;
     if (rows.length > 0) {
-      const { error } = await supabase.rpc("eduq_api_sync_upsert", {
+      const { data, error } = await supabase.rpc("eduq_api_sync_upsert", {
         p_items: rows, p_periodo_inicio: inicio, p_periodo_fim: fim,
       });
       if (error) throw new Error(`eduq_api_sync_upsert: ${error.message}`);
+      contaBaixa = (data as { conta_baixa?: unknown } | null)?.conta_baixa ?? null;
     }
-    return json({ success: true, total: rows.length, periodo: { inicio, fim } });
+    return json({ success: true, total: rows.length, periodo: { inicio, fim }, conta_baixa: contaBaixa });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[eduq-api-sync]", message);
