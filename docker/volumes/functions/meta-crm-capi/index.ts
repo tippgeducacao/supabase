@@ -54,9 +54,10 @@ type Pendente = {
   telefone: string | null;
   fbclid: string | null;
   leadgen_id: string | null;
+  valor: number | string | null; // só na matrícula, em BRL (prop_valor_final)
 };
 
-async function montarEvento(p: Pendente) {
+export async function montarEvento(p: Pendente) {
   const user_data: Record<string, unknown> = {};
   if (p.email) user_data.em = [await sha256(p.email.trim().toLowerCase())];
   const tel = telefoneMeta(p.telefone);
@@ -71,7 +72,11 @@ async function montarEvento(p: Pendente) {
     event_time: Math.floor(new Date(p.event_time).getTime() / 1000),
     event_id: p.event_id,
     action_source: "system_generated",
-    custom_data: { event_source: "crm", lead_event_source: "Sistema PPGVET" },
+    custom_data: {
+      event_source: "crm",
+      lead_event_source: "Sistema PPGVET",
+      ...(Number(p.valor) > 0 ? { value: Number(p.valor), currency: "BRL" } : {}),
+    },
     user_data,
   };
 }

@@ -91,6 +91,7 @@ type Pendente = {
   gclid: string;
   email: string | null;
   telefone: string | null;
+  valor: number | string | null; // só na matrícula, em BRL (prop_valor_final)
 };
 
 export async function montarEvento(p: Pendente) {
@@ -102,6 +103,7 @@ export async function montarEvento(p: Pendente) {
     adIdentifiers: { gclid: p.gclid },
     eventTimestamp: new Date(p.event_time).toISOString(),
     transactionId: p.event_id,
+    ...(Number(p.valor) > 0 ? { conversionValue: Number(p.valor), currency: "BRL" } : {}),
     eventSource: "OTHER",
     ...(ids.length ? { userData: { userIdentifiers: ids } } : {}),
   };
