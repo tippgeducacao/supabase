@@ -2,6 +2,7 @@
 // de lista_tools_claude; a descrição efetiva não depende de editar produção para testar.
 import { INSTRUCAO_AGENDA_EVENTOS } from './instrucaoEventos.ts';
 import { INSTRUCAO_TITULOS_PROFISSIONAIS } from './fatosLead.ts';
+import { INSTRUCAO_ALUNO_PPG } from './evidenciaAlunoPpg.ts';
 type Propriedade = { description?: string; [chave: string]: unknown };
 type ToolSdr = {
   name: string;
@@ -29,6 +30,7 @@ export function descreverToolsSdr(tools: ToolSdr[]): ToolSdr[] {
       tool.description = INSTRUCAO_AGENDA_EVENTOS + '\n\n' + (tool.description ?? '');
     }
     if (tool.name === 'pausa_ia') {
+      tool.description = INSTRUCAO_ALUNO_PPG + '\n\n' + (tool.description ?? '');
       tool.description = 'Para tipo=sem_graduacao, exige declaração explícita do próprio lead de nunca ter cursado graduação ou ter somente ensino médio/técnico, sem graduação em andamento nem outra concluída. O executor confere o histórico e bloqueia sem evidência. Não atuar/trabalhar em nenhuma área, pretender atuar, cadastro vazio e resposta curta sobre trabalho NÃO informam formação. Interesse somente na aula aberta não autoriza desqualificar nem arquivar. Se faltar informação, preserve o atendimento e esclareça somente o necessário para o objetivo atual.\n' + (tool.description ?? '');
     }
     if (tool.name === 'consulta_disponibilidade') {

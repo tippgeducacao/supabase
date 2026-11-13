@@ -4,6 +4,7 @@
 import { AGENTE_QUALIFICADOR, AGENTE_VALIDACAO } from './prompts.ts';
 import { INSTRUCAO_MEMORIA_HUMANA } from './memoriaHumana.ts';
 import { INSTRUCAO_FATOS_DO_LEAD } from './fatosLead.ts';
+import { INSTRUCAO_ALUNO_PPG } from './evidenciaAlunoPpg.ts';
 import { INSTRUCAO_DISPONIBILIDADE_CONTATO } from './disponibilidadeContato.ts';
 import { INSTRUCAO_EVENTOS } from './instrucaoEventos.ts';
 import { INSTRUCAO_FICHA } from './fichaAtendimento.ts';
@@ -36,7 +37,7 @@ const PRODUCAO: BlocosDoPrompt = {
 };
 const LUNA: BlocosDoPrompt = {
   validacao: LUNA_AGENTE_VALIDACAO, qualificador: LUNA_AGENTE_QUALIFICADOR, memoriaHumana: LUNA_MEMORIA_HUMANA,
-  fatosDoLead: LUNA_FATOS_DO_LEAD, disponibilidade: LUNA_DISPONIBILIDADE, eventos: LUNA_EVENTOS,
+  fatosDoLead: INSTRUCAO_ALUNO_PPG + '\n\n' + LUNA_FATOS_DO_LEAD, disponibilidade: LUNA_DISPONIBILIDADE, eventos: LUNA_EVENTOS,
   ficha: LUNA_FICHA, voz: LUNA_VOZ, canalResposta: LUNA_CANAL_RESPOSTA,
 };
 

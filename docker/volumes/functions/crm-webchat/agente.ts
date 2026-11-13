@@ -20,6 +20,7 @@ import { comPresenteEscola, LINK_ESCOLA_GRATUITA } from "../crm-agente-sdr/escol
 import { carregarTools, chamarAgentePrincipal, chamarRouter } from "../crm-agente-sdr/agente.ts";
 import { type CtxConversa, executarTool, montarToolResults } from "../crm-agente-sdr/tools.ts";
 import { avaliarEvidenciaSemGraduacao, bloqueioSemEvidenciaGraduacao } from "../crm-agente-sdr/evidenciaFormacao.ts";
+import { bloquearPausaSemVinculoPpg } from "../crm-agente-sdr/evidenciaAlunoPpg.ts";
 import { toolConcluida } from "../crm-agente-sdr/encerramento.ts";
 import { type EstadoElegibilidade, VERSAO_REGRA_ELEGIBILIDADE } from "../crm-agente-sdr/elegibilidadeAgendamento.ts";
 // Frases que viram PARÂMETRO de template ficam num módulo puro pra poderem ser testadas:
@@ -683,8 +684,10 @@ export async function responderWebchat(
       const registro: WebchatToolChamada = { nome: nomeTool, input, mockado };
       chamadas.push(registro);
       let saidaTool: ResultadoToolWebchat;
+      const semVinculoPpg = nomeTool === 'pausa_ia' ? bloquearPausaSemVinculoPpg(input, ctx.historicoConversa, tu.id) : null;
       // O harness do chat aplica a mesma trava antes do mock, sem mutações reais.
-      if (nomeTool === 'pausa_ia' && input.tipo === 'sem_graduacao'
+      if (semVinculoPpg) saidaTool = semVinculoPpg;
+      else if (nomeTool === 'pausa_ia' && input.tipo === 'sem_graduacao'
         && !avaliarEvidenciaSemGraduacao(ctx.historicoConversa).autorizada) {
         saidaTool = bloqueioSemEvidenciaGraduacao(tu.id);
       }

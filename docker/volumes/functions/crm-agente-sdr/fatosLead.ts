@@ -1,3 +1,4 @@
+import { INSTRUCAO_ALUNO_PPG } from './evidenciaAlunoPpg.ts';
 // 15/09/2026: critério comercial definido pelo usuário após o caso Luciana.
 // Autodeclaração profissional pode identificar formação sem exigir a palavra
 // "formada"; o complemento "auxiliar de" continua tendo significado próprio.
@@ -10,7 +11,9 @@ Depois de reconhecer a formação, siga as etapas de fechamento com seus resulta
 
 // Incidente Angélica (12/09/2026): "nenhuma" respondia à área de atuação,
 // mas virou "sem graduação" e arquivamento. Vale para todas as personas/canais.
-export const INSTRUCAO_FATOS_DO_LEAD = `## Fatos do lead: não transforme ausência de informação em conclusão
+export const INSTRUCAO_FATOS_DO_LEAD = `${INSTRUCAO_ALUNO_PPG}
+
+## Fatos do lead: não transforme ausência de informação em conclusão
 Separe três informações independentes: atuação profissional, formação acadêmica e objetivo do contato. Não trabalhar, não atuar na área, estar desempregado, querer começar ou "pretendo atuar" NÃO dizem se a pessoa tem graduação ou pós. Formação vazia no cadastro significa DESCONHECIDA; nunca significa que não estudou. Não invente fatos pessoais, intenção de compra, impedimento acadêmico ou recusa.
 Preserve também o tempo e a certeza do que foi dito. "Pretendo atuar" é intenção futura, não "já está começando"; não atuar hoje não significa nunca ter atuado. Não invente que o interesse é recente, que a pessoa é iniciante ou está mudando de carreira. Ao acolher, prefira repetir fielmente "você pretende atuar nessa área" sem acrescentar uma história.
 Não enfeite a resposta com suposições sobre a pessoa, mesmo usando "imagino" ou "deve ser". Formação/pós não comprova experiência, autoridade ou "trajetória sólida"; não faça elogios baseados nessa inferência. Não suponha o motivo da inscrição na aula. Se precisar desse motivo, pergunte de forma aberta. Para reparar um erro, basta reconhecer o engano e respeitar o pedido: "desculpa pela confusão, associei sua resposta sobre atuação à formação indevidamente. entendi que você quer assistir à aula do Humberto". Sem elogios, justificativas ou biografia inventada.

@@ -9,6 +9,7 @@ import type { ConjuntoPrompt } from '../crm-agente-sdr/conjuntoPrompt.ts';
 import { modeloOpenaiEnsaioPermitido, modeloOpenaiPermitido } from '../crm-agente-sdr/modelosOpenai.ts';
 import { contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from '../crm-agente-sdr/contextoAulaPiloto.ts';
 import { avaliarEvidenciaSemGraduacao, bloqueioSemEvidenciaGraduacao } from '../crm-agente-sdr/evidenciaFormacao.ts';
+import { bloquearPausaSemVinculoPpg } from '../crm-agente-sdr/evidenciaAlunoPpg.ts';
 import { respostaDoEncerramento, toolConcluida, type Encerramento } from '../crm-agente-sdr/encerramento.ts';
 import { comPresenteNaDespedida } from '../crm-agente-sdr/escolaGratuita.ts';
 import { confirmacaoDoResultado, falaEntregaConfirmacao, textoConfirmacaoAgendamento, type ConfirmacaoAgendamento } from '../crm-agente-sdr/confirmacaoAgendamento.ts';
@@ -481,6 +482,8 @@ export async function executarSimulacao(entrada: EntradaSimulacao, deps: Depende
       const pausasBloqueadas = new Set(toolUses.filter((tu) => tu.name === 'pausa_ia'
         && (tu.input as Record<string, unknown> | undefined)?.tipo === 'sem_graduacao'
         && !avaliarEvidenciaSemGraduacao(messages).autorizada).map((tu) => tu.id));
+      const pausasSemVinculo = new Map(toolUses.filter(tu => tu.name === 'pausa_ia')
+        .map(tu => [tu.id, bloquearPausaSemVinculoPpg((tu.input ?? {}) as Record<string, unknown>, messages, tu.id)]));
       // Thinking permanece só na memória necessária para a cadeia ativa de tools.
       if (blocos.length) messages.push({ role: 'assistant', content: !toolUses.length && deps.prepararFala && texto
         ? [{ type: 'text', text: texto }] : blocos });
@@ -502,10 +505,11 @@ export async function executarSimulacao(entrada: EntradaSimulacao, deps: Depende
       const results = [];
       const toolsConcluidas: Encerramento[] = [];
       for (const tu of toolUses) {
-        const bloqueadoPelaGuarda = pausasBloqueadas.has(tu.id);
+        const bloqueioAluno = pausasSemVinculo.get(tu.id);
+        const bloqueadoPelaGuarda = pausasBloqueadas.has(tu.id) || !!bloqueioAluno;
         // Espelho do index.ts (canário): consulta idêntica já feita neste turno não executa de novo.
         const repetida = !bloqueadoPelaGuarda && (consultasDoTurno?.repetida(tu.name, tu.input) ?? false);
-        const resultado = bloqueadoPelaGuarda ? JSON.stringify(bloqueioSemEvidenciaGraduacao(tu.id))
+        const resultado = bloqueadoPelaGuarda ? JSON.stringify(bloqueioAluno ?? bloqueioSemEvidenciaGraduacao(tu.id))
           : repetida ? JSON.stringify({ resultado: AVISO_CONSULTA_REPETIDA })
           : await deps.mockTool(tu.name, tu.input);
         let retornoTool: Record<string, unknown> = { resultado };

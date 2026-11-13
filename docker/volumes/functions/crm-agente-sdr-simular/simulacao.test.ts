@@ -332,6 +332,22 @@ describe('replay sem envio e diagnóstico sem thinking', () => {
     expect(resultado.transcript.find((t) => t.quem === 'tool')?.resultado).toContain('SEM_EVIDENCIA_SEM_GRADUACAO');
   });
 
+  it('Denise: recusa pausa por pós sem instituição e continua o pedido do MBA', async () => {
+    const deps = dependencias();
+    vi.mocked(deps.chamarPrincipal).mockResolvedValueOnce({ content: [
+      { type: 'text', text: 'Vou te passar para o suporte.' },
+      { type: 'tool_use', id: 'aluna-sem-prova', name: 'pausa_ia', input: { tipo: 'pausa', motivo: 'Lead já cursa uma pós; encaminhar ao suporte' } },
+    ] });
+    const r = await executarSimulacao(validarEntradaSimulacao({
+      historico_inicial: [{ role: 'user', content: 'Já faço uma pós.' }],
+      mensagens: ['Como funciona o MBA? Quais conteúdos?'],
+    }), deps);
+    expect(deps.mockTool).not.toHaveBeenCalled();
+    expect(deps.chamarPrincipal).toHaveBeenCalledTimes(2);
+    expect(r.transcript.filter(t => t.quem === 'joao').map(t => t.texto)).toEqual(['Podemos continuar.']);
+    expect(r.transcript.find(t => t.quem === 'tool')?.resultado).toContain('SEM_EVIDENCIA_ALUNO_PPG');
+  });
+
   it('mantém a pausa simulada quando há declaração explícita de única formação', async () => {
     const deps = dependencias();
     vi.mocked(deps.chamarPrincipal).mockResolvedValueOnce({ content: [

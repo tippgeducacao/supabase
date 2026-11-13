@@ -24,6 +24,7 @@ import { assuntoDoCadastroLigado, notaDoAssunto } from './assuntoDaPos.ts';
 import { VINCULOS_TRABALHO } from './carreiraPos.ts';
 import type { Msg } from './historico.ts';
 import { avaliarEvidenciaSemGraduacao, bloqueioSemEvidenciaGraduacao, respostaCurtaLigada } from './evidenciaFormacao.ts';
+import { bloquearPausaSemVinculoPpg } from './evidenciaAlunoPpg.ts';
 import { chamarAnthropic } from './agente.ts';
 import { selecionarProvedorDoLead } from './pilotoOpenai.ts';
 import { INSTRUCAO_FALHA_COMPATIBILIDADE } from './falhaCompatibilidade.ts';
@@ -1463,6 +1464,8 @@ async function enviaInformacoes(supabase: any, input: any, ctx: CtxConversa, too
 // pausas por desinteresse e o lead seguia recebendo template (1.244 pessoas
 // cutucadas depois de pedir pra parar, em 90 dias).
 async function pausaIa(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
+  const semVinculoPpg = bloquearPausaSemVinculoPpg(input, ctx.historicoConversa, toolUseId);
+  if (semVinculoPpg) return semVinculoPpg;
   // Antes de QUALQUER escrita: o enum escolhido pelo modelo não comprova o fato.
   // Contextos legados sem histórico também ficam fechados para sem_graduacao.
   if (input.tipo === 'sem_graduacao' && !avaliarEvidenciaSemGraduacao(ctx.historicoConversa).autorizada) {
