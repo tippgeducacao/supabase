@@ -126,7 +126,9 @@ Deno.serve(async (req) => {
       if (acao !== 'marcar') return json({ ok: false, motivo: 'acao_invalida' }, 400);
 
       // Quem é, só agora: o WhatsApp (o número que recebeu a mensagem) e, se o número não
-      // achar ninguém, o nome. Qualquer card aberto do funil de RH: sem lista de fora.
+      // achar ninguém, o nome completo exato. Qualquer card aberto do funil de RH, e quem não
+      // está no funil também marca: vira card na etapa da campanha. Pedido do Rafael: "não tem
+      // problema se alguém de fora agendar, não se atente a essa regra".
       const whatsapp = String(body?.whatsapp ?? '').replace(/\D/g, '');
       if (!nome || whatsapp.length < 10) return json({ ok: false, motivo: 'contato_incompleto' });
 
@@ -136,8 +138,25 @@ Deno.serve(async (req) => {
       });
       if (erroContato) throw erroContato;
       candidato = Array.isArray(achado) ? achado[0] : achado;
-      if ((candidato?.achados ?? 0) > 1) return json({ ok: false, motivo: 'contato_ambiguo' });
-      if (!candidato?.oportunidade_id) return json({ ok: false, motivo: 'contato_nao_encontrado' });
+
+      if (!candidato?.oportunidade_id || (candidato?.achados ?? 0) > 1) {
+        // Ninguém com esse número, nem exatamente uma pessoa com esse nome: gente nova, que
+        // marca do mesmo jeito. O card nasce na primeira etapa da campanha.
+        const { data: novo, error: erroNovo } = await admin.rpc('rh_agenda_campanha_novo_candidato', {
+          p_nome: nome,
+          p_whatsapp: whatsapp,
+        });
+        if (erroNovo) throw erroNovo;
+        if (!novo) return json({ ok: false, motivo: 'contato_incompleto' });
+        candidato = {
+          oportunidade_id: novo,
+          nome,
+          primeiro_nome: nome.split(/\s+/)[0],
+          telefone: whatsapp,
+          area: 'Agendou pela campanha',
+          papel_etapa: null,
+        };
+      }
 
       // O horário vale para quem tem o link, seja qual for a etapa do card. Forçar só pula a
       // conferência da agenda DO candidato: o horário é conferido abaixo contra os livres da
