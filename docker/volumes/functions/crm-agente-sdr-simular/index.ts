@@ -28,7 +28,7 @@ import { chamarAnthropic } from '../crm-agente-sdr/agente.ts';
 import type { DependenciasSimulacao } from './simulacao.ts';
 import { type LeituraJev, rotearComJev } from '../crm-agente-sdr/routerJev.ts';
 import { carregarDiasSemAtendimento, encontrarFormacao, extrairPrimeiroNome, montarContextoTemporal, montarPerguntaFormacao, notaDoCurso, notaDoNome, renderPrompt } from '../crm-agente-sdr/contexto.ts';
-import { comBlocoDaEscola, comPresenteEscola } from '../crm-agente-sdr/escolaGratuita.ts';
+import { comBlocoDaEscola } from '../crm-agente-sdr/escolaGratuita.ts';
 import {
   decidirPrazoEstudante,
   instrucaoPerguntarConclusao,
@@ -517,7 +517,9 @@ Deno.serve(async (req) => {
         // Mesma escolha da produção (index.ts → comBlocoDaEscola): quem já está na Escola
         // recebe o aviso, não o convite. Sem isto o caso Leandro (2026-09-11) não é testável.
         if (entrada.esta_na_escola) promptAgente = comBlocoDaEscola(promptAgente, true);
-        else if (!entrada.sem_presente_escola) promptAgente = comPresenteEscola(promptAgente);
+        // 13/11/2026: o laboratório também respeita PRESENTE_ESCOLA_ATIVO. Anexar o bloco
+        // cru reativava a promoção nos ensaios, apesar de ela estar desligada na produção.
+        else if (!entrada.sem_presente_escola) promptAgente = comBlocoDaEscola(promptAgente, false);
         if (entrada.prompt_extra) promptAgente += `\n\n${entrada.prompt_extra}`;
         // agente_aula ainda não tem linha própria em lista_tools_claude: usa as tools da
         // validação (que já incluem atualizar_dados_lead), como o PRD prevê.

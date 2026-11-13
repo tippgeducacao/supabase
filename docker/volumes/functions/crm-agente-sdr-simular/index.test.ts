@@ -85,6 +85,7 @@ describe('acesso do laboratório pelo painel', () => {
     expect(resposta.headers.get('Access-Control-Allow-Origin')).toBe('*');
     const data = await resposta.json();
     expect(data.pedido.system.length).toBeGreaterThan(0);
+    expect(data.pedido.system.map((b: { text: string }) => b.text).join('\n')).not.toContain('## 🎁 ANTES DE ENCERRAR: o presente da Escola');
     expect(data.pedido.tools.some((t: { name: string }) => t.name === 'responder_ao_cliente')).toBe(true);
     expect(data.origens.system).toHaveLength(data.pedido.system.length);
     expect(mocks.fetch.mock.calls.every(([url]) => !String(url).includes('api.anthropic.com'))).toBe(true);
