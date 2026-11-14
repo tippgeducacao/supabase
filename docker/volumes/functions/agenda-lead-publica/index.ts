@@ -25,6 +25,11 @@ import { corsHeaders } from '../_shared/cors.ts';
  * evento no Google e template de WhatsApp para o número digitado; sem freio isso vira disparo
  * para desconhecidos.
  *
+ * CORRIGIR (14/11, 'e se eu coloquei meu número errado?'): a marcação devolve à página um
+ * código de correção de uso curto; com ele a própria pessoa troca o número da reunião que
+ * acabou de marcar. Não é 'digite o telefone para mexer na reunião': quem não marcou não tem
+ * o código.
+ *
  * ABRIR e HORÁRIOS também têm freio por IP e cache curto: a conta de horários livres varre a
  * agenda de todos os vendedores da pós, e um laço de pedidos saturaria o banco.
  *
@@ -253,7 +258,8 @@ Deno.serve(async (req) => {
     }
 
     const cursoId = String(body?.curso_id ?? '').toLowerCase();
-    if (!UUID_OK.test(cursoId)) return json({ ok: false, motivo: 'pedido_invalido' }, 400);
+    // a correção não escolhe pós: ela refaz a reunião que já existe
+    if (acao !== 'corrigir' && !UUID_OK.test(cursoId)) return json({ ok: false, motivo: 'pedido_invalido' }, 400);
 
     // ── Horários livres da pós escolhida ─────────────────────────────────────────────────
     // 45 s de cache por pós: a conta varre a agenda de todos os vendedores dela. Horário que
@@ -269,6 +275,43 @@ Deno.serve(async (req) => {
       });
       if (!data?.ok) return json({ ok: false, motivo: data?.motivo ?? 'link_invalido' });
       return json({ ok: true, horarios: data.horarios ?? [] });
+    }
+
+    // ── Corrigir o número, logo depois de marcar ─────────────────────────────────────────
+    // A credencial é o código de correção que SÓ a página que marcou recebeu (128 bits, 15 min,
+    // no máximo 2 usos por marcação). Sem captcha de novo: ele já foi cobrado na marcação, e
+    // os freios por telefone, por IP e por hora contam cada correção como uma marcação.
+    if (acao === 'corrigir') {
+      if (!dentroDoLimite('marcar', ip)) return json({ ok: false, motivo: 'muitas_tentativas' });
+      const token = String(body?.correcao_token ?? '').trim().toLowerCase();
+      const novo = String(body?.whatsapp ?? '').replace(/\D/g, '').slice(0, 15);
+      if (!/^[0-9a-f]{32}$/.test(token)) return json({ ok: false, motivo: 'correcao_expirada' });
+      if (novo.length < 10) return json({ ok: false, motivo: 'contato_incompleto' });
+
+      const { data: c, error: erroC } = await admin.rpc('agenda_lead_publica_corrigir', {
+        p_codigo: codigo,
+        p_token: token,
+        p_whatsapp: novo,
+        p_ip: ip,
+      });
+      if (erroC) throw erroC;
+      if (!c?.ok) return json({ ok: false, motivo: c?.motivo ?? 'falhou' });
+      console.log(`[agenda-lead-publica] número corrigido pelo lead: reunião ${c.interno?.agendamento_id} refeita`);
+      // a sala e o evento do Google são os mesmos da reunião que foi refeita
+      return json({
+        ok: true,
+        reuniao: {
+          inicio: c.reuniao.inicio,
+          fim: c.reuniao.fim,
+          dia: c.reuniao.dia,
+          hora: c.reuniao.hora,
+          curso: c.reuniao.curso,
+          primeiro_nome: c.reuniao.primeiro_nome,
+          confirmacao_whatsapp: c.reuniao.confirmacao_whatsapp === true,
+          link: c.reuniao.link ?? null,
+        },
+        correcao: c.correcao ?? null,
+      });
     }
 
     if (acao !== 'marcar') return json({ ok: false, motivo: 'pedido_invalido' }, 400);
@@ -360,6 +403,8 @@ Deno.serve(async (req) => {
         confirmacao_whatsapp: r.reuniao.confirmacao_whatsapp === true,
         link: sala,
       },
+      // código para a própria página corrigir o número nos próximos minutos
+      correcao: r.correcao ?? null,
     });
   } catch (e) {
     console.error('[agenda-lead-publica]', e);
