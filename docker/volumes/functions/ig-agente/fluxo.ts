@@ -23,9 +23,11 @@
 // Módulo puro (sem banco, sem rede): cada passagem tem teste em fluxo.test.ts.
 import { avaliarConclusao, limiteFormatura } from "../crm-agente-sdr/elegibilidadeFormatura.ts";
 import { IG_WA_NUMERO_EXIBIDO, linkDoWhatsapp } from "../_shared/igWhatsapp.ts";
+import { campanhaEscola } from "../crm-agente-sdr/escolaGratuita.ts";
 
-// UTM no padrão de src/lib/marketing/utmPadrao.ts: direct do Instagram respondido pela IA.
-export const LINK_ESCOLA = "https://escoladeespecializacao.ppgvet.com.br/?utm_source=ig_dm&utm_medium=ia&utm_campaign=escola-de-especializacao";
+// UTM no padrão de src/lib/marketing/utmPadrao.ts: direct do @ppgvet_oficial (o único com a IA), lugar = dm.
+export const linkEscola = (): string =>
+  `https://escoladeespecializacao.ppgvet.com.br/?utm_source=instagram_ppgvet&utm_medium=social&utm_campaign=${campanhaEscola()}&utm_term=dm`;
 /** A IA do direct se apresenta com este nome (decisão do Gustavo, 25/09/2026). */
 export const NOME_AGENTE = "Flávia";
 
@@ -163,7 +165,7 @@ export const TEXTOS = {
   // número, para a pessoa conferir. Nunca dizer "te mandei" sem ter mandado.
   whatsappNaoFoi: "Hmm, não consegui te chamar nesse número 🤔 Confere se é o seu WhatsApp com DDD e me manda de novo?",
   escola:
-    `Te mando sim! 😉 Aqui está o acesso à nossa Escola de Especialização gratuita, com mais de 10 cursos, além de artigos, e-books e podcasts: ${LINK_ESCOLA}`,
+    `Te mando sim! 😉 Aqui está o acesso à nossa Escola de Especialização gratuita, com mais de 10 cursos, além de artigos, e-books e podcasts: ${linkEscola()}`,
   recusa: "Tranquilo! Se mudar de ideia, é só me chamar por aqui 😉",
   // ⚠️ PROVISÓRIA: o que fazer com quem não passa o número ficou para depois (24/09).
   recusaWhatsapp: "Sem problema! Se preferir, é só me mandar o número aqui quando quiser 😉",

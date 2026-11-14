@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  type Classificacao, decidirPasso, type EtapaFluxo, etapaCrmInstagram, extrairTelefoneBR, LINK_ESCOLA,
+  type Classificacao, decidirPasso, type EtapaFluxo, etapaCrmInstagram, extrairTelefoneBR, linkEscola,
   primeiroNomeConfiavel, TEXTOS,
 } from './fluxo';
 
@@ -139,7 +139,7 @@ describe('pergunta_formacao', () => {
   it('nem formado nem estudante → link da Escola, sem CRM', () => {
     const p = passo('pergunta_formacao', { situacao: 'nenhum' });
     expect(p).toMatchObject({ mensagens: [TEXTOS.escola], proximaEtapa: 'escola_enviada' });
-    expect(p.mensagens[0]).toContain(LINK_ESCOLA);
+    expect(p.mensagens[0]).toContain(linkEscola());
     expect(p.mensagens[0]).toContain('mais de 10 cursos');
     expect(p.enviarWhatsapp).toBeUndefined();
   });

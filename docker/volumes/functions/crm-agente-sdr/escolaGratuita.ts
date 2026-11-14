@@ -20,12 +20,19 @@ export const LINK_ESCOLA_GRATUITA = 'https://escoladeespecializacao.ppgvet.com.b
 
 /**
  * O link que SAI no WhatsApp, com UTM no padrão de `src/lib/marketing/utmPadrao.ts`
- * (WhatsApp individual: source whatsapp, medium = quem mandou). O cru acima fica para o
+ * (WhatsApp individual: source whatsapp, medium social, term = quem mandou; 14/11/2026). O cru acima fica para o
  * prompt, a detecção (`jaTemOPresente`) e o webchat: UTM entre os nossos próprios sites
  * abriria sessão nova na GA4 e apagaria a origem real da visita.
  */
+/** "aaaa-mm" do envio, no fuso de Brasília. */
+export const mesDoEnvio = (agora: Date = new Date()): string =>
+  agora.toLocaleDateString('sv-SE', { timeZone: 'America/Sao_Paulo' }).slice(0, 7);
+
+/** Campanha da Escola gratuita: tipo `curso` com o mês do ENVIO, sozinho (decisão do usuário, 14/11/2026). */
+export const campanhaEscola = (agora?: Date): string => `curso-escola-de-especializacao-${mesDoEnvio(agora)}`;
+
 export const linkEscolaWhatsapp = (meio: 'ia' | 'automacao'): string =>
-  `${LINK_ESCOLA_GRATUITA}/?utm_source=whatsapp&utm_medium=${meio}&utm_campaign=escola-de-especializacao`;
+  `${LINK_ESCOLA_GRATUITA}/?utm_source=whatsapp&utm_medium=social&utm_campaign=${campanhaEscola()}&utm_term=${meio}`;
 
 /**
  * 14/10/2026 (Gustavo): "vamos parar de enviar o link da escola de especialização". Desligado, o

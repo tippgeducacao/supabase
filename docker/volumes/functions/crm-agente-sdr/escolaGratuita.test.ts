@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  campanhaEscola,
   comBlocoDaEscola,
   comLinkPedido,
   comPresenteNaDespedida,
   jaTemOPresente,
   LINK_ESCOLA_GRATUITA,
   linkEscolaWhatsapp,
+  mesDoEnvio,
   marcarLinkEscola,
   mereceOPresente,
   pediuLinkDaEscola,
@@ -21,6 +23,14 @@ const pausa = (motivo: string, tipo?: string) => ({
 const merece = (e: Parameters<typeof mereceOPresente>[0], jaEsta = false) => mereceOPresente(e, jaEsta, true);
 const comPresente = (t: string, e: Parameters<typeof mereceOPresente>[0], conversa: string, jaEsta = false) =>
   comPresenteNaDespedida(t, e, conversa, jaEsta, true);
+
+describe('campanha da Escola (14/11/2026)', () => {
+  it('leva o mês do envio no fuso de Brasília', () => {
+    // 1º/12 às 01h UTC ainda é 30/11 em Brasília.
+    expect(campanhaEscola(new Date('2026-12-01T01:00:00Z'))).toBe('curso-escola-de-especializacao-2026-11');
+    expect(mesDoEnvio(new Date('2026-12-01T12:00:00Z'))).toBe('2026-12');
+  });
+});
 
 describe('convite da Escola desligado (14/10/2026)', () => {
   it('nenhuma despedida leva o convite e o prompt não recebe o bloco', () => {
@@ -222,7 +232,7 @@ describe('marcarLinkEscola', () => {
   });
   it('mantém o caminho do link', () => {
     expect(marcarLinkEscola('https://escoladeespecializacao.ppgvet.com.br/ee-cmmv'))
-      .toBe('https://escoladeespecializacao.ppgvet.com.br/ee-cmmv?utm_source=whatsapp&utm_medium=ia&utm_campaign=escola-de-especializacao');
+      .toBe(`https://escoladeespecializacao.ppgvet.com.br/ee-cmmv?utm_source=whatsapp&utm_medium=social&utm_campaign=${campanhaEscola()}&utm_term=ia`);
   });
   it('não mexe em link já marcado nem em texto sem link', () => {
     expect(marcarLinkEscola(`oi ${marcado}`)).toBe(`oi ${marcado}`);
