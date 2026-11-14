@@ -121,11 +121,16 @@ describe('leitura do Jev na rodada do canário', () => {
     expect(f.enviar).toHaveBeenCalledOnce();
   });
 
-  it('sombra: registra o que faria, sem tocar na jornada nem na ficha da Luna', async () => {
+  it('sombra: não aplica o Jev, mas preserva a autodeclaração reconhecida sem o modelo auxiliar', async () => {
     f.modoLeitura = 'sombra';
     await chamar();
     expect(f.lerLead).toHaveBeenCalledOnce();
-    expect(f.registrarNaJornada.mock.calls.some(([, , fn]) => typeof fn === 'function')).toBe(false);
+    // 14/11/2026: "sou veterinária" já alimenta a ficha pela regra comercial pura,
+    // independentemente de Jev off/sombra. O Jev acrescentaria também a graduação.
+    const mutacoes = f.registrarNaJornada.mock.calls.filter(([, , fn]) => typeof fn === 'function');
+    expect(mutacoes).toHaveLength(1);
+    expect(mutacoes[0][2]({}).coleta).toMatchObject({ graduacao_concluida: 'sim' });
+    expect(mutacoes[0][2]({}).coleta.graduacao).toBeUndefined();
     expect(f.chamarPrincipal.mock.calls[0][0].contextoFicha).not.toContain(CABECALHO_LEITURA);
     expect(f.registrar).toHaveBeenCalledWith('leitura_jev', expect.objectContaining({ modo: 'sombra', faria: expect.any(Array) }), 280);
   });

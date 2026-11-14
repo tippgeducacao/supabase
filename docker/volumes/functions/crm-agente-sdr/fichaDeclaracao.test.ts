@@ -27,7 +27,6 @@ describe('declaracaoDeConclusao', () => {
     'ainda não me formei',
     'quero ser pós graduado',
     'vou fazer mestrado depois',
-    'sou nutricionista',
     'sou estudante de veterinária',
     'tenho interesse na pós',
     'estou fazendo pós',
@@ -52,6 +51,42 @@ describe('declaracaoDeConclusao', () => {
 });
 
 describe('aplicarDeclaracaoNaJornada', () => {
+  it('aproveita Medicina Veterinária e atuação clínica sem repetir a conclusão', () => {
+    const falas = ['Quero o cronograma da pós. Minha graduação é Medicina Veterinária e atuo em clínica de pequenos animais.'];
+    expect(declaracaoDeConclusao(falas)).toBe(falas[0]);
+    const jornada = aplicarDeclaracaoNaJornada({ coleta: { graduacao: 'Medicina Veterinária', area_atuacao: 'clínica de pequenos animais', atua_na_area: 'sim' } });
+    const ficha = avaliarFicha({ cadastro: 'Médico Veterinário (a)', jornada });
+    expect(ficha.graduacaoConcluida).toBe(true);
+    expect(ficha.perguntaConfirmacaoFormacao).toBeNull();
+  });
+
+  it('combina duas respostas próprias, sem usar pergunta, citação ou formulário', () => {
+    expect(declaracaoDeConclusao(['Medicina Veterinária', 'Já atuo em clínica de pequenos animais'])).not.toBeNull();
+    expect(declaracaoDeConclusao(falasDoLead([
+      { role: 'assistant', content: 'Sua graduação é Medicina Veterinária?' },
+      { role: 'user', content: '[Em resposta à mensagem: "Minha graduação é Medicina Veterinária"] atuo em clínica' },
+    ]))).toBeNull();
+    expect(avaliarFicha({ cadastro: 'Médico Veterinário (a)', jornada: { coleta: { area_atuacao: 'clínica', atua_na_area: 'sim' } } }).graduacaoConcluida).toBe(false);
+  });
+
+  it.each([
+    ['Minha graduação é Medicina Veterinária'],
+    ['Atuo em clínica de pequenos animais'],
+    ['Minha irmã tem graduação em Medicina Veterinária e eu atuo em clínica'],
+    ['Minha graduação é Medicina Veterinária. Meu marido atua em clínica'],
+    ['Minha graduação é Medicina Veterinária e não atuo em clínica'],
+    ['Minha graduação é Medicina Veterinária e pretendo atuar em clínica'],
+    ['Minha graduação é Medicina Veterinária e atuo em clínica como auxiliar. Ainda não me formei'],
+    ['Minha graduação é Medicina Veterinária e atuo em clínica como auxiliar'],
+    ['Minha graduação é Medicina Veterinária e trabalho de recepcionista em clínica'],
+    ['Medicina Veterinária', 'Atuo em clínica', 'Sou estagiária'],
+    ['Minha graduação é Medicina Veterinária e trabalho em clínica. Sou recepcionista'],
+    ['Ainda curso Medicina Veterinária e atuo em clínica'],
+    ['Minha graduação é Medicina Veterinária e atuo em clínica', 'Ainda curso a graduação'],
+  ])('não conclui só por combinar curso com contexto insuficiente: %s', (...falas) => {
+    expect(declaracaoDeConclusao(falas)).toBeNull();
+  });
+
   it('ficha que pediria "vc já se formou em Direito?" deixa de pedir', () => {
     const antes = avaliarFicha({ cadastro: 'Advogado (a)', jornada: {} });
     expect(antes.perguntaConfirmacaoFormacao).toBe('vc já se formou em Direito?');

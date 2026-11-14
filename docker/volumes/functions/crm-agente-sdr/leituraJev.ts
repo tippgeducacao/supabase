@@ -47,10 +47,11 @@ export const PERGUNTAS_LEITURA = {
       pergunta: 'Pelo que o LEAD disse sobre ELE MESMO na conversa (principalmente nas mensagens novas), qual é a situação da graduação dele?',
       regras: [
         "concluiu: declarou que concluiu ('me formei', 'já concluí', 'sou formado', 'sou formada', 'sim' respondendo se já se formou); OU disse que tem ou fez pós-graduação, especialização, residência, mestrado ou doutorado; OU se apresentou como médico veterinário, médica veterinária, veterinário, veterinária, vet, zootecnista, chefe ou subchefe de veterinária.",
-        "Outros títulos sozinhos (agrônomo, nutricionista, biólogo, advogado, dentista) não provam conclusão: nao_disse, a menos que ele também diga que se formou.",
+        "A autodeclaração por título profissional que identifica graduação também conta nas demais áreas: agrônomo, engenheiro agrônomo, engenheiro de alimentos/produção, biólogo, advogado, dentista, nutricionista, farmacêutico, biomédico, médico, enfermeiro, fisioterapeuta, psicólogo, contador e pedagogo, entre outros. Não peça que repita que se formou. Cargo genérico (gerente, produtor, vendedor) não identifica graduação.",
         "cursando: disse que ainda está na graduação (período, semestre, 'faço', 'curso', 'me formo em…', 'ainda não me formei').",
         'nao_tem_graduacao: disse que não tem nem faz faculdade (só ensino médio, só curso técnico, parou ou trancou e não cursa mais).',
-        "Auxiliar, técnico, cargo, área de trabalho, nome do curso sozinho, intenção ('quero me formar') e fala sobre outra pessoa não são conclusão.",
+        'concluiu também quando o próprio lead informa sua graduação e exercício profissional correspondente que exige essa formação, mesmo em mensagens separadas; por exemplo, Medicina Veterinária (ou med vet) junto com atuação clínica. Não precisa repetir que se formou. Se ainda cursa ou atua como auxiliar, técnico, recepcionista ou estagiário, não infira conclusão por essa combinação.',
+        "Auxiliar, técnico, cargo, área de trabalho isolada, nome do curso sozinho, intenção ('quero me formar') e fala sobre outra pessoa não são conclusão.",
         'Na dúvida, nao_disse.',
       ],
     },

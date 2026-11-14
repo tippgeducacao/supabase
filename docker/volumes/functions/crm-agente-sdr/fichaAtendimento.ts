@@ -21,6 +21,7 @@
 // "claro, te envio aqui" saiu sem dizer O QUE seria enviado). Por isso cada frase nomeia o
 // material e já traz a pergunta inteira.
 import { encontrarFormacao, FORMACOES_OFICIAIS } from './contexto.ts';
+import { declaracaoProfissionalDeConclusao } from './formacaoProfissional.ts';
 import { jidsDoTelefone } from './historico.ts';
 import { phoneVariants } from '../crm-whatsapp-send/telefoneConversa.ts';
 
@@ -221,7 +222,7 @@ export const INSTRUCAO_FICHA = `## FICHA DO ATENDIMENTO (estado do sistema)
 No fim da última mensagem existe o bloco [FICHA DO ATENDIMENTO]. Ele é a memória determinística desta conversa: o que o cadastro do formulário diz, o que o lead já informou, o que já foi pedido e enviado, as objeções já tratadas e o que FALTA COLETAR. Para o que o SISTEMA fez (cronograma, elegibilidade, reunião), confie na ficha. Para o que o LEAD disse, o histórico manda: "—" na ficha quer dizer "ainda não registrado", não "ele não disse" (parte da conversa pode ser de antes da ficha). Se o histórico já traz a graduação, a conclusão ou a área, registre com atualizar_dados_lead nesta resposta e siga, sem perguntar de novo. Nunca cite a ficha e nunca diga que registrou ou salvou dados.
 
 ### Formação conhecida e pedido de horário
-Se o formulário já nomeia a graduação (ex.: Medicina Veterinária), não pergunte "qual é sua formação?". Quando o lead pedir horários ou aceitar procurar um encaixe, confirme somente se concluiu: use a pergunta direta indicada na ficha e conecte-a ao horário que ele pediu. "Vou confirmar sua formação, pode ser?" não coleta nada; faça a pergunta na mesma mensagem. Atuar na área da pós não confirma graduação concluída. O título profissional preenchido no formulário também não equivale a uma confirmação nesta conversa.
+Se o formulário já nomeia a graduação (ex.: Medicina Veterinária), não pergunte "qual é sua formação?". Quando o lead pedir horários ou aceitar procurar um encaixe, confirme somente se concluiu: use a pergunta direta indicada na ficha e conecte-a ao horário que ele pediu. "Vou confirmar sua formação, pode ser?" não coleta nada; faça a pergunta na mesma mensagem. Atuar na área da pós isoladamente não confirma graduação concluída; se o próprio lead declarou título profissional que identifica graduação ou sua graduação junto com exercício profissional correspondente, reconheça conclusão conforme a regra de autodeclaração, sem perguntar de novo. Estudante, auxiliar, técnico, recepcionista ou estagiário não permite essa inferência. O título profissional preenchido no formulário também não equivale a uma confirmação nesta conversa.
 Se o próprio lead já afirmou que concluiu ou se apresentou na conversa como profissional reconhecido pela regra de autodeclaração, não repita a pergunta: primeiro registre graduacao_concluida="sim" com atualizar_dados_lead, depois faça a checagem. Quem diz que já tem pós-graduação, mestrado ou doutorado já concluiu uma graduação. Se disse que ainda cursa, registre "cursando" e esclareça somente a data que falta ("fim do ano", "este ano" e "esse semestre" já são data). A compatibilidade continua obrigatória e é distinta dessa confirmação: com a graduação e a conclusão conhecidas, chame verificar_compatibilidade_curso antes de convidar, oferecer horário ou fazer outra pergunta; o retorno de atualizar_dados_lead diz a chamada exata.
 Se você já fez uma pergunta e o lead respondeu de um jeito que não fecha a dúvida, não repita a mesma frase: diga o que entendeu e pergunte só o pedaço que falta.
 
@@ -306,8 +307,8 @@ const FIXO = (v: unknown, aceitos: string[]) => (aceitos.includes(texto(v).toLow
   A ficha só sabia o que passou por atualizar_dados_lead; em conversa anterior ao canário (Sonnet,
   atendente) ela vinha vazia e a Luna perguntava "vc já é formado em Direito?" a quem tinha escrito
   "sou advogado pós graduado". Só frases que PROVAM conclusão: "me formei", "sou formada", "sou
-  pós-graduado", "tenho/fiz uma pós | mestrado | doutorado". Título profissional sozinho ("sou
-  nutricionista") NÃO entra — a regra de autodeclaração da tool continua sendo a que vale.
+  pós-graduado", "tenho/fiz uma pós | mestrado | doutorado". Autodeclarações profissionais reconhecidas
+  entram pela mesma regra comercial das instruções (formacaoProfissional.ts).
 */
 const RE_DECLARA_CONCLUSAO = [
   /\b(?:ja\s+)?me\s+formei\b/,
@@ -328,6 +329,8 @@ const RE_ANTES_NEGA = /\b(?:nao|nunca|quero|queria|vou|pretendo|gostaria|espero)
 
 /** Primeiro trecho de fala do lead que declara graduação concluída, ou null. */
 export function declaracaoDeConclusao(falas: readonly string[]): string | null {
+  const profissional = declaracaoProfissionalDeConclusao(falas);
+  if (profissional) return profissional;
   for (const fala of falas) {
     const t = fala.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
     for (const re of RE_DECLARA_CONCLUSAO) {
