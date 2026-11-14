@@ -1,8 +1,19 @@
+// acesso: publico — página /processo-seletivo do candidato, sem login; a credencial é o token pessoal (128 bits) ou o código da campanha no ar, toda regra mora em RPCs só de service_role e o marcar tem freio por IP
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { corsHeaders } from '../_shared/cors.ts';
 
 /**
  * A agenda de entrevistas, aberta ao CANDIDATO.
+ *
+ * REVISÃO DE SEGURANÇA (14/11/2026), pedida antes de reaproveitar o desenho na agenda comercial:
+ *  - o link ANTIGO, por nome, foi DESLIGADO: sem código nem token, quem soubesse o nome completo
+ *    de um candidato confirmava que ele estava no funil, via o horário e a sala da entrevista e
+ *    remarcava. O sistema já não o entregava desde 13/11; agora responde `link_invalido`;
+ *  - o MARCAR tem freio por IP (o link da campanha cria contato, evento no Google e dispara
+ *    template de WhatsApp para o número digitado: sem freio, um script lotava a agenda e fazia o
+ *    número do RH escrever para desconhecidos);
+ *  - no link da campanha a resposta não devolve mais o primeiro nome do DONO do número: digitar
+ *    o telefone de alguém não pode contar como ele se chama.
  *
  * Três links, a mesma edge (13/11/2026):
  *  - CAMPANHA (`/processo-seletivo/campanha/<código>`, corpo com `campanha`): um só, gerado
@@ -16,8 +27,8 @@ import { corsHeaders } from '../_shared/cors.ts';
  * nada. O corpo traz `token`; o dono é `rh_agenda_publica_por_token`. Pedido do Rafael:
  * "retire essa trava de ter que colocar o nome, não precisa disso".
  *
- * O link antigo, um só para todo mundo, continua respondendo para quem já o recebeu: sem
- * `token`, quem abre digita o NOME COMPLETO, vê os horários que a casa liberou e escolhe um.
+ * O link antigo (`/processo-seletivo/agendar`, um só para todo mundo, identificado pelo NOME
+ * COMPLETO digitado) valeu de 10/09 a 14/11/2026 e está desligado: ver a revisão acima.
  *
  * Existe porque o agendamento pela conversa do agente não escala: os convocados do PS 01/2026
  * chegam todos no mesmo dia.
@@ -71,6 +82,36 @@ function json(body: unknown, status = 200) {
  */
 const DIAS_COM_HORARIO = 3;
 
+// Freio de abuso para o MARCAR (por IP, em memória), a mesma régua de `professor-agenda-publica`
+// e `cob-agenda-publica`. Carregar não conta: abrir a página várias vezes não é abuso.
+const tentativas = new Map<string, { n: number; ate: number }>();
+const MAX_MARCAR = 8;
+const JANELA_MS = 10 * 60_000;
+
+function podeMarcar(ip: string): boolean {
+  const agora = Date.now();
+  const t = tentativas.get(ip);
+  if (!t || agora > t.ate) {
+    tentativas.set(ip, { n: 1, ate: agora + JANELA_MS });
+    return true;
+  }
+  t.n += 1;
+  return t.n <= MAX_MARCAR;
+}
+
+// IP do cliente SEM confiar no que o cliente manda: o PRIMEIRO valor do x-forwarded-for é
+// forjável; varre da direita (o que os NOSSOS proxies apuseram) e pega o primeiro IP público.
+const IP_PRIVADO_RE = /^(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|::1$|f[cd][0-9a-f]{2}:)/i;
+function ipDe(req: Request): string {
+  const cf = req.headers.get('cf-connecting-ip');
+  if (cf) return cf.trim();
+  const partes = (req.headers.get('x-forwarded-for') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  for (let i = partes.length - 1; i >= 0; i--) {
+    if (!IP_PRIVADO_RE.test(partes[i])) return partes[i];
+  }
+  return partes[partes.length - 1] || 'desconhecido';
+}
+
 /** "2026-11-13", no fuso de Brasília: é a data que a campanha usa. */
 function hojeEmSaoPaulo() {
   return new Intl.DateTimeFormat('en-CA', {
@@ -89,7 +130,13 @@ Deno.serve(async (req) => {
     const acao = String(body?.acao ?? 'carregar');
     const campanha = String(body?.campanha ?? '').trim().toLowerCase();
     const token = String(body?.token ?? '').trim().toLowerCase();
-    const nome = String(body?.nome ?? '').trim();
+    const nome = String(body?.nome ?? '').trim().slice(0, 120);
+
+    // Sem código de campanha nem token não há o que abrir (o link por nome foi desligado).
+    if (!campanha && !token) return json({ ok: false, motivo: 'link_invalido' });
+    if (acao === 'marcar' && !podeMarcar(ipDe(req))) {
+      return json({ ok: false, motivo: 'muitas_tentativas' });
+    }
 
     const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
     let candidato: any = null;
@@ -129,7 +176,7 @@ Deno.serve(async (req) => {
       // achar ninguém, o nome completo exato. Qualquer card aberto do funil de RH, e quem não
       // está no funil também marca: vira card na etapa da campanha. Pedido do Rafael: "não tem
       // problema se alguém de fora agendar, não se atente a essa regra".
-      const whatsapp = String(body?.whatsapp ?? '').replace(/\D/g, '');
+      const whatsapp = String(body?.whatsapp ?? '').replace(/\D/g, '').slice(0, 15);
       if (!nome || whatsapp.length < 10) return json({ ok: false, motivo: 'contato_incompleto' });
 
       const { data: achado, error: erroContato } = await admin.rpc('rh_agenda_publica_por_contato', {
@@ -162,7 +209,10 @@ Deno.serve(async (req) => {
       // conferência da agenda DO candidato: o horário é conferido abaixo contra os livres da
       // campanha, e o índice único de rh_entrevistas continua impedindo dois no mesmo horário.
       forcar = true;
-    } else if (token) {
+      // O que volta para a página é o nome que a própria pessoa DIGITOU, nunca o do cadastro:
+      // quem digita o número de outro não descobre de quem ele é.
+      candidato = { ...candidato, primeiro_nome: nome.split(/\s+/)[0] };
+    } else {
       // ── Link pessoal ──────────────────────────────────────────────────────────
       if (!/^[0-9a-f]{32}$/.test(token)) return json({ ok: false, motivo: 'link_invalido' });
 
@@ -175,30 +225,6 @@ Deno.serve(async (req) => {
       // Mesma resposta para "link que não existe" e "pessoa que saiu do processo"
       // (desqualificada, contratada, monitor não convocado fora de campanha).
       if (!candidato?.oportunidade_id) return json({ ok: false, motivo: 'link_invalido' });
-    } else {
-      // ── Link antigo, por nome ─────────────────────────────────────────────────
-      // Nome e sobrenome, no mínimo: com uma palavra só, meia dúzia de "Maria" casaria com a
-      // primeira que aparecesse na lista.
-      if (nome.replace(/\s+/g, ' ').split(' ').filter(Boolean).length < 2) {
-        return json({ ok: false, motivo: 'nome_incompleto' });
-      }
-
-      const { data: achado, error: erroCandidato } = await admin.rpc('rh_agenda_publica_por_nome', {
-        p_nome: nome,
-      });
-      if (erroCandidato) throw erroCandidato;
-      candidato = Array.isArray(achado) ? achado[0] : achado;
-
-      // Homônimo não vira chute: marcar a entrevista no card errado é pior que não marcar.
-      if ((candidato?.achados ?? 0) > 1) {
-        return json({ ok: false, motivo: 'ambiguo' });
-      }
-      // Mesma resposta para "não existe" e "existe mas está fora" (desqualificado, contratado,
-      // monitor não convocado): a diferença entre as duas contaria, a quem tentasse, quem saiu
-      // do processo.
-      if (!candidato?.oportunidade_id) {
-        return json({ ok: false, motivo: 'nao_encontrado' });
-      }
     }
 
     if (!campanha) {
