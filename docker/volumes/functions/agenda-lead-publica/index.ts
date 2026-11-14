@@ -223,6 +223,9 @@ async function criarEventoMeet(admin: SupabaseClient, o: {
 }
 
 const CODIGO_OK = /^[0-9a-f]{20}$/;
+// Link PESSOAL do lead (disparo por automação): 32 hex do id + 24 hex de assinatura HMAC.
+// Quem confere a assinatura é o banco (`agenda_lead__convite`); aqui é só o formato.
+const TOKEN_PESSOAL_OK = /^[0-9a-f]{56}$/;
 const UUID_OK = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 Deno.serve(async (req) => {
@@ -232,7 +235,11 @@ Deno.serve(async (req) => {
     const body = await req.json().catch(() => ({}));
     const acao = String(body?.acao ?? 'abrir');
     const codigo = String(body?.codigo ?? '').trim().toLowerCase();
-    if (!CODIGO_OK.test(codigo)) return json({ ok: false, motivo: 'link_invalido' });
+    // Dois tipos de link na mesma página: o GERAL (um por número de WhatsApp, colado no modelo
+    // de qualquer automação; a pessoa digita nome e número) e o PESSOAL (um por lead, montado
+    // pela automação no botão do modelo; nome e número vêm do cadastro).
+    const pessoal = TOKEN_PESSOAL_OK.test(codigo);
+    if (!pessoal && !CODIGO_OK.test(codigo)) return json({ ok: false, motivo: 'link_invalido' });
 
     const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
     const ip = ipDe(req);
@@ -252,8 +259,26 @@ Deno.serve(async (req) => {
 
     // ── Abrir ────────────────────────────────────────────────────────────────────────────
     if (acao === 'abrir') {
+      if (pessoal) {
+        // Sem cache: é esta chamada que registra que o lead abriu o link dele. O primeiro nome
+        // e o WhatsApp mascarado que voltam são os do próprio dono do link.
+        const { data, error } = await admin.rpc('agenda_lead_publica_abrir_convite', { p_token: codigo });
+        if (error) throw error;
+        if (!data?.ok) return json({ ok: false, motivo: data?.motivo ?? 'link_invalido' });
+        return json({
+          ok: true,
+          cursos: data.cursos ?? [],
+          captcha: false,
+          pessoal: data.pessoal ?? {},
+          reuniao: data.reuniao ?? null,
+        });
+      }
       const data = await abrir();
       if (!data?.ok) return json({ ok: false, motivo: data?.motivo ?? 'link_invalido' });
+      // Uma abertura deste link (o cache acima não deixa contar pela leitura). Só contagem:
+      // qual lead abriu, só o link pessoal sabe.
+      const { error: erroAbertura } = await admin.rpc('agenda_lead_publica_registrar_abertura', { p_codigo: codigo });
+      if (erroAbertura) console.error('[agenda-lead-publica] abertura não contada', erroAbertura.message);
       return json({ ok: true, cursos: data.cursos ?? [], captcha: data.exigir_captcha === true });
     }
 
@@ -266,10 +291,9 @@ Deno.serve(async (req) => {
     // alguém pegou nesse intervalo é barrado no marcar, que confere de novo.
     if (acao === 'horarios') {
       const data = await comCache(`horarios:${codigo}:${cursoId}`, 45_000, async () => {
-        const { data, error } = await admin.rpc('agenda_lead_publica_horarios', {
-          p_codigo: codigo,
-          p_curso_id: cursoId,
-        });
+        const { data, error } = pessoal
+          ? await admin.rpc('agenda_lead_publica_horarios_convite', { p_token: codigo, p_curso_id: cursoId })
+          : await admin.rpc('agenda_lead_publica_horarios', { p_codigo: codigo, p_curso_id: cursoId });
         if (error) throw error;
         return data;
       });
@@ -282,6 +306,8 @@ Deno.serve(async (req) => {
     // no máximo 2 usos por marcação). Sem captcha de novo: ele já foi cobrado na marcação, e
     // os freios por telefone, por IP e por hora contam cada correção como uma marcação.
     if (acao === 'corrigir') {
+      // no link pessoal o número vem do cadastro: não há o que corrigir
+      if (pessoal) return json({ ok: false, motivo: 'correcao_expirada' });
       if (!dentroDoLimite('marcar', ip)) return json({ ok: false, motivo: 'muitas_tentativas' });
       const token = String(body?.correcao_token ?? '').trim().toLowerCase();
       const novo = String(body?.whatsapp ?? '').replace(/\D/g, '').slice(0, 15);
@@ -323,12 +349,14 @@ Deno.serve(async (req) => {
     const nome = String(body?.nome ?? '').trim().replace(/\s+/g, ' ').slice(0, 120);
     const whatsapp = String(body?.whatsapp ?? '').replace(/\D/g, '').slice(0, 15);
     if (Number.isNaN(Date.parse(inicio))) return json({ ok: false, motivo: 'horario_indisponivel' });
-    if (!NOME_OK.test(nome) || nome.split(' ')[0].length > 20 || whatsapp.length < 10) {
+    // Link pessoal: a pessoa não digita nada (nome e número são os do cadastro) e a credencial
+    // é o token assinado do próprio lead — sem captcha, como o link pessoal do RH e o /renegociar.
+    if (!pessoal && (!NOME_OK.test(nome) || nome.split(' ')[0].length > 20 || whatsapp.length < 10)) {
       return json({ ok: false, motivo: 'contato_incompleto' });
     }
 
     // O link vale e pede captcha?
-    const link = await abrir();
+    const link = pessoal ? { ok: true, exigir_captcha: false } : await abrir();
     if (!link?.ok) return json({ ok: false, motivo: 'link_invalido' });
 
     if (link.exigir_captcha === true) {
@@ -344,15 +372,22 @@ Deno.serve(async (req) => {
       }
     }
 
-    const { data: r, error } = await admin.rpc('agenda_lead_publica_marcar', {
-      p_codigo: codigo,
-      p_curso_id: cursoId,
-      p_inicio: new Date(inicio).toISOString(),
-      p_nome: nome,
-      p_whatsapp: whatsapp,
-      // sempre um valor: sem IP, todo mundo divide o balde "desconhecido" (e o limite vale)
-      p_ip: ip,
-    });
+    const { data: r, error } = pessoal
+      ? await admin.rpc('agenda_lead_publica_marcar_convite', {
+          p_token: codigo,
+          p_curso_id: cursoId,
+          p_inicio: new Date(inicio).toISOString(),
+          p_ip: ip,
+        })
+      : await admin.rpc('agenda_lead_publica_marcar', {
+          p_codigo: codigo,
+          p_curso_id: cursoId,
+          p_inicio: new Date(inicio).toISOString(),
+          p_nome: nome,
+          p_whatsapp: whatsapp,
+          // sempre um valor: sem IP, todo mundo divide o balde "desconhecido" (e o limite vale)
+          p_ip: ip,
+        });
     if (error) throw error;
     // marcou, ou o horário já tinha dono: a lista em cache desta pós não vale mais
     if (r?.ok || r?.motivo === 'horario_indisponivel') cache.delete(`horarios:${codigo}:${cursoId}`);
