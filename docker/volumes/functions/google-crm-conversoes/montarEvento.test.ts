@@ -2,10 +2,11 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 
 vi.mock("https://esm.sh/@supabase/supabase-js@2.49.1", () => ({ createClient: () => ({}) }));
 let montarEvento: (p: Record<string, unknown>) => Promise<Record<string, any>>;
+let emailGoogle: (bruto: string) => string;
 
 beforeAll(async () => {
   vi.stubGlobal("Deno", { env: { get: () => undefined }, serve: () => {} });
-  ({ montarEvento } = (await import("./index.ts")) as never);
+  ({ montarEvento, emailGoogle } = (await import("./index.ts")) as never);
 });
 
 const base = {
@@ -35,5 +36,15 @@ describe("click IDs do Google Ads (gclid, gbraid, wbraid)", () => {
   });
   it("os três juntos vão juntos (o Google escolhe gclid > wbraid > gbraid)", async () => {
     expect((await montarEvento({ ...base, gbraid: "GB_1", wbraid: "WB_1" })).adIdentifiers).toEqual({ gclid: "GCLID_1", gbraid: "GB_1", wbraid: "WB_1" });
+  });
+});
+
+describe("e-mail no formato do Google (Data Manager, formatting)", () => {
+  it("gmail: sem pontos e sem o + e o que vem depois", () => {
+    expect(emailGoogle(" Cloudy.SanFrancisco+shopping@gmail.com ")).toBe("cloudysanfrancisco@gmail.com");
+    expect(emailGoogle("a.b+x@googlemail.com")).toBe("ab@googlemail.com");
+  });
+  it("outros domínios: só minúsculo, pontos e + ficam", () => {
+    expect(emailGoogle("Ana.Souza+pos@hotmail.com")).toBe("ana.souza+pos@hotmail.com");
   });
 });

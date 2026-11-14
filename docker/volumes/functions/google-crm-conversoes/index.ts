@@ -43,11 +43,15 @@ async function sha256(texto: string): Promise<string> {
   return Array.from(new Uint8Array(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-/** Normalização do Google: minúsculo; gmail/googlemail sem pontos antes do @. */
+/**
+ * Normalização do Google: minúsculo; gmail/googlemail sem pontos e sem o "+" e o que vem
+ * depois, antes do @. Outros domínios ficam como estão.
+ * Doc: developers.google.com/data-manager/api/devguides/concepts/formatting
+ */
 export function emailGoogle(bruto: string): string {
   const e = bruto.trim().toLowerCase();
   const [local, dominio] = e.split("@");
-  if (dominio === "gmail.com" || dominio === "googlemail.com") return `${local.replace(/\./g, "")}@${dominio}`;
+  if (dominio === "gmail.com" || dominio === "googlemail.com") return `${local.split("+")[0].replace(/\./g, "")}@${dominio}`;
   return e;
 }
 

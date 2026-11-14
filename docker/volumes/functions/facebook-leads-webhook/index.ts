@@ -26,7 +26,8 @@
 
 import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.50.3";
 
-const GRAPH = "https://graph.facebook.com/v21.0";
+// v26.0 (14/11/2026): a v21 expira em 21/01/2027; nada de lead ads mudou entre a v22 e a v26.
+const GRAPH = "https://graph.facebook.com/v26.0";
 const CAMPOS_LEAD =
   "id,created_time,ad_id,ad_name,adset_id,adset_name,campaign_id,campaign_name,form_id,is_organic,platform,field_data";
 const CAMPOS_LEAD_MINIMO = "id,created_time,ad_id,form_id,is_organic,platform,field_data";

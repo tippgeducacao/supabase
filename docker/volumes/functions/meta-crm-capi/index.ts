@@ -14,7 +14,8 @@
 // (chamadaInterna, que deixa o PostgREST conferir a assinatura).
 //
 // Corpo (JSON, tudo opcional):
-//   { "dias": 1..7 }          janela (padrão 2; a API aceita evento de até 7 dias)
+//   { "dias": 1..7 }          janela (padrão 6; a API aceita evento de até 7 dias e UM evento
+//                             vencido derruba o lote inteiro, daí 1 dia de folga)
 //   { "simular": true }       monta tudo, NÃO envia e NÃO grava: devolve contagens
 //   { "teste": "TEST12345" }  envia com test_event_code (aba "Eventos de teste"), NÃO grava
 //
@@ -54,14 +55,22 @@ type Pendente = {
   telefone: string | null;
   fbclid: string | null;
   leadgen_id: string | null;
-  valor: number | string | null; // só na matrícula, em BRL (prop_valor_final)
+  // Só na matrícula, em BRL (prop_valor_final). Sem valor a matrícula vai assim mesmo
+  // (decisão do usuário, 14/11/2026: só 21% têm valor e a Meta aprende com todas).
+  valor: number | string | null;
 };
 
 export async function montarEvento(p: Pendente) {
   const user_data: Record<string, unknown> = {};
   if (p.email) user_data.em = [await sha256(p.email.trim().toLowerCase())];
   const tel = telefoneMeta(p.telefone);
-  if (tel) user_data.ph = [await sha256(tel)];
+  if (tel) {
+    const telHash = await sha256(tel);
+    user_data.ph = [telHash];
+    // Mesmo external_id dos sites (hash do WhatsApp com 55, metaCapi.server.ts): a Meta liga a
+    // etapa do CRM ao Lead do site da mesma pessoa.
+    user_data.external_id = [telHash];
+  }
   // String, não número: 15-17 dígitos passam do inteiro seguro do JavaScript.
   // meta_leadgen_entregas guarda o ID como na exportação da Meta, com "l:" na frente.
   const leadId = (p.leadgen_id || "").replace(/^l:/, "");
@@ -119,7 +128,7 @@ Deno.serve(async (req) => {
   } catch {
     corpo = {};
   }
-  const dias = Math.min(Math.max(Number(corpo.dias) || 2, 1), 7);
+  const dias = Math.min(Math.max(Number(corpo.dias) || 6, 1), 7);
   const teste = typeof corpo.teste === "string" && /^TEST\w+$/i.test(corpo.teste) ? corpo.teste : null;
 
   try {

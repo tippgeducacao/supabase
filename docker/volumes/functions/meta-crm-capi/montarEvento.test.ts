@@ -24,3 +24,16 @@ describe("valor da matrícula na Meta", () => {
     expect(e.custom_data).toEqual({ event_source: "crm", lead_event_source: "Sistema PPGVET" });
   });
 });
+
+describe("correspondência", () => {
+  it("external_id é o mesmo hash do telefone com 55 (igual ao dos sites)", async () => {
+    const e = await montarEvento({ ...base, telefone: "(46) 99999-0000", valor: null });
+    expect(e.user_data.external_id).toEqual(e.user_data.ph);
+    expect(e.user_data.ph).toHaveLength(1);
+  });
+  it("sem telefone válido: nem ph nem external_id", async () => {
+    const e = await montarEvento({ ...base, telefone: "123", valor: null });
+    expect(e.user_data).not.toHaveProperty("external_id");
+    expect(e.user_data).not.toHaveProperty("ph");
+  });
+});
