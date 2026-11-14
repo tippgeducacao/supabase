@@ -19,7 +19,7 @@ import { corsHeaders } from '../_shared/cors.ts';
  *  - se o número "já existe" ou "já tem reunião": tudo isso responde `nao_concluido`, igual a
  *    qualquer outra recusa que não seja horário tomado.
  *
- * Freios do MARCAR, em camadas: Turnstile (a mesma chave do login do sistema) → 6 marcações
+ * Freios do MARCAR, em camadas: Turnstile (widget próprio da página, separado do login) → 6 marcações
  * por IP a cada 10 min aqui, em memória → no banco, uma marcação pública por vez, 3 por
  * telefone e 15 por IP em 24 h e um disjuntor de 40 por hora. Cada marcação cria reunião,
  * evento no Google e template de WhatsApp para o número digitado; sem freio isso vira disparo
