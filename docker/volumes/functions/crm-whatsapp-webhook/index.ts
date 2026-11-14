@@ -6,6 +6,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { extrairReferral } from "../_shared/waProviders.ts";
 import { carimboInbound } from "./carimbo.ts";
+import { detalheNaoSuportada } from "./naoSuportada.ts";
 import { prepararPortfolioInstagram } from "./portfolioInstagram.ts";
 import { alertaDeFalhaDeConta, statusProvaEntrega, TIPO_ALERTA_ENTREGA, type AlertaEntrega } from "./alertaEntrega.ts";
 import { CABECALHO_SEGREDO_N8N, carregarDesvioN8n, vaiParaN8n } from "../_shared/desvioN8n.ts";
@@ -1153,6 +1154,9 @@ Deno.serve(async (req) => {
           // envios humanos recusados num dia. Chegada normal (< 60s) segue com o carimbo do
           // servidor; reentrega grava o relógio da Meta e guarda a chegada no metadata.
           const carimbo = carimboInbound(msg?.timestamp, Date.now());
+          // "Não suportada": a Meta não entrega o conteúdo, só o motivo (`errors[]`). Sem
+          // gravar aqui ele some para sempre — ver naoSuportada.ts.
+          const naoSuportada = detalheNaoSuportada(msg);
           const { error: insertErr } = await admin.from("crm_whatsapp_messages").insert({
             wa_account_id: accountId,
             lead_id: leadId,
@@ -1171,6 +1175,7 @@ Deno.serve(async (req) => {
               timestamp: msg?.timestamp,
               ...(carimbo.reentrega ? { chegou_em: carimbo.chegouEm, atraso_s: carimbo.atrasoS } : {}),
               ...(midiaPendente ? { midia_pendente: midiaPendente } : {}),
+              ...(naoSuportada ? { nao_suportada: naoSuportada } : {}),
               // CLIQUE-PARA-WHATSAPP: o anúncio que abriu a conversa. Guardar o
               // bloco cru aqui é o backup — a atribuição de verdade é a linha em
               // `crm_whatsapp_referral`, gravada logo abaixo.
