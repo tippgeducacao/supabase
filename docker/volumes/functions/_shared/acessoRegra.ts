@@ -4,7 +4,7 @@
 export type Chamador =
   | { tipo: "servico" }
   | { tipo: "segredo" }
-  | { tipo: "usuario"; usuarioId: string; token: string };
+  | { tipo: "usuario"; usuarioId: string; token: string; papel: "authenticated" | "ies_portal" };
 
 export interface OpcoesAcesso {
   /** Aceita a chave de serviço exata (cron, outra edge). */
@@ -13,6 +13,13 @@ export interface OpcoesAcesso {
   usuario?: boolean;
   /** RPC sem argumentos, chamada COM O TOKEN DO USUÁRIO, que precisa devolver true (ex.: "is_financial_user"). */
   rpcPermissao?: string;
+  /**
+   * Aceita TAMBÉM a conta do Portal da IES (papel `ies_portal`, 15/11/2026). Só para edge do
+   * próprio portal, que autoriza tudo no banco por uma RPC `ies_portal_*` chamada com o token da
+   * conta (a conta, a unidade e o registro de acesso ficam lá). `rpcPermissao` não vale para essa
+   * conta (o banco recusa qualquer RPC fora de `ies_portal_*`). Ver ies-portal-documento.
+   */
+  contaIes?: boolean;
   /** Segredo próprio num cabeçalho (comparação em tempo constante). Valor vazio = desligado. */
   segredo?: { cabecalho: string; valor: string | null | undefined };
 }
@@ -86,6 +93,9 @@ export async function decidirAcesso(
   if (!usuario?.id || usuario.anonimo) throw new AcessoNegado(401, "Sessão inválida. Entre novamente.");
   // Conta de fora (Portal da IES, 03/11/2026): logada, mas não é colaborador. Nenhuma edge do
   // sistema a aceita — o portal dela fala só com as RPCs ies_portal_*.
+  if (usuario.papel === "ies_portal" && opcoes.contaIes) {
+    return { tipo: "usuario", usuarioId: usuario.id, token, papel: "ies_portal" };
+  }
   if (usuario.papel !== "authenticated") {
     throw new AcessoNegado(403, "Esta conta não acessa as funções do sistema.");
   }
@@ -101,5 +111,5 @@ export async function decidirAcesso(
     if (pode !== true) throw new AcessoNegado(403, "Você não tem permissão para esta ação.");
   }
 
-  return { tipo: "usuario", usuarioId: usuario.id, token };
+  return { tipo: "usuario", usuarioId: usuario.id, token, papel: "authenticated" };
 }

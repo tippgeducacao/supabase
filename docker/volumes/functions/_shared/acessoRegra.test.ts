@@ -74,6 +74,22 @@ describe("conferência de acesso das edges (29/10/2026)", () => {
     expect(await status(decidirAcesso(cab("Bearer t"), { usuario: true }, semPapel))).toBe(403);
   });
 
+  it("contaIes: a edge do portal aceita a conta da IES; o colaborador segue passando; anon e sessão ruim não", async () => {
+    const ies = deps({ usuarioDoToken: async () => ({ id: "ies", anonimo: false, papel: "ies_portal" }) });
+    const r = await decidirAcesso(cab("Bearer t"), { usuario: true, contaIes: true }, ies);
+    expect(r).toEqual({ tipo: "usuario", usuarioId: "ies", token: "t", papel: "ies_portal" });
+    // A RPC de permissão é do sistema: para a conta da IES quem decide é a RPC ies_portal_* da edge.
+    const semRpc = deps({ usuarioDoToken: async () => ({ id: "ies", anonimo: false, papel: "ies_portal" }), rpcComoUsuario: async () => false });
+    expect(await status(decidirAcesso(cab("Bearer t"), { usuario: true, contaIes: true, rpcPermissao: "x" }, semRpc))).toBe("usuario");
+    const colab = await decidirAcesso(cab("Bearer token-da-maria"), { usuario: true, contaIes: true }, deps());
+    expect(colab).toMatchObject({ tipo: "usuario", usuarioId: "maria", papel: "authenticated" });
+    expect(await status(decidirAcesso(cab(`Bearer ${ANON}`), { usuario: true, contaIes: true }, ies))).toBe(401);
+    expect(await status(decidirAcesso(cab("Bearer ruim"), { usuario: true, contaIes: true }, deps()))).toBe(401);
+    // Outro papel qualquer continua fechado, mesmo com contaIes.
+    const outro = deps({ usuarioDoToken: async () => ({ id: "x", anonimo: false, papel: "service_role" }) });
+    expect(await status(decidirAcesso(cab("Bearer t"), { usuario: true, contaIes: true }, outro))).toBe(403);
+  });
+
   it("falha ao conferir a sessão vira 503, não acesso liberado", async () => {
     const d = deps({ usuarioDoToken: async () => { throw new Error("rede"); } });
     expect(await status(decidirAcesso(cab("Bearer t"), { usuario: true }, d))).toBe(503);

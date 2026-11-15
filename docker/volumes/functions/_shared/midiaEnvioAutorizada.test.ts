@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { criarMidiaEnvio, type ReferenciaMidia } from "./midiaEnvioAutorizada";
 
-const usuario = { tipo: "usuario" as const, usuarioId: "usuario", token: "jwt-do-usuario" };
+const usuario = { tipo: "usuario" as const, usuarioId: "usuario", token: "jwt-do-usuario", papel: "authenticated" as const };
 const url = (bucket: string, caminho = "pasta/arquivo.pdf") => `https://api.ppgeducacao.site/storage/v1/object/public/${bucket}/${caminho}`;
 const resposta = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 const origem = { tabela: "crm_whatsapp_messages", id: "11111111-1111-4111-8111-111111111111" };
