@@ -30,7 +30,7 @@ describe('três cursos livres confirmados pela gestão', () => {
   it.each(CURSOS_LIVRES_VENDA)('responde catálogo, preço e acesso sem consultar somente pós: $nome', async curso => {
     const db = { from: vi.fn(), rpc: vi.fn() };
     const r = await consultarCatalogo(db as any, curso.nome);
-    expect(r).toMatchObject({ status: 'curso_livre_confirmado', curso: { tipo: 'curso_livre', exige_graduacao: false, valor_informado: 'R$ 492,50', checkout: null } });
+    expect(r).toMatchObject({ status: 'curso_livre_confirmado', curso: { tipo: 'curso_livre', exige_graduacao: false, valor_total: 492.50, natureza_preco: 'valor_total_do_curso', valor_informado: 'R$ 492,50', checkout: null } });
     expect(db.from).not.toHaveBeenCalled();
     expect(db.rpc).not.toHaveBeenCalled();
   });

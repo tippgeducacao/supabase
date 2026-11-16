@@ -14,7 +14,7 @@ const normalizar = (v: unknown) => String(v ?? '').normalize('NFD').replace(/[\u
   .toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
 
 export const INSTRUCAO_CURSOS_LIVRES_VENDA = `[CURSOS LIVRES À VENDA — gestão, 16/11/2026]
-Oferecemos Gestão Estratégica de Fazendas Leiteiras; Ambiência, Manejo e Sanidade de Frangos de Corte; Curso de Cannabis Medicinal. Cada um tem valor informado de R$ 492,50 e aceita pessoas com ou sem graduação. São cursos livres, não pós-graduações. A gestão ainda não especificou se esse valor é total ou matrícula: use "valor informado", sem classificar como integral, à vista, parcela ou matrícula. Não invente parcelas, descontos, mensalidade, taxa extra, prazo, duração, conteúdo, certificado ou habilitação profissional.
+Oferecemos Gestão Estratégica de Fazendas Leiteiras; Ambiência, Manejo e Sanidade de Frangos de Corte; Curso de Cannabis Medicinal. O VALOR TOTAL de cada curso é R$ 492,50, confirmado pela gestão em 16/11/2026. Não é matrícula, mensalidade ou valor de parcela. Cada curso aceita pessoas com ou sem graduação. São cursos livres, não pós-graduações. Não invente parcelamento, descontos, condições de pagamento à vista, taxa extra, prazo, duração, conteúdo, certificado ou habilitação profissional.
 Esta exceção prevalece sobre FICHA, elegibilidade, coleta acadêmica, preço só no PDF e roteiro de Meet APENAS para esses cursos livres. Não exigir formação, conclusão ou matriz de pós; não pausar/arquivar por falta de graduação; não impor Meet para informar ou comprar. Para pós, todas as regras acadêmicas e comerciais continuam valendo. Não trocar o interesse do lead por um curso livre sem escolha explícita.
 Use consulta_pos_disponiveis com curso_consulta para confirmar os dados de um desses cursos e obter o valor autorizado antes de escrevê-lo na conversa; o retorno curso_livre_confirmado é válido. Pedido de informações desses cursos pode usar envia_informacoes: devolve referência, não envia automaticamente PDF. Compartilhe apenas o link de cronograma retornado e não diga que enviou arquivo. Não invente link de matrícula nem use o da pós; links antigos de Cannabis com outros preços não foram confirmados para esta oferta.
 Cannabis sem indicar o produto é ambíguo: pergunte se quer o curso livre de R$ 492,50 ou a pós em Cannabis Medicinal Veterinária. Na pergunta de esclarecimento, pode dizer apenas "curso livre ou pós?" para não citar valor antes da consulta. Nome explícito "Curso de Cannabis Medicinal" ou "CURSO | CANNABIS" identifica o livre; "pós", "MBA" ou "especialização" identifica a pós, nunca a libera por R$ 492,50. Não atribua ao curso livre as regras, matrícula, grade ou poderes de prescrição da pós.
@@ -44,7 +44,7 @@ export function consultarCursosLivresVenda(alvo: unknown) {
 
 function dadosCursoLivre(curso: typeof CURSOS_LIVRES_VENDA[number]) {
   return { id: curso.id, nome: curso.nome, nome_oficial: curso.nome, tipo: 'curso_livre', exige_graduacao: false,
-    preco: 492.50, valor_informado: 'R$ 492,50', confirmado_em: '2026-11-16', cronograma_url: curso.cronograma_url, checkout: null };
+    preco: 492.50, valor_total: 492.50, natureza_preco: 'valor_total_do_curso', valor_informado: 'R$ 492,50', confirmado_em: '2026-11-16', cronograma_url: curso.cronograma_url, checkout: null };
 }
 
 /** Só falas próprias do lead: a menção recente de pós/recusa impede usar curso antigo. */
