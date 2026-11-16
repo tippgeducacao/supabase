@@ -7,7 +7,7 @@
 // `telefone` ou, vazia, do rh_dados_pessoais do user_id.
 import { carregarLinha, enviarTexto } from "./wa.ts";
 import {
-  JANELA_MIN, REPETIR_MIN, classificarErroIa, decidirAcao, resumirFalhas, telefoneParaEnvio,
+  JANELA_MIN, REPETIR_MIN, classificarErroIa, decidirAcao, falhasDoChat, resumirFalhas, telefoneParaEnvio,
   textoAlerta, textoVoltou, type EstadoIa, type ProvedorIa,
 } from "./alertaIa.ts";
 
@@ -80,7 +80,11 @@ export async function processarAlertaIa(admin: any): Promise<Record<string, unkn
     .select("erro, remotejid, criado_em").gte("criado_em", desde).not("erro", "is", null)
     .order("criado_em", { ascending: false }).limit(5000);
   if (error) throw new Error(`crm_agente_sdr_eventos: ${error.message}`);
-  const resumo = resumirFalhas((eventos ?? []) as any[]);
+  // O chat do site grava a falha na própria sessão; a sessão que falhou acabou de receber mensagem.
+  const { data: sessoes, error: eChat } = await admin.from("webchat_sessoes")
+    .select("id, falhas").gte("ultima_atividade", desde).eq("modo_teste", false);
+  if (eChat) throw new Error(`webchat_sessoes: ${eChat.message}`);
+  const resumo = resumirFalhas([...((eventos ?? []) as any[]), ...falhasDoChat(sessoes ?? [], desde)]);
 
   const { data: est, error: e2 } = await admin.from("ia_alerta_estado").select("*");
   if (e2) throw new Error(`ia_alerta_estado: ${e2.message}`);

@@ -143,7 +143,8 @@ describe("rodada real do Webchat com fronteiras simuladas", () => {
     expect(resultado.erro).toBe("provedor indisponível");
     expect(rpc).toHaveBeenCalledWith("webchat_ia_publicar", expect.objectContaining({
       p_ultimo_inbound_id: 60, p_erro: "provedor indisponível", p_estagio: "validacao",
-      p_chunks: [expect.stringContaining("Pode mandar de novo?")],
+      // Nada de "manda de novo": o erro se repetia; a conversa passa para um monitor.
+      p_chunks: [expect.stringContaining("passei sua conversa para um monitor")],
     }));
   });
 

@@ -74,6 +74,9 @@ export async function carregarHistoricoRecente(
   })).filter((m) => m.text);
 }
 
+export const FALA_DA_FALHA = "Tive um problema técnico aqui e não consigo responder agora 😕 "
+  + "Já passei sua conversa para um monitor, que vai falar com você pelo WhatsApp que você informou.";
+
 export async function processarRodadaWebchat(
   supabase: ClienteRodada,
   sessaoId: string,
@@ -103,7 +106,9 @@ export async function processarRodadaWebchat(
     } catch (e) {
       erro = (e instanceof Error ? e.message : String(e)).slice(0, 500);
       resposta = {
-        chunks: ["Desculpa, tive um problema aqui e não consegui responder. Pode mandar de novo? 🙏"],
+        // Plano B (16/11/2026): nada de "manda de novo" (o erro se repetia em loop). A conversa
+        // passa para o time (index.ts liga atendimento_humano) e o TI recebe o alerta de IA.
+        chunks: [FALA_DA_FALHA],
         tools: [], estagio: estagioSalvo,
       };
     }

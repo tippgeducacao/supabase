@@ -70,6 +70,24 @@ export interface ResumoFalhas {
 }
 
 /** Agrupa os erros da janela por provedor. O motivo é o mais frequente (empate: o mais recente). */
+/**
+ * Falhas do chat do site (webchat_sessoes.falhas, gravadas pelo webchat_ia_publicar) no formato
+ * dos eventos do SDR. Existe porque o chat roda na Anthropic e o João do WhatsApp em outro
+ * provedor: o chat ficou 3 dias sem crédito (14 a 16/11/2026) e este alerta não viu.
+ */
+export function falhasDoChat(sessoes: { id: string; falhas: unknown }[], desde: string): EventoErro[] {
+  const limite = Date.parse(desde);
+  const out: EventoErro[] = [];
+  for (const s of sessoes) {
+    for (const f of Array.isArray(s.falhas) ? s.falhas : []) {
+      const em = Date.parse(String(f?.em ?? ""));
+      if (!(em >= limite)) continue;
+      out.push({ erro: String(f?.erro ?? ""), remotejid: `webchat:${s.id}`, criado_em: new Date(em).toISOString() });
+    }
+  }
+  return out;
+}
+
 export function resumirFalhas(eventos: EventoErro[]): Map<ProvedorIa, ResumoFalhas> {
   const acc = new Map<ProvedorIa, { n: number; jids: Set<string>; primeira: string; ultima: string; motivos: Map<MotivoIa, number>; motivoUltimo: MotivoIa }>();
   for (const ev of eventos) {

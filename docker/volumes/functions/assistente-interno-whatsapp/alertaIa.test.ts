@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  classificarErroIa, decidirAcao, duracao, horaSP, LIMIAR_FALHAS, resumirFalhas, telefoneParaEnvio,
+  classificarErroIa, decidirAcao, duracao, falhasDoChat, horaSP, LIMIAR_FALHAS, resumirFalhas, telefoneParaEnvio,
   textoAlerta, textoVoltou, type ResumoFalhas,
 } from './alertaIa';
 
@@ -58,6 +58,29 @@ const AGORA = Date.parse('2026-09-22T14:00:00Z');
 const falhas = (n: number): ResumoFalhas => ({
   provedor: 'anthropic', motivo: 'sem_credito', n, leads: n,
   primeira: '2026-09-22T13:52:00Z', ultima: '2026-09-22T13:59:00Z',
+});
+
+describe('falhasDoChat (chat do site)', () => {
+  // Formato real de webchat_sessoes.falhas (jsonb_build_object com timestamptz).
+  const sessoes = [
+    { id: 's1', falhas: [
+      { em: '2026-11-16T15:00:00.123456+00:00', erro: CREDITO, msgs: 3 },
+      { em: '2026-11-16T14:00:00+00:00', erro: CREDITO, msgs: 1 },
+    ] },
+    { id: 's2', falhas: [{ em: '2026-11-16T15:05:00+00:00', erro: CREDITO }] },
+    { id: 's3', falhas: null },
+  ];
+
+  it('só entra falha dentro da janela, uma sessão vira um lead', () => {
+    const eventos = falhasDoChat(sessoes, '2026-11-16T14:55:00.000Z');
+    expect(eventos.map((e) => e.remotejid)).toEqual(['webchat:s1', 'webchat:s2']);
+    const r = resumirFalhas(eventos).get('anthropic');
+    expect(r).toMatchObject({ motivo: 'sem_credito', n: 2, leads: 2, ultima: '2026-11-16T15:05:00.000Z' });
+  });
+
+  it('falhas sem lista ou com data quebrada não derrubam o tick', () => {
+    expect(falhasDoChat([{ id: 'x', falhas: [{ em: 'lixo', erro: CREDITO }, null] }], '2026-11-16T00:00:00Z')).toEqual([]);
+  });
 });
 
 describe('decidirAcao (dedupe e recuperação)', () => {

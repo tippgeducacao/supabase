@@ -292,6 +292,11 @@ async function responderComoJoao(
 ) {
   const rodada = await processarRodadaWebchat(supabase, sessaoId, sessao, responderWebchat);
   if (rodada.erro) console.error(`[crm-webchat] cerebro: ${rodada.erro}`);
+  // O visitante acabou de ler que um monitor assume (FALA_DA_FALHA): o João cala nesta conversa,
+  // senão a próxima mensagem cai no mesmo erro, e ela fica para o time no SAC.
+  if (rodada.erro && rodada.status === "publicado" && !sessao.modo_teste) {
+    await supabase.from("webchat_sessoes").update({ atendimento_humano: true }).eq("id", sessaoId);
+  }
 
   // A tool registra o EFEITO confirmado, não uma tentativa nem uma frase do modelo.
   // Mesmo que um humano assuma durante a geração, o envio que já ocorreu é real.
