@@ -15,6 +15,7 @@ import { linhaDaMensagemReagida } from "./linhaDaReacao.ts";
 import { MidiaInvalida } from "../_shared/midiaRecebida.ts";
 import { criarMidiaEnvio, type MidiaEnvio } from "../_shared/midiaEnvioAutorizada.ts";
 import { conferirUrlPublica } from "../_shared/urlMidiaPublica.ts";
+import { linkDaAgendaNoEnvio } from "../_shared/agendaLeadLink.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -781,7 +782,24 @@ Deno.serve(async (req) => {
         text: { body: String(conteudo).slice(0, 4096), preview_url: true },
       };
     } else if (tipo === "template") {
-      const comps = sanitizarComponentsTemplate(template_components);
+      let comps = sanitizarComponentsTemplate(template_components);
+      // LINK DA AGENDA DO COMERCIAL (16/11/2026). Modelo cujo botão de URL aponta para
+      // /agendar-reuniao/{{1}} recebe AQUI o link do lead, assinado junto com o número que
+      // está enviando — o mesmo motivo da mídia do cabeçalho logo abaixo: este é o ponto
+      // único de todo envio, então vale para fluxo, automação, CRM v2, SAC e envio manual.
+      // Modelo comum não passa por nada (a lista de modelos fica 60 s em memória).
+      // Lead que já tem reunião marcada NÃO recebe o convite: a Meta recusaria o modelo sem
+      // o parâmetro do botão, então o envio para aqui, com o motivo.
+      const agenda = await linkDaAgendaNoEnvio(admin, {
+        wabaId: wa.waba_id, template: template_name, contaId: accountId, leadId: lead_id, comps,
+      });
+      if (agenda.aplica) {
+        if (!agenda.ok) {
+          console.log(`[crm-whatsapp-send] ${template_name}: link da agenda não montado — ${agenda.erro}`);
+          return json({ error: agenda.erro, codigo: "agenda_sem_link" }, 422);
+        }
+        comps = agenda.comps as any[];
+      }
       // Template com CABEÇALHO DE MÍDIA (IMAGE/VIDEO/DOCUMENT) EXIGE, em todo envio, o
       // componente de header com a mídia — senão a Meta recusa com 132012 ("header:
       // Format mismatch, expected IMAGE, received UNKNOWN"). O nosso envio só monta o

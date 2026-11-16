@@ -16,6 +16,7 @@
 // get_crm_wa_account (service_role). Cada conta = 1 número de API cadastrado.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
+import { modelosComLinkDaAgenda } from "../_shared/agendaLeadLink.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -216,6 +217,19 @@ Deno.serve(async (req) => {
       url = typeof proxima === "string" && proxima !== url ? proxima : null;
     }
     console.log("[crm-whatsapp-templates] list total:", data.length);
+    // Agenda pública do comercial (16/11/2026): os modelos desta conta cujo botão leva o link
+    // /agendar-reuniao/{{1}}. É por esta lista que a crm-whatsapp-send sabe em qual modelo pôr
+    // o link de cada lead. Só roda com a listagem completa (erro da Meta já saiu acima) e nunca
+    // derruba a listagem.
+    try {
+      const { error: erroAgenda } = await admin.rpc("agenda_lead_modelos_registrar", {
+        p_waba_id: String(wabaId),
+        p_modelos: modelosComLinkDaAgenda(data),
+      });
+      if (erroAgenda) console.error("[crm-whatsapp-templates] modelos da agenda não registrados:", erroAgenda.message);
+    } catch (e) {
+      console.error("[crm-whatsapp-templates] modelos da agenda não registrados:", (e as Error)?.message);
+    }
     const templates = data.map((t: any) => {
       const components = Array.isArray(t?.components) ? t.components : [];
       const up = (c: any) => String(c?.type ?? "").toUpperCase();

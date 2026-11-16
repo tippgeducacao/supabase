@@ -223,9 +223,10 @@ async function criarEventoMeet(admin: SupabaseClient, o: {
 }
 
 const CODIGO_OK = /^[0-9a-f]{20}$/;
-// Link PESSOAL do lead (disparo por automação): 32 hex do id + 24 hex de assinatura HMAC.
-// Quem confere a assinatura é o banco (`agenda_lead__convite`); aqui é só o formato.
-const TOKEN_PESSOAL_OK = /^[0-9a-f]{56}$/;
+// Link PESSOAL do lead (disparo por automação). Dois formatos: 56 hex (id do lead + assinatura,
+// de 14/11) e 88 hex (id do lead + número que enviou + assinatura, montado no envio desde
+// 16/11). Quem confere a assinatura é o banco (`agenda_lead__convite`); aqui é só o formato.
+const TOKEN_PESSOAL_OK = /^(?:[0-9a-f]{56}|[0-9a-f]{88})$/;
 const UUID_OK = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 Deno.serve(async (req) => {
@@ -268,6 +269,8 @@ Deno.serve(async (req) => {
         return json({
           ok: true,
           cursos: data.cursos ?? [],
+          // a pós que o cadastro do lead já diz: a página abre direto nos horários dela
+          curso_sugerido: data.curso_sugerido ?? null,
           captcha: false,
           pessoal: data.pessoal ?? {},
           reuniao: data.reuniao ?? null,
