@@ -69,6 +69,20 @@ describe("webhook do sistema: rastreamento no entrypoint real", () => {
     expect(gravacoes.lead_oportunidades[0]).toMatchObject({ utm_source: "tiktok_aviario" });
   });
 
+  it("grava o ga_client_id do GA4 (corpo ou query) e ignora valor inválido", async () => {
+    await enviar({ ga_client_id: "GA1.1.123456789.1700000000" });
+    expect(gravacoes.leads[0]).toMatchObject({ ga_client_id: "123456789.1700000000" });
+    gravacoes = {};
+    await enviar({ ga_client_id: "{ga_client_id}" });
+    expect(gravacoes.leads[0]).toMatchObject({ ga_client_id: null });
+  });
+
+  it("contato existente sem ga_client_id recebe o do formulário (fill-if-empty)", async () => {
+    existente = { id: "lead-antigo", fonte: "METAADS" };
+    await enviar({}, "?ga_client_id=987.654");
+    expect(gravacoes["leads:update"]?.[0]).toMatchObject({ ga_client_id: "987.654" });
+  });
+
   it("reentrada TikTok preserva Meta do contato e registra TikTok na nova oportunidade", async () => {
     existente = { id: "lead-antigo", fonte: "METAADS", utm_source: "facebook", utm_campaign: "campanha-antiga" };
     await enviar({ URL: "https://sanidade.ppgvet.com.br/?utm_source=tiktok&utm_campaign=nova&utm_content=video" });

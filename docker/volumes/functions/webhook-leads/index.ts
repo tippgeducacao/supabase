@@ -3,6 +3,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { createLogger } from '../_shared/logger.ts'
 import { complementarPrimeiraAtribuicao, extrairRastreamento, podeComplementarAtribuicao } from '../_shared/utmCaptura.ts'
+import { gaClientIdDe } from '../_shared/gaClientId.ts'
 
 const logger = createLogger('webhook-leads');
 
@@ -394,6 +395,8 @@ serve(async (req) => {
       ttclid: rastreamento.ttclid ?? null,
       gclid: rastreamento.gclid ?? null,
       fbclid: rastreamento.fbclid ?? null,
+      // Número do visitante no GA4 (cookie _ga), para a ga4-crm-eventos. Fora da régua de origem.
+      ga_client_id: gaClientIdDe(body, Object.fromEntries(new URL(req.url).searchParams)) ?? null,
       
       // Informações técnicas
       ip_address: body.IP_do_usuario || body.ip || body.ip_address || body.client_ip || 
@@ -687,6 +690,7 @@ serve(async (req) => {
       if (leadData.area_interesse && !existingLead.area_interesse) updates.area_interesse = leadData.area_interesse;
       if (leadData.curso_interesse && !existingLead.curso_interesse) updates.curso_interesse = leadData.curso_interesse;
       if (leadData.regiao && !existingLead.regiao) updates.regiao = leadData.regiao;
+      if (leadData.ga_client_id && !existingLead.ga_client_id) updates.ga_client_id = leadData.ga_client_id;
       // Atribuição é um conjunto: recadastro de outra campanha não deve completar
       // UTMs ou metadados Meta do primeiro contato com dados do novo toque.
       const mesmaAtribuicao = podeComplementarAtribuicao(existingLead, leadData);
