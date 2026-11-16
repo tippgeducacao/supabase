@@ -4,6 +4,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { PROMPT_ROUTER } from './prompts.ts';
 import { INSTRUCAO_CATTLE_CLINIC, mencionaCattleClinic } from './cattleClinic.ts';
+import { INSTRUCAO_CURSOS_LIVRES_VENDA } from './cursosLivresVenda.ts';
 import { observarSemInterromper, type ObservadorModelo } from './capturaModelo.ts';
 import type { Msg } from './historico.ts';
 import { INSTRUCAO_MEMORIA_HUMANA } from './memoriaHumana.ts';
@@ -191,6 +192,7 @@ export function pedidoRouter(historicoLimpo: Msg[]): Record<string, unknown> {
       { type: 'text', text: PROMPT_ROUTER },
       { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA },
       { type: 'text', text: INSTRUCAO_FATOS_DO_LEAD },
+      { type: 'text', text: INSTRUCAO_CURSOS_LIVRES_VENDA },
       { type: 'text', text: INSTRUCAO_DISPONIBILIDADE_CONTATO },
       { type: 'text', text: INSTRUCAO_EVENTOS, cache_control: { type: 'ephemeral' } },
     ],
@@ -316,6 +318,7 @@ export function montarPedidoPrincipal(opts: OpcoesPedidoPrincipal): { pedido: Re
     // desse lead é outro, mas continua idêntico entre as voltas e as rodadas dele.
     // Canário: a ficha (estado) e a VOZ DO JOÃO (persona, 21/09/2026) entram juntas.
     ...(opts.comFicha ? [{ type: 'text', text: opts.instrucaoFicha ?? b.ficha }, { type: 'text', text: b.voz }] : []),
+    { type: 'text', text: INSTRUCAO_CURSOS_LIVRES_VENDA },
     { type: 'text', text: b.canalResposta, cache_control: { type: 'ephemeral' } },
   ];
 
@@ -382,6 +385,7 @@ export function montarPedidoPrincipal(opts: OpcoesPedidoPrincipal): { pedido: Re
     'Persona renderizada pelo fluxo (inclui nome, curso e notas)', `Memória humana · ${base}`, `Fatos do lead · ${base}`,
     `Disponibilidade de contato · ${base}`, `Eventos · ${base}`,
     ...(opts.comFicha ? [`Ficha do atendimento · ${base}`, `Voz do João · ${base}`] : []),
+    'Cursos livres à venda · cursosLivresVenda.ts · gestão 16/11/2026',
     `Canal de resposta · ${base}`,
   ], ferramentas: opts.conjunto === 'luna' || opts.provedor?.formato === 'openai' ? 'tools-luna.ts · catálogo por persona' : 'lista_tools_claude + descricoesTools.ts' };
   // Só acrescenta a referência quando o produto/link aparece no contexto desta conversa.

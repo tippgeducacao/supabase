@@ -10,6 +10,7 @@ import { montarContextoEntregaMateriais } from './entregaMateriais';
 import { INSTRUCAO_DISPONIBILIDADE_CONTATO } from './disponibilidadeContato';
 import { INSTRUCAO_EVENTOS } from './instrucaoEventos';
 import { INSTRUCAO_FATOS_DO_LEAD } from './fatosLead';
+import { INSTRUCAO_CURSOS_LIVRES_VENDA } from './cursosLivresVenda';
 import { INSTRUCAO_VOZ } from './vozDoJoao';
 import { INSTRUCAO_AULA_PILOTO } from './contextoAulaPiloto';
 import { INSTRUCAO_FALHA_COMPATIBILIDADE } from './falhaCompatibilidade';
@@ -199,6 +200,7 @@ describe('instrução de memória no system enviado à Anthropic', () => {
       { type: 'text', text: PROMPT_ROUTER },
       { type: 'text', text: INSTRUCAO_MEMORIA_HUMANA },
       { type: 'text', text: INSTRUCAO_FATOS_DO_LEAD },
+      { type: 'text', text: INSTRUCAO_CURSOS_LIVRES_VENDA },
       { type: 'text', text: INSTRUCAO_DISPONIBILIDADE_CONTATO },
       { type: 'text', text: INSTRUCAO_EVENTOS, cache_control: { type: 'ephemeral' } },
     ]);
@@ -235,6 +237,7 @@ describe('instrução de memória no system enviado à Anthropic', () => {
       { type: 'text', text: INSTRUCAO_FATOS_DO_LEAD },
       { type: 'text', text: INSTRUCAO_DISPONIBILIDADE_CONTATO },
       { type: 'text', text: INSTRUCAO_EVENTOS },
+      { type: 'text', text: INSTRUCAO_CURSOS_LIVRES_VENDA },
       { type: 'text', text: INSTRUCAO_CANAL_RESPOSTA, cache_control: { type: 'ephemeral' } },
     ]);
     // A exceção já chegava no segundo bloco, mas perdia força porque a persona

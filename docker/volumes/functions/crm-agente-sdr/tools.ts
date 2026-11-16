@@ -33,6 +33,8 @@ import { conferirHorarioDaFerramenta } from './travasDeterministicas.ts';
 import { montarRetornoInformacoes } from './envioMateriais.ts';
 import { consultarCatalogo } from './catalogoCursos.ts';
 import { consultarCattleClinic } from './cattleClinic.ts';
+import { consultarCursosLivresVenda, ultimoCursoLivreDeclarado } from './cursosLivresVenda.ts';
+import { falasDoLead } from './perguntasRecentes.ts';
 import {
   type LinhaDaMatriz, aceitaQualquerFormacao, chaveFormacao, formacoesDaLista, linhaDoCurso, semPontuacao, soParaVeterinario,
 } from './linhaDaMatriz.ts';
@@ -976,6 +978,9 @@ async function exclusivaParaOutraFormacao(supabase: any, input: any, cadastro: u
 }
 
 async function verificarCompatibilidade(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
+  const ofertaLivre = consultarCursosLivresVenda(input?.curso_interesse);
+  if (ofertaLivre) return { ...ofertaLivre, id: toolUseId,
+    ...('curso' in ofertaLivre ? { pode_cursar: true, resultado: 'Curso livre: aceita pessoas com ou sem graduação. Não aprova elegibilidade de pós nem agenda reunião.' } : {}) };
   const cursoLivre = consultarCattleClinic(input?.curso_interesse);
   if (cursoLivre) return { ...cursoLivre, id: toolUseId, pode_cursar: true,
     resultado: 'Curso livre aberto a pessoas sem graduação. Não é aprovação de elegibilidade para uma pós-graduação.' };
@@ -1464,6 +1469,12 @@ async function enviaInformacoes(supabase: any, input: any, ctx: CtxConversa, too
 // pausas por desinteresse e o lead seguia recebendo template (1.244 pessoas
 // cutucadas depois de pedir pra parar, em 90 dias).
 async function pausaIa(supabase: any, input: any, ctx: CtxConversa, toolUseId: string) {
+  // 16/11/2026: não excluir quem explicitamente escolheu curso aberto sem graduação.
+  // A decisão se apoia na fala recente do lead, nunca no motivo inventado pela IA.
+  if (input.tipo === 'sem_graduacao') {
+    if (ultimoCursoLivreDeclarado(falasDoLead(ctx.historicoConversa ?? []))) return { id: toolUseId, status: 'pausa_bloqueada_curso_livre',
+      resultado: 'Nada foi pausado ou arquivado. O curso livre aceita pessoas sem graduação. Continue o atendimento; respeite pedidos explícitos de parar mensagens ou falar com humano.' };
+  }
   const semVinculoPpg = bloquearPausaSemVinculoPpg(input, ctx.historicoConversa, toolUseId);
   if (semVinculoPpg) return semVinculoPpg;
   // Antes de QUALQUER escrita: o enum escolhido pelo modelo não comprova o fato.
@@ -1644,17 +1655,19 @@ async function consultaPosDisponiveis(supabase: any, input: any, ctx: CtxConvers
       console.error('[crm-agente-sdr] pós do cadastro (assunto):', (e as Error)?.message ?? e);
     }
   }
-  if (!troca || resultado.status !== 'curso_confirmado' || !('curso' in resultado) || !resultado.curso) {
+  if (!troca || !['curso_confirmado', 'curso_livre_confirmado'].includes(resultado.status) || !('curso' in resultado) || !resultado.curso) {
     return { ...resultado, id: toolUseId };
   }
   try {
     if (!ctx.modoTeste) await atualizarLead(supabase, ctx.remotejid, { curso_interesse_original: resultado.curso.nome });
   } catch {
     return { ...resultado, status: 'erro_atualizar_interesse', id: toolUseId,
-      instrucao: 'A pós existe, mas não foi possível registrar a troca. Não diga que atualizou o cadastro; tente novamente antes de seguir usando o novo interesse.' };
+      instrucao: 'O curso existe, mas não foi possível registrar a troca. Não diga que atualizou o cadastro; tente novamente antes de seguir usando o novo interesse.' };
   }
   return { ...resultado, status: 'interesse_atualizado', simulado: !!ctx.modoTeste, id: toolUseId,
-    instrucao: resultado.instrucao + ` Interesse ${ctx.modoTeste ? 'simulado' : 'registrado'}: ${resultado.curso.nome}. Use este nome nas ferramentas do curso e siga a qualificação/agendamento; envie informações se solicitado.` };
+    instrucao: resultado.instrucao + ` Interesse ${ctx.modoTeste ? 'simulado' : 'registrado'}: ${resultado.curso.nome}. `
+      + (resultado.curso.tipo === 'curso_livre' ? 'Atenda ao pedido sobre o curso livre; sem exigir graduação, matriz de pós ou Meet.'
+        : 'Use este nome nas ferramentas do curso e siga a qualificação/agendamento; envie informações se solicitado.') };
 }
 
 // ── atualizar_dados_lead (persona campanha_direta) ──────────────────────────
@@ -1768,7 +1781,8 @@ export async function executarTool(
   opcoes: { comDados?: boolean } = {},
 ): Promise<Record<string, unknown>> {
   const { id, name, input } = toolUse;
-  if (name === 'verificar_compatibilidade_curso' && ctx.ficha && ctx.compatibilidadeIndisponivel) {
+  if (name === 'verificar_compatibilidade_curso' && ctx.ficha && ctx.compatibilidadeIndisponivel
+    && !consultarCursosLivresVenda(input?.curso_interesse)) {
     return { id, output: 'FALHA_TECNICA', compativel: null, pode_cursar: null,
       reutilizado_nesta_rodada: true,
       resultado: 'A checagem já falhou nesta rodada. Nenhuma nova tentativa foi feita.',
@@ -1783,6 +1797,10 @@ export async function executarTool(
       case 'verificar_compatibilidade_curso': return await verificarCompatibilidade(supabase, input, ctx, id);
       case 'consulta_objecoes': return await consultaObjecoes(supabase, input, id, ctx);
       case 'envia_informacoes': {
+        const ofertaLivre = consultarCursosLivresVenda(input?.curso_escolhido);
+        if (ofertaLivre?.status === 'produto_ambiguo') return { ...ofertaLivre, id, material_enviado: false };
+        if (ofertaLivre) return { ...ofertaLivre, id, material_enviado: false,
+          resultado: 'Referência do curso livre, sem envio de arquivo. Responda com os dados confirmados e compartilhe o cronograma_url, se houver. Não diga que enviou PDF, não colete graduação e não use material ou matrícula da pós.' };
         // 10/10/2026 (Gustavo e Wellinton): o valor NÃO sai mais em texto. Pedido de preço
         // (conteudo 'valor' ou 'cronograma_e_valor') faz o MESMO caminho do cronograma: passa pela
         // trava da graduação e envia o PDF, que já traz professores, módulos e o valor integral.

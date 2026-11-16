@@ -3,6 +3,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { INSTRUCAO_MEMORIA_HUMANA } from './memoriaHumana';
 import { INSTRUCAO_ALUNO_PPG } from './evidenciaAlunoPpg';
+import { INSTRUCAO_CURSOS_LIVRES_VENDA } from './cursosLivresVenda';
 import { INSTRUCAO_CANAL_RESPOSTA, NOME_TOOL_RESPOSTA } from './canalResposta';
 
 vi.mock('./prompts-luna.ts', () => ({
@@ -42,7 +43,7 @@ describe('chamarAgentePrincipal: de onde vem o texto', () => {
   it("conjunto 'luna': todos os blocos saem de prompts-luna.ts, na mesma ordem", async () => {
     expect(await systemEnviado('luna')).toEqual([
       'PERSONA', 'SENTINELA_MEMORIA', INSTRUCAO_ALUNO_PPG + '\n\nSENTINELA_FATOS\n\nSENTINELA_ROTEAMENTO', 'SENTINELA_DISPONIBILIDADE', 'SENTINELA_EVENTOS',
-      'SENTINELA_FICHA', 'SENTINELA_VOZ', 'SENTINELA_CANAL',
+      'SENTINELA_FICHA', 'SENTINELA_VOZ', INSTRUCAO_CURSOS_LIVRES_VENDA, 'SENTINELA_CANAL',
     ]);
   });
   it('sem conjunto: os blocos de sempre (produção)', async () => {
