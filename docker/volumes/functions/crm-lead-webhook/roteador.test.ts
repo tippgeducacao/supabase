@@ -51,11 +51,31 @@ describe('roteador dos sites', () => {
     const corpo = corpoParaFicha(
       { teste: false, nome: 'Maria', email: 'm@x.com', profissao: 'Zootecnista', referrer: 'https://www.google.com/', id_envio: 'abc', cidade: 'Ampére' },
       { curso: 'Medicina Integrativa' },
+      'form-pos-mifv',
     );
     expect(corpo).toMatchObject({
       eu_sou: 'Zootecnista', curso: 'Medicina Integrativa', Nome: 'Maria', E_mail: 'm@x.com',
       Referral_Source: 'https://www.google.com/', dados_completos: { id: 'abc' }, Cidade_do_usuario: 'Ampére',
     });
     expect(corpo).not.toHaveProperty('teste');
+  });
+
+  it('hub: sem curso na rota, vale a pós escolhida; campo próprio passa como veio', () => {
+    const corpo = corpoParaFicha({ curso_interesse: 'Sanidade Avícola', acesso: 'https://x/ee-sa' }, { curso: '' }, 'form-lp-escola');
+    expect(corpo).toMatchObject({ curso: 'Sanidade Avícola', acesso: 'https://x/ee-sa' });
+  });
+
+  it('cursos: os nomes da GreatPages que as receitas form-curso-* leem', () => {
+    const corpo = corpoParaFicha(
+      { whatsapp: '5546999990000', profissao: 'Estudante', utm_source: 'meta', ip: '1.2.3.4', dispositivo: 'Mobile',
+        url: 'https://site/curso-cc', tempo_formacao: '2 anos', enviado_em: '2026-11-16T17:00:01.000Z' },
+      { curso: null },
+      'form-curso-cc',
+    );
+    expect(corpo).toMatchObject({
+      Seu_WhatsApp: '+5546999990000', Eu_sou: 'Estudante', UTM_Source: 'meta', IP_do_usuario: '1.2.3.4',
+      Dispositivo: 'Mobile', URL: 'https://site/curso-cc', Tempo_de_Formacao: '2 anos',
+      Data_da_conversao: '2026-11-16 17:00:01', Id_do_formulario: 'form-curso-cc', Politicas_de_privacidade: 'true',
+    });
   });
 });

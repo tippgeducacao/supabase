@@ -43,18 +43,37 @@ export function camposFaltando(p: Payload): string[] {
 }
 
 /**
- * O corpo que a ficha recebe: o payload v1 mais os nomes antigos que as receitas leem.
- * shortcut: apelidos dos nomes antigos (eu_sou, Nome, E_mail, geo do blog, Referral_Source); tirar
- * quando as receitas das fichas lerem os nomes do v1.
+ * O corpo que a ficha recebe: o payload v1 mais os nomes antigos que as receitas leem
+ * (pós: eu_sou, curso; blog e cursos: os nomes da GreatPages). Campo próprio do formulário
+ * (ex.: `acesso` do hub da Escola) passa como veio.
+ * shortcut: apelidos dos nomes antigos; tirar quando as receitas das fichas lerem o v1.
  */
-export function corpoParaFicha(p: Payload, rota: Pick<Rota, "curso">): Payload {
+export function corpoParaFicha(p: Payload, rota: Pick<Rota, "curso">, slugDestino: string): Payload {
   const { teste: _teste, ...resto } = p;
+  const enviado = typeof p.enviado_em === "string" ? new Date(p.enviado_em) : new Date();
   return {
     ...resto,
     eu_sou: p.profissao ?? p.eu_sou,
-    curso: rota.curso ?? p.curso,
+    // O curso da rota; sem ele (hub), a pós escolhida no formulário.
+    curso: rota.curso || p.curso_interesse || p.curso,
     Nome: p.nome,
     E_mail: p.email,
+    Seu_WhatsApp: p.whatsapp ? `+${p.whatsapp}` : undefined,
+    Eu_sou: p.profissao,
+    UTM_Source: p.utm_source,
+    UTM_Medium: p.utm_medium,
+    UTM_Campaign: p.utm_campaign,
+    UTM_Content: p.utm_content,
+    UTM_Term: p.utm_term,
+    UTM_Id: p.utm_id,
+    URL: p.url,
+    IP_do_usuario: p.ip,
+    Dispositivo: p.dispositivo,
+    Tempo_de_Formacao: p.tempo_formacao,
+    Dificuldade_profissional: p.dificuldade,
+    Politicas_de_privacidade: "true",
+    Data_da_conversao: (isNaN(+enviado) ? new Date() : enviado).toISOString().slice(0, 19).replace("T", " "),
+    Id_do_formulario: slugDestino,
     Cidade_do_usuario: p.cidade,
     Regiao_do_usuario: p.estado,
     Pais_do_usuario: p.pais,
@@ -151,6 +170,6 @@ export async function rotearSites(args: {
       "x-webhook-secret": destino.secret,
       ...(ipOrigem ? { "x-forwarded-for": ipOrigem } : {}),
     },
-    body: JSON.stringify(corpoParaFicha(payload, rota)),
+    body: JSON.stringify(corpoParaFicha(payload, rota, destino.slug)),
   }));
 }
