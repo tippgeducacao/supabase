@@ -9,19 +9,28 @@
  * a Meta recusar o envio inteiro. O corpo do template pode ter quebras; o parâmetro, não.
  */
 
-/** Tira o prefixo de catálogo ("PÓS | X", "MBA | X") e devolve o nome como se fala. */
+const MINUSCULAS = new Set(["de", "da", "do", "das", "dos", "e", "em", "na", "no", "com", "a", "o"]);
+const SIGLAS = new Set(["rh", "ia", "ti"]);
+
+/**
+ * Tira o prefixo de catálogo ("PÓS | X", "MBA | X", "MBA X") e devolve o nome como se fala.
+ * Sem "MBA": para o visitante tudo é pós-graduação (marca.md, 16/11/2026). Nome do banco em
+ * caixa alta ("GESTÃO DE COOPERATIVAS DE CRÉDITO") volta em caixa de título.
+ */
 export function limparCurso(c: string | null | undefined): string {
   if (!c) return "";
-  return String(c)
-    .replace(/^p[oó]s\s*\|\s*/i, "")
-    .replace(/^mba\s*\|\s*/i, "MBA ")
-    .replace(/^curso\s*\|\s*/i, "")
+  const s = String(c)
+    .replace(/^\s*(p[oó]s|mba|curso)\s*\|\s*/i, "")
+    .replace(/^mba\s+/i, "")
     .trim();
+  if (s !== s.toUpperCase()) return s;
+  return s.toLowerCase().split(" ")
+    .map((p, i) => (SIGLAS.has(p) ? p.toUpperCase() : i && MINUSCULAS.has(p) ? p : p.charAt(0).toUpperCase() + p.slice(1)))
+    .join(" ");
 }
 
-/** MBA é "o MBA X"; pós é "a pós em X". Errar o artigo entrega que é robô. */
 function comoSeChama(pos: string): string {
-  return /^mba\b/i.test(pos.trim()) ? `o ${pos}` : `a pós em ${pos}`;
+  return `a pós em ${limparCurso(pos)}`;
 }
 
 /**

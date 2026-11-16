@@ -442,7 +442,7 @@ function instrucaoAbertura(curso: string): string {
       + "OFERECENDO a conversa rápida no Google Meet com um monitor especialista. Termine com uma pergunta convidando a marcar."
     : base + " ⚠️ Ele veio da HOME e vc NÃO SABE qual pós interessa a ele. É PROIBIDO dizer que viu o interesse dele "
       + "'na nossa pós' ou em qualquer curso específico — vc não viu. Pergunte, em UMA frase curta, qual área ele quer, "
-      + "citando as que existem: bovinos e leite, aves, suínos, animais de companhia, gestão e agronegócio, saúde e alimentos. "
+      + "citando as que existem: bovinos e leite, aves, suínos, peixes, animais de companhia, gestão e agronegócio, saúde e alimentos. "
       + "NÃO ofereça o Meet ainda: primeiro descubra o assunto.";
 }
 export async function aberturaWebchat(nome: string, curso: string | null, produto: Produto = "pos"): Promise<string[]> {
@@ -454,7 +454,7 @@ export async function aberturaWebchat(nome: string, curso: string | null, produt
     // que sabe a pós: sem curso na sessão, ele PERGUNTA a área em vez de afirmar interesse.
     : limparCurso(curso)
       ? `Oi${primeiro ? ", " + primeiro : ""}, tudo bem? Vi que vc tá de olho na pós em ${limparCurso(curso)}. Que tal uma conversa rápida no Google Meet com um monitor especialista pra te mostrar tudo? Topa que eu já procuro um horário?`
-      : `Oi${primeiro ? ", " + primeiro : ""}, tudo bem? Me conta rapidinho qual área vc tá querendo, pra eu te falar da pós certa: bovinos e leite, aves, suínos, animais de companhia, gestão e agronegócio, ou saúde e alimentos?`;
+      : `Oi${primeiro ? ", " + primeiro : ""}, tudo bem? Me conta rapidinho qual área vc tá querendo, pra eu te falar da pós certa: bovinos e leite, aves, suínos, peixes, animais de companhia, gestão e agronegócio, ou saúde e alimentos?`;
   if (!ANTHROPIC_KEY) return dividirAberturaEm2(fallback);
   try {
     // Abertura usa só o canal local de resposta, sem ferramentas de negócio.

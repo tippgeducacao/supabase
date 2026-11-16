@@ -27,7 +27,7 @@ function json(data: unknown, status = 200) {
 function primeiroNome(n: string | null): string { return (n ?? "").trim().split(/\s+/)[0] || ""; }
 function limparCurso(c: string | null): string {
   if (!c) return "";
-  return c.replace(/^p[oó]s\s*\|\s*/i, "").replace(/^mba\s*\|\s*/i, "MBA ").replace(/^curso\s*\|\s*/i, "").trim();
+  return c.replace(/^p[oó]s\s*\|\s*/i, "").replace(/^mba\s*\|\s*/i, "").replace(/^mba\s+/i, "").replace(/^curso\s*\|\s*/i, "").trim();
 }
 
 // resultado por tentativa (endpoint truncado + status) — vai no response (push_tentativas)

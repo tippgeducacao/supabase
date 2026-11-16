@@ -80,8 +80,16 @@ const MAX_MSGS_HORA_GLOBAL = Number(Deno.env.get("WEBCHAT_MAX_MSGS_HORA_GLOBAL")
 // Allowlist de Origin OPT-IN (CSV de origens, ex.: "https://lp1.com.br,https://lp2.com.br").
 // Vazia = aberto (default). Só barra navegador (curl forja Origin) — é fricção, não muro;
 // o muro são os rate limits + disjuntores.
-const ALLOWED_ORIGINS = (Deno.env.get("WEBCHAT_ALLOWED_ORIGINS") ?? "")
+// Os sites da casa entram sempre (16/11/2026): o site da PPG ficou fora do CSV da VPS e nunca
+// abriu uma conversa. Vale só quando a allowlist está ligada (env não vazia).
+const ORIGENS_DOS_SITES = [
+  "https://site.ppgvet.com.br",
+  "https://site.ppgeducacao.com.br",
+  "https://escoladeespecializacao.ppgvet.com.br",
+];
+const ORIGENS_DO_ENV = (Deno.env.get("WEBCHAT_ALLOWED_ORIGINS") ?? "")
   .split(",").map((s) => s.trim().toLowerCase().replace(/\/$/, "")).filter(Boolean);
+const ALLOWED_ORIGINS = ORIGENS_DO_ENV.length ? [...ORIGENS_DO_ENV, ...ORIGENS_DOS_SITES] : [];
 
 // Cloudflare Turnstile (captcha invisível). Secret setado = exige token válido no 'iniciar'.
 // Vazio = desligado (passa direto). Sitekey (público) vai no widget via data-turnstile.

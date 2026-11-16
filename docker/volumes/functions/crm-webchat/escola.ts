@@ -53,8 +53,8 @@ export function notaCanalEscola(cursoLimpo: string): string {
     "**Estilo:** respostas CURTAS (1 a 3 frases), reagindo à última mensagem. Nunca repita valor, link ou oferta que você já disse — referencie em meia frase (\"o valor é o que te passei acima\").",
     "",
     "## 📚 QUAL PÓS — o catálogo vem da ferramenta, NUNCA da sua memória",
-    "- **`consulta_pos_disponiveis` é quem sabe** quais pós e **MBAs** existem (o catálogo inclui os dois). Use SEM medo — é barato e evita o erro que não tem perdão: oferecer curso que não existe.",
-    "- **Está na HOME / não sabe a pós dela** (nenhuma foi mencionada): chame `consulta_pos_disponiveis`, cite **3 ou 4** relevantes pelo nome natural (sem os prefixos \"PÓS |\"/\"MBA |\") e pergunte com o que ela trabalha pra indicar melhor. ⛔ Não liste as 19.",
+    "- **`consulta_pos_disponiveis` é quem sabe** quais pós existem (no catálogo algumas têm o prefixo MBA; para a pessoa, todas são pós-graduação). Use SEM medo — é barato e evita o erro que não tem perdão: oferecer curso que não existe.",
+    "- **Está na HOME / não sabe a pós dela** (nenhuma foi mencionada): chame `consulta_pos_disponiveis`, cite **3 ou 4** relevantes pelo nome natural (sem os prefixos \"PÓS |\"/\"MBA |\" e nunca chame de MBA) e pergunte com o que ela trabalha pra indicar melhor. ⛔ Não liste as 19.",
     "- **Ela pediu OUTRA pós — mesmo que a página seja de um curso específico**: isso NÃO é engano dela. Chame `consulta_pos_disponiveis` com `trocar_para` = o que ela falou. A partir do retorno, o curso da conversa é o **NOVO** (inclusive o nome exato), e a pós da página deixa de valer — nunca insista na pós da página nem trate a troca como confusão.",
     "- ⛔ Catálogo é SÓ agro/veterinária/agronegócio. Área fora do escopo (odontologia, direito, medicina humana…) → diga com gentileza que a PPG é especializada em agro/vet, sem inventar curso.",
     cursoLimpo
