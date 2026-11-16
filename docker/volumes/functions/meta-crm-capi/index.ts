@@ -1,7 +1,9 @@
 // Leads qualificados do CRM → API de Conversões da Meta (integração de CRM) · 27/10/2026.
 //
-// Uma vez por dia (pg_cron), manda à Meta as etapas do funil dos leads de origem META:
-// crm_lead, crm_reuniao_agendada, crm_reuniao_realizada e crm_matricula. Com isso a Meta
+// Uma vez por dia (pg_cron), manda à Meta as etapas do funil dos leads de origem META (ou com
+// clique da Meta: fbc/fbclid, desde 16/11/2026): crm_lead, crm_reuniao_agendada,
+// crm_reuniao_realizada, crm_matricula e crm_segunda_compra (matrícula de quem já era aluno).
+// Desde 16/11 vai também nome, cidade, estado, país, fbc/fbp reais, IP e navegador. Com isso a Meta
 // aprende quem AVANÇA no funil, não só quem preenche o formulário (recomendação da conta
 // BM 01: "custo por lead de qualidade 24% menor"). Guia do Gerenciador de Eventos → conjunto
 // de dados PPGVET 5865 → integração de CRM. Ver docs/Marketing — Mídia Paga.md.
@@ -58,6 +60,44 @@ type Pendente = {
   // Só na matrícula, em BRL (prop_valor_final). Sem valor a matrícula vai assim mesmo
   // (decisão do usuário, 14/11/2026: só 21% têm valor e a Meta aprende com todas).
   valor: number | string | null;
+  // Enriquecimento (16/11/2026): do lead e do payload v1 dos sites. Tudo opcional.
+  nome?: string | null;
+  cidade?: string | null;
+  estado?: string | null;
+  pais?: string | null;
+  fbc?: string | null;
+  fbp?: string | null;
+  ip?: string | null;
+  user_agent?: string | null;
+};
+
+/** UF por nome do estado (leads.regiao guarda o nome por extenso). Mesma sigla que os sites mandam. */
+const UF: Record<string, string> = {
+  acre: "ac", alagoas: "al", amapa: "ap", amazonas: "am", bahia: "ba", ceara: "ce", "distrito federal": "df",
+  "espirito santo": "es", goias: "go", maranhao: "ma", "mato grosso": "mt", "mato grosso do sul": "ms",
+  "minas gerais": "mg", para: "pa", paraiba: "pb", parana: "pr", pernambuco: "pe", piaui: "pi",
+  "rio de janeiro": "rj", "rio grande do norte": "rn", "rio grande do sul": "rs", rondonia: "ro", roraima: "rr",
+  "santa catarina": "sc", "sao paulo": "sp", sergipe: "se", tocantins: "to",
+};
+const semAcento = (t: string) => t.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+/**
+ * Normalização da Meta (customer-information-parameters): minúsculo, sem pontuação nem espaço; nome e
+ * cidade guardam o acento (UTF-8), como a CAPI dos sites ("São José" → "sãojosé"), para casar igual.
+ */
+export const normalizar = {
+  nome: (t: string) => t.trim().toLowerCase().replace(/[^\p{L}\s'-]/gu, "").replace(/\s+/g, " "),
+  cidade: (t: string) => t.trim().toLowerCase().replace(/[^\p{L}\p{N}]/gu, ""),
+  estado(t: string) {
+    const k = semAcento(t.trim().toLowerCase());
+    if (/^[a-z]{2}$/.test(k)) return k;
+    return UF[k] ?? k.replace(/[^a-z]/g, "");
+  },
+  pais(t: string) {
+    const k = semAcento(t.trim().toLowerCase());
+    if (k === "brasil" || k === "brazil") return "br";
+    return /^[a-z]{2}$/.test(k) ? k : "";
+  },
 };
 
 export async function montarEvento(p: Pendente) {
@@ -75,7 +115,22 @@ export async function montarEvento(p: Pendente) {
   // meta_leadgen_entregas guarda o ID como na exportação da Meta, com "l:" na frente.
   const leadId = (p.leadgen_id || "").replace(/^l:/, "");
   if (/^\d{15,17}$/.test(leadId)) user_data.lead_id = leadId;
-  if (p.fbclid) user_data.fbc = `fb.1.${new Date(p.lead_criado_em).getTime()}.${p.fbclid}`;
+  // fbc: o cookie real do site; sem ele, montado do fbclid guardado (formato fb.1.<ms>.<fbclid>).
+  if (p.fbc) user_data.fbc = p.fbc;
+  else if (p.fbclid) user_data.fbc = `fb.1.${new Date(p.lead_criado_em).getTime()}.${p.fbclid}`;
+  if (p.fbp) user_data.fbp = p.fbp;
+  // IP e navegador do visitante no envio do formulário: sem hash (a Meta pede assim).
+  if (p.ip) user_data.client_ip_address = p.ip;
+  if (p.user_agent) user_data.client_user_agent = p.user_agent;
+  const partes = normalizar.nome(p.nome ?? "").split(" ").filter(Boolean);
+  if (partes.length) user_data.fn = [await sha256(partes[0])];
+  if (partes.length > 1) user_data.ln = [await sha256(partes[partes.length - 1])];
+  const ct = normalizar.cidade(p.cidade ?? "");
+  if (ct) user_data.ct = [await sha256(ct)];
+  const st = normalizar.estado(p.estado ?? "");
+  if (st) user_data.st = [await sha256(st)];
+  const country = normalizar.pais(p.pais ?? "");
+  if (country) user_data.country = [await sha256(country)];
   return {
     event_name: p.etapa,
     event_time: Math.floor(new Date(p.event_time).getTime() / 1000),

@@ -37,3 +37,34 @@ describe("correspondência", () => {
     expect(e.user_data).not.toHaveProperty("ph");
   });
 });
+
+describe("enriquecimento (16/11/2026)", () => {
+  it("nome, cidade, estado, país em hash; fbc/fbp/IP/navegador do site sem hash", async () => {
+    const e = await montarEvento({
+      ...base, valor: null, nome: "Maria  da Silva", cidade: "São José", estado: "Paraná", pais: "Brazil",
+      fbc: "fb.1.1731770000000.IwAR2abc", fbp: "fb.1.1731700000000.123456789", fbclid: "VELHO",
+      ip: "200.1.2.3", user_agent: "Mozilla/5.0 (iPhone)",
+    });
+    const u = e.user_data;
+    expect(u.fn).toEqual([await sha("maria")]);
+    expect(u.ln).toEqual([await sha("silva")]);
+    expect(u.ct).toEqual([await sha("sãojosé")]);
+    expect(u.st).toEqual([await sha("pr")]);
+    expect(u.country).toEqual([await sha("br")]);
+    expect(u.fbc).toBe("fb.1.1731770000000.IwAR2abc");
+    expect(u.fbp).toBe("fb.1.1731700000000.123456789");
+    expect(u.client_ip_address).toBe("200.1.2.3");
+    expect(u.client_user_agent).toBe("Mozilla/5.0 (iPhone)");
+  });
+
+  it("sem cookie, o fbc sai do fbclid; sem dados, nada a mais", async () => {
+    const e = await montarEvento({ ...base, valor: null, fbclid: "ABC", lead_criado_em: "2026-11-01T00:00:00Z" });
+    expect(e.user_data.fbc).toBe(`fb.1.${Date.parse("2026-11-01T00:00:00Z")}.ABC`);
+    for (const k of ["fn", "ln", "ct", "st", "country", "fbp", "client_ip_address"]) expect(e.user_data).not.toHaveProperty(k);
+  });
+});
+
+async function sha(t: string) {
+  const b = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(t));
+  return Array.from(new Uint8Array(b), (x) => x.toString(16).padStart(2, "0")).join("");
+}

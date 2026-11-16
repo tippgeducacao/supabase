@@ -58,6 +58,7 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { gaClientIdDe } from "../_shared/gaClientId.ts";
+import { sinaisMetaDe } from "../_shared/sinaisMeta.ts";
 import { CAMPOS_RASTREAMENTO, complementarPrimeiraAtribuicao, extrairRastreamento, fonteSemUtmDoReferrer, limparValorRastreamento, podeComplementarAtribuicao, rastreamentoDoReferrer, temRastreamento } from "../_shared/utmCaptura.ts";
 import { telefoneEnviavel } from "../_shared/telefone.ts";
 import { normalizeWhatsapp } from "./normalizaWhatsapp.ts";
@@ -843,6 +844,8 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
   if (!inUtm.utm_content  && inMeta.meta_ad_name)       inUtm.utm_content  = inMeta.meta_ad_name;
   // Número do visitante no GA4 (cookie _ga), para a ga4-crm-eventos. Fora da régua de origem.
   const gaClientId = gaClientIdDe(payload as Record<string, unknown>, queryParams);
+  // Cookies da Meta, IP e navegador do visitante (payload v1 dos sites), para a meta-crm-capi.
+  const sinaisMeta = sinaisMetaDe(payload as Record<string, unknown>);
   if (!inUtm.utm_term     && inMeta.meta_adset_name)    inUtm.utm_term     = inMeta.meta_adset_name;
 
   // Normaliza o título do SprintHub → nome canônico do curso (só pós/MBA; cascata
@@ -1085,6 +1088,8 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
       if (!existing.tempo_formacao && (inTempo ?? criacaoDefaults.tempo_formacao))    patch.tempo_formacao = (inTempo ?? criacaoDefaults.tempo_formacao)!;
       if (!existing.regiao && (inRegiao ?? criacaoDefaults.regiao))               patch.regiao = (inRegiao ?? criacaoDefaults.regiao)!;
       if (!existing.ga_client_id && gaClientId)                                   patch.ga_client_id = gaClientId;
+      // O mais recente vale: o fbc muda a cada clique no anúncio e é o que casa na Meta.
+      Object.assign(patch, sinaisMeta);
       const atribuicaoRecebida = { ...inMeta, ...inUtm };
       if (podeComplementarAtribuicao(existing, atribuicaoRecebida)) {
         if (!existing.pagina_nome && (inPagina ?? criacaoDefaults.pagina_nome)) patch.pagina_nome = (inPagina ?? criacaoDefaults.pagina_nome)!;
@@ -1120,6 +1125,7 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
           ...inMeta,
           ...inUtm,
           ...(gaClientId ? { ga_client_id: gaClientId } : {}),
+          ...sinaisMeta,
           // Origem da criação → evento "Criado por <webhook>" na timeline (via trigger).
           origem_criacao: integration.nome ?? `Webhook ${slug}`,
         })
