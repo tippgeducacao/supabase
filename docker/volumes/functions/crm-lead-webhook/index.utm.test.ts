@@ -261,6 +261,23 @@ describe("webhook integrado: captura UTM no entrypoint real", () => {
     expect(gravacoes["leads:update"]?.[0]).toMatchObject({ wbraid: "clique-iphone" });
   });
 
+  it.each(["body", "query"])("grava o ga_client_id do GA4 enviado por %s, aceitando o valor cru do cookie", async modo => {
+    await enviar(modo === "body" ? { ga_client_id: "GA1.1.123456789.1700000000" } : {}, modo === "query" ? "&ga_client_id=123456789.1700000000" : "");
+    expect(gravacoes.leads[0]).toMatchObject({ ga_client_id: "123456789.1700000000" });
+  });
+
+  it("ga_client_id inválido não é gravado e não vira rastreamento", async () => {
+    await enviar({ ga_client_id: "{ga_client_id}" });
+    expect(gravacoes.leads[0]).not.toHaveProperty("ga_client_id");
+    expect(gravacoes.crm_webhook_logs[0].resultado?.rastreamento ?? {}).not.toHaveProperty("ga_client_id");
+  });
+
+  it("contato existente sem ga_client_id recebe o do formulário (fill-if-empty)", async () => {
+    contato = { id: "lead-chat", nome: "Contato sintético", email: "sintetico@example.com", fonte: "Webchat LP", origem_criacao: "webchat" };
+    await enviar({ ga_client_id: "987.654" });
+    expect(gravacoes["leads:update"]?.[0]).toMatchObject({ ga_client_id: "987.654" });
+  });
+
   it("captação do chat da LP lê a UTM de origem_url sem trocar a página do contato", async () => {
     const origem = "https://www.ppgvet.com.br/pos-clinica-e-cirurgia?utm_source=tiktok&utm_medium=paid&utm_campaign=LP_LEAD_POS-CLINICACIRURGIA-COMERCIAL-mensal&utm_id=1876&ttclid=clique-chat";
     await enviar({ telefone: "11999998888", curso: "Clínica Médica", fonte: "Webchat", pagina: "www.ppgvet.com.br", origem_url: origem });

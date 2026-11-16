@@ -57,6 +57,7 @@
 //   { ok:true, lead_id, segmento_aplicado, lead_oportunidade_id, oportunidade_id, duplicado_lote }
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
+import { gaClientIdDe } from "../_shared/gaClientId.ts";
 import { CAMPOS_RASTREAMENTO, complementarPrimeiraAtribuicao, extrairRastreamento, fonteSemUtmDoReferrer, limparValorRastreamento, podeComplementarAtribuicao, rastreamentoDoReferrer, temRastreamento } from "../_shared/utmCaptura.ts";
 import { telefoneEnviavel } from "../_shared/telefone.ts";
 import { normalizeWhatsapp } from "./normalizaWhatsapp.ts";
@@ -840,6 +841,8 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
   });
   if (!inUtm.utm_campaign && inMeta.meta_campaign_name) inUtm.utm_campaign = inMeta.meta_campaign_name;
   if (!inUtm.utm_content  && inMeta.meta_ad_name)       inUtm.utm_content  = inMeta.meta_ad_name;
+  // Número do visitante no GA4 (cookie _ga), para a ga4-crm-eventos. Fora da régua de origem.
+  const gaClientId = gaClientIdDe(payload as Record<string, unknown>, queryParams);
   if (!inUtm.utm_term     && inMeta.meta_adset_name)    inUtm.utm_term     = inMeta.meta_adset_name;
 
   // Normaliza o título do SprintHub → nome canônico do curso (só pós/MBA; cascata
@@ -1026,7 +1029,7 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
     if (email) {
       const { data } = await admin
         .from("leads")
-        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, fonte_referencia, meta_campaign_id, meta_campaign_name, meta_adset_id, meta_adset_name, meta_ad_id, meta_ad_name, meta_form_id, meta_form_name, meta_platform, utm_source, utm_medium, utm_campaign, utm_content, utm_term, utm_id, gclid, gbraid, wbraid, fbclid, ttclid, arquivado, arquivado_em")
+        .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, fonte_referencia, meta_campaign_id, meta_campaign_name, meta_adset_id, meta_adset_name, meta_ad_id, meta_ad_name, meta_form_id, meta_form_name, meta_platform, utm_source, utm_medium, utm_campaign, utm_content, utm_term, utm_id, gclid, gbraid, wbraid, fbclid, ttclid, ga_client_id, arquivado, arquivado_em")
         .eq("email", email)
         .limit(1);
       existing = data?.[0] ?? null;
@@ -1040,7 +1043,7 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
       if (canonId) {
         const { data } = await admin
           .from("leads")
-          .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, fonte_referencia, meta_campaign_id, meta_campaign_name, meta_adset_id, meta_adset_name, meta_ad_id, meta_ad_name, meta_form_id, meta_form_name, meta_platform, utm_source, utm_medium, utm_campaign, utm_content, utm_term, utm_id, gclid, gbraid, wbraid, fbclid, ttclid, arquivado, arquivado_em")
+          .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, fonte_referencia, meta_campaign_id, meta_campaign_name, meta_adset_id, meta_adset_name, meta_ad_id, meta_ad_name, meta_form_id, meta_form_name, meta_platform, utm_source, utm_medium, utm_campaign, utm_content, utm_term, utm_id, gclid, gbraid, wbraid, fbclid, ttclid, ga_client_id, arquivado, arquivado_em")
           .eq("id", canonId as string)
           .maybeSingle();
         existing = data ?? null;
@@ -1081,6 +1084,7 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
       if (!existing.area_interesse && (inArea ?? criacaoDefaults.area_interesse))     patch.area_interesse = (inArea ?? criacaoDefaults.area_interesse)!;
       if (!existing.tempo_formacao && (inTempo ?? criacaoDefaults.tempo_formacao))    patch.tempo_formacao = (inTempo ?? criacaoDefaults.tempo_formacao)!;
       if (!existing.regiao && (inRegiao ?? criacaoDefaults.regiao))               patch.regiao = (inRegiao ?? criacaoDefaults.regiao)!;
+      if (!existing.ga_client_id && gaClientId)                                   patch.ga_client_id = gaClientId;
       const atribuicaoRecebida = { ...inMeta, ...inUtm };
       if (podeComplementarAtribuicao(existing, atribuicaoRecebida)) {
         if (!existing.pagina_nome && (inPagina ?? criacaoDefaults.pagina_nome)) patch.pagina_nome = (inPagina ?? criacaoDefaults.pagina_nome)!;
@@ -1115,6 +1119,7 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
           ...(inFonte ?? criacaoDefaults.fonte ?? fonteSemUtm ? { fonte: (inFonte ?? criacaoDefaults.fonte ?? fonteSemUtm) } : {}),
           ...inMeta,
           ...inUtm,
+          ...(gaClientId ? { ga_client_id: gaClientId } : {}),
           // Origem da criação → evento "Criado por <webhook>" na timeline (via trigger).
           origem_criacao: integration.nome ?? `Webhook ${slug}`,
         })
