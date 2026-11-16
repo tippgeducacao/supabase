@@ -17,6 +17,8 @@
 //     cada aluno: { nome, email, cpf, telefone, cep, rua, numero,
 //                   complemento?, bairro, cidade, uf }
 //   - termoAceite, declaracaoRevisor, fichaOrientador, arquivoTcc: File (PDF/DOC/DOCX, <=25MB)
+//     declaracaoRevisor é OPCIONAL desde 16/11/2026 (o formulário deixou de exigir):
+//     ausente, string ou arquivo vazio = "não enviada"; a tarefa nasce igual, só com 3 anexos.
 //
 // Retorna: { ok: true, protocolo, taskId, prazoRetorno, enviadoEm }
 //   ou { ok: false, error, details? }
@@ -100,6 +102,10 @@ const FILE_LABELS: Record<FileField, string> = {
   fichaOrientador: 'Ficha cadastral do orientador',
   arquivoTcc: 'Arquivo do TCC',
 }
+
+// Anexos que o aluno pode deixar em branco. Campo de arquivo vazio no navegador
+// chega como File de tamanho 0 (ou nem chega), então os dois casos contam como "não enviado".
+const OPTIONAL_FIELDS = new Set<FileField>(['declaracaoRevisor'])
 
 function jsonResponse(payload: unknown, status = 200) {
   return new Response(JSON.stringify(payload), {
@@ -217,9 +223,12 @@ Deno.serve(async (req) => {
     }
 
     // 3) Valida arquivos
-    const files: Record<FileField, File> = {} as Record<FileField, File>
+    const files: Partial<Record<FileField, File>> = {}
     for (const field of FILE_FIELDS) {
       const f = form.get(field)
+      if (OPTIONAL_FIELDS.has(field) && (!(f instanceof File) || f.size === 0)) {
+        continue // opcional e não enviado
+      }
       if (!(f instanceof File)) {
         return jsonResponse(
           { ok: false, error: `Anexo ausente: ${FILE_LABELS[field]}` },
@@ -256,12 +265,14 @@ Deno.serve(async (req) => {
     const prazo = new Date(agora.getTime() + PRAZO_DIAS * 24 * 60 * 60 * 1000)
     const protocolo = `TCC-${agora.getTime().toString(36).toUpperCase()}`
 
-    // 5) Upload dos 4 arquivos (bucket público, nome/extensão originais)
-    const uploaded: Record<FileField, { path: string; url: string; fileName: string }> =
-      {} as Record<FileField, { path: string; url: string; fileName: string }>
+    // Só os anexos que vieram (a Declaração do revisor pode faltar)
+    const enviados = FILE_FIELDS.filter((f) => files[f] !== undefined)
 
-    for (const field of FILE_FIELDS) {
-      const file = files[field]
+    // 5) Upload dos arquivos enviados (bucket público, nome/extensão originais)
+    const uploaded: Partial<Record<FileField, { path: string; url: string; fileName: string }>> = {}
+
+    for (const field of enviados) {
+      const file = files[field]!
       const original = file.name || `${field}.pdf`
       const path = `${STORAGE_FOLDER}/${protocolo}/${field}-${sufixoAleatorio()}-${sanitizeName(original)}`
       const buf = new Uint8Array(await file.arrayBuffer())
@@ -342,9 +353,13 @@ Deno.serve(async (req) => {
       .join('')
 
     const anexosHtml = FILE_FIELDS.map((f) => {
-      const display = `${FILE_LABELS[f]} — ${uploaded[f].fileName}`
+      const up = uploaded[f]
+      if (!up) {
+        return `<p>➖ ${escapeHtml(FILE_LABELS[f])} — não enviada (opcional)</p>`
+      }
+      const display = `${FILE_LABELS[f]} — ${up.fileName}`
       return (
-        `<p><a href="${escapeHtml(uploaded[f].url)}" target="_blank" rel="noopener" ` +
+        `<p><a href="${escapeHtml(up.url)}" target="_blank" rel="noopener" ` +
         `data-attachment-kind="file" data-attachment-name="${escapeHtml(display)}">📎 ${escapeHtml(display)}</a></p>`
       )
     }).join('\n')
@@ -407,12 +422,12 @@ Deno.serve(async (req) => {
 
     // 9) Registro estruturado dos anexos (gt_task_attachments) — alimenta a
     //    contagem/badge da tarefa; o painel visível lê do HTML da descrição.
-    const attachmentsRows = FILE_FIELDS.map((f) => ({
+    const attachmentsRows = enviados.map((f) => ({
       task_id: task.id,
-      file_url: uploaded[f].url,
-      file_name: `${FILE_LABELS[f]} — ${uploaded[f].fileName}`,
-      file_type: files[f].type || 'application/octet-stream',
-      file_size: files[f].size,
+      file_url: uploaded[f]!.url,
+      file_name: `${FILE_LABELS[f]} — ${uploaded[f]!.fileName}`,
+      file_type: files[f]!.type || 'application/octet-stream',
+      file_size: files[f]!.size,
     }))
     const { error: attErr } = await supabase
       .from('gt_task_attachments')
@@ -436,10 +451,11 @@ Deno.serve(async (req) => {
         turma: dadosParsed.turma,
         orientador: dadosParsed.orientador,
         tituloTcc: dadosParsed.tituloTcc,
+        // Anexo opcional não enviado não entra no objeto
         arquivos: Object.fromEntries(
-          FILE_FIELDS.map((f) => [
+          enviados.map((f) => [
             f,
-            { path: uploaded[f].path, url: uploaded[f].url, fileName: uploaded[f].fileName },
+            { path: uploaded[f]!.path, url: uploaded[f]!.url, fileName: uploaded[f]!.fileName },
           ]),
         ),
       },
