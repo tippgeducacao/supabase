@@ -24,12 +24,11 @@ export const LINK_ESCOLA_GRATUITA = 'https://escoladeespecializacao.ppgvet.com.b
  * prompt, a detecção (`jaTemOPresente`) e o webchat: UTM entre os nossos próprios sites
  * abriria sessão nova na GA4 e apagaria a origem real da visita.
  */
-/** "aaaa-mm" do envio, no fuso de Brasília. */
-export const mesDoEnvio = (agora: Date = new Date()): string =>
-  agora.toLocaleDateString('sv-SE', { timeZone: 'America/Sao_Paulo' }).slice(0, 7);
-
-/** Campanha da Escola gratuita: tipo `curso` com o mês do ENVIO, sozinho (decisão do usuário, 14/11/2026). */
-export const campanhaEscola = (agora?: Date): string => `curso-escola-de-especializacao-${mesDoEnvio(agora)}`;
+/**
+ * Campanha da Escola: `escola`, sem mês — a Escola fica sempre aberta, como a pós (decisão do usuário, 16/11/2026; antes
+ * `curso-escola-de-especializacao-<mês>`). É o mesmo nome que o gerador Links com UTM monta para a página geral da Escola.
+ */
+export const campanhaEscola = (): string => 'escola';
 
 export const linkEscolaWhatsapp = (meio: 'ia' | 'automacao'): string =>
   `${LINK_ESCOLA_GRATUITA}/?utm_source=whatsapp&utm_medium=social&utm_campaign=${campanhaEscola()}&utm_term=${meio}`;

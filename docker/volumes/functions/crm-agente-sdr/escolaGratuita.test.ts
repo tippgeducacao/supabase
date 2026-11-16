@@ -7,7 +7,6 @@ import {
   jaTemOPresente,
   LINK_ESCOLA_GRATUITA,
   linkEscolaWhatsapp,
-  mesDoEnvio,
   marcarLinkEscola,
   mereceOPresente,
   pediuLinkDaEscola,
@@ -24,11 +23,10 @@ const merece = (e: Parameters<typeof mereceOPresente>[0], jaEsta = false) => mer
 const comPresente = (t: string, e: Parameters<typeof mereceOPresente>[0], conversa: string, jaEsta = false) =>
   comPresenteNaDespedida(t, e, conversa, jaEsta, true);
 
-describe('campanha da Escola (14/11/2026)', () => {
-  it('leva o mês do envio no fuso de Brasília', () => {
-    // 1º/12 às 01h UTC ainda é 30/11 em Brasília.
-    expect(campanhaEscola(new Date('2026-12-01T01:00:00Z'))).toBe('curso-escola-de-especializacao-2026-11');
-    expect(mesDoEnvio(new Date('2026-12-01T12:00:00Z'))).toBe('2026-12');
+describe('campanha da Escola (16/11/2026)', () => {
+  it('é "escola", sem mês, igual ao gerador Links com UTM', () => {
+    expect(campanhaEscola()).toBe('escola');
+    expect(new URL(linkEscolaWhatsapp('ia')).searchParams.get('utm_campaign')).toBe('escola');
   });
 });
 
