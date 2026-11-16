@@ -71,6 +71,7 @@ import { etapaPorCampo } from "./arquivosValidacao.ts";
 import { decidirAvanco, etapasDeOrigem } from "./avancarCard.ts";
 import { nomeComPrefixo } from "./prefixoNome.ts";
 import { codigoErroEmpresa, dadosDaEmpresa, falhaDaEmpresa, responsavelDaEmpresa } from "./empresaWebhook.ts";
+import { rotearSites } from "./roteador.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -518,6 +519,12 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
       erro: "corpo nao reconhecido (esperado JSON, form-urlencoded ou multipart)", ip_origem: ipOrigem, ...reqMeta,
     });
     return json({ error: "invalid_body" }, 400);
+  }
+
+  // (3.4) ROTEADOR dos sites (16/11/2026): a porta única escolhe a ficha destino pela etiqueta
+  // e a chama por dentro; a receita da ficha roda abaixo, como em qualquer integração.
+  if (integration.processador === "roteador") {
+    return rotearSites({ req, payload, admin, roteador: integration, ipOrigem, receber: (r) => receberWebhook(r) });
   }
 
   // (3.5) MODO MAPEAMENTO ("escuta" do builder) — DRY-RUN.
