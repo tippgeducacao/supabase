@@ -64,18 +64,43 @@ export function aplicarUtm(href: string, utm: Utm | null | undefined): string {
 }
 
 /** Só os nossos sites leem UTM (GA4 e formulário do CRM); link de terceiro sai como veio. */
-const NOSSO_SITE = /^https?:\/\/([a-z0-9-]+\.)*(ppgvet|ppgeducacao)\.com\.br(?=[/?#:]|$)/i;
+export const NOSSO_SITE = /^https?:\/\/([a-z0-9-]+\.)*(ppgvet|ppgeducacao)\.com\.br(?=[/?#:]|$)/i;
+
+const DATA_NO_FIM = /(?:^|-)((?:jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez|q[1-4])-\d{4})$/;
 
 /**
- * UTM do e-mail no padrão da casa (ver `src/lib/marketing/utmPadrao.ts`):
- * source e medium `email`, campanha = nome do modelo em slug. Não sobrescreve
- * o que o autor já pôs no link (é o `aplicarUtm`).
+ * Nome de modelo/disparo → campanha no padrão v4 (`src/lib/marketing/utmPadrao.ts`, 17/11/2026): minúsculo, sem acento,
+ * palavras com hífen, sem número (só a data do fim, `nov-2026`, fica).
+ * "Seletivo Professores 2026 | Pré-inscrição" → "seletivo-professores-pre-inscricao".
+ */
+export function utmNomeDoEnvio(nome: string | null | undefined): string {
+  const v = (nome ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  const data = v.match(DATA_NO_FIM)?.[1] ?? "";
+  const resto = data ? v.slice(0, v.length - data.length) : v;
+  const limpo = resto.replace(/[0-9]+/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "");
+  return [limpo, data].filter(Boolean).join("-");
+}
+
+/**
+ * UTM do e-mail no padrão da casa: source e medium `email`, campanha = nome do modelo. Não sobrescreve o que o autor já
+ * pôs no link (é o `aplicarUtm`).
  */
 export function utmDoEmail(href: string, nomeModelo: string | null | undefined): string {
   if (!NOSSO_SITE.test(href.trim())) return href;
-  const campanha = (nomeModelo ?? "").normalize("NFD").replace(/[̀-ͯ]/g, "")
-    .toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-  return aplicarUtm(href, { source: "email", medium: "email", campaign: campanha || null });
+  return aplicarUtm(href, { source: "email", medium: "email", campaign: utmNomeDoEnvio(nomeModelo) || null });
+}
+
+/** Marca os `href` de um HTML pronto com a UTM do e-mail (todo envio, não só campanha: 17/11/2026). */
+export function marcarLinksDoEmailNoHtml(html: string, nomeModelo: string | null | undefined): string {
+  if (!html) return html;
+  return html.replace(
+    /(<a\b[^>]*?\bhref\s*=\s*)(["'])(.*?)\2/gi,
+    (inteiro, antes: string, aspas: string, href: string) => {
+      const cru = decodificarHref(href);
+      const novo = utmDoEmail(cru, nomeModelo);
+      return novo === cru ? inteiro : `${antes}${aspas}${escaparHref(novo)}${aspas}`;
+    },
+  );
 }
 
 /**

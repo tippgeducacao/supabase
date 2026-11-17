@@ -27,7 +27,7 @@ import { campanhaEscola } from "../crm-agente-sdr/escolaGratuita.ts";
 
 // UTM no padrão de src/lib/marketing/utmPadrao.ts: direct do @ppgvet_oficial (o único com a IA), lugar = dm.
 export const linkEscola = (): string =>
-  `https://escoladeespecializacao.ppgvet.com.br/?utm_source=instagram_ppgvet&utm_medium=social&utm_campaign=${campanhaEscola()}&utm_term=dm`;
+  `https://escoladeespecializacao.ppgvet.com.br/?utm_source=instagram-ppgvet&utm_medium=social&utm_campaign=${campanhaEscola()}&utm_content=dm`;
 /** A IA do direct se apresenta com este nome (decisão do Gustavo, 25/09/2026). */
 export const NOME_AGENTE = "Flávia";
 

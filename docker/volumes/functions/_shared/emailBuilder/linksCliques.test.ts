@@ -2,9 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { envolverCliquesNoHtml, utmDoEmail } from "./links.ts";
 
 describe("UTM do e-mail", () => {
-  it("marca link nosso com email/email e o nome do modelo em slug", () => {
+  it("marca link nosso com email/email e o nome do modelo em slug, sem número (padrão v4)", () => {
     expect(utmDoEmail("https://www.ppgvet.com.br/sanidade#form", "03/11 09:00 | Produção de Suínos"))
-      .toBe("https://www.ppgvet.com.br/sanidade?utm_source=email&utm_campaign=03-11-09-00-producao-de-suinos&utm_medium=email#form");
+      .toBe("https://www.ppgvet.com.br/sanidade?utm_source=email&utm_campaign=producao-de-suinos&utm_medium=email#form");
   });
   it("não sobrescreve UTM escrita à mão e só completa o que falta", () => {
     expect(utmDoEmail("https://escoladeespecializacao.ppgvet.com.br/?utm_content=b", "X"))

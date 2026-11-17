@@ -230,7 +230,7 @@ describe('marcarLinkEscola', () => {
   });
   it('mantém o caminho do link', () => {
     expect(marcarLinkEscola('https://escoladeespecializacao.ppgvet.com.br/ee-cmmv'))
-      .toBe(`https://escoladeespecializacao.ppgvet.com.br/ee-cmmv?utm_source=whatsapp&utm_medium=social&utm_campaign=${campanhaEscola()}&utm_term=ia`);
+      .toBe(`https://escoladeespecializacao.ppgvet.com.br/ee-cmmv?utm_source=whatsapp&utm_medium=social&utm_campaign=${campanhaEscola()}&utm_content=ia`);
   });
   it('não mexe em link já marcado nem em texto sem link', () => {
     expect(marcarLinkEscola(`oi ${marcado}`)).toBe(`oi ${marcado}`);

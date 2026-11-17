@@ -12,7 +12,8 @@
 // domínio que manda o e-mail de aprovação de TCC. Ver docs/E-mail e Caixas.md.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { formatarFrom, linkCliqueEmail, linkDescadastro, tagSegura } from "../_shared/envioComum.ts";
-import { envolverCliquesNoHtml, utmDoEmail } from "../_shared/emailBuilder/links.ts";
+import { envolverCliquesNoHtml, marcarLinksDoEmailNoHtml, utmNomeDoEnvio } from "../_shared/emailBuilder/links.ts";
+import { marcarLinksNoTexto } from "../_shared/utmEnvio.ts";
 import { urlPublicaEmail } from "../_shared/urlPublicaEmail.ts";
 import { ErroEnvio, obterProvedor, provedorEfetivo } from "../_shared/emailProviders/index.ts";
 import { buscarSupressao, supressaoSeAplica } from "../_shared/supressao.ts";
@@ -275,6 +276,11 @@ Deno.serve(async (req) => {
       if (corpoTexto) corpoTexto = renderTemplate(corpoTexto, dados);
     }
 
+    // UTM em TODO e-mail, não só no de campanha, e também na parte em texto (17/11/2026, padrão v4 de
+    // src/lib/marketing/utmPadrao.ts): só link de site nosso, e o que o autor já marcou fica como está.
+    corpoHtml = marcarLinksDoEmailNoHtml(corpoHtml, nomeModelo);
+    if (corpoTexto) corpoTexto = marcarLinksNoTexto(corpoTexto, { source: "email", medium: "email", campaign: utmNomeDoEnvio(nomeModelo) || null });
+
     // Resolve remetente -> caixa Gmail
     if (!remetenteId) {
       return new Response(JSON.stringify({ error: "remetente_id obrigatório" }), {
@@ -466,7 +472,7 @@ Deno.serve(async (req) => {
       try {
         corpoHtml = await envolverCliquesNoHtml(
           corpoHtml,
-          (href, info) => linkCliqueEmail(basePublicaEmail, log.id, utmDoEmail(href, nomeModelo), info),
+          (href, info) => linkCliqueEmail(basePublicaEmail, log.id, href, info),
           // O descadastro precisa chegar inteiro: tem token próprio e é o que o
           // Gmail aciona no one-click.
           (href) => href.includes("/functions/v1/email-descadastro") || href.includes("/functions/v1/email-track-"),

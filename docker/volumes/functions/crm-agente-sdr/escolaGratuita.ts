@@ -20,7 +20,7 @@ export const LINK_ESCOLA_GRATUITA = 'https://escoladeespecializacao.ppgvet.com.b
 
 /**
  * O link que SAI no WhatsApp, com UTM no padrão de `src/lib/marketing/utmPadrao.ts`
- * (WhatsApp individual: source whatsapp, medium social, term = quem mandou; 14/11/2026). O cru acima fica para o
+ * (WhatsApp individual: source whatsapp, medium social, peça = quem mandou; padrão v4 de 17/11/2026, antes no utm_term). O cru acima fica para o
  * prompt, a detecção (`jaTemOPresente`) e o webchat: UTM entre os nossos próprios sites
  * abriria sessão nova na GA4 e apagaria a origem real da visita.
  */
@@ -31,7 +31,7 @@ export const LINK_ESCOLA_GRATUITA = 'https://escoladeespecializacao.ppgvet.com.b
 export const campanhaEscola = (): string => 'escola';
 
 export const linkEscolaWhatsapp = (meio: 'ia' | 'automacao'): string =>
-  `${LINK_ESCOLA_GRATUITA}/?utm_source=whatsapp&utm_medium=social&utm_campaign=${campanhaEscola()}&utm_term=${meio}`;
+  `${LINK_ESCOLA_GRATUITA}/?utm_source=whatsapp&utm_medium=social&utm_campaign=${campanhaEscola()}&utm_content=${meio}`;
 
 /**
  * 14/10/2026 (Gustavo): "vamos parar de enviar o link da escola de especialização". Desligado, o

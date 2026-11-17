@@ -6,6 +6,7 @@ import { MidiaInvalida } from "../_shared/midiaRecebida.ts";
 import { exigirAcesso, respostaAcessoNegado, AcessoNegado, type Chamador } from "../_shared/acesso.ts";
 import { criarMidiaEnvio } from "../_shared/midiaEnvioAutorizada.ts";
 import { conferirUrlPublica } from "../_shared/urlMidiaPublica.ts";
+import { marcarComponentsDoModelo, marcarLinksNoTexto, utmDoWhatsapp } from "../_shared/utmEnvio.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -55,15 +56,19 @@ Deno.serve(async (req) => {
       conversa_id,
       telefone,
       tipo,
-      conteudo,
+      conteudo: conteudoBruto,
       template_name,
       template_lang,
       template_components,
       media_url,
       media_filename,
-      caption,
+      caption: captionBruto,
       reply_to_wa_message_id,
     } = body ?? {};
+    // UTM nos links de site nosso que saem sem marca (17/11/2026, `_shared/utmEnvio.ts`).
+    const utmWa = utmDoWhatsapp(template_name);
+    const conteudo = typeof conteudoBruto === "string" ? marcarLinksNoTexto(conteudoBruto, utmWa) : conteudoBruto;
+    const caption = typeof captionBruto === "string" ? marcarLinksNoTexto(captionBruto, utmWa) : captionBruto;
 
     if (!conversa_id || !telefone || !tipo) {
       return new Response(
@@ -208,7 +213,7 @@ Deno.serve(async (req) => {
         template: {
           name: template_name,
           language: { code: template_lang || "pt_BR" },
-          components: await midia.componentes(Array.isArray(template_components) ? template_components : []),
+          components: await midia.componentes(marcarComponentsDoModelo(Array.isArray(template_components) ? template_components : [], utmWa)),
         },
       };
     } else {
@@ -271,7 +276,7 @@ Deno.serve(async (req) => {
     } else if (tipo === "template") {
       // Renderiza {{1}}, {{2}}... com os parâmetros realmente enviados; sem cadastro
       // do template (ou sem corpo), mantém o rótulo antigo como fallback.
-      const params: string[] = (Array.isArray(template_components) ? template_components : [])
+      const params: string[] = marcarComponentsDoModelo(Array.isArray(template_components) ? template_components : [], utmWa)
         .filter((c: any) => c?.type === "body")
         .flatMap((c: any) => (Array.isArray(c.parameters) ? c.parameters : []))
         .map((p: any) => String(p?.text ?? ""));

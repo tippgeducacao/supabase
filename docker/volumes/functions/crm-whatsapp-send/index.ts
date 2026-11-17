@@ -16,6 +16,7 @@ import { MidiaInvalida } from "../_shared/midiaRecebida.ts";
 import { criarMidiaEnvio, type MidiaEnvio } from "../_shared/midiaEnvioAutorizada.ts";
 import { conferirUrlPublica } from "../_shared/urlMidiaPublica.ts";
 import { linkDaAgendaNoEnvio, linkDeAgendamentoComNumero } from "../_shared/agendaLeadLink.ts";
+import { marcarComponentsDoModelo, marcarLinksNoTexto, utmDoWhatsapp } from "../_shared/utmEnvio.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -455,7 +456,7 @@ Deno.serve(async (req) => {
       wa_conexao_id,
       telefone,
       tipo = "text",
-      conteudo,
+      conteudo: conteudoBruto,
       template_name,
       template_lang,
       template_components,
@@ -506,6 +507,11 @@ Deno.serve(async (req) => {
       interactive_list_button,
       interactive_sections,
     } = body ?? {};
+
+    // UTM nos links de site nosso que saem sem marca (17/11/2026, `_shared/utmEnvio.ts`): todo envio de WhatsApp passa
+    // aqui (fluxo, automação, disparo, réguas, agentes, envio manual), então ninguém precisa marcar link à mão.
+    const utmWa = utmDoWhatsapp(template_name);
+    const conteudo = typeof conteudoBruto === "string" ? marcarLinksNoTexto(conteudoBruto, utmWa) : conteudoBruto;
 
     if (!telefone || !tipo) {
       return json({ error: "telefone e tipo são obrigatórios" }, 400);
@@ -782,7 +788,7 @@ Deno.serve(async (req) => {
         text: { body: String(conteudo).slice(0, 4096), preview_url: true },
       };
     } else if (tipo === "template") {
-      let comps = sanitizarComponentsTemplate(template_components);
+      let comps = marcarComponentsDoModelo(sanitizarComponentsTemplate(template_components), utmWa);
       // LINK DA AGENDA DO COMERCIAL (16/11/2026). Modelo cujo botão de URL aponta para
       // /agendar-reuniao/{{1}} recebe AQUI o link do lead, assinado junto com o número que
       // está enviando — o mesmo motivo da mídia do cabeçalho logo abaixo: este é o ponto
@@ -1234,7 +1240,7 @@ Deno.serve(async (req) => {
       }
       if (!corpo && corpoVencido) corpo = corpoVencido;
       // Renderiza com os componentes JÁ saneados, p/ o texto persistido bater com o enviado.
-      if (corpo) templateTexto = renderTemplate(corpo, sanitizarComponentsTemplate(template_components));
+      if (corpo) templateTexto = renderTemplate(corpo, marcarComponentsDoModelo(sanitizarComponentsTemplate(template_components), utmWa));
     }
 
     // Conteúdo persistido (texto real do template quando temos o corpo; caption/nome do doc).
