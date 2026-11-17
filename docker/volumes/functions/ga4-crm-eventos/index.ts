@@ -2,8 +2,9 @@
 //
 // Uma vez por dia (pg_cron), manda ao GA4 (G-4548Y6L079) as etapas dos leads que têm
 // ga_client_id (o número do visitante no cookie _ga, mandado pelos sites no formulário):
-// crm_reuniao_agendada, crm_reuniao_realizada e crm_matricula (com valor em BRL). O site já
-// manda generate_lead; com estas três o GA4 mostra o funil inteiro até a matrícula.
+// crm_reuniao_agendada, crm_reuniao_realizada e a matrícula como `purchase` (17/11/2026: valor em
+// BRL, a pós em items e transaction_id = event_id; é o evento-chave padrão do GA4 e entra na receita).
+// O site já manda generate_lead; com estas três o GA4 mostra o funil inteiro até a matrícula.
 // Irmã da google-crm-conversoes (mesma régua de etapas); ver docs/Marketing — Mídia Paga.md.
 //
 // O GA4 aceita evento datado de até 72 h atrás (doc: developers.google.com/analytics/devguides/
@@ -34,6 +35,8 @@ export type Pendente = {
   event_time: string;
   ga_client_id: string;
   valor: number | string | null; // só na matrícula, em BRL
+  curso_id?: string | null; // só na matrícula
+  curso_nome?: string | null;
 };
 
 /** Corpo do Measurement Protocol para UMA etapa de UM lead. */
@@ -43,10 +46,23 @@ export function montarEvento(p: Pendente, agora = Date.now()) {
   return {
     client_id: p.ga_client_id,
     ...(Number.isFinite(t) && agora - t <= LIMITE_DATA_MS && t <= agora ? { timestamp_micros: t * 1000 } : {}),
-    events: [{
-      name: p.etapa,
-      params: valor > 0 ? { value: valor, currency: "BRL" } : {},
-    }],
+    events: [p.etapa === "crm_matricula"
+      ? {
+        // purchase exige transaction_id e items com item_id ou item_name (doc: developers.google.com/
+        // analytics/devguides/collection/protocol/ga4/reference/events#purchase).
+        name: "purchase",
+        params: {
+          transaction_id: p.event_id,
+          ...(valor > 0 ? { value: valor, currency: "BRL" } : {}),
+          items: [{
+            ...(p.curso_id ? { item_id: p.curso_id } : {}),
+            item_name: p.curso_nome || "Matrícula",
+            ...(valor > 0 ? { price: valor } : {}),
+            quantity: 1,
+          }],
+        },
+      }
+      : { name: p.etapa, params: valor > 0 ? { value: valor, currency: "BRL" } : {} }],
   };
 }
 
