@@ -22,7 +22,7 @@ import {
   enviarModeloPodcast, formatPhone, modeloAprovadoPorUso, parametrosDoModelo, primeiroNomePodcast, telefoneLegivel,
   type CtxPodcast,
 } from "../_shared/podcastEnvio.ts";
-import { agradHostPula, dataBR, horaBR, LEMBRETES, planoDeLembretes } from "../_shared/podcastLembretes.ts";
+import { agradHostPula, dataBR, horaBR, LEMBRETES, planoDeLembretes, telefoneConvidadoParaHost } from "../_shared/podcastLembretes.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -107,7 +107,8 @@ Deno.serve(async (req: Request) => {
         host: a.host?.nome ?? null,
         nomeHost: a.host?.nome ? primeiroNomePodcast(a.host.nome) : null,
         convidado: a.convidado?.nome ?? null,
-        telefoneConvidado: telefoneLegivel(a.convidado?.contato_whatsapp) || null,
+        // Só os modelos do host usam; sem o número do convidado, sai "não informado" em vez de travar.
+        telefoneConvidado: telefoneConvidadoParaHost(telefoneLegivel(a.convidado?.contato_whatsapp)),
         linkAcesso: a.link_acesso ?? null,
         linkBriefing: a.link_briefing ?? null,
         usuarioAcesso: a.usuario_acesso ?? null,

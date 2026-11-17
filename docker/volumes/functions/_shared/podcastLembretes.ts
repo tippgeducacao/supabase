@@ -143,3 +143,16 @@ export function agradHostPula(nomeModelo: string | null | undefined, inicio: str
   if (nomeModelo !== "agrad_host_podcast") return false;
   return !gravadoEm || diaBR(new Date(gravadoEm)) !== diaBR(new Date(inicio));
 }
+
+/**
+ * O que vai no "Contato do convidado: {{6}}" dos lembretes do HOST. Sem WhatsApp do convidado no
+ * cadastro, o {{6}} ficava vazio e o lembrete do host esperava para sempre, sem registrar nada —
+ * a Letticie (Suinocast, gravação de 23/11/2026 com a Monike) ficou sem a confirmação e sem os
+ * lembretes de 15 e 7 dias. O host recebe assim mesmo; o dado que falta é avisado no próprio texto.
+ */
+export const TELEFONE_CONVIDADO_AUSENTE = "não informado";
+
+export function telefoneConvidadoParaHost(telefoneLegivelDoConvidado: string | null | undefined): string {
+  const t = (telefoneLegivelDoConvidado ?? "").trim();
+  return t || TELEFONE_CONVIDADO_AUSENTE;
+}

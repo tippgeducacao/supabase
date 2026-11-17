@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agradHostPula, dataBR, diaBR, emBR, horaBR, planoDeLembretes } from "./podcastLembretes";
+import { agradHostPula, dataBR, diaBR, emBR, horaBR, planoDeLembretes, TELEFONE_CONVIDADO_AUSENTE, telefoneConvidadoParaHost } from "./podcastLembretes";
 import { parametrosDoModelo, resolverVarPodcast, telefoneLegivel } from "./podcastEnvio";
 
 /**
@@ -171,5 +171,23 @@ describe("variáveis da gravação", () => {
     expect(telefoneLegivel("46 9 9927-0638")).toBe("(46) 99927-0638");
     expect(telefoneLegivel("+5546999270638")).toBe("(46) 99927-0638");
     expect(telefoneLegivel(null)).toBe("");
+  });
+});
+
+describe("telefoneConvidadoParaHost", () => {
+  const MAP = { "1": "nome_host", "6": "telefone_convidado" };
+
+  it("convidado sem WhatsApp no cadastro não trava o lembrete do host (Letticie × Monike, 17/11/2026)", () => {
+    for (const cadastro of [null, "", "   "]) {
+      const tel = telefoneConvidadoParaHost(telefoneLegivel(cadastro));
+      expect(tel).toBe(TELEFONE_CONVIDADO_AUSENTE);
+      const { vazios } = parametrosDoModelo(MAP, { nome: "", podcast: "Suinocast", youtube: "", nomeHost: "Letticie", telefoneConvidado: tel });
+      expect(vazios).toEqual([]);
+    }
+  });
+
+  it("com o número, vai o número legível", () => {
+    expect(telefoneConvidadoParaHost(telefoneLegivel("+55 19 98299-4484"))).toBe(telefoneLegivel("+55 19 98299-4484"));
+    expect(telefoneConvidadoParaHost(telefoneLegivel("+55 19 98299-4484"))).not.toBe(TELEFONE_CONVIDADO_AUSENTE);
   });
 });
