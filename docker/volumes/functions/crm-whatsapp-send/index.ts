@@ -15,7 +15,7 @@ import { linhaDaMensagemReagida } from "./linhaDaReacao.ts";
 import { MidiaInvalida } from "../_shared/midiaRecebida.ts";
 import { criarMidiaEnvio, type MidiaEnvio } from "../_shared/midiaEnvioAutorizada.ts";
 import { conferirUrlPublica } from "../_shared/urlMidiaPublica.ts";
-import { linkDaAgendaNoEnvio } from "../_shared/agendaLeadLink.ts";
+import { linkDaAgendaNoEnvio, linkDeAgendamentoComNumero } from "../_shared/agendaLeadLink.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -800,6 +800,11 @@ Deno.serve(async (req) => {
         }
         comps = agenda.comps as any[];
       }
+      // "Link de agendamento" no TEXTO (17/11/2026): a variável sai do banco com o link do
+      // lead sem o número (o resolvedor não sabe por qual número o envio vai sair). Aqui o
+      // link ganha o número que está enviando. Sem link no texto, nada é consultado; se a
+      // troca falhar, o link segue como veio e abre a agenda do lead do mesmo jeito.
+      comps = (await linkDeAgendamentoComNumero(admin, comps, accountId)) as any[];
       // Template com CABEÇALHO DE MÍDIA (IMAGE/VIDEO/DOCUMENT) EXIGE, em todo envio, o
       // componente de header com a mídia — senão a Meta recusa com 132012 ("header:
       // Format mismatch, expected IMAGE, received UNKNOWN"). O nosso envio só monta o

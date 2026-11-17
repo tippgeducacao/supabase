@@ -138,3 +138,64 @@ export async function linkDaAgendaNoEnvio(
   }
   return { aplica: true, ok: true, comps: comBotaoDaAgenda(p.comps, Number(r.indice ?? 0), String(r.valor)), tipo: String(r.tipo ?? "") };
 }
+
+/**
+ * "LINK DE AGENDAMENTO" NO TEXTO DO MODELO (17/11/2026, pedido do Gustavo: "cria uma variável,
+ * Link de agendamento").
+ *
+ * A variável é resolvida no banco (`crm_template_montar_components`), que devolve o endereço
+ * inteiro do link do lead com 56 hex: aquele ponto não sabe por qual número o envio vai sair.
+ * Aqui, onde o número é conhecido, o link vira o de 88 hex (lead + número que envia), o mesmo
+ * que o botão leva. Só age quando há um link desses no texto: modelo comum não consulta nada.
+ * Se a troca falhar, o link de 56 hex segue como veio: ele abre a agenda do lead do mesmo
+ * jeito, só não diz de qual número saiu.
+ */
+const LINK_DO_LEAD_NO_TEXTO = /\/agendar-reuniao\/([0-9a-f]{56})(?![0-9a-f])/g;
+const TOKEN_DO_ENVIO = /^[0-9a-f]{88}$/;
+
+export async function linkDeAgendamentoComNumero(admin: Rpc, comps: unknown[], contaId: unknown): Promise<unknown[]> {
+  const conta = String(contaId ?? "");
+  if (!Array.isArray(comps) || !UUID.test(conta)) return comps;
+
+  const tokens = new Set<string>();
+  for (const c of comps) {
+    const params = (c as Record<string, unknown>)?.parameters;
+    if (!Array.isArray(params)) continue;
+    for (const p of params) {
+      const texto = (p as Record<string, unknown>)?.text;
+      if (typeof texto !== "string") continue;
+      for (const m of texto.matchAll(LINK_DO_LEAD_NO_TEXTO)) tokens.add(m[1]);
+    }
+  }
+  if (tokens.size === 0) return comps;
+
+  const trocas = new Map<string, string>();
+  for (const token of tokens) {
+    try {
+      const { data, error } = await admin.rpc("agenda_lead_link_com_numero", { p_token: token, p_conta: conta });
+      if (error) throw new Error(error.message ?? "erro");
+      if (typeof data === "string" && TOKEN_DO_ENVIO.test(data)) trocas.set(token, data);
+    } catch (e) {
+      console.error("[agenda-lead-link] link do texto segue sem o número:", (e as Error)?.message);
+    }
+  }
+  if (trocas.size === 0) return comps;
+
+  return comps.map((c) => {
+    const comp = c as Record<string, unknown>;
+    if (!Array.isArray(comp?.parameters)) return c;
+    return {
+      ...comp,
+      parameters: comp.parameters.map((p) => {
+        const param = p as Record<string, unknown>;
+        if (typeof param?.text !== "string") return p;
+        return {
+          ...param,
+          text: param.text.replace(LINK_DO_LEAD_NO_TEXTO, (tudo: string, token: string) =>
+            trocas.has(token) ? `/agendar-reuniao/${trocas.get(token)}` : tudo,
+          ),
+        };
+      }),
+    };
+  });
+}

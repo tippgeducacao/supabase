@@ -3,6 +3,7 @@ import {
   comBotaoDaAgenda,
   esquecerModelosDaAgenda,
   linkDaAgendaNoEnvio,
+  linkDeAgendamentoComNumero,
   modeloLevaLinkDaAgenda,
   modelosComLinkDaAgenda,
 } from "./agendaLeadLink";
@@ -148,5 +149,74 @@ describe("modelo da agenda sai com o link do lead", () => {
     const b = banco({ ...lista, agenda_lead_link_para_envio: { data: { aplica: true, ok: true, indice: 0, valor: "c".repeat(20), tipo: "geral" } } });
     await linkDaAgendaNoEnvio(b, { wabaId: "waba1", template: "convite_agenda", contaId: CONTA, leadId: "não-é-uuid", comps: [] });
     expect(b.chamadas[1].args?.p_lead).toBeNull();
+  });
+});
+
+/**
+ * "LINK DE AGENDAMENTO" NO TEXTO (17/11/2026). A variável sai do banco com o link do lead sem o
+ * número; a edge põe o número que está enviando. O que não pode acontecer: modelo comum pagar
+ * consulta, e uma falha na troca derrubar o envio ou estragar o link.
+ */
+describe("o link de agendamento no texto ganha o número que envia", () => {
+  const T56 = "b".repeat(56);
+  const T88 = "c".repeat(88);
+  const SITE = "https://sistema.invalid/agendar-reuniao/";
+  const corpo = (texto: string) => [
+    { type: "body", parameters: [{ type: "text", text: "Ana" }, { type: "text", text: texto }] },
+  ];
+
+  it("troca o link de 56 hex pelo de 88, e deixa o resto do texto como está", async () => {
+    const b = banco({ agenda_lead_link_com_numero: { data: T88 } });
+    const r = await linkDeAgendamentoComNumero(b, corpo(`Escolha aqui: ${SITE}${T56} até sexta`), CONTA);
+    expect(r).toEqual(corpo(`Escolha aqui: ${SITE}${T88} até sexta`));
+    expect(b.chamadas).toEqual([{ fn: "agenda_lead_link_com_numero", args: { p_token: T56, p_conta: CONTA } }]);
+  });
+
+  it("modelo sem o link no texto não consulta nada e volta igual", async () => {
+    const b = banco({});
+    const comps = corpo("hoje às 19h30");
+    expect(await linkDeAgendamentoComNumero(b, comps, CONTA)).toBe(comps);
+    expect(b.chamadas).toEqual([]);
+  });
+
+  it("o link que já tem o número (88 hex) e o link geral (20 hex) não são mexidos", async () => {
+    const b = banco({ agenda_lead_link_com_numero: { data: T88 } });
+    const comps = corpo(`${SITE}${T88} ou ${SITE}${"d".repeat(20)}`);
+    expect(await linkDeAgendamentoComNumero(b, comps, CONTA)).toBe(comps);
+    expect(b.chamadas).toEqual([]);
+  });
+
+  it("falha na troca: o link de 56 hex segue como veio, e o envio não para", async () => {
+    const b = banco({ agenda_lead_link_com_numero: { error: { message: "timeout" } } });
+    const comps = corpo(`${SITE}${T56}`);
+    expect(await linkDeAgendamentoComNumero(b, comps, CONTA)).toBe(comps);
+  });
+
+  it("o banco recusou o link (assinatura que não confere): nada é trocado", async () => {
+    const b = banco({ agenda_lead_link_com_numero: { data: null } });
+    const comps = corpo(`${SITE}${T56}`);
+    expect(await linkDeAgendamentoComNumero(b, comps, CONTA)).toBe(comps);
+  });
+
+  it("sem conta válida não há número para pôr no link", async () => {
+    const b = banco({ agenda_lead_link_com_numero: { data: T88 } });
+    const comps = corpo(`${SITE}${T56}`);
+    expect(await linkDeAgendamentoComNumero(b, comps, "conexao-web")).toBe(comps);
+    expect(b.chamadas).toEqual([]);
+  });
+
+  it("o mesmo link em duas variáveis é consultado uma vez só", async () => {
+    const b = banco({ agenda_lead_link_com_numero: { data: T88 } });
+    const comps = [
+      { type: "header", parameters: [{ type: "text", text: `${SITE}${T56}` }] },
+      { type: "body", parameters: [{ type: "text", text: `${SITE}${T56}` }] },
+      // o botão do modelo leva só o token, sem o endereço: não é assunto desta função
+      { type: "button", sub_type: "url", index: 0, parameters: [{ type: "text", text: T56 }] },
+    ];
+    const r = (await linkDeAgendamentoComNumero(b, comps, CONTA)) as typeof comps;
+    expect(b.chamadas).toHaveLength(1);
+    expect(r[0].parameters[0].text).toBe(`${SITE}${T88}`);
+    expect(r[1].parameters[0].text).toBe(`${SITE}${T88}`);
+    expect(r[2]).toEqual(comps[2]);
   });
 });
