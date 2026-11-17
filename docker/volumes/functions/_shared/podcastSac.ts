@@ -108,6 +108,33 @@ export function acaoDoBotaoPodcast(rotulo: string | null | undefined, modelo: st
   return null;
 }
 
+/** Só dígitos, com o 55 quando é número brasileiro sem DDI — a mesma régua do espelho
+ *  `ped_msg_espelhar_no_crm` ("(54) 99997-6959" vira 5554999976959). */
+function telefoneComDdi(raw: string | null | undefined): string {
+  const d = String(raw ?? "").replace(/\D/g, "");
+  return d.length === 10 || d.length === 11 ? "55" + d : d;
+}
+
+/**
+ * Telefone NOVO para gravar na conversa, ou null se não precisa mexer.
+ *
+ * `metadata.telefone` nascia no 1º envio e nunca mais mudava. O espelho no CRM lê esse
+ * campo ANTES do cadastro, então quem trocou de número continuava com os lembretes
+ * aparecendo no card do número velho, embora a Meta os entregasse no novo (Luciana
+ * Domingues, 16–17/11/2026). Só o OUTBOUND atualiza: é o número para onde a mensagem
+ * acabou de sair. Inbound não mexe (a pessoa pode escrever do número antigo).
+ */
+export function telefoneNovoDaConversa(
+  direcao: "inbound" | "outbound",
+  guardado: string | null | undefined,
+  enviadoPara: string | null | undefined,
+): string | null {
+  if (direcao !== "outbound") return null;
+  const novo = telefoneComDdi(enviadoPara);
+  if (novo.length < 10) return null;
+  return telefoneComDdi(guardado) === novo ? null : novo;
+}
+
 // Best-effort: nunca lança (o disparo/webhook não pode falhar por causa do espelho no SAC).
 export async function logPodcastConversaSac(admin: any, m: PodcastConversaMsg): Promise<void> {
   try {
@@ -117,7 +144,7 @@ export async function logPodcastConversaSac(admin: any, m: PodcastConversaMsg): 
     let conversaId: string | null = null;
     const { data: existente } = await admin
       .from("ped_conversas_avulsas")
-      .select("id")
+      .select("id, metadata")
       .contains("professores_alvo", [m.professorId])
       .filter("metadata->>origem", "eq", "podcast_convite")
       .order("created_at", { ascending: false })
@@ -126,6 +153,16 @@ export async function logPodcastConversaSac(admin: any, m: PodcastConversaMsg): 
 
     if (existente?.id) {
       conversaId = existente.id;
+      // O número mudou no cadastro: a conversa passa a guardar o novo ANTES de inserir a
+      // mensagem — o trigger de espelho lê metadata.telefone no INSERT.
+      const telNovo = telefoneNovoDaConversa(m.direcao, existente.metadata?.telefone, m.telefone);
+      if (telNovo) {
+        const { error: telErr } = await admin
+          .from("ped_conversas_avulsas")
+          .update({ metadata: { ...(existente.metadata ?? {}), telefone: telNovo } })
+          .eq("id", conversaId);
+        if (telErr) console.error("[podcastSac] atualiza telefone erro:", telErr.message);
+      }
     } else {
       const { data: nova, error: convErr } = await admin
         .from("ped_conversas_avulsas")

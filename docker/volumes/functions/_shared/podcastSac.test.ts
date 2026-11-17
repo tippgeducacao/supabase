@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ACOES_DE_RECUSA, acaoDoBotaoPodcast, acaoDoCliquePodcast, ehBotaoDeRecusa } from "./podcastSac";
+import { ACOES_DE_RECUSA, acaoDoBotaoPodcast, acaoDoCliquePodcast, ehBotaoDeRecusa, telefoneNovoDaConversa } from "./podcastSac";
 
 /**
  * Tabela de botões do PDF "Processo de Podcasts PPGVET" (22/10/2026): a ação depende do rótulo E
@@ -105,5 +105,29 @@ describe("acaoDoCliquePodcast", () => {
     ]) {
       expect(acaoDoCliquePodcast(rotulo), rotulo).toBeNull();
     }
+  });
+});
+
+describe("telefoneNovoDaConversa", () => {
+  it("cadastro trocado: o envio leva a conversa para o número novo (caso da Luciana, 16/11/2026)", () => {
+    expect(telefoneNovoDaConversa("outbound", "+55 15 99729-9771", "15 99610-1978")).toBe("5515996101978");
+  });
+
+  it("mesmo número escrito de outro jeito não regrava", () => {
+    expect(telefoneNovoDaConversa("outbound", "+55 15 99610-1978", "15 99610-1978")).toBeNull();
+    expect(telefoneNovoDaConversa("outbound", "5515996101978", "(15) 99610-1978")).toBeNull();
+  });
+
+  it("conversa sem telefone guardado ganha o do envio", () => {
+    expect(telefoneNovoDaConversa("outbound", null, "5515996101978")).toBe("5515996101978");
+  });
+
+  it("resposta da pessoa (inbound) nunca mexe — ela pode escrever do número antigo", () => {
+    expect(telefoneNovoDaConversa("inbound", "5515996101978", "5515997299771")).toBeNull();
+  });
+
+  it("envio sem número válido não apaga o que está guardado", () => {
+    expect(telefoneNovoDaConversa("outbound", "5515996101978", null)).toBeNull();
+    expect(telefoneNovoDaConversa("outbound", "5515996101978", "123")).toBeNull();
   });
 });
