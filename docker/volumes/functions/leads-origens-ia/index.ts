@@ -59,6 +59,7 @@ const SUB: Record<string, string> = {
   tiktok_perfil: "TIKTOK › Perfil/bio",
   tiktok_sem_marca: "TIKTOK › Sem marca de tráfego",
   indicacao: "INDICAÇÃO",
+  whatsapp_grupo: "WHATSAPP", // sem grupos desde 18/11/2026
   organico_captacao: "ORGÂNICOS › Captação do time (SDR)",
   organico_declarado: "ORGÂNICOS › Declarado no cadastro",
   sem_utm_pagina: "SEM UTM › Formulário de página sem UTM",
@@ -78,8 +79,7 @@ const SUB: Record<string, string> = {
 const nomeSub = (s: string) =>
   SUB[s] ??
   (s.startsWith("link_bio") ? `LINK NA BIO › ${s.replace("link_bio_", "")}` :
-   s.startsWith("linkedin") ? `LINKEDIN › ${s.replace("linkedin_", "")}` :
-   s.startsWith("whatsapp_") ? `GRUPOS DE WHATSAPP › ${s.replace("whatsapp_", "")}` : s);
+   s.startsWith("linkedin") ? `LINKEDIN › ${s.replace("linkedin_", "")}` : s);
 const NAT: Record<string, string> = { pago: "MÍDIA PAGA", organico: "ORGÂNICO", sem_rastro: "SEM RASTRO" };
 
 const pct = (a: number, b: number) => (b > 0 ? `${((a / b) * 100).toFixed(2)}%` : "—");
