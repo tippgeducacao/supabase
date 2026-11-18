@@ -24,15 +24,20 @@
 //   "A conexão caiu no meio do envio". Internet lenta + PDF grande = falha.
 //   Continua aceito para não quebrar a versão do formulário que ainda está no ar.
 //
-// ── Modo 2 (NOVO): JSON em duas etapas, arquivos em pedaços de 1 MB ──────────
+// ── Modo 2 (NOVO): JSON em etapas, arquivos em pedaços de 1 MB ───────────────
 //   1. { operacao: "preparar", envioId: <uuid gerado no navegador>,
 //        arquivos: [{ campo, nome, tipo, tamanho }] }
 //      → { ok, protocolo, envioId, tamanhoParte,
-//          arquivos: [{ campo, contentType, partes: [urlAssinada, ...] }] }
-//      O navegador faz PUT de cada pedaço (file.slice) na sua URL, com
-//      Content-Type = contentType. Cada pedaço é um pedido curto: não esbarra
-//      no corte de ~60 s, e um pedaço que falha é só repetido.
-//   2. { operacao: "concluir", envioId, dados, arquivos: [mesma lista] }
+//          arquivos: [{ campo, contentType, totalPartes }] }
+//   2. Para CADA pedaço, logo antes de enviá-lo:
+//      { operacao: "assinar", envioId, arquivos: [mesma lista], campo, parte: i }
+//      → { ok, url, contentType }
+//      e PUT do pedaço (file.slice) na url, com Content-Type = contentType.
+//      O link vale só 60 s no nosso Storage (conferido no FIM do upload; medido
+//      em 18/11/2026), por isso é pedido um a um e não todos no "preparar".
+//      Cada pedaço é um pedido curto: não esbarra no corte de ~60 s da borda,
+//      e um pedaço que falha é só repetido (com link novo).
+//   3. { operacao: "concluir", envioId, dados, arquivos: [mesma lista] }
 //      → confere que todos os pedaços chegaram com o tamanho certo, junta cada
 //        arquivo, grava no lugar definitivo, apaga os pedaços e cria a tarefa.
 //      Repetir o "concluir" de um envio já concluído devolve a mesma tarefa
@@ -299,19 +304,6 @@ const nomeDaParte = (i: number) => String(i).padStart(4, '0')
 const quantasPartes = (tamanho: number) => Math.ceil(tamanho / PARTE_BYTES)
 const tamanhoDaParte = (a: ArquivoDeclarado, i: number) =>
   i < quantasPartes(a.tamanho) - 1 ? PARTE_BYTES : a.tamanho - PARTE_BYTES * (quantasPartes(a.tamanho) - 1)
-
-async function emLotes<T, R>(itens: T[], paralelo: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const saida: R[] = new Array(itens.length)
-  let proximo = 0
-  const trabalhadores = Array.from({ length: Math.min(paralelo, itens.length) }, async () => {
-    while (proximo < itens.length) {
-      const i = proximo++
-      saida[i] = await fn(itens[i])
-    }
-  })
-  await Promise.all(trabalhadores)
-  return saida
-}
 
 /** Grava um arquivo no lugar definitivo e devolve o anexo. */
 async function gravarDefinitivo(
@@ -593,7 +585,21 @@ async function receberMultipart(req: Request, supabase: SupabaseClient): Promise
 }
 
 // ── Modo 2: JSON em pedaços (novo) ───────────────────────────────────────────
-async function preparar(
+function preparar(body: Record<string, unknown>): Response {
+  const envioId = String(body.envioId ?? '')
+  if (!UUID_RE.test(envioId)) return jsonResponse({ ok: false, error: 'Identificador do envio inválido' }, 400)
+  const arquivos = validarManifesto(body.arquivos)
+  return jsonResponse({
+    ok: true,
+    protocolo: protocoloDoEnvio(envioId),
+    envioId,
+    tamanhoParte: PARTE_BYTES,
+    arquivos: arquivos.map((a) => ({ campo: a.campo, contentType: a.tipo, totalPartes: quantasPartes(a.tamanho) })),
+  })
+}
+
+/** Link de envio de UM pedaço, pedido logo antes de enviá-lo (vale 60 s). */
+async function assinar(
   body: Record<string, unknown>,
   supabase: SupabaseClient,
   segredo: string,
@@ -601,30 +607,19 @@ async function preparar(
   const envioId = String(body.envioId ?? '')
   if (!UUID_RE.test(envioId)) return jsonResponse({ ok: false, error: 'Identificador do envio inválido' }, 400)
   const arquivos = validarManifesto(body.arquivos)
-
-  const saida = []
-  for (const a of arquivos) {
-    const pasta = await pastaDasPartes(segredo, envioId, a)
-    const indices = Array.from({ length: quantasPartes(a.tamanho) }, (_, i) => i)
-    const partes = await emLotes(indices, 8, async (i) => {
-      const { data, error } = await supabase.storage
-        .from(BUCKET)
-        .createSignedUploadUrl(`${pasta}/${nomeDaParte(i)}`, { upsert: true })
-      if (error || !data) throw new Error(`assinar parte: ${error?.message}`)
-      // O runtime self-hosted assina com o Kong interno; o navegador recebe a origem pública.
-      const link = new URL(data.signedUrl)
-      return `${PUBLIC_SUPABASE_URL}${link.pathname}${link.search}`
-    })
-    saida.push({ campo: a.campo, contentType: a.tipo, partes })
+  const a = arquivos.find((x) => x.campo === body.campo)
+  const parte = Number(body.parte)
+  if (!a || !Number.isInteger(parte) || parte < 0 || parte >= quantasPartes(a.tamanho)) {
+    return jsonResponse({ ok: false, error: 'Pedaço inválido' }, 400)
   }
-
-  return jsonResponse({
-    ok: true,
-    protocolo: protocoloDoEnvio(envioId),
-    envioId,
-    tamanhoParte: PARTE_BYTES,
-    arquivos: saida,
-  })
+  const pasta = await pastaDasPartes(segredo, envioId, a)
+  const { data, error } = await supabase.storage
+    .from(BUCKET)
+    .createSignedUploadUrl(`${pasta}/${nomeDaParte(parte)}`, { upsert: true })
+  if (error || !data) throw new Error(`assinar parte: ${error?.message}`)
+  // O runtime self-hosted assina com o Kong interno; o navegador recebe a origem pública.
+  const link = new URL(data.signedUrl)
+  return jsonResponse({ ok: true, url: `${PUBLIC_SUPABASE_URL}${link.pathname}${link.search}`, contentType: a.tipo })
 }
 
 async function concluir(
@@ -726,7 +721,8 @@ async function receberJson(req: Request, supabase: SupabaseClient, segredo: stri
     return jsonResponse({ ok: false, error: 'JSON inválido' }, 400)
   }
   if (!body || typeof body !== 'object') return jsonResponse({ ok: false, error: 'JSON inválido' }, 400)
-  if (body.operacao === 'preparar') return preparar(body, supabase, segredo)
+  if (body.operacao === 'preparar') return preparar(body)
+  if (body.operacao === 'assinar') return assinar(body, supabase, segredo)
   if (body.operacao === 'concluir') return concluir(body, supabase, segredo)
   return jsonResponse({ ok: false, error: 'Operação inválida' }, 400)
 }
