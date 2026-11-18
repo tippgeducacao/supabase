@@ -21,6 +21,7 @@
 // _get_google_datamanager_sa(). A conta precisa ser usuária da conta do Google Ads.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { tokenDaContaDeServico } from "../_shared/googleContaServico.ts";
 
 const CONTA_GOOGLE_ADS = "9744900197";
 const ACAO_POR_ETAPA: Record<string, string> = {
@@ -34,9 +35,6 @@ const LOTE = 2000;
 
 const json = (corpo: unknown, status = 200) =>
   new Response(JSON.stringify(corpo), { status, headers: { "Content-Type": "application/json" } });
-
-const b64url = (bytes: Uint8Array) =>
-  btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 
 async function sha256(texto: string): Promise<string> {
   const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(texto));
@@ -61,30 +59,6 @@ export function telefoneGoogle(bruto: string | null): string | null {
   if (d.length === 10 || d.length === 11) return "+55" + d;
   if (d.startsWith("55") && (d.length === 12 || d.length === 13)) return "+" + d;
   return null;
-}
-
-/** Access token da conta de serviço (JWT assinado RS256 → oauth2 token). */
-export async function tokenDaContaDeServico(sa: { client_email: string; private_key: string; token_uri?: string }) {
-  const agora = Math.floor(Date.now() / 1000);
-  const aud = sa.token_uri || "https://oauth2.googleapis.com/token";
-  const enc = new TextEncoder();
-  const cab = b64url(enc.encode(JSON.stringify({ alg: "RS256", typ: "JWT" })));
-  const carga = b64url(enc.encode(JSON.stringify({ iss: sa.client_email, scope: ESCOPO, aud, iat: agora, exp: agora + 3600 })));
-  const pem = sa.private_key.replace(/-----[^-]+-----/g, "").replace(/\s+/g, "");
-  const der = Uint8Array.from(atob(pem), (c) => c.charCodeAt(0));
-  const chave = await crypto.subtle.importKey("pkcs8", der, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
-  const assinatura = new Uint8Array(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", chave, enc.encode(`${cab}.${carga}`)));
-  const resp = await fetch(aud, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-      assertion: `${cab}.${carga}.${b64url(assinatura)}`,
-    }),
-  });
-  const r = await resp.json().catch(() => ({}));
-  if (!resp.ok || !r.access_token) throw new Error(`token Google: HTTP ${resp.status} ${r.error_description || r.error || ""}`);
-  return r.access_token as string;
 }
 
 type Pendente = {
@@ -162,7 +136,7 @@ Deno.serve(async (req) => {
     const { data: saTexto, error: errSa } = await supabase.rpc("_get_google_datamanager_sa");
     if (errSa) throw errSa;
     if (typeof saTexto !== "string" || !saTexto) return json({ ok: false, erro: "Sem a chave 'google_datamanager_sa' no vault" }, 500);
-    const token = await tokenDaContaDeServico(JSON.parse(saTexto));
+    const token = await tokenDaContaDeServico(JSON.parse(saTexto), ESCOPO);
 
     let aceitos = 0;
     const falhas: string[] = [];
