@@ -27,6 +27,8 @@ export interface RespostaGa4 {
   por_dia: LinhaGa4[];
   por_utm: LinhaGa4[];
   por_pagina: LinhaGa4[];
+  /** form_start por página de entrada (aba Páginas, 19/11); ausente = edge de antes. */
+  comecou_por_pagina?: LinhaGa4[];
   por_canal: LinhaGa4[];
   sites: LinhaGa4[];
   cortado: { por_utm: boolean; por_pagina: boolean };
@@ -194,14 +196,22 @@ export interface LinhaPagina extends Linha {
   slug: string | null;
   /** Caminho como o GA4 mostra (o primeiro visto), para o link. */
   caminho: string | null;
+  /** Visitas que entraram pela página (com a rejeição medida) e, delas, as não engajadas (bounceRate × visitas, para somar endereços da mesma página). */
+  sessoes: number;
+  rejeitadas: number;
+  /** Pessoas que entraram pela página e começaram um formulário na visita (form_start). */
+  comecou: number;
 }
 
-export function juntarPaginas(ga4: LinhaGa4[], crm: RespostaCrm['por_pagina']): LinhaPagina[] {
+/** Rejeição em % (visitas não engajadas ÷ visitas); sem visita, null. */
+export const rejeicao = (p: Pick<LinhaPagina, 'sessoes' | 'rejeitadas'>) => taxa(p.rejeitadas, p.sessoes);
+
+export function juntarPaginas(ga4: LinhaGa4[], crm: RespostaCrm['por_pagina'], comecou: LinhaGa4[] = []): LinhaPagina[] {
   const mapa = new Map<string, LinhaPagina>();
   const pegar = (host: string | null, slug: string | null, caminho: string | null) => {
     const id = `${host ?? ''}|${slug ?? ''}`;
     let l = mapa.get(id);
-    if (!l) mapa.set(id, (l = { ...zero(), host, slug, caminho }));
+    if (!l) mapa.set(id, (l = { ...zero(), host, slug, caminho, sessoes: 0, rejeitadas: 0, comecou: 0 }));
     if (!l.caminho && caminho) l.caminho = caminho;
     return l;
   };
@@ -209,7 +219,19 @@ export function juntarPaginas(ga4: LinhaGa4[], crm: RespostaCrm['por_pagina']): 
     const host = semWww(String(g.host ?? ''));
     const caminho = String(g.pagina ?? '');
     if (caminho === '(not set)') continue;
-    somarGa4(pegar(host, slugDaPagina(`${host}${caminho}`), caminho), g);
+    const l = pegar(host, slugDaPagina(`${host}${caminho}`), caminho);
+    somarGa4(l, g);
+    // Sem `rejeicao` (edge de antes) a visita não entra na conta: a tela mostra "—", não 0%.
+    if (g.rejeicao !== undefined) {
+      l.sessoes += Number(g.sessoes ?? 0);
+      l.rejeitadas += Number(g.sessoes ?? 0) * Number(g.rejeicao);
+    }
+  }
+  for (const g of comecou) {
+    const host = semWww(String(g.host ?? ''));
+    const caminho = String(g.pagina ?? '');
+    if (caminho === '(not set)') continue;
+    pegar(host, slugDaPagina(`${host}${caminho}`), caminho).comecou += Number(g.usuarios ?? 0);
   }
   for (const c of crm) somarCrm(pegar(semWww(c.host), c.slug, null), c);
   return [...mapa.values()].sort((a, b) => b.pessoas - a.pessoas || b.leads - a.leads);

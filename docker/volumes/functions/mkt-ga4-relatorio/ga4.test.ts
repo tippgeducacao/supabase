@@ -77,13 +77,22 @@ describe('mkt-ga4-relatorio', () => {
     for (const site of [null, 'site.ppgvet.com.br']) {
       const { lote, anterior, experimentos } = montarRelatorios({ inicio: '2026-11-10', fim: '2026-11-16', site });
       for (const r of [...lote.requests, ...anterior.requests, experimentos]) expect(JSON.stringify(r.dimensionFilter)).toContain('teste_claude');
-      expect(anterior.requests).toHaveLength(4); // limite do batchRunReports é 5
-      const [, , atual, ant] = anterior.requests;
+      expect(anterior.requests).toHaveLength(5); // limite do batchRunReports é 5
+      const [, , atual, ant, porPagina] = anterior.requests;
+      expect(JSON.stringify(porPagina.dimensionFilter)).toContain('form_start');
+      expect((porPagina as { dimensions?: { name: string }[] }).dimensions?.map((d) => d.name)).toEqual(['hostName', 'landingPage']);
       expect(JSON.stringify(atual.dimensionFilter)).toContain('form_start');
       expect(atual.dateRanges).toEqual([{ startDate: '2026-11-10', endDate: '2026-11-16' }]);
       expect(ant.dateRanges).toEqual([{ startDate: '2026-11-03', endDate: '2026-11-09' }]);
     }
     expect(FORA_DO_ANALYTICS).toContain('ppgteste.ppgvet.com.br');
+  });
+
+  it('página de entrada traz a rejeição', () => {
+    const { lote } = montarRelatorios({ inicio: '2026-11-10', fim: '2026-11-16', site: null });
+    expect(lote.requests[3].metrics.map((x) => x.name)).toContain('bounceRate');
+    expect(linhas({ dimensionHeaders: [{ name: 'landingPage' }], metricHeaders: [{ name: 'sessions' }, { name: 'bounceRate' }], rows: [{ dimensionValues: [{ value: '/pos-x' }], metricValues: [{ value: '40' }, { value: '0.25' }] }] }))
+      .toEqual([{ pagina: '/pos-x', sessoes: 40, rejeicao: 0.25 }]);
   });
 
   it('lê as linhas com nome curto, data e número', () => {

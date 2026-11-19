@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { comAnterior, desistencia, funil, paginaRelevante, semUtmNoCrm, juntarDias, linkDaVersao, juntarPaginas, juntarUtm, ordenar, sitesDoSeletor, slugDaPagina, testesPorSorteio, valorUtm, variacao } from './mktAnalytics.ts';
+import { comAnterior, desistencia, funil, paginaRelevante, rejeicao, semUtmNoCrm, juntarDias, linkDaVersao, juntarPaginas, juntarUtm, ordenar, sitesDoSeletor, slugDaPagina, testesPorSorteio, valorUtm, variacao } from './mktAnalytics.ts';
 
 const crm = (n: number) => ({ leads: n, qualificados: 0, reunioes: 0, matriculas: 0 });
 
@@ -66,6 +66,24 @@ describe('juntar GA4 e CRM', () => {
       [{ host: 'site.ppgvet.com.br', slug: 'site', ...crm(2) }],
     );
     expect(r).toEqual([expect.objectContaining({ slug: 'site', pessoas: 5, leads: 2 })]);
+  });
+
+  it('página: rejeição refeita pelo total de visitas (nunca média das %) e começou o formulário somado', () => {
+    // A mesma pós com e sem query string vira uma linha só: 30 visitas a 10% + 10 visitas a 50% = 8 de 40 = 20%.
+    const r = juntarPaginas(
+      [
+        { host: 'site.ppgvet.com.br', pagina: '/pos-x', usuarios: 25, pessoas_lead: 2, sessoes: 30, rejeicao: 0.1 },
+        { host: 'site.ppgvet.com.br', pagina: '/pos-x/', usuarios: 8, pessoas_lead: 0, sessoes: 10, rejeicao: 0.5 },
+      ],
+      [],
+      [{ host: 'site.ppgvet.com.br', pagina: '/pos-x', usuarios: 6 }, { host: 'site.ppgvet.com.br', pagina: '/pos-x/', usuarios: 1 }],
+    );
+    expect(r).toHaveLength(1);
+    expect(r[0]).toMatchObject({ sessoes: 40, comecou: 7 });
+    expect(rejeicao(r[0])).toBeCloseTo(20);
+    expect(rejeicao({ sessoes: 0, rejeitadas: 0 })).toBeNull();
+    // Edge de antes, sem a rejeição: "—", nunca 0%.
+    expect(rejeicao(juntarPaginas([{ host: 'site.ppgvet.com.br', pagina: '/pos-x', usuarios: 5, sessoes: 6 }], [])[0])).toBeNull();
   });
 
   it('dias: período inteiro, inclusive o dia sem nada', () => {

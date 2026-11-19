@@ -72,6 +72,7 @@ const NOME: Record<string, string> = {
   totalUsers: "usuarios",
   [LEAD]: "leads",
   [TAXA_PESSOA]: "taxa_pessoa",
+  bounceRate: "rejeicao",
 };
 
 type Filtro = Record<string, unknown>;
@@ -132,7 +133,8 @@ export function montarRelatorios(p: PedidoGa4) {
         orderBys: porSessoes,
         limit: 2000,
       },
-      { dateRanges, dimensions: m("hostName", "landingPage"), metrics: m("sessions", "totalUsers", LEAD, TAXA_PESSOA), dimensionFilter: doSite, orderBys: porSessoes, limit: 2000 },
+      // bounceRate = visitas não engajadas (menos de 10 s, 1 página e sem evento-chave), em fração. Aba Páginas, 19/11.
+      { dateRanges, dimensions: m("hostName", "landingPage"), metrics: m("sessions", "totalUsers", LEAD, TAXA_PESSOA, "bounceRate"), dimensionFilter: doSite, orderBys: porSessoes, limit: 2000 },
       { dateRanges, dimensions: m("sessionDefaultChannelGroup"), metrics: m("sessions", "totalUsers", LEAD, TAXA_PESSOA), dimensionFilter: doSite, orderBys: porSessoes },
     ],
   };
@@ -142,9 +144,13 @@ export function montarRelatorios(p: PedidoGa4) {
     metrics: m("totalUsers"),
     dimensionFilter: { andGroup: { expressions: [filtroCampo("eventName", "form_start"), doSite] } },
   });
-  // O período anterior: só o total e o dia a dia, para a comparação e a linha fraca do gráfico; e o form_start dos dois.
+  // O período anterior: só o total e o dia a dia, para a comparação e a linha fraca do gráfico; o form_start dos dois;
+  // e o form_start por página de entrada (aba Páginas, 19/11), que cabe aqui como o 5º (limite do batchRunReports).
   const anterior = {
-    requests: [...[lote.requests[0], lote.requests[1]].map((r) => ({ ...r, dateRanges: dateRangesAnt })), comecou(dateRanges), comecou(dateRangesAnt)],
+    requests: [
+      ...[lote.requests[0], lote.requests[1]].map((r) => ({ ...r, dateRanges: dateRangesAnt })), comecou(dateRanges), comecou(dateRangesAnt),
+      { ...comecou(dateRanges), dimensions: m("hostName", "landingPage"), limit: 2000 },
+    ],
   };
   const doEvento = filtroCampo("eventName", "experience_impression");
   const experimentos = {
@@ -264,6 +270,8 @@ export interface RespostaGa4 {
   por_dia: LinhaGa4[];
   por_utm: LinhaGa4[];
   por_pagina: LinhaGa4[];
+  /** Pessoas que começaram um formulário, por página de entrada (aba Páginas). */
+  comecou_por_pagina: LinhaGa4[];
   /** Agrupamento padrão de canais do GA4 (orgânico, pago, direto…). */
   por_canal: LinhaGa4[];
   /** hostName × sessões no período, sem o filtro de site (lista do seletor). */
@@ -316,7 +324,7 @@ export async function consultarGa4(token: string, p: PedidoGa4, guardado?: Guard
     ]);
     return {
       resumo: RESUMO_VAZIO, resumo_anterior: RESUMO_VAZIO, periodo_anterior: periodoAnterior(p),
-      por_dia_anterior: [], por_dia: [], por_utm: [], por_pagina: [], por_canal: [], sites: [],
+      por_dia_anterior: [], por_dia: [], por_utm: [], por_pagina: [], comecou_por_pagina: [], por_canal: [], sites: [],
       cortado: { por_utm: false, por_pagina: false },
       ...lerExperimentos(e),
       experimentos_detalhe: d instanceof Error ? null : d,
@@ -329,7 +337,7 @@ export async function consultarGa4(token: string, p: PedidoGa4, guardado?: Guard
     post(token, "runReport", sites),
   ]);
   const [resumo, porDia, porUtm, porPagina, porCanal] = (l.reports ?? []) as RelatorioGa4[];
-  const [resumoAnt, porDiaAnt, comecouAtual, comecouAnt] = (a.reports ?? []) as RelatorioGa4[];
+  const [resumoAnt, porDiaAnt, comecouAtual, comecouAnt, comecouPag] = (a.reports ?? []) as RelatorioGa4[];
   const total = (r: RelatorioGa4 | undefined, c: RelatorioGa4 | undefined): Resumo => {
     const t = linhas(r ?? {})[0] ?? {};
     return {
@@ -345,6 +353,7 @@ export async function consultarGa4(token: string, p: PedidoGa4, guardado?: Guard
     por_dia: linhas(porDia ?? {}),
     por_utm: linhas(porUtm ?? {}),
     por_pagina: linhas(porPagina ?? {}),
+    comecou_por_pagina: linhas(comecouPag ?? {}),
     por_canal: linhas(porCanal ?? {}),
     sites: linhas(s),
     cortado: { por_utm: (porUtm?.rowCount ?? 0) > 2000, por_pagina: (porPagina?.rowCount ?? 0) > 2000 },
