@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FORA_DO_ANALYTICS, linhas, montarRelatorios, periodoAnterior, validarPedido } from './ga4';
+import { FORA_DO_ANALYTICS, linhas, montarRelatorios, periodoAnterior, pontosAcumulados, validarPedido } from './ga4';
 
 describe('mkt-ga4-relatorio', () => {
   it('período anterior: mesmo tamanho, logo antes', () => {
@@ -21,8 +21,10 @@ describe('mkt-ga4-relatorio', () => {
 
   it('valida o pedido', () => {
     expect(validarPedido({ inicio: '2026-11-01', fim: '2026-11-30', site: 'Site.PPGVET.com.br' })).toEqual({
-      inicio: '2026-11-01', fim: '2026-11-30', site: 'site.ppgvet.com.br',
+      inicio: '2026-11-01', fim: '2026-11-30', site: 'site.ppgvet.com.br', detalhe: false,
     });
+    expect(validarPedido({ inicio: '2026-11-18', fim: '2026-11-18', detalhe: true }).detalhe).toBe(true);
+    expect(validarPedido({ inicio: '2026-11-18', fim: '2026-11-18', detalhe: 'sim' }).detalhe).toBe(false);
     expect(validarPedido({ inicio: '2026-11-01', fim: '2026-11-01' }).site).toBeNull();
     expect(() => validarPedido({ inicio: '2026-02-30', fim: '2026-03-01' })).toThrow();
     expect(() => validarPedido({ inicio: '2026-11-02', fim: '2026-11-01' })).toThrow();
@@ -45,6 +47,31 @@ describe('mkt-ga4-relatorio', () => {
     expect(todos.anterior.requests[0].dateRanges).toEqual([{ startDate: '2026-10-01', endDate: '2026-10-02' }]);
     // A lista de sites nunca leva o site escolhido, senão o seletor encolhe para um só.
     expect(JSON.stringify(montarRelatorios({ inicio: '2026-11-01', fim: '2026-11-02', site: 'site.ppgvet.com.br' }).sites)).not.toContain('site.ppgvet.com.br');
+  });
+
+  it('detalhe do teste: só quando pedido; série acumulada desde o início, por página, aparelho, hoje e form_start só nas pós', () => {
+    expect(montarRelatorios({ inicio: '2026-11-18', fim: '2026-11-20', site: null }).detalheTeste).toBeNull();
+    const { detalheTeste } = montarRelatorios({ inicio: '2026-11-18', fim: '2026-11-24', site: null, detalhe: true });
+    const [pagina, aparelho, form, hoje] = detalheTeste!.extras.requests;
+    expect(pagina.dimensions.map((d) => d.name)).toEqual(['customEvent:exp_variant_string', 'pagePath']);
+    expect(aparelho.dimensions.map((d) => d.name)).toEqual(['customEvent:exp_variant_string', 'deviceCategory']);
+    expect(JSON.stringify(form.dimensionFilter)).toContain('form_start');
+    expect(JSON.stringify(form.dimensionFilter)).toContain('^/pos-[a-z0-9]+/?$');
+    expect(hoje.dateRanges).toEqual([{ startDate: '2026-11-24', endDate: '2026-11-24' }]);
+    // 7 dias = 7 pontos, todos do início até o dia: 2 lotes (5 + 2).
+    expect(detalheTeste!.dias).toHaveLength(7);
+    expect(detalheTeste!.acumulado.map((l) => l.requests.length)).toEqual([5, 2]);
+    expect(detalheTeste!.acumulado[1].requests[1].dateRanges).toEqual([{ startDate: '2026-11-18', endDate: '2026-11-24' }]);
+    expect(JSON.stringify(detalheTeste!.acumulado[0].requests[0].dimensionFilter)).toContain('experience_impression');
+    expect(linhas({ dimensionHeaders: [{ name: 'customEvent:exp_variant_string' }, { name: 'deviceCategory' }], metricHeaders: [{ name: 'totalUsers' }], rows: [{ dimensionValues: [{ value: 'PPG-form-aberto-b' }, { value: 'mobile' }], metricValues: [{ value: '3' }] }] }))
+      .toEqual([{ exp: 'PPG-form-aberto-b', aparelho: 'mobile', usuarios: 3 }]);
+  });
+
+  it('série acumulada: no máximo 30 pontos, sempre com o último dia', () => {
+    expect(pontosAcumulados('2026-11-18', '2026-11-18')).toEqual(['2026-11-18']);
+    const longo = pontosAcumulados('2026-01-01', '2026-03-31'); // 90 dias
+    expect(longo.length).toBeLessThanOrEqual(30);
+    expect(longo.at(-1)).toBe('2026-03-31');
   });
 
   it('lê as linhas com nome curto, data e número', () => {

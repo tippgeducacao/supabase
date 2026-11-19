@@ -29,6 +29,8 @@ export interface PedidoGa4 {
   fim: string;
   /** hostName exato (ex.: site.ppgvet.com.br); null = todos os sites. */
   site: string | null;
+  /** Aba Testes A/B: traz também quem viu cada versão acumulado por dia, por página, por aparelho e hoje, e o form_start por versão. */
+  detalhe?: boolean;
 }
 
 const ehData = (v: unknown): v is string =>
@@ -41,7 +43,7 @@ export function validarPedido(corpo: unknown): PedidoGa4 {
   if (dias < 0 || dias > MAX_DIAS) throw new Error(`Período de 1 a ${MAX_DIAS + 1} dias`);
   const site = c.site == null || c.site === "" ? null : String(c.site).toLowerCase();
   if (site !== null && !/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(site)) throw new Error("site inválido");
-  return { inicio: c.inicio, fim: c.fim, site };
+  return { inicio: c.inicio, fim: c.fim, site, detalhe: c.detalhe === true };
 }
 
 /** Nome curto de cada campo do GA4 na resposta. */
@@ -55,6 +57,8 @@ const NOME: Record<string, string> = {
   hostName: "host",
   sessionDefaultChannelGroup: "canal",
   landingPage: "pagina",
+  pagePath: "caminho",
+  deviceCategory: "aparelho",
   "customEvent:exp_variant_string": "exp",
   sessions: "sessoes",
   totalUsers: "usuarios",
@@ -135,8 +139,50 @@ export function montarRelatorios(p: PedidoGa4) {
   };
   // Os sites que o GA4 vê no período, sem o filtro do site escolhido (é a lista do seletor), mas sem os de fora.
   const sites = { dateRanges, dimensions: m("hostName"), metrics: m("sessions"), dimensionFilter: semForaDoAnalytics, orderBys: porSessoes, limit: 200 };
-  return { lote, anterior, experimentos, sites };
+  // Detalhe do teste (só a aba Testes A/B pede: cada relatório gasta cota da propriedade).
+  // form_start por versão: a tag do GTM lê exp_variant_string do dataLayer, que guarda o último valor
+  // (variável v2), então o form_start da página em teste sai com a versão vista. Só nas páginas de pós,
+  // para não contar o valor que sobra depois de navegar para fora do teste.
+  const naPos: Filtro = { filter: { fieldName: "pagePath", stringFilter: { matchType: "FULL_REGEXP", value: "^/pos-[a-z0-9]+/?$" } } };
+  const dias = p.detalhe ? pontosAcumulados(p.inicio, p.fim) : [];
+  const detalheTeste = p.detalhe
+    ? {
+        extras: {
+          requests: [
+            { ...experimentos, dimensions: m("customEvent:exp_variant_string", "pagePath") },
+            { ...experimentos, dimensions: m("customEvent:exp_variant_string", "deviceCategory") },
+            {
+              dateRanges,
+              dimensions: m("customEvent:exp_variant_string"),
+              metrics: m("totalUsers"),
+              dimensionFilter: { andGroup: { expressions: [filtroCampo("eventName", "form_start"), naPos, doSite] } },
+              limit: 1000,
+            },
+            // Hoje: "versão sem ninguém hoje" (saúde do teste).
+            { ...experimentos, dateRanges: [{ startDate: p.fim, endDate: p.fim }] },
+          ],
+        },
+        // Pessoa não se soma de um dia para o outro no GA4: cada ponto acumulado é uma consulta do início até
+        // aquele dia (como o `ab.mjs ga4`), 5 por lote (limite do batchRunReports).
+        acumulado: lotes(dias.map((dia) => ({ ...experimentos, dateRanges: [{ startDate: p.inicio, endDate: dia }] })), 5),
+        dias,
+      }
+    : null;
+  return { lote, anterior, experimentos, sites, detalheTeste };
 }
+
+/**
+ * Os dias da série acumulada, do início ao fim. shortcut: no máximo 30 pontos (teste longo pula dias, sempre com o
+ * último), para não passar de 6 chamadas ao GA4 por abertura da aba; mais pontos se a cota sobrar.
+ */
+export function pontosAcumulados(inicio: string, fim: string, max = 30): string[] {
+  const dias: string[] = [];
+  for (let t = Date.parse(`${inicio}T00:00:00Z`); t <= Date.parse(`${fim}T00:00:00Z`); t += 864e5) dias.push(new Date(t).toISOString().slice(0, 10));
+  const passo = Math.ceil(dias.length / max);
+  return passo <= 1 ? dias : dias.filter((_, i) => (dias.length - 1 - i) % passo === 0);
+}
+
+const lotes = <T>(itens: T[], n: number) => Array.from({ length: Math.ceil(itens.length / n) }, (_, i) => ({ requests: itens.slice(i * n, i * n + n) }));
 
 interface RelatorioGa4 {
   dimensionHeaders?: { name: string }[];
@@ -191,6 +237,13 @@ export interface RespostaGa4 {
   /** null quando o GA4 não tem a dimensão exp_variant_string (ver aviso_experimentos). */
   experimentos: LinhaGa4[] | null;
   aviso_experimentos: string | null;
+  /**
+   * Só com `detalhe`: quem viu cada versão do início até cada dia (`acumulado`, com `dia`), por página, por aparelho e hoje,
+   * e quem começou o formulário. null = não pedido ou o GA4 falhou.
+   */
+  experimentos_detalhe: {
+    acumulado: LinhaGa4[]; por_pagina: LinhaGa4[]; por_aparelho: LinhaGa4[]; form_start: LinhaGa4[]; hoje: LinhaGa4[];
+  } | null;
 }
 
 async function post(token: string, metodo: string, corpo: unknown) {
@@ -205,12 +258,13 @@ async function post(token: string, metodo: string, corpo: unknown) {
 }
 
 export async function consultarGa4(token: string, p: PedidoGa4): Promise<RespostaGa4> {
-  const { lote, anterior, experimentos, sites } = montarRelatorios(p);
-  const [l, a, e, s] = await Promise.all([
+  const { lote, anterior, experimentos, sites, detalheTeste } = montarRelatorios(p);
+  const [l, a, e, s, d] = await Promise.all([
     post(token, "batchRunReports", lote),
     post(token, "batchRunReports", anterior),
     post(token, "runReport", experimentos).catch((err: Error) => err),
     post(token, "runReport", sites),
+    detalheTeste ? detalhar(token, detalheTeste).catch((err: Error) => err) : Promise.resolve(null),
   ]);
   const [resumo, porDia, porUtm, porPagina, porCanal] = (l.reports ?? []) as RelatorioGa4[];
   const [resumoAnt, porDiaAnt] = (a.reports ?? []) as RelatorioGa4[];
@@ -236,5 +290,21 @@ export async function consultarGa4(token: string, p: PedidoGa4): Promise<Respost
         ? "Falta a dimensão personalizada exp_variant_string no GA4: sem ela não dá para contar quem viu cada versão."
         : `O GA4 não respondeu sobre os testes: ${e.message}`
       : null,
+    experimentos_detalhe: d instanceof Error ? null : d,
   };
+}
+
+/** O detalhe do teste: os extras num lote e a série acumulada em lotes seguidos (sem estourar as chamadas simultâneas do GA4). */
+async function detalhar(token: string, d: NonNullable<ReturnType<typeof montarRelatorios>["detalheTeste"]>): Promise<RespostaGa4["experimentos_detalhe"]> {
+  const serie = async () => {
+    const out: LinhaGa4[] = [];
+    for (const [i, lote] of d.acumulado.entries()) {
+      const r = await post(token, "batchRunReports", lote);
+      ((r.reports ?? []) as RelatorioGa4[]).forEach((rep, j) => out.push(...linhas(rep).map((l) => ({ ...l, dia: d.dias[i * 5 + j] }))));
+    }
+    return out;
+  };
+  const [extras, acumulado] = await Promise.all([post(token, "batchRunReports", d.extras), serie()]);
+  const [pagina, aparelho, form, hoje] = (extras.reports ?? []) as RelatorioGa4[];
+  return { acumulado, por_pagina: linhas(pagina ?? {}), por_aparelho: linhas(aparelho ?? {}), form_start: linhas(form ?? {}), hoje: linhas(hoje ?? {}) };
 }
