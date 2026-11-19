@@ -14,6 +14,7 @@ import { tokenDaContaDeServico } from "../_shared/googleContaServico.ts";
 import type { RespostaCrm, RespostaGa4 } from "../_shared/mktAnalytics.ts";
 import { montarDetalhe, type TesteAb } from "../_shared/testeAbDetalhe.ts";
 import { consultarGa4, ESCOPO_GA4, validarPedido } from "../mkt-ga4-relatorio/ga4.ts";
+import { guardadoNoBanco } from "../mkt-ga4-relatorio/guardado.ts";
 import { avisosDoDia } from "./aviso.ts";
 
 const json = (corpo: unknown, status = 200) =>
@@ -57,7 +58,7 @@ Deno.serve(async (req) => {
     if (eSa) throw eSa;
     if (typeof saTexto !== "string" || !saTexto) return json({ erro: "Sem a chave do Google no vault" }, 503);
     const token = await tokenDaContaDeServico(JSON.parse(saTexto), ESCOPO_GA4);
-    const ga4 = (await consultarGa4(token, validarPedido({ inicio, fim: hoje, site: null, detalhe: true }))) as unknown as RespostaGa4;
+    const ga4 = (await consultarGa4(token, validarPedido({ inicio, fim: hoje, site: null, detalhe: true }), guardadoNoBanco(supabase))) as unknown as RespostaGa4;
     const { data: crm, error: eCrm } = await supabase.rpc("mkt_analytics_crm", { p_inicio: inicio, p_fim: hoje, p_site: null });
     if (eCrm) throw eCrm;
 

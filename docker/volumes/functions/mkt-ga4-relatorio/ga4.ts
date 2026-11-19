@@ -34,7 +34,10 @@ export interface PedidoGa4 {
   fim: string;
   /** hostName exato (ex.: site.ppgvet.com.br); null = todos os sites. */
   site: string | null;
-  /** Aba Testes A/B: traz também quem viu cada versão acumulado por dia, por página, por aparelho e hoje, e o form_start por versão. */
+  /**
+   * Aba Testes A/B (e o aviso das 8h): SÓ a parte dos testes, ou seja quem viu cada versão, acumulado por dia, por
+   * página, por aparelho e hoje, e o form_start por versão. Sem UTM, página, canal, período anterior e sites (19/11).
+   */
   detalhe?: boolean;
 }
 
@@ -177,8 +180,8 @@ export function montarRelatorios(p: PedidoGa4) {
           ],
         },
         // Pessoa não se soma de um dia para o outro no GA4: cada ponto acumulado é uma consulta do início até
-        // aquele dia (como o `ab.mjs ga4`), 5 por lote (limite do batchRunReports).
-        acumulado: lotes(dias.map((dia) => ({ ...experimentos, dateRanges: [{ startDate: p.inicio, endDate: dia }] })), 5),
+        // aquele dia (como o `ab.mjs ga4`).
+        pontoAcumulado: (dia: string) => ({ ...experimentos, dateRanges: [{ startDate: p.inicio, endDate: dia }] }),
         dias,
       }
     : null;
@@ -196,7 +199,24 @@ export function pontosAcumulados(inicio: string, fim: string, max = 30): string[
   return passo <= 1 ? dias : dias.filter((_, i) => (dias.length - 1 - i) % passo === 0);
 }
 
-const lotes = <T>(itens: T[], n: number) => Array.from({ length: Math.ceil(itens.length / n) }, (_, i) => ({ requests: itens.slice(i * n, i * n + n) }));
+/**
+ * Ponto da curva que o GA4 já fechou e pode ser guardado. Doc do GA4 ("Data freshness",
+ * support.google.com/analytics/answer/11198161): "Data processing can take 24-48 hours. During that time, data in
+ * your reports may change." Com 3 dias de folga, o dia guardado não muda mais. Pelo relógio, não pelo `fim` do pedido.
+ */
+export function diaFechado(dia: string, agora = new Date()): boolean {
+  return Date.parse(`${dia}T00:00:00Z`) <= agora.getTime() - 3 * 864e5;
+}
+
+/**
+ * Onde ficam os pontos fechados da curva (tabela `mkt_ga4_teste_acumulado`, `guardado.ts`): cada abertura só pede ao GA4 os dias novos.
+ * shortcut: o ponto guardado não sabe com que filtro foi contado; mudou FORA_DO_ANALYTICS, ORIGENS_DE_TESTE ou o
+ * `experimentos`, apagar a tabela (`delete from mkt_ga4_teste_acumulado`) na mesma mudança.
+ */
+export interface Guardado {
+  ler(chave: { inicio: string; site: string }, dias: string[]): Promise<Map<string, LinhaGa4[]>>;
+  gravar(chave: { inicio: string; site: string }, pontos: Map<string, LinhaGa4[]>): Promise<void>;
+}
 
 interface RelatorioGa4 {
   dimensionHeaders?: { name: string }[];
@@ -273,14 +293,40 @@ async function post(token: string, metodo: string, corpo: unknown) {
   return r;
 }
 
-export async function consultarGa4(token: string, p: PedidoGa4): Promise<RespostaGa4> {
+/** Quem viu cada versão no período e o aviso quando a dimensão falta ou o GA4 falha. */
+function lerExperimentos(e: RelatorioGa4 | Error): Pick<RespostaGa4, "experimentos" | "aviso_experimentos"> {
+  if (!(e instanceof Error)) return { experimentos: linhas(e), aviso_experimentos: null };
+  return {
+    experimentos: null,
+    aviso_experimentos: e.message.includes("exp_variant_string")
+      ? "Falta a dimensão personalizada exp_variant_string no GA4: sem ela não dá para contar quem viu cada versão."
+      : `O GA4 não respondeu sobre os testes: ${e.message}`,
+  };
+}
+
+const RESUMO_VAZIO: Resumo = { sessoes: 0, usuarios: 0, leads: 0, pessoas_lead: 0, comecou: 0 };
+
+export async function consultarGa4(token: string, p: PedidoGa4, guardado?: Guardado): Promise<RespostaGa4> {
   const { lote, anterior, experimentos, sites, detalheTeste } = montarRelatorios(p);
-  const [l, a, e, s, d] = await Promise.all([
+  if (detalheTeste) {
+    // Aba Testes A/B: só o que ela usa (o resto gastava cota e esperava à toa).
+    const [e, d] = await Promise.all([
+      post(token, "runReport", experimentos).catch((err: Error) => err),
+      detalhar(token, detalheTeste, { inicio: p.inicio, site: p.site ?? "" }, guardado).catch((err: Error) => err),
+    ]);
+    return {
+      resumo: RESUMO_VAZIO, resumo_anterior: RESUMO_VAZIO, periodo_anterior: periodoAnterior(p),
+      por_dia_anterior: [], por_dia: [], por_utm: [], por_pagina: [], por_canal: [], sites: [],
+      cortado: { por_utm: false, por_pagina: false },
+      ...lerExperimentos(e),
+      experimentos_detalhe: d instanceof Error ? null : d,
+    };
+  }
+  const [l, a, e, s] = await Promise.all([
     post(token, "batchRunReports", lote),
     post(token, "batchRunReports", anterior),
     post(token, "runReport", experimentos).catch((err: Error) => err),
     post(token, "runReport", sites),
-    detalheTeste ? detalhar(token, detalheTeste).catch((err: Error) => err) : Promise.resolve(null),
   ]);
   const [resumo, porDia, porUtm, porPagina, porCanal] = (l.reports ?? []) as RelatorioGa4[];
   const [resumoAnt, porDiaAnt, comecouAtual, comecouAnt] = (a.reports ?? []) as RelatorioGa4[];
@@ -291,7 +337,6 @@ export async function consultarGa4(token: string, p: PedidoGa4): Promise<Respost
       comecou: Number(linhas(c ?? {})[0]?.usuarios ?? 0),
     };
   };
-  const semDimensao = e instanceof Error && e.message.includes("exp_variant_string");
   return {
     resumo: total(resumo, comecouAtual),
     resumo_anterior: total(resumoAnt, comecouAnt),
@@ -303,27 +348,36 @@ export async function consultarGa4(token: string, p: PedidoGa4): Promise<Respost
     por_canal: linhas(porCanal ?? {}),
     sites: linhas(s),
     cortado: { por_utm: (porUtm?.rowCount ?? 0) > 2000, por_pagina: (porPagina?.rowCount ?? 0) > 2000 },
-    experimentos: e instanceof Error ? null : linhas(e),
-    aviso_experimentos: e instanceof Error
-      ? semDimensao
-        ? "Falta a dimensão personalizada exp_variant_string no GA4: sem ela não dá para contar quem viu cada versão."
-        : `O GA4 não respondeu sobre os testes: ${e.message}`
-      : null,
-    experimentos_detalhe: d instanceof Error ? null : d,
+    ...lerExperimentos(e),
+    experimentos_detalhe: null,
   };
 }
 
-/** O detalhe do teste: os extras num lote e a série acumulada em lotes seguidos (sem estourar as chamadas simultâneas do GA4). */
-async function detalhar(token: string, d: NonNullable<ReturnType<typeof montarRelatorios>["detalheTeste"]>): Promise<RespostaGa4["experimentos_detalhe"]> {
+/**
+ * O detalhe do teste: os extras num lote e a série acumulada. Os pontos fechados vêm do `guardado`; só os que faltam
+ * vão ao GA4, 5 por lote (limite do batchRunReports), um lote depois do outro (sem estourar as chamadas simultâneas).
+ * O guardado falhar nunca derruba a aba: pede tudo ao GA4, como antes.
+ */
+export async function detalhar(
+  token: string, d: NonNullable<ReturnType<typeof montarRelatorios>["detalheTeste"]>,
+  chave: { inicio: string; site: string }, guardado?: Guardado, enviar = post,
+): Promise<RespostaGa4["experimentos_detalhe"]> {
+  const fechados = d.dias.filter((dia) => diaFechado(dia));
+  const prontos = guardado && fechados.length ? await guardado.ler(chave, fechados).catch(() => new Map<string, LinhaGa4[]>()) : new Map<string, LinhaGa4[]>();
+  const faltam = d.dias.filter((dia) => !prontos.has(dia));
   const serie = async () => {
-    const out: LinhaGa4[] = [];
-    for (const [i, lote] of d.acumulado.entries()) {
-      const r = await post(token, "batchRunReports", lote);
-      ((r.reports ?? []) as RelatorioGa4[]).forEach((rep, j) => out.push(...linhas(rep).map((l) => ({ ...l, dia: d.dias[i * 5 + j] }))));
+    const novos = new Map<string, LinhaGa4[]>();
+    for (let i = 0; i < faltam.length; i += 5) {
+      const parte = faltam.slice(i, i + 5);
+      const r = await enviar(token, "batchRunReports", { requests: parte.map(d.pontoAcumulado) });
+      parte.forEach((dia, j) => novos.set(dia, linhas(((r.reports ?? []) as RelatorioGa4[])[j] ?? {})));
     }
-    return out;
+    const paraGuardar = new Map([...novos].filter(([dia]) => diaFechado(dia)));
+    // shortcut: gravar que falha só faz a próxima abertura pedir de novo ao GA4; sem log aqui (ga4.ts roda no vitest).
+    if (guardado && paraGuardar.size) await guardado.gravar(chave, paraGuardar).catch(() => {});
+    return d.dias.flatMap((dia) => (prontos.get(dia) ?? novos.get(dia) ?? []).map((l) => ({ ...l, dia })));
   };
-  const [extras, acumulado] = await Promise.all([post(token, "batchRunReports", d.extras), serie()]);
+  const [extras, acumulado] = await Promise.all([enviar(token, "batchRunReports", d.extras), serie()]);
   const [pagina, aparelho, form, hoje] = (extras.reports ?? []) as RelatorioGa4[];
   return { acumulado, por_pagina: linhas(pagina ?? {}), por_aparelho: linhas(aparelho ?? {}), form_start: linhas(form ?? {}), hoje: linhas(hoje ?? {}) };
 }

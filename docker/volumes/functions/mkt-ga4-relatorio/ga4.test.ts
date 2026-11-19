@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FORA_DO_ANALYTICS, linhas, montarRelatorios, periodoAnterior, pontosAcumulados, validarPedido } from './ga4';
+import { detalhar, diaFechado, FORA_DO_ANALYTICS, linhas, montarRelatorios, periodoAnterior, pontosAcumulados, validarPedido, type Guardado, type LinhaGa4 } from './ga4';
 
 describe('mkt-ga4-relatorio', () => {
   it('período anterior: mesmo tamanho, logo antes', () => {
@@ -58,11 +58,10 @@ describe('mkt-ga4-relatorio', () => {
     expect(JSON.stringify(form.dimensionFilter)).toContain('form_start');
     expect(JSON.stringify(form.dimensionFilter)).toContain('^/pos-[a-z0-9]+/?$');
     expect(hoje.dateRanges).toEqual([{ startDate: '2026-11-24', endDate: '2026-11-24' }]);
-    // 7 dias = 7 pontos, todos do início até o dia: 2 lotes (5 + 2).
+    // 7 dias = 7 pontos, todos do início até o dia.
     expect(detalheTeste!.dias).toHaveLength(7);
-    expect(detalheTeste!.acumulado.map((l) => l.requests.length)).toEqual([5, 2]);
-    expect(detalheTeste!.acumulado[1].requests[1].dateRanges).toEqual([{ startDate: '2026-11-18', endDate: '2026-11-24' }]);
-    expect(JSON.stringify(detalheTeste!.acumulado[0].requests[0].dimensionFilter)).toContain('experience_impression');
+    expect(detalheTeste!.pontoAcumulado('2026-11-24').dateRanges).toEqual([{ startDate: '2026-11-18', endDate: '2026-11-24' }]);
+    expect(JSON.stringify(detalheTeste!.pontoAcumulado('2026-11-20').dimensionFilter)).toContain('experience_impression');
     expect(linhas({ dimensionHeaders: [{ name: 'customEvent:exp_variant_string' }, { name: 'deviceCategory' }], metricHeaders: [{ name: 'totalUsers' }], rows: [{ dimensionValues: [{ value: 'PPG-form-aberto-b' }, { value: 'mobile' }], metricValues: [{ value: '3' }] }] }))
       .toEqual([{ exp: 'PPG-form-aberto-b', aparelho: 'mobile', usuarios: 3 }]);
   });
@@ -100,4 +99,65 @@ describe('mkt-ga4-relatorio', () => {
     expect(linhas({ metricHeaders: [{ name: 'totalUsers' }, { name: 'userKeyEventRate:generate_lead' }], rows: [{ metricValues: [{ value: '200' }, { value: '0.115' }] }] }))
       .toEqual([{ usuarios: 200, taxa_pessoa: 0.115, pessoas_lead: 23 }]);
   });
+
+  it('dia fechado = 3 dias ou mais pelo relógio (o GA4 pode mudar o dia por 24-48 h)', () => {
+    const agora = new Date('2026-11-25T15:00:00Z');
+    expect(diaFechado('2026-11-22', agora)).toBe(true);
+    expect(diaFechado('2026-11-23', agora)).toBe(false);
+    expect(diaFechado('2026-11-25', agora)).toBe(false);
+  });
+
+  describe('série acumulada com os dias guardados', () => {
+    // 01 a 10/11/2026: todos fechados hoje (o relógio é o de verdade, bem depois).
+    const { detalheTeste } = montarRelatorios({ inicio: '2026-11-01', fim: '2026-11-10', site: null, detalhe: true });
+    const chave = { inicio: '2026-11-01', site: '' };
+    const linha = (n: number): LinhaGa4[] => [{ exp: 'PPG-x-a', usuarios: n }];
+    /** GA4 falso: responde cada ponto com o número do dia e conta os pontos pedidos. */
+    const ga4Falso = () => {
+      const pedidos: string[] = [];
+      const enviar = async (_t: string, _m: string, corpo: unknown) => {
+        const reqs = (corpo as { requests: { dateRanges: { endDate: string }[]; dimensions: unknown[]; dimensionFilter: unknown }[] }).requests;
+        // O lote de extras (por página, aparelho, form_start e hoje) não é ponto da curva.
+        if (reqs.some((r) => r.dimensions.length > 1 || JSON.stringify(r.dimensionFilter).includes('form_start'))) return { reports: [] };
+        pedidos.push(...reqs.map((r) => r.dateRanges[0].endDate));
+        return { reports: reqs.map((r) => ({ dimensionHeaders: [{ name: 'customEvent:exp_variant_string' }], metricHeaders: [{ name: 'totalUsers' }], rows: [{ dimensionValues: [{ value: 'PPG-x-a' }], metricValues: [{ value: String(Number(r.dateRanges[0].endDate.slice(8))) }] }] })) };
+      };
+      return { pedidos, enviar };
+    };
+
+    it('só pede ao GA4 o que não está guardado, e guarda o que pediu', async () => {
+      const guardados = new Map([['2026-11-01', linha(100)], ['2026-11-02', linha(200)]]);
+      const gravados: string[] = [];
+      const guardado: Guardado = {
+        ler: async (_c, dias) => new Map(dias.filter((d) => guardados.has(d)).map((d) => [d, guardados.get(d)!])),
+        gravar: async (_c, pontos) => { gravados.push(...pontos.keys()); },
+      };
+      const { pedidos, enviar } = ga4Falso();
+      const d = await detalhar('t', detalheTeste!, chave, guardado, enviar);
+      expect(pedidos.filter((x) => x <= '2026-11-02')).toEqual([]); // os 2 guardados não vão ao GA4
+      expect(gravados).toHaveLength(8);
+      expect(d!.acumulado.find((l) => l.dia === '2026-11-01')?.usuarios).toBe(100);
+      expect(d!.acumulado.find((l) => l.dia === '2026-11-10')?.usuarios).toBe(10);
+      expect(d!.acumulado).toHaveLength(10);
+    });
+
+    it('banco fora do ar: pede tudo ao GA4 e a aba abre igual', async () => {
+      const guardado: Guardado = { ler: async () => { throw new Error('fora'); }, gravar: async () => { throw new Error('fora'); } };
+      const { pedidos, enviar } = ga4Falso();
+      const d = await detalhar('t', detalheTeste!, chave, guardado, enviar);
+      expect(pedidos).toHaveLength(10);
+      expect(d!.acumulado).toHaveLength(10);
+    });
+
+    it('dia recente nunca é guardado', async () => {
+      const hoje = new Date().toISOString().slice(0, 10);
+      const ontem = new Date(Date.now() - 864e5).toISOString().slice(0, 10);
+      const recente = montarRelatorios({ inicio: ontem, fim: hoje, site: null, detalhe: true }).detalheTeste!;
+      const gravados: string[] = [];
+      const guardado: Guardado = { ler: async () => new Map(), gravar: async (_c, p) => { gravados.push(...p.keys()); } };
+      await detalhar('t', recente, { inicio: ontem, site: '' }, guardado, ga4Falso().enviar);
+      expect(gravados).toEqual([]);
+    });
+  });
 });
+

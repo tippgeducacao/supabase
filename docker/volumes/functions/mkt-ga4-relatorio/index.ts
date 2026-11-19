@@ -14,6 +14,7 @@ import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 import { corsHeaders } from "../_shared/cors.ts";
 import { tokenDaContaDeServico } from "../_shared/googleContaServico.ts";
 import { consultarGa4, ESCOPO_GA4, validarPedido } from "./ga4.ts";
+import { guardadoNoBanco } from "./guardado.ts";
 
 const json = (corpo: unknown, status = 200) =>
   new Response(JSON.stringify(corpo), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
@@ -41,7 +42,7 @@ Deno.serve(async (req) => {
     if (error) throw error;
     if (typeof saTexto !== "string" || !saTexto) return json({ erro: "Sem a chave do Google no vault" }, 503);
     const token = await tokenDaContaDeServico(JSON.parse(saTexto), ESCOPO_GA4);
-    return json(await consultarGa4(token, pedido));
+    return json(await consultarGa4(token, pedido, guardadoNoBanco(supabase)));
   } catch (e) {
     // O detalhe fica só no log: erro de JSON.parse da chave pode trazer um pedaço dela.
     console.error("mkt-ga4-relatorio:", (e as Error).message);
