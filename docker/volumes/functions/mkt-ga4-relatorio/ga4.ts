@@ -15,13 +15,18 @@ const TAXA_PESSOA = "userKeyEventRate:generate_lead";
  * Sites que não são captação de aluno: contratação (saiu do GA4 em 16/11/2026) e fórum e curso
  * presencial (saíram em 18/11/2026). Ficam fora dos números e da lista mesmo no histórico.
  * O CRM tira os mesmos em mkt_analytics_crm (régua de candidato + host). Mudou aqui, mude lá.
+ * Exceção: o site de teste `ppgteste` (11 visitas até 10/11/2026) nunca teve lead, então só sai daqui.
  */
 export const FORA_DO_ANALYTICS = [
   "professores.ppgvet.com.br",
   "centraldetalentos.ppgvet.com.br",
   "forum.ppgvet.com.br",
   "cursoampere.ppgvet.com.br",
+  "ppgteste.ppgvet.com.br",
 ];
+
+/** Visitas de verificação feitas por nós (utm_source=teste_claude, 21 a 27/10/2026): nunca contam (pedido de 19/11/2026). */
+export const ORIGENS_DE_TESTE = ["teste_claude"];
 const MAX_DIAS = 400;
 
 export interface PedidoGa4 {
@@ -97,8 +102,11 @@ export function montarRelatorios(p: PedidoGa4) {
   const dateRanges = [{ startDate: p.inicio, endDate: p.fim }];
   const ant = periodoAnterior(p);
   const dateRangesAnt = [{ startDate: ant.inicio, endDate: ant.fim }];
-  const semForaDoAnalytics: Filtro = { notExpression: { filter: { fieldName: "hostName", inListFilter: { values: FORA_DO_ANALYTICS } } } };
-  const doSite = p.site ? filtroCampo("hostName", p.site) : semForaDoAnalytics;
+  const semTeste: Filtro = { notExpression: { filter: { fieldName: "sessionManualSource", inListFilter: { values: ORIGENS_DE_TESTE } } } };
+  const semForaDoAnalytics: Filtro = {
+    andGroup: { expressions: [{ notExpression: { filter: { fieldName: "hostName", inListFilter: { values: FORA_DO_ANALYTICS } } } }, semTeste] },
+  };
+  const doSite: Filtro = p.site ? { andGroup: { expressions: [filtroCampo("hostName", p.site), semTeste] } } : semForaDoAnalytics;
   const m = (...nomes: string[]) => nomes.map((name) => ({ name }));
   const porSessoes = [{ metric: { metricName: "sessions" }, desc: true }];
   const lote = {
@@ -125,9 +133,15 @@ export function montarRelatorios(p: PedidoGa4) {
       { dateRanges, dimensions: m("sessionDefaultChannelGroup"), metrics: m("sessions", "totalUsers", LEAD, TAXA_PESSOA), dimensionFilter: doSite, orderBys: porSessoes },
     ],
   };
-  // O período anterior: só o total e o dia a dia, para a comparação e a linha fraca do gráfico.
+  // Quem começou um formulário (form_start; não é evento-chave, então vai em relatório à parte), nos dois períodos.
+  const comecou = (dr: typeof dateRanges) => ({
+    dateRanges: dr,
+    metrics: m("totalUsers"),
+    dimensionFilter: { andGroup: { expressions: [filtroCampo("eventName", "form_start"), doSite] } },
+  });
+  // O período anterior: só o total e o dia a dia, para a comparação e a linha fraca do gráfico; e o form_start dos dois.
   const anterior = {
-    requests: [lote.requests[0], lote.requests[1]].map((r) => ({ ...r, dateRanges: dateRangesAnt })),
+    requests: [...[lote.requests[0], lote.requests[1]].map((r) => ({ ...r, dateRanges: dateRangesAnt })), comecou(dateRanges), comecou(dateRangesAnt)],
   };
   const doEvento = filtroCampo("eventName", "experience_impression");
   const experimentos = {
@@ -217,6 +231,8 @@ export interface Resumo {
   leads: number;
   /** Pessoas com pelo menos um generate_lead. */
   pessoas_lead: number;
+  /** Pessoas que começaram um formulário (form_start). */
+  comecou: number;
 }
 
 export interface RespostaGa4 {
@@ -267,15 +283,18 @@ export async function consultarGa4(token: string, p: PedidoGa4): Promise<Respost
     detalheTeste ? detalhar(token, detalheTeste).catch((err: Error) => err) : Promise.resolve(null),
   ]);
   const [resumo, porDia, porUtm, porPagina, porCanal] = (l.reports ?? []) as RelatorioGa4[];
-  const [resumoAnt, porDiaAnt] = (a.reports ?? []) as RelatorioGa4[];
-  const total = (r?: RelatorioGa4): Resumo => {
+  const [resumoAnt, porDiaAnt, comecouAtual, comecouAnt] = (a.reports ?? []) as RelatorioGa4[];
+  const total = (r: RelatorioGa4 | undefined, c: RelatorioGa4 | undefined): Resumo => {
     const t = linhas(r ?? {})[0] ?? {};
-    return { sessoes: Number(t.sessoes ?? 0), usuarios: Number(t.usuarios ?? 0), leads: Number(t.leads ?? 0), pessoas_lead: Number(t.pessoas_lead ?? 0) };
+    return {
+      sessoes: Number(t.sessoes ?? 0), usuarios: Number(t.usuarios ?? 0), leads: Number(t.leads ?? 0), pessoas_lead: Number(t.pessoas_lead ?? 0),
+      comecou: Number(linhas(c ?? {})[0]?.usuarios ?? 0),
+    };
   };
   const semDimensao = e instanceof Error && e.message.includes("exp_variant_string");
   return {
-    resumo: total(resumo),
-    resumo_anterior: total(resumoAnt),
+    resumo: total(resumo, comecouAtual),
+    resumo_anterior: total(resumoAnt, comecouAnt),
     periodo_anterior: periodoAnterior(p),
     por_dia_anterior: linhas(porDiaAnt ?? {}),
     por_dia: linhas(porDia ?? {}),

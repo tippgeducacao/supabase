@@ -74,6 +74,19 @@ describe('mkt-ga4-relatorio', () => {
     expect(longo.at(-1)).toBe('2026-03-31');
   });
 
+  it('visitas de teste nunca contam; form_start nos dois períodos', () => {
+    for (const site of [null, 'site.ppgvet.com.br']) {
+      const { lote, anterior, experimentos } = montarRelatorios({ inicio: '2026-11-10', fim: '2026-11-16', site });
+      for (const r of [...lote.requests, ...anterior.requests, experimentos]) expect(JSON.stringify(r.dimensionFilter)).toContain('teste_claude');
+      expect(anterior.requests).toHaveLength(4); // limite do batchRunReports é 5
+      const [, , atual, ant] = anterior.requests;
+      expect(JSON.stringify(atual.dimensionFilter)).toContain('form_start');
+      expect(atual.dateRanges).toEqual([{ startDate: '2026-11-10', endDate: '2026-11-16' }]);
+      expect(ant.dateRanges).toEqual([{ startDate: '2026-11-03', endDate: '2026-11-09' }]);
+    }
+    expect(FORA_DO_ANALYTICS).toContain('ppgteste.ppgvet.com.br');
+  });
+
   it('lê as linhas com nome curto, data e número', () => {
     expect(linhas({
       dimensionHeaders: [{ name: 'date' }],
