@@ -18,13 +18,14 @@
 //   - dados: JSON.stringify({ alunos[1..2], curso, turma, orientador, tituloTcc })
 //     cada aluno: { nome, email, cpf, telefone, cep, rua, numero,
 //                   complemento?, bairro, cidade, uf }
-//   - termoAceite, declaracaoRevisor, fichaOrientador, arquivoTcc: File (PDF/DOC/DOCX, <=25MB)
+//   - termoAceite, declaracaoRevisor, fichaOrientador, arquivoTcc: File (PDF/DOC/DOCX, <=25MB;
+//     este modo fica em 25 MB, os 100 MB são só do modo em pedaços)
 //   Problema (18/11/2026): o upload inteiro (até 100 MB) precisa caber em ~60 s,
 //   senão a borda do servidor corta a conexão antes de chegar aqui e o aluno vê
 //   "A conexão caiu no meio do envio". Internet lenta + PDF grande = falha.
 //   Continua aceito para não quebrar a versão do formulário que ainda está no ar.
 //
-// ── Modo 2 (NOVO): JSON em etapas, arquivos em pedaços de 1 MB ───────────────
+// ── Modo 2 (NOVO): JSON em etapas, arquivos em pedaços de 1 MB, até 100 MB cada ─
 //   1. { operacao: "preparar", envioId: <uuid gerado no navegador>,
 //        arquivos: [{ campo, nome, tipo, tamanho }] }
 //      → { ok, protocolo, envioId, tamanhoParte,
@@ -39,7 +40,8 @@
 //      e um pedaço que falha é só repetido (com link novo).
 //   3. { operacao: "concluir", envioId, dados, arquivos: [mesma lista] }
 //      → confere que todos os pedaços chegaram com o tamanho certo, junta cada
-//        arquivo, grava no lugar definitivo, apaga os pedaços e cria a tarefa.
+//        arquivo EM FLUXO (pedaço a pedaço, sem o arquivo inteiro na memória),
+//        grava no lugar definitivo, apaga os pedaços e cria a tarefa.
 //      Repetir o "concluir" de um envio já concluído devolve a mesma tarefa
 //      (repetido: true), sem duplicar.
 //
@@ -77,7 +79,15 @@ const PUBLIC_SUPABASE_URL =
   Deno.env.get('PUBLIC_SUPABASE_URL') || 'https://api.ppgeducacao.site'
 const toPublicUrl = (u: string) => u.replace(/^https?:\/\/kong:8000/i, PUBLIC_SUPABASE_URL)
 
-const MAX_FILE_BYTES = 25 * 1024 * 1024 // 25 MB
+const MB = 1024 * 1024
+// Limite por arquivo no modo em pedaços: 100 MB desde 19/11/2026 (era 25 MB). Só é
+// viável porque o "concluir" grava em fluxo, sem montar o arquivo na memória
+// (ver gravarDefinitivoPorPartes).
+const MAX_FILE_BYTES = 100 * MB
+// O modo antigo (multipart) continua em 25 MB: ele lê os arquivos inteiros na
+// memória e, com internet lenta, um envio maior nem passa do corte de ~60 s.
+const MAX_FILE_BYTES_MULTIPART = 25 * MB
+const emMb = (bytes: number) => `${Math.round(bytes / MB)} MB`
 // 1 MB por pedaço: mesmo a 20 KB/s (internet bem ruim) um pedaço sobe em ~50 s,
 // abaixo do corte de ~60 s medido em 18/11/2026 (1,4 MB a 30 KB/s passou em 45 s;
 // 3 MB a 30 KB/s foi cortado em 77 s).
@@ -256,7 +266,9 @@ function validarManifesto(lista: unknown): ArquivoDeclarado[] {
       if (OPTIONAL_FIELDS.has(campo)) continue // opcional e não enviado
       throw new ErroDoAluno(`Anexo vazio: ${FILE_LABELS[campo]}`, campo)
     }
-    if (tamanho > MAX_FILE_BYTES) throw new ErroDoAluno(`${FILE_LABELS[campo]} excede 25 MB`, campo)
+    if (tamanho > MAX_FILE_BYTES) {
+      throw new ErroDoAluno(`${FILE_LABELS[campo]} excede ${emMb(MAX_FILE_BYTES)}`, campo)
+    }
     const tipo = tipoAceito(nome, typeof tipoBruto === 'string' ? tipoBruto : '')
     if (!nome || !tipo) {
       throw new ErroDoAluno(
@@ -323,6 +335,89 @@ async function gravarDefinitivo(
   if (error) throw new Error(`Falha no upload: ${FILE_LABELS[campo]} (${error.message})`)
   const { data: pub } = supabase.storage.from(BUCKET).getPublicUrl(path)
   return { path, url: toPublicUrl(pub.publicUrl), fileName: original, type: tipo, size: bytes.length }
+}
+
+// Pedaços baixados adiantados enquanto o anterior segue para o Storage.
+const PARTES_ADIANTADAS = 3
+
+/**
+ * Junta os pedaços de um arquivo e grava no lugar definitivo SEM montá-lo na memória.
+ *
+ * Com 100 MB por arquivo, juntar tudo num Uint8Array (como era até 19/11/2026)
+ * esbarraria no teto de memória do worker da edge. Aqui cada pedaço é baixado,
+ * conferido e repassado ao Storage na hora, num corpo em fluxo sem Content-Length
+ * (o Storage aceita e grava o tamanho exato: conferido em 19/11/2026 com 1 MB em
+ * Transfer-Encoding: chunked). Na memória ficam só ~4 pedaços de 1 MB.
+ */
+async function gravarDefinitivoPorPartes(
+  supabase: SupabaseClient,
+  protocolo: string,
+  a: ArquivoDeclarado,
+  pasta: string,
+): Promise<Anexo> {
+  const total = quantasPartes(a.tamanho)
+  const baixar = async (i: number): Promise<Uint8Array> => {
+    const { data, error } = await supabase.storage.from(BUCKET).download(`${pasta}/${nomeDaParte(i)}`)
+    if (error || !data) throw new Error(`baixar parte ${i}: ${error?.message}`)
+    const parte = new Uint8Array(await data.arrayBuffer())
+    if (parte.length !== tamanhoDaParte(a, i)) {
+      throw new ErroDoAluno(`O arquivo não chegou completo: ${FILE_LABELS[a.campo]}. Envie novamente.`, a.campo)
+    }
+    return parte
+  }
+
+  const fila: Promise<Uint8Array>[] = []
+  let proxima = 0
+  const encher = () => {
+    while (proxima < total && fila.length < PARTES_ADIANTADAS) {
+      const p = baixar(proxima++)
+      p.catch(() => {}) // a falha é lida no pull; isto só evita "unhandled rejection"
+      fila.push(p)
+    }
+  }
+  // O fetch troca o erro do fluxo por um genérico: guardamos o original.
+  let falhaDoFluxo: unknown = null
+  let enviados = 0
+  const corpo = new ReadableStream<Uint8Array>({
+    async pull(ctrl) {
+      encher()
+      const p = fila.shift()
+      if (!p) {
+        ctrl.close()
+        return
+      }
+      try {
+        const parte = await p
+        enviados += parte.length
+        ctrl.enqueue(parte)
+        encher()
+      } catch (e) {
+        falhaDoFluxo = e
+        ctrl.error(e)
+      }
+    },
+  })
+
+  const original = a.nome || `${a.campo}.pdf`
+  const path = `${STORAGE_FOLDER}/${protocolo}/${a.campo}-${sufixoAleatorio()}-${sanitizeName(original)}`
+  let erroUpload: string | null = null
+  try {
+    const { error } = await supabase.storage.from(BUCKET).upload(path, corpo, {
+      contentType: a.tipo,
+      upsert: true,
+      duplex: 'half',
+    })
+    if (error) erroUpload = error.message
+  } catch (e) {
+    erroUpload = (e as Error).message
+  }
+  if (falhaDoFluxo) throw falhaDoFluxo
+  if (erroUpload) throw new Error(`Falha no upload: ${FILE_LABELS[a.campo]} (${erroUpload})`)
+  if (enviados !== a.tamanho) {
+    throw new Error(`Falha no upload: ${FILE_LABELS[a.campo]} (${enviados} de ${a.tamanho} bytes)`)
+  }
+  const { data: pub } = supabase.storage.from(BUCKET).getPublicUrl(path)
+  return { path, url: toPublicUrl(pub.publicUrl), fileName: original, type: a.tipo, size: a.tamanho }
 }
 
 /** Passos comuns aos dois modos: tarefa, responsáveis, anexos e registro da submissão. */
@@ -541,8 +636,11 @@ async function receberMultipart(req: Request, supabase: SupabaseClient): Promise
     if (f.size === 0) {
       return jsonResponse({ ok: false, error: `Anexo vazio: ${FILE_LABELS[field]}` }, 400)
     }
-    if (f.size > MAX_FILE_BYTES) {
-      return jsonResponse({ ok: false, error: `${FILE_LABELS[field]} excede 25 MB` }, 400)
+    if (f.size > MAX_FILE_BYTES_MULTIPART) {
+      return jsonResponse(
+        { ok: false, error: `${FILE_LABELS[field]} excede ${emMb(MAX_FILE_BYTES_MULTIPART)}` },
+        400,
+      )
     }
     if (!tipoAceito(f.name, f.type)) {
       return jsonResponse(
@@ -673,22 +771,12 @@ async function concluir(
     }
   }
 
-  // 2) Junta cada arquivo (um por vez, para não segurar 100 MB na memória) e grava.
+  // 2) Junta cada arquivo (um por vez) e grava, em fluxo: nunca há um arquivo inteiro
+  //    na memória.
   const agora = new Date()
   const anexos: Partial<Record<FileField, Anexo>> = {}
   for (const a of arquivos) {
-    const pasta = pastas.get(a.campo)!
-    const bytes = new Uint8Array(a.tamanho)
-    for (let i = 0; i < quantasPartes(a.tamanho); i++) {
-      const { data, error } = await supabase.storage.from(BUCKET).download(`${pasta}/${nomeDaParte(i)}`)
-      if (error || !data) throw new Error(`baixar parte ${i}: ${error?.message}`)
-      const parte = new Uint8Array(await data.arrayBuffer())
-      if (parte.length !== tamanhoDaParte(a, i)) {
-        throw new ErroDoAluno(`O arquivo não chegou completo: ${FILE_LABELS[a.campo]}. Envie novamente.`, a.campo)
-      }
-      bytes.set(parte, i * PARTE_BYTES)
-    }
-    anexos[a.campo] = await gravarDefinitivo(supabase, protocolo, a.campo, a.nome, a.tipo, bytes)
+    anexos[a.campo] = await gravarDefinitivoPorPartes(supabase, protocolo, a, pastas.get(a.campo)!)
   }
 
   const resposta = await criarTarefaTcc(supabase, v.dados, protocolo, agora, anexos)
