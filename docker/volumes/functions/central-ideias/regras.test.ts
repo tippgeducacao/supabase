@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resumirNossasContas, validarDia, validarMiniaturas, type PostNosso } from "./regras";
+import { codigoDoPost, resumirAvaliacoes, resumirNossasContas, validarDia, validarMiniaturas, type PostNosso } from "./regras";
 
 const post = (o: Partial<PostNosso>): PostNosso => ({
   conta: "ppgvet_oficial", caption: "x", media_type: "VIDEO", permalink: "https://instagram.com/p/1",
@@ -61,5 +61,23 @@ describe("validarMiniaturas", () => {
     ["demais", Array.from({ length: 81 }, () => ({ link: "https://x", jpeg_base64: "A" }))],
   ])("recusa %s", (_n, m) => {
     expect(typeof validarMiniaturas(m)).toBe("string");
+  });
+});
+
+describe("avaliações do time", () => {
+  it("reconhece o mesmo post em /p/ e /reel/", () => {
+    expect(codigoDoPost("https://www.instagram.com/reel/DfaxZtgt8xM/?igsh=1")).toBe("DfaxZtgt8xM");
+    expect(codigoDoPost("https://instagram.com/p/DfaxZtgt8xM")).toBe("DfaxZtgt8xM");
+    expect(codigoDoPost("https://www.tiktok.com/@x/video/1")).toBeNull();
+  });
+  it("junta o resultado do post feito e separa as recusadas", () => {
+    const r = resumirAvaliacoes([
+      { status: "nao_serve", titulo: "a", ideia: { canal: "tiktok", producao: "time" }, motivo: "precisa de muita gente", link_post: null },
+      { status: "fizemos", titulo: "b", ideia: { canal: "instagram" }, motivo: null, link_post: "https://www.instagram.com/reel/XYZ/" },
+      { status: "fizemos", titulo: "c", ideia: {}, motivo: null, link_post: "https://www.tiktok.com/@x/video/1" },
+    ], [post({ permalink: "https://www.instagram.com/p/XYZ/", reach: 900 })], { ppgvet_oficial: 300 });
+    expect(r.recusadas).toEqual([{ titulo: "a", canal: "tiktok", producao: "time", motivo: "precisa de muita gente" }]);
+    expect(r.feitas[0].resultado).toMatchObject({ conta: "ppgvet_oficial", alcance: 900, media_da_conta: 300 });
+    expect(r.feitas[1].resultado).toBeNull();
   });
 });

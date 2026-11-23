@@ -7,7 +7,7 @@
 // Doc: docs/Marketing — Portal e Conteúdo.md › Central de Ideias.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
-import { resumirNossasContas, validarDia, validarMiniaturas } from "./regras.ts";
+import { resumirAvaliacoes, resumirNossasContas, validarDia, validarMiniaturas, type Avaliacao } from "./regras.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -38,7 +38,8 @@ Deno.serve(async (req) => {
 
     if (corpo.acao === "contexto") {
       const desde = new Date(Date.now() - 30 * 86_400_000).toISOString();
-      const [fontes, contas, posts, historico, guia] = await Promise.all([
+      const sessentaDias = new Date(Date.now() - 60 * 86_400_000).toISOString();
+      const [fontes, contas, posts, historico, guia, avaliacoes] = await Promise.all([
         admin.from("central_ideias_fontes").select("tipo, valor, observacao").eq("ativo", true),
         admin.from("ig_accounts").select("id, username").eq("is_active", true),
         admin.from("ig_post_metrics")
@@ -49,17 +50,22 @@ Deno.serve(async (req) => {
         // O guia de gravação mais recente (refeito no dia 1º): guia as ideias "na empresa".
         admin.from("central_ideias_dias").select("guia:conteudo->guia").not("conteudo->guia", "is", null)
           .order("dia", { ascending: false }).limit(1).maybeSingle(),
+        // O que o time recusou ou fez: o robô evita o recusado e aprende com o resultado do que foi feito.
+        admin.from("central_ideias_avaliacoes").select("status, titulo, ideia, motivo, link_post")
+          .gte("created_at", sessentaDias).order("created_at", { ascending: false }).limit(100),
       ]);
-      const erro = fontes.error || contas.error || posts.error || historico.error || guia.error;
+      const erro = fontes.error || contas.error || posts.error || historico.error || guia.error || avaliacoes.error;
       if (erro) return json({ error: erro.message }, 500);
       const nomes = new Map((contas.data ?? []).filter((c) => !CONTAS_FORA.includes(c.username))
         .map((c) => [c.id, c.username]));
+      const nossos = (posts.data ?? []).filter((p) => nomes.has(p.account_id))
+        .map((p) => ({ ...p, conta: nomes.get(p.account_id)! }));
+      const nossasContas = resumirNossasContas(nossos);
       return json({
         fontes: fontes.data,
-        nossas_contas: resumirNossasContas(
-          (posts.data ?? []).filter((p) => nomes.has(p.account_id))
-            .map((p) => ({ ...p, conta: nomes.get(p.account_id)! })),
-        ),
+        nossas_contas: nossasContas,
+        avaliacoes_do_time: resumirAvaliacoes((avaliacoes.data ?? []) as Avaliacao[], nossos,
+          Object.fromEntries(nossasContas.por_conta.map((c) => [c.conta, c.alcance_medio]))),
         // Só métricas e títulos: é o que o robô usa para a linha de base e para não repetir ideia.
         guia: (guia.data as { guia?: unknown } | null)?.guia ?? null,
         historico: (historico.data ?? []).map((h: Record<string, unknown>) => ({

@@ -108,3 +108,38 @@ export function validarMiniaturas(m: unknown): Miniatura[] | string {
   }
   return m as Miniatura[];
 }
+
+export interface Avaliacao {
+  status: "nao_serve" | "fizemos";
+  titulo: string;
+  ideia: { canal?: string; producao?: string; formato?: string };
+  motivo: string | null;
+  link_post: string | null;
+}
+
+/** Código do post do Instagram no link (/p/X, /reel/X ou /tv/X são o mesmo post). */
+export function codigoDoPost(link: string | null | undefined): string | null {
+  const m = (link ?? "").match(/instagram\.com\/(?:[^/]+\/)?(?:p|reel|reels|tv)\/([A-Za-z0-9_-]+)/);
+  return m ? m[1] : null;
+}
+
+/** O que o time recusou (com o motivo) e o que fez (com o resultado do post contra a média da conta). */
+export function resumirAvaliacoes(avaliacoes: Avaliacao[], posts: PostNosso[], mediaPorConta: Record<string, number | null>) {
+  const porCodigo = new Map(posts.map((p) => [codigoDoPost(p.permalink), p]));
+  return {
+    recusadas: avaliacoes.filter((a) => a.status === "nao_serve").slice(0, 40).map((a) => ({
+      titulo: a.titulo, canal: a.ideia?.canal ?? null, producao: a.ideia?.producao ?? null, motivo: a.motivo,
+    })),
+    feitas: avaliacoes.filter((a) => a.status === "fizemos").slice(0, 30).map((a) => {
+      const p = porCodigo.get(codigoDoPost(a.link_post));
+      return {
+        titulo: a.titulo, canal: a.ideia?.canal ?? null, producao: a.ideia?.producao ?? null, link: a.link_post,
+        // Só posts das nossas contas do Instagram nos últimos 30 dias têm resultado; o resto vai sem.
+        resultado: p ? {
+          conta: p.conta, alcance: p.reach, curtidas: p.likes, salvos: p.saves, compartilhamentos: p.shares,
+          media_da_conta: mediaPorConta[p.conta] ?? null,
+        } : null,
+      };
+    }),
+  };
+}
