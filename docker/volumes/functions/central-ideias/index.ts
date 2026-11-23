@@ -16,8 +16,9 @@ const cors = {
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { ...cors, "Content-Type": "application/json" } });
 
-// A PPG é outra marca (~/conhecimento/marca.md: nunca misturar): fica fora das ideias da PPGVET.
-const CONTAS_FORA = ["ppg.educacao"];
+// Fora da análise "nossas contas": a PPG é outra marca (~/conhecimento/marca.md: nunca misturar) e a
+// raafaelcostta é a conta pessoal do diretor (usuário, 23/11/2026).
+const CONTAS_FORA = ["ppg.educacao", "raafaelcostta"];
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: cors });
