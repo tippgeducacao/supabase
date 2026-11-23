@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { comAnterior, desistencia, funil, paginaRelevante, rejeicao, semUtmNoCrm, juntarDias, linkDaVersao, juntarPaginas, juntarUtm, ordenar, sitesDoSeletor, slugDaPagina, testesPorSorteio, valorUtm, variacao } from './mktAnalytics.ts';
+import { comAnterior, desistencia, funil, paginaRelevante, rejeicao, semUtmNoCrm, juntarDias, linkDaVersao, juntarPaginas, juntarUtm, ordenar, paginasDoSeletor, sitesDoSeletor, slugDaPagina, testesPorSorteio, valorUtm, variacao } from './mktAnalytics.ts';
 
 const crm = (n: number) => ({ leads: n, qualificados: 0, reunioes: 0, matriculas: 0 });
 
@@ -178,5 +178,18 @@ describe('linkDaVersao', () => {
   it('abre a versão pelo ?ab= dos sites, mantendo a query da página', () => {
     expect(linkDaVersao('https://site.ppgvet.com.br/pos-sa', 'form-aberto', 'b')).toBe('https://site.ppgvet.com.br/pos-sa?ab=form-aberto:b');
     expect(linkDaVersao('https://site.ppgvet.com.br/pos-sa?x=1', 'form-aberto', 'a')).toBe('https://site.ppgvet.com.br/pos-sa?x=1&ab=form-aberto:a');
+  });
+  it('menu de página: só as relevantes, uma por slug, e a escolhida sempre', () => {
+    const p = juntarPaginas(
+      [
+        { host: 'site.ppgvet.com.br', pagina: '/pos-ca', usuarios: 40 },
+        { host: 'site.ppgvet.com.br', pagina: '/pos-ca/', usuarios: 3 },
+        { host: 'site.ppgvet.com.br', pagina: '/velha', usuarios: 1 },
+        { host: 'site.ppgvet.com.br', pagina: '/', usuarios: 90 },
+      ],
+      [],
+    );
+    expect(paginasDoSeletor(p, null)).toEqual([{ slug: 'site', rotulo: '/' }, { slug: 'pos-ca', rotulo: '/pos-ca' }]);
+    expect(paginasDoSeletor(p, 'sumiu').map((o) => o.slug)).toContain('sumiu');
   });
 });

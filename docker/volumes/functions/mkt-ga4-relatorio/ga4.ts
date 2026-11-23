@@ -35,6 +35,11 @@ export interface PedidoGa4 {
   /** hostName exato (ex.: site.ppgvet.com.br); null = todos os sites. */
   site: string | null;
   /**
+   * Uma página do site (o `slug` da aba Páginas, `slugDaPagina`): filtra pela página de entrada. Só com `site`
+   * (a home de cada site tem o mesmo slug do subdomínio). null = o site inteiro (23/11/2026).
+   */
+  pagina?: string | null;
+  /**
    * Aba Testes A/B (e o aviso das 8h): SÓ a parte dos testes, ou seja quem viu cada versão, acumulado por dia, por
    * página, por aparelho e hoje, e o form_start por versão. Sem UTM, página, canal, período anterior e sites (19/11).
    */
@@ -51,7 +56,9 @@ export function validarPedido(corpo: unknown): PedidoGa4 {
   if (dias < 0 || dias > MAX_DIAS) throw new Error(`Período de 1 a ${MAX_DIAS + 1} dias`);
   const site = c.site == null || c.site === "" ? null : String(c.site).toLowerCase();
   if (site !== null && !/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(site)) throw new Error("site inválido");
-  return { inicio: c.inicio, fim: c.fim, site, detalhe: c.detalhe === true };
+  const pagina = c.pagina == null || c.pagina === "" ? null : String(c.pagina).toLowerCase();
+  if (pagina !== null && (site === null || pagina.length > 200 || /[/?#\s]/.test(pagina))) throw new Error("página inválida");
+  return { inicio: c.inicio, fim: c.fim, site, pagina, detalhe: c.detalhe === true };
 }
 
 /** Nome curto de cada campo do GA4 na resposta. */
@@ -76,6 +83,16 @@ const NOME: Record<string, string> = {
 };
 
 type Filtro = Record<string, unknown>;
+
+/**
+ * As páginas de entrada que viram o mesmo `slug` (espelho de `slugDaPagina`, _shared/mktAnalytics.ts): o último pedaço
+ * do caminho, sem extensão e sem barra final; a home ("/") é o subdomínio. Regex RE2 do GA4, sem maiúscula/minúscula.
+ */
+export function regexDaPagina(site: string, slug: string): string {
+  const esc = slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pedaco = `(.*/)?${esc}(\\.[a-z0-9]+)?/*`;
+  return site.split(".")[0] === slug ? `/*|${pedaco}` : pedaco;
+}
 const filtroCampo = (campo: string, valor: string): Filtro => ({
   filter: { fieldName: campo, stringFilter: { matchType: "EXACT", value: valor } },
 });
@@ -110,7 +127,10 @@ export function montarRelatorios(p: PedidoGa4) {
   const semForaDoAnalytics: Filtro = {
     andGroup: { expressions: [{ notExpression: { filter: { fieldName: "hostName", inListFilter: { values: FORA_DO_ANALYTICS } } } }, semTeste] },
   };
-  const doSite: Filtro = p.site ? { andGroup: { expressions: [filtroCampo("hostName", p.site), semTeste] } } : semForaDoAnalytics;
+  const daPagina: Filtro[] = p.site && p.pagina
+    ? [{ filter: { fieldName: "landingPage", stringFilter: { matchType: "FULL_REGEXP", value: regexDaPagina(p.site, p.pagina), caseSensitive: false } } }]
+    : [];
+  const doSite: Filtro = p.site ? { andGroup: { expressions: [filtroCampo("hostName", p.site), semTeste, ...daPagina] } } : semForaDoAnalytics;
   const m = (...nomes: string[]) => nomes.map((name) => ({ name }));
   const porSessoes = [{ metric: { metricName: "sessions" }, desc: true }];
   const lote = {

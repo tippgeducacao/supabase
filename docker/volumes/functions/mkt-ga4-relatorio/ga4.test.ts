@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { detalhar, diaFechado, FORA_DO_ANALYTICS, linhas, montarRelatorios, periodoAnterior, pontosAcumulados, validarPedido, type Guardado, type LinhaGa4 } from './ga4';
+import { detalhar, diaFechado, FORA_DO_ANALYTICS, linhas, montarRelatorios, periodoAnterior, pontosAcumulados, regexDaPagina, validarPedido, type Guardado, type LinhaGa4 } from './ga4';
 
 describe('mkt-ga4-relatorio', () => {
   it('período anterior: mesmo tamanho, logo antes', () => {
@@ -21,8 +21,12 @@ describe('mkt-ga4-relatorio', () => {
 
   it('valida o pedido', () => {
     expect(validarPedido({ inicio: '2026-11-01', fim: '2026-11-30', site: 'Site.PPGVET.com.br' })).toEqual({
-      inicio: '2026-11-01', fim: '2026-11-30', site: 'site.ppgvet.com.br', detalhe: false,
+      inicio: '2026-11-01', fim: '2026-11-30', site: 'site.ppgvet.com.br', pagina: null, detalhe: false,
     });
+    expect(validarPedido({ inicio: '2026-11-01', fim: '2026-11-01', site: 'site.ppgvet.com.br', pagina: 'Pos-CA' }).pagina).toBe('pos-ca');
+    // Página só dentro de um site (a home de cada site tem o slug do subdomínio) e sem pedaço de caminho.
+    expect(() => validarPedido({ inicio: '2026-11-01', fim: '2026-11-01', pagina: 'pos-ca' })).toThrow();
+    expect(() => validarPedido({ inicio: '2026-11-01', fim: '2026-11-01', site: 'site.ppgvet.com.br', pagina: 'a/b' })).toThrow();
     expect(validarPedido({ inicio: '2026-11-18', fim: '2026-11-18', detalhe: true }).detalhe).toBe(true);
     expect(validarPedido({ inicio: '2026-11-18', fim: '2026-11-18', detalhe: 'sim' }).detalhe).toBe(false);
     expect(validarPedido({ inicio: '2026-11-01', fim: '2026-11-01' }).site).toBeNull();
@@ -47,6 +51,24 @@ describe('mkt-ga4-relatorio', () => {
     expect(todos.anterior.requests[0].dateRanges).toEqual([{ startDate: '2026-10-01', endDate: '2026-10-02' }]);
     // A lista de sites nunca leva o site escolhido, senão o seletor encolhe para um só.
     expect(JSON.stringify(montarRelatorios({ inicio: '2026-11-01', fim: '2026-11-02', site: 'site.ppgvet.com.br' }).sites)).not.toContain('site.ppgvet.com.br');
+  });
+
+  it('página escolhida: filtra a página de entrada nos relatórios do site, com os endereços do mesmo slug', () => {
+    const casa = (site: string, slug: string, caminho: string) => new RegExp(`^(?:${regexDaPagina(site, slug)})$`, 'i').test(caminho);
+    expect(casa('site.ppgvet.com.br', 'pos-ca', '/pos-ca')).toBe(true);
+    expect(casa('site.ppgvet.com.br', 'pos-ca', '/pos-ca/')).toBe(true);
+    expect(casa('site.ppgvet.com.br', 'pos-ca', '/POS-CA.html')).toBe(true);
+    expect(casa('site.ppgvet.com.br', 'pos-ca', '/x/pos-ca')).toBe(true);
+    expect(casa('site.ppgvet.com.br', 'pos-ca', '/pos-cab')).toBe(false);
+    expect(casa('site.ppgvet.com.br', 'pos-ca', '/')).toBe(false);
+    // A home ("/") é o subdomínio, como no slugDaPagina.
+    expect(casa('site.ppgvet.com.br', 'site', '/')).toBe(true);
+    expect(casa('site.ppgvet.com.br', 'site', '/pos-ca')).toBe(false);
+    // Ponto no slug não vira "qualquer letra".
+    expect(casa('site.ppgvet.com.br', 'a.b', '/axb')).toBe(false);
+    const { lote, anterior } = montarRelatorios({ inicio: '2026-11-01', fim: '2026-11-02', site: 'site.ppgvet.com.br', pagina: 'pos-ca' });
+    for (const r of [...lote.requests, ...anterior.requests]) expect(JSON.stringify(r.dimensionFilter)).toContain('landingPage');
+    expect(JSON.stringify(montarRelatorios({ inicio: '2026-11-01', fim: '2026-11-02', site: 'site.ppgvet.com.br', pagina: 'pos-ca' }).sites)).not.toContain('landingPage');
   });
 
   it('detalhe do teste: só quando pedido; série acumulada desde o início, por página, aparelho, hoje e form_start só nas pós', () => {

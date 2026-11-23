@@ -203,6 +203,17 @@ export interface LinhaPagina extends Linha {
   comecou: number;
 }
 
+/**
+ * As páginas do menu "Página" (só com um site escolhido, 23/11/2026): as da lista enxuta da aba Páginas, da mais
+ * visitada à menos, pelo slug (o que a edge e a RPC filtram). A escolhida entra mesmo sem visita no período.
+ */
+export function paginasDoSeletor(paginas: LinhaPagina[], atual: string | null): { slug: string; rotulo: string }[] {
+  const out = new Map<string, string>();
+  for (const p of paginas) if (p.slug && paginaRelevante(p) && !out.has(p.slug)) out.set(p.slug, p.caminho ?? p.slug);
+  if (atual && !out.has(atual)) out.set(atual, atual);
+  return [...out].map(([slug, rotulo]) => ({ slug, rotulo }));
+}
+
 /** Rejeição em % (visitas não engajadas ÷ visitas); sem visita, null. */
 export const rejeicao = (p: Pick<LinhaPagina, 'sessoes' | 'rejeitadas'>) => taxa(p.rejeitadas, p.sessoes);
 
