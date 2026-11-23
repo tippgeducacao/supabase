@@ -87,6 +87,13 @@ Deno.serve(async (req) => {
         else caminhos[m.link] = caminho;
       }
       dia.conteudo = { ...dia.conteudo, miniaturas: caminhos };
+      // Rodar o mesmo dia de novo sem --guia não pode apagar o guia de gravação gravado nele.
+      if (!dia.conteudo.guia) {
+        const { data: antigo } = await admin.from("central_ideias_dias").select("guia:conteudo->guia")
+          .eq("dia", dia.dia).maybeSingle();
+        const guiaAntigo = (antigo as { guia?: unknown } | null)?.guia;
+        if (guiaAntigo) dia.conteudo = { ...dia.conteudo, guia: guiaAntigo };
+      }
       const { error } = await admin.from("central_ideias_dias").upsert(dia, { onConflict: "dia" });
       if (error) return json({ error: error.message }, 500);
       return json({ ok: true, dia: dia.dia });
