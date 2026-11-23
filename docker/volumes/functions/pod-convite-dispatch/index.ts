@@ -1,16 +1,21 @@
 // pod-convite-dispatch: motor da cadência de convite de CONVIDADOS de podcast.
 // Automação = SÓ qualificar interesse. 3 toques, e-mail + WhatsApp (Meta) juntos, a cada
 // podcast_toque_intervalo_horas (72h = 3 dias desde 22/10/2026, como pede o PDF da equipe; antes 48h).
-// Gate: podcast_dispatch_mode ('off' = só dispara ondas aprovadas via pod_convite_aprovar_onda).
+// 21/11/2026 — "a palavra final é do Pedagógico" (usuário): NADA sai sem alguém do Pedagógico clicar.
+//   - Cron / "Aprovar onda": entrega só o 1º convite de quem foi APROVADO na tela (aprovado_em),
+//     mesmo com podcast_dispatch_mode = 'on'.
+//   - Toques 2 e 3: só pelo modo 'lembrete' (clique na Fila de Convites, com a lista na frente).
+//   - Agenda 2: só pelo modo 'agenda' (clique). O cron não manda mais nem encerra ninguém.
+//   - Sem resposta depois do 3º toque: a tela SUGERE e o Pedagógico confirma
+//     (pod_convite_encerrar_sem_resposta) — o motor não muda mais o status sozinho.
 // Interessou (botão/resposta) → webhook marca 'respondeu' (humano assume no SAC/e-mail).
-// Silêncio após o 3º toque → 'silenciou' + convidado vira 'convidar_em_6m' (+6 meses).
 // NÃO envia enquanto: não houver conta WA do podcast (token) OU o template não estiver 'aprovado'.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { ensureToken, base64UrlEncode, encodeHeaderUtf8, encodeDisplayName } from "../_shared/gmail.ts";
 import { logPodcastConversaSac } from "../_shared/podcastSac.ts";
 import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 import {
-  dentroDaJanelaAgenda, enviarModeloPodcast, formatPhone, linkAgendaDoCandidato, modeloAprovadoPorUso, parametrosDoModelo,
+  enviarModeloPodcast, formatPhone, linkAgendaDoCandidato, modeloAprovadoPorUso, parametrosDoModelo,
   resolverVarPodcast, usosDoAgendamento,
 } from "../_shared/podcastEnvio.ts";
 
@@ -28,8 +33,8 @@ const TOQUE_TEMPLATE: Record<number, string> = {
 };
 // FASE DE AGENDAMENTO (Interessado): os follow-ups 1/2 usam `podcast_agenda_N_link`, com o
 // Calendly do host DESIGNADO no cadastro do convidado (ver usosDoAgendamento e
-// linkAgendaDoCandidato; até 22/10/2026 era um rodízio). Sem host, nada sai. O 2 sai sozinho
-// desde 21/10/2026 (passo 3 do cron, abaixo).
+// linkAgendaDoCandidato; até 22/10/2026 era um rodízio). Sem host, nada sai. De 21/10 a 21/11/2026
+// o 2 saía sozinho pelo cron; desde 21/11 só sai no clique (modo 'agenda').
 
 function primeiroNome(nome?: string | null): string {
   return String(nome ?? "").trim().split(/\s+/)[0] || "Professor(a)";
@@ -113,11 +118,14 @@ async function handler(req: Request): Promise<Response> {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
     );
 
-    // FASE DE AGENDAMENTO (Interessado): envio de UM convidado, sob demanda (clique do
-    // atendente = a aprovação). NÃO é o cron — o cron nunca manda body com modo 'agenda'.
-    // Gate: só usuário do pedagógico dispara (o modo envia mensagem real a uma pessoa).
+    // Envios sob demanda (clique = a aprovação). NÃO é o cron — o cron nunca manda body com modo.
+    // Gate: só usuário do pedagógico dispara (estes modos enviam mensagem real a pessoas).
+    //   'agenda'   → UM follow-up de agendamento de UM Interessado (candidato_id)
+    //   'lembrete' → o toque 2 ou 3 do convite para os convidados escolhidos na tela (candidato_ids)
     const body = await req.json().catch(() => ({} as any));
-    if (body?.modo === "agenda" && body?.candidato_id) {
+    const sobDemanda = (body?.modo === "agenda" && body?.candidato_id)
+      || (body?.modo === "lembrete" && Array.isArray(body?.candidato_ids));
+    if (sobDemanda) {
       const authHeader = req.headers.get("Authorization") ?? "";
       const userClient = createClient(
         Deno.env.get("SUPABASE_URL") ?? "",
@@ -128,23 +136,21 @@ async function handler(req: Request): Promise<Response> {
       if (!user) return json({ ok: false, error: "não autenticado" }, 401);
       const { data: pode } = await admin.rpc("user_can_access_pedagogico", { _user_id: user.id });
       if (!pode) return json({ ok: false, error: "sem permissão (pedagógico)" }, 403);
-      return await dispatchAgenda(admin, String(body.candidato_id), json);
+      if (body.modo === "agenda") return await dispatchAgenda(admin, String(body.candidato_id), json);
     }
 
     let mode = "off";
     let intervaloH = 48;
     let caixaId: string | null = null;
-    let agendaAuto = "off";
     {
       const { data: cfg } = await admin
         .from("ped_configuracoes")
         .select("chave, valor")
-        .in("chave", ["podcast_dispatch_mode", "podcast_toque_intervalo_horas", "podcast_email_caixa_id", "podcast_agenda_auto"]);
+        .in("chave", ["podcast_dispatch_mode", "podcast_toque_intervalo_horas", "podcast_email_caixa_id"]);
       const map = new Map((cfg ?? []).map((c: any) => [c.chave, c.valor]));
       mode = (map.get("podcast_dispatch_mode") as string) || "off";
       intervaloH = parseInt((map.get("podcast_toque_intervalo_horas") as string) || "48", 10) || 48;
       caixaId = (map.get("podcast_email_caixa_id") as string) || null;
-      agendaAuto = (map.get("podcast_agenda_auto") as string) || "off";
     }
     const proximaEm = () => new Date(Date.now() + intervaloH * 3600_000).toISOString();
 
@@ -171,43 +177,34 @@ async function handler(req: Request): Promise<Response> {
     const SEL = "id, podcast_id, professor_id, status, toque, aprovado_em, proxima_acao_em, " +
       "professor:ped_professores(nome,email,contato_whatsapp), podcast:ped_podcasts(nome,youtube_url)";
 
-    // 1) toque inicial: na_fila liberados (mode on OU onda aprovada) — e só com host designado
-    //    (22/10/2026, guia do Pedagógico: "o convite só é liberado com host no cadastro"). A
-    //    aprovação da onda já filtra; aqui é a 2ª trava (modo 'on', onda aprovada antes da regra).
-    let q1 = admin.from("pod_convite_candidatos").select(SEL).eq("status", "na_fila").limit(60);
-    if (mode !== "on") q1 = q1.not("aprovado_em", "is", null);
-    const { data: liberados } = await q1;
-    const { com: novos, sem: semHost } = await comHostDesignado(admin, liberados ?? []);
-
-    // 2) follow-ups vencidos
-    const { data: seguindo } = await admin
-      .from("pod_convite_candidatos").select(SEL)
-      .eq("status", "convidando").lte("proxima_acao_em", nowIso).limit(120);
-
-    const fila = [...novos, ...(seguindo ?? [])];
-    let enviados = 0, silenciados = 0, pulados = 0, erros = 0;
+    let fila: any[] = [];
+    let semHost = 0;
+    if (body?.modo === "lembrete") {
+      // Toques 2 e 3, só dos convidados que a pessoa escolheu na tela, e só se o lembrete já está
+      // devido (o intervalo passou) e o convidado não respondeu nesse meio-tempo.
+      const ids = (body.candidato_ids as unknown[]).map(String).filter((s) => /^[0-9a-f-]{36}$/i.test(s)).slice(0, 25);
+      if (ids.length) {
+        const { data: escolhidos } = await admin
+          .from("pod_convite_candidatos").select(SEL)
+          .in("id", ids).eq("status", "convidando").in("toque", [1, 2]).lte("proxima_acao_em", nowIso);
+        fila = escolhidos ?? [];
+      }
+    } else {
+      // 1) toque inicial: só quem foi APROVADO na tela (aprovado_em) — nunca sozinho, nem com o
+      //    modo 'on' (21/11/2026) — e só com host designado (22/10/2026, guia do Pedagógico: "o
+      //    convite só é liberado com host no cadastro"). A aprovação já filtra; aqui é a 2ª trava.
+      const { data: liberados } = await admin.from("pod_convite_candidatos").select(SEL)
+        .eq("status", "na_fila").not("aprovado_em", "is", null).limit(60);
+      const r1 = await comHostDesignado(admin, liberados ?? []);
+      fila = r1.com;
+      semHost = r1.sem;
+    }
+    let enviados = 0, pulados = 0, erros = 0;
 
     for (const c of fila) {
       try {
         const proxToque = (c.toque ?? 0) + 1;
-
-        // esgotou os 3 toques → silenciou + convidado 'convidar_em_6m'
-        if (proxToque > 3) {
-          // guarda anti-corrida: se respondeu (webhook/e-mail/manual) entre o SELECT da fila
-          // e aqui, NÃO sobrescreve nem rebaixa o convidado
-          const { data: sil } = await admin.from("pod_convite_candidatos")
-            .update({ status: "silenciou" }).eq("id", c.id)
-            .in("status", ["na_fila", "convidando"]).select("id");
-          if ((sil ?? []).length > 0) {
-            const seis = new Date(); seis.setMonth(seis.getMonth() + 6);
-            await admin.from("ped_professores")
-              .update({ status_podcast: "convidar_em_6m", reconvidar_a_partir_de: seis.toISOString().slice(0, 10) })
-              .eq("id", c.professor_id)
-              .eq("status_podcast", "a_convidar"); // só rebaixa quem ainda está 'a_convidar'
-            silenciados++;
-          }
-          continue;
-        }
+        if (proxToque > 3) { pulados++; continue; } // encerrar "sem resposta" é decisão do Pedagógico
 
         const tpl = tplPorUso.get(TOQUE_TEMPLATE[proxToque]);
         if (!tpl) { pulados++; continue; } // template não aprovado ainda
@@ -294,40 +291,10 @@ async function handler(req: Request): Promise<Response> {
       }
     }
 
-    // 3) AGENDA AUTOMÁTICA (21/10/2026 — documento do Pedagógico: "agenda_1 → (2 a 3 dias, sem
-    //    agendamento) agenda_2 → fim"). O follow-up 2 sai sozinho podcast_agenda_intervalo_horas
-    //    (72h) depois do 1, entre 8h e 20h de Brasília. Quem agendou já saiu de 'respondeu' (o
-    //    registro da gravação — à mão ou pelo aviso do Calendly — põe 'confirmou'). Quem RESPONDEU
-    //    algo depois do 1 (WhatsApp ou e-mail) fica com o atendente: pode estar no meio de uma conversa.
-    const agenda = { enviados: 0, com_atendente: 0, sem_host: 0, erros: 0, encerrados: 0, fora_do_horario: false, ligada: agendaAuto === "on" };
-    if (agendaAuto === "on") {
-      if (!dentroDaJanelaAgenda(new Date())) {
-        agenda.fora_do_horario = true;
-      } else {
-        const { data: filaAgenda, error: filaErr } = await admin.rpc("pod_agenda_auto_fila", { p_limite: 30 });
-        if (filaErr) console.error("[pod-dispatch agenda auto] fila:", filaErr.message);
-        for (const f of (filaAgenda ?? []) as Array<{ candidato_id: string; respondeu_depois: boolean }>) {
-          if (f.respondeu_depois) { agenda.com_atendente++; continue; }
-          try {
-            const r = await enviarAgenda(admin, f.candidato_id, true);
-            if (r.status === 200) agenda.enviados++;
-            // sem host designado: espera a equipe escolher (sai na rodada seguinte à escolha)
-            else if (r.corpo.sem_host) agenda.sem_host++;
-            else { agenda.erros++; console.error("[pod-dispatch agenda auto]", f.candidato_id, JSON.stringify(r.corpo)); }
-          } catch (e) {
-            agenda.erros++;
-            console.error("[pod-dispatch agenda auto] erro", f.candidato_id, String(e));
-          }
-        }
-      }
-      // "Sem agendamento depois do agenda 2 → Convidar em 6 meses" (PDF da equipe, 22/10/2026): 72h
-      // depois do 2, quem não agendou nem respondeu nada sai de Interessados (pod_agenda_auto_encerrar).
-      const { data: enc, error: encErr } = await admin.rpc("pod_agenda_auto_encerrar", { p_limite: 30 });
-      if (encErr) console.error("[pod-dispatch agenda auto] encerrar:", encErr.message);
-      else agenda.encerrados = Number(enc ?? 0);
-    }
-
-    return json({ ok: true, mode, enviados, silenciados, pulados, erros, sem_host: semHost, processados: fila.length, agenda });
+    // A AGENDA AUTOMÁTICA (agenda 2 sozinha 72h depois + encerrar quem não agendou) saiu em
+    // 21/11/2026: a Fila de Convites mostra quem está devido e o Pedagógico envia (modo 'agenda') ou
+    // descarta. Ver docs/Pedagógico.md.
+    return json({ ok: true, mode, modo: body?.modo ?? "cron", enviados, pulados, erros, sem_host: semHost, processados: fila.length });
   } catch (e) {
     console.error("[pod-dispatch] fatal", String(e));
     return json({ ok: false, error: String(e) }, 500);
@@ -350,11 +317,11 @@ async function comHostDesignado(admin: any, cands: any[]): Promise<{ com: any[];
   return { com, sem: cands.length - com.length };
 }
 
-// FASE DE AGENDAMENTO — UM follow-up de agendamento para UM convidado 'respondeu'. Duas portas:
-// o clique do atendente na tela (o clique É a aprovação) e, desde 21/10/2026, o cron para o
-// follow-up 2 (documento do Pedagógico: "agenda_1 → 2 a 3 dias sem agendamento → agenda_2 →
-// fim"). Reusa toda a máquina de envio (template Meta por uso_cadencia 'podcast_agenda_N' +
-// e-mail 0704/5 + SAC). O toque é TRAVADO antes de enviar (as duas portas podem coincidir) e
+// FASE DE AGENDAMENTO — UM follow-up de agendamento para UM convidado 'respondeu'. Portas: o clique
+// do atendente na tela (o clique É a aprovação) e o botão do convidado no WhatsApp (whatsapp-webhook,
+// o agenda 1). De 21/10 a 21/11/2026 o cron também mandava o 2 sozinho; saiu ("a palavra final é do
+// Pedagógico"). Reusa toda a máquina de envio (template Meta por uso_cadencia 'podcast_agenda_N' +
+// e-mail 0704/5 + SAC). O toque é TRAVADO antes de enviar (dois cliques podem coincidir) e
 // destravado se nada sair. WhatsApp só sai com o template 'aprovado' na Meta; senão vai só e-mail.
 const AGENDA_MAX = 2; // o fluxo termina no agenda_2 (até 21/10/2026 eram 3)
 
