@@ -79,7 +79,8 @@ export function montarMaterial(
   ficha: Record<string, unknown> | null,
 ): string {
   const partes: string[] = [];
-  const nome = limpa(pos.nome_comercial || pos.nome, 300);
+  // «PÓS | NOME» é o rótulo interno do catálogo; a IA copiava o prefixo para as frases (24/11/2026).
+  const nome = limpa(pos.nome_comercial || pos.nome, 300).replace(/^(?:p[óo]s|mba|curso)\s*\|\s*/i, "");
   const ficha1 = [
     `# Pós-graduação: ${nome}`,
     pos.nome_comercial && pos.nome_comercial !== pos.nome ? `Nome interno: ${limpa(pos.nome, 300)}` : "",

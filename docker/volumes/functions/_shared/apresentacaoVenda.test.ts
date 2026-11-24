@@ -140,4 +140,9 @@ describe("montarMaterial", () => {
     expect(txt).toContain("- Ana (coordenador(a); Dra.; Gestão; RH): Bio da Ana");
     expect(txt).toContain("Ficha de venda já cadastrada");
   });
+
+  it("tira o rótulo interno «PÓS |» do nome (a IA copiava para as frases)", () => {
+    const txt = montarMaterial({ ...pos, nome_comercial: "PÓS | PISCICULTURA E PRODUÇÃO DE TILÁPIA" }, [], [], [], null);
+    expect(txt.split("\n")[0]).toBe("# Pós-graduação: PISCICULTURA E PRODUÇÃO DE TILÁPIA");
+  });
 });

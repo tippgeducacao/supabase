@@ -155,7 +155,7 @@ async function juntarMaterial(db: Db, posId: string): Promise<{ texto: string; n
     professores,
     ficha,
   );
-  return { texto, nome: pos.nome_comercial || pos.nome };
+  return { texto, nome: String(pos.nome_comercial || pos.nome).replace(/^\s*(?:p[óo]s|mba|curso)\s*\|\s*/i, "") };
 }
 
 Deno.serve(async (req) => {
