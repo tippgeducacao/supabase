@@ -1,7 +1,9 @@
-// acesso: publico — o link com token é a credencial (32 bytes, só o hash SHA-256 no banco): link de cadastro desligável com validade e limite, convite pessoal de 1 uso por 7 dias, nova senha 1 h, confirmar e-mail 7 dias; o "esqueci" só manda e-mail a embaixador com conta e no máximo 1 a cada 10 min.
+// acesso: publico — cadastro pelo LINK ÚNICO (/embaixador/cadastro, sem código) só com o interruptor ligado na gestão, Turnstile fail-closed e freio por IP; convite pessoal, nova senha e confirmar e-mail são por token de uso único (32 bytes, só o hash SHA-256 no banco); o "esqueci" só manda e-mail a embaixador com conta e no máximo 1 a cada 10 min.
 //
 // Edge Function: emb-cadastro-publico — Programa de Embaixadores (23/11/2026).
-// O embaixador abre o link (/embaixador/cadastro?c=…), preenche o cadastro com a foto, aceita o
+// 24/11/2026: o cadastro aberto é um LINK ÚNICO, /embaixador/cadastro (sem código), que a gestão pausa e
+// liga (emb_link_cadastro). O convite pessoal continua com código (?c=…).
+// O embaixador abre o link, preenche o cadastro com a foto, aceita o
 // termo e cria a senha. A conta nasce no Auth com role = 'embaixador' (só alcança /rpc/emb_portal_*)
 // e SEM profile. Também: confirmar o e-mail, criar nova senha e "esqueci a senha".
 // Nunca toca em conta de colaborador nem da IES. Ver docs/Embaixadores.md.
@@ -27,6 +29,7 @@ interface Corpo {
   senha?: string;
   foto?: string;
   email?: string;
+  turnstile_token?: string;
 }
 
 interface Convite {
@@ -35,6 +38,58 @@ interface Convite {
 }
 
 const LINK_INVALIDO = "Este link não vale mais. Peça um novo à equipe do Programa de Embaixadores.";
+const LINK_PAUSADO = "As inscrições para o Programa de Embaixadores estão pausadas no momento. Tente de novo mais tarde.";
+// Mesmo widget do Turnstile da agenda e da página pública (mesmo domínio): src/lib/agendaLeadPublica.ts.
+const CHAVE_TURNSTILE = "AGENDA_LEAD_TURNSTILE_SECRET";
+
+// ── Freio por IP do link único (em memória, por worker): 5 cadastros a cada 10 min ──────────────────
+const JANELA_MS = 10 * 60_000;
+const baldeCadastro = new Map<string, { n: number; ate: number }>();
+function dentroDoLimite(ip: string): boolean {
+  const agora = Date.now();
+  if (baldeCadastro.size > 5000) for (const [k, v] of baldeCadastro) if (agora > v.ate) baldeCadastro.delete(k);
+  const t = baldeCadastro.get(ip);
+  if (!t || agora > t.ate) { baldeCadastro.set(ip, { n: 1, ate: agora + JANELA_MS }); return true; }
+  t.n += 1;
+  return t.n <= 5;
+}
+const IP_PRIVADO_RE = /^(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|::1$|f[cd][0-9a-f]{2}:)/i;
+function ipDe(req: Request): string {
+  const cf = req.headers.get("cf-connecting-ip");
+  let ip = cf ? cf.trim() : "";
+  if (!ip) {
+    const partes = (req.headers.get("x-forwarded-for") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+    for (let i = partes.length - 1; i >= 0 && !ip; i--) if (!IP_PRIVADO_RE.test(partes[i])) ip = partes[i];
+    if (!ip) ip = partes[partes.length - 1] ?? "";
+  }
+  return ip ? ip.slice(0, 45) : "desconhecido";
+}
+
+// ── Turnstile (fail-closed: sem segredo, sem token, recusado ou Cloudflare muda = não cadastra) ───────
+// deno-lint-ignore no-explicit-any
+async function segredoTurnstile(admin: any): Promise<string> {
+  try {
+    const { data } = await admin.from("app_secrets").select("valor").eq("chave", CHAVE_TURNSTILE).maybeSingle();
+    const v = String(data?.valor ?? "").trim();
+    if (v) return v;
+  } catch { /* cai no env */ }
+  return (Deno.env.get(CHAVE_TURNSTILE) ?? "").trim();
+}
+async function turnstileOk(segredo: string, token: string, ip: string): Promise<boolean> {
+  if (!segredo || !token) return false;
+  try {
+    const form = new URLSearchParams({ secret: segredo, response: token });
+    if (ip && ip !== "desconhecido") form.set("remoteip", ip);
+    const res = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: form.toString(),
+      signal: AbortSignal.timeout(6000),
+    });
+    return (await res.json())?.success === true;
+  } catch (e) {
+    console.error(`[emb-cadastro-publico] siteverify não respondeu: ${(e as Error).message}`);
+    return false;
+  }
+}
 /** E-mail como padrão do ilike: `_` e `%` são curingas e casariam outro endereço. */
 const literalIlike = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
 
@@ -83,6 +138,12 @@ Deno.serve(async (req) => {
 
     // ---------------------------------------------------------------------------------------------
     if (corpo.acao === "conferir") {
+      // Link único (sem código): vale enquanto a gestão deixar ligado.
+      if (!String(corpo.token ?? "").trim()) {
+        const { data: ligado } = await admin.rpc("emb_link_cadastro_ligado");
+        if (ligado !== true) return json({ error: LINK_PAUSADO, pausado: true }, 410);
+        return json({ ok: true, motivo: "cadastro", unico: true, nome: null, email: null, termo: await termoVigente() });
+      }
       const c = await conviteDoToken(corpo.token);
       if (!c) return json({ error: LINK_INVALIDO }, 410);
       const emb = await embaixadorDoConvite(c);
@@ -99,10 +160,23 @@ Deno.serve(async (req) => {
 
     // ---------------------------------------------------------------------------------------------
     if (corpo.acao === "cadastrar") {
-      const c = await conviteDoToken(corpo.token);
-      if (!c || (c.motivo !== "cadastro" && c.motivo !== "convite")) return json({ error: LINK_INVALIDO }, 410);
-      const pessoal = c.motivo === "convite";
-      const embConvidado = pessoal ? await embaixadorDoConvite(c) : null;
+      const unico = !String(corpo.token ?? "").trim();
+      let c: Convite | null = null;
+      if (unico) {
+        // Link único: interruptor ligado, freio por IP e Turnstile, nesta ordem (o barato primeiro).
+        const ip = ipDe(req);
+        if (!dentroDoLimite(ip)) return json({ error: "Muitas tentativas. Aguarde alguns minutos." }, 429);
+        const { data: ligado } = await admin.rpc("emb_link_cadastro_ligado");
+        if (ligado !== true) return json({ error: LINK_PAUSADO, pausado: true }, 410);
+        if (!(await turnstileOk(await segredoTurnstile(admin), String(corpo.turnstile_token ?? ""), ip))) {
+          return json({ error: "Não foi possível confirmar a verificação de segurança. Tente de novo." }, 403);
+        }
+      } else {
+        c = await conviteDoToken(corpo.token);
+        if (!c || (c.motivo !== "cadastro" && c.motivo !== "convite")) return json({ error: LINK_INVALIDO }, 410);
+      }
+      const pessoal = c?.motivo === "convite";
+      const embConvidado = pessoal && c ? await embaixadorDoConvite(c) : null;
       if (pessoal && (!embConvidado || embConvidado.status !== "convidado")) return json({ error: LINK_INVALIDO }, 410);
 
       const dados = { ...(corpo.dados ?? {}) } as CadastroEmbaixador;
@@ -136,14 +210,20 @@ Deno.serve(async (req) => {
       if (!termo) return json({ error: "O termo do programa não está disponível. Avise a equipe do programa." }, 503);
 
       // Reserva o uso do link ANTES de criar a conta (dois envios ao mesmo tempo não passam do limite).
-      const reserva = pessoal
-        ? await admin.from("emb_convites").update({ usos: 1 }).eq("id", c.id).eq("usos", 0).select("id")
-        : await admin.rpc("emb_convite_reservar_uso", { p_id: c.id });
-      const reservou = pessoal ? !!(reserva.data as unknown[] | null)?.length : reserva.data === true;
+      // O link único não tem uso a reservar.
+      let reservou = true;
+      if (c) {
+        const reserva = pessoal
+          ? await admin.from("emb_convites").update({ usos: 1 }).eq("id", c.id).eq("usos", 0).select("id")
+          : await admin.rpc("emb_convite_reservar_uso", { p_id: c.id });
+        reservou = pessoal ? !!(reserva.data as unknown[] | null)?.length : reserva.data === true;
+      }
       if (!reservou) return json({ error: LINK_INVALIDO }, 410);
-      const devolverUso = () => pessoal
-        ? admin.from("emb_convites").update({ usos: 0 }).eq("id", c.id)
-        : admin.rpc("emb_convite_devolver_uso", { p_id: c.id });
+      const devolverUso = async () => {
+        if (!c) return;
+        if (pessoal) await admin.from("emb_convites").update({ usos: 0 }).eq("id", c.id);
+        else await admin.rpc("emb_convite_devolver_uso", { p_id: c.id });
+      };
 
       const embId = embConvidado?.id ?? crypto.randomUUID();
       const apelido = await apelidoLivre(apelidoDoNome(n.nome), embId);
@@ -194,7 +274,8 @@ Deno.serve(async (req) => {
         titulo: [n.area_atuacao, n.cidade && n.uf ? `${n.cidade}, ${n.uf}` : n.cidade].filter(Boolean).join(" · ") || null,
         formulario_respondido_em: agora,
         email_confirmado_em: pessoal ? agora : null,
-        convite_id: c.id,
+        convite_id: c?.id ?? null,
+        origem_cadastro: unico ? "link_unico" : pessoal ? "convite" : "link",
         atualizado_em: agora,
       };
       const gravado = pessoal
@@ -209,7 +290,7 @@ Deno.serve(async (req) => {
       await admin.from("emb_termos_aceites").insert({
         embaixador_id: embId, versao: termo.versao, ip: ipDoPedido(req), user_agent: (req.headers.get("user-agent") ?? "").slice(0, 400),
       });
-      await registrar(embId, "embaixador", "respondeu_formulario", { link: c.motivo, termo: termo.versao });
+      await registrar(embId, "embaixador", "respondeu_formulario", { link: unico ? "unico" : c!.motivo, termo: termo.versao });
 
       let emailEnviado = true;
       if (!pessoal) {
