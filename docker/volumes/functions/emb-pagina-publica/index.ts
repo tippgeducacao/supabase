@@ -15,6 +15,11 @@ const corsHeaders = {
 };
 
 const APP = "https://sistemappgvet.ppgeducacao.site";
+// O link assinado do Storage sai com o endereço INTERNO da edge (http://kong:8000), que o navegador do
+// visitante não alcança. A assinatura não depende do host: troca-se a origem pela URL pública da API.
+const API_PUBLICA = (Deno.env.get("SUPABASE_PUBLIC_URL") || Deno.env.get("PUBLIC_SUPABASE_URL") || "https://api.ppgeducacao.site")
+  .trim().replace(/\/+$/, "");
+const linkPublico = (assinado: string, base = API_PUBLICA) => assinado.replace(/^https?:\/\/[^/]+/, base);
 const CUPOM_PERCENTUAL = 50;
 // Mesmo widget do Turnstile da agenda pública (mesmo domínio): src/lib/agendaLeadPublica.ts.
 const CHAVE_TURNSTILE = "AGENDA_LEAD_TURNSTILE_SECRET";
@@ -123,7 +128,7 @@ Deno.serve(async (req) => {
       let fotoUrl: string | null = null;
       if (pagina.foto_path) {
         const { data } = await admin.storage.from("emb-fotos").createSignedUrl(pagina.foto_path, 3600);
-        fotoUrl = data?.signedUrl ?? null;
+        fotoUrl = data?.signedUrl ? linkPublico(data.signedUrl) : null;
       }
       const { data: pos } = await admin.rpc("emb_pos_da_pagina");
       return json({
