@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { contarAulasFuturas, hojeEmAmpere, turmaDaOportunidade, type Admin } from "./dados.ts";
+import {
+  carregarCronograma,
+  contagemDoCronograma,
+  contarAulasFuturas,
+  hojeEmAmpere,
+  turmaDaOportunidade,
+  type Admin,
+} from "./dados.ts";
 
 describe("aulas futuras (a conferência do D+1)", () => {
   it("hoje é o dia de Ampére, não o de UTC", () => {
@@ -56,5 +63,90 @@ describe("turma pela oportunidade", () => {
       OP,
     );
     expect(r).toMatchObject({ ok: false, status: 424, code: "rpc_sem_acesso" });
+  });
+});
+
+describe("módulo gravado (EAD) também é cronograma (24/11/2026)", () => {
+  it("futuros soma aula ao vivo e módulo gravado de hoje em diante", () => {
+    const aoVivo = [{ data: "2026-11-18" }, { data: "2026-12-02" }];
+    const ead = [{ data: "2026-10-10" }, { data: "2026-12-10" }, { data: "2027-01-10" }];
+    expect(contagemDoCronograma(aoVivo, ead, 0, "2026-11-24")).toEqual({
+      aoVivo: 2,
+      aoVivoFuturas: 1,
+      ead: 3,
+      eadFuturos: 2,
+      futuros: 3,
+      praticos: 0,
+    });
+  });
+
+  it("curso só de gravados, com tudo ao vivo no passado, ainda tem cronograma pela frente", () => {
+    // Crédito Rural 02/26 #01 em 24/11/2026: 9 aulas ao vivo até 18/11 e 9 módulos de dez a ago.
+    const aoVivo = [{ data: "2026-08-26" }, { data: "2026-11-18" }];
+    const ead = [{ data: "2026-12-10" }, { data: "2027-08-10" }];
+    const c = contagemDoCronograma(aoVivo, ead, 0, "2026-11-24");
+    expect(c.aoVivoFuturas).toBe(0);
+    expect(c.futuros).toBe(2);
+  });
+});
+
+/** Admin falso para carregarCronograma: a turma, as três RPCs e a sonda direta das aulas. */
+function adminCronograma(o: { aoVivo?: unknown[]; ead?: unknown[]; sonda?: unknown[] }): Admin {
+  const turma = {
+    id: "t1",
+    nome: "02/26 #01",
+    data_inicio: "2026-08-26",
+    data_fim: null,
+    horario_inicio: null,
+    horario_fim: null,
+    pos: { nome: "Crédito Rural, Cooperativismo e Vendas", periodo_total_meses: 18, marca: null },
+  };
+  const tabela = (nome: string) => {
+    // deno-lint-ignore no-explicit-any
+    const q: any = {
+      select: () => q,
+      eq: () => q,
+      limit: async () => ({ data: nome === "ped_aula_turmas" ? o.sonda ?? [] : [], error: null }),
+      maybeSingle: async () => ({ data: nome === "ped_turmas" ? turma : null, error: null }),
+    };
+    return q;
+  };
+  const rpcs: Record<string, unknown[]> = {
+    comercial_cronograma_aluno_turma: o.aoVivo ?? [],
+    ped_turma_ead_cronograma: o.ead ?? [],
+    ped_turma_praticos_cronograma: [],
+  };
+  return { rpc: async (nome: string) => ({ data: rpcs[nome] ?? [], error: null }), from: tabela } as unknown as Admin;
+}
+
+describe("carregarCronograma com e sem aula ao vivo", () => {
+  const moduloFuturo = { modulo_numero: 4, modulo_nome: "Crédito rural", data_liberacao_planejada: "2099-12-10", aulas: ["Aula 1"] };
+
+  it("turma só com módulos gravados gera o cronograma (antes dava 422)", async () => {
+    const r = await carregarCronograma(adminCronograma({ ead: [moduloFuturo] }), "t1");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.aulas).toHaveLength(1);
+    expect(r.aulas[0]).toMatchObject({ tipo_aula: "gravado", data: "2099-12-10" });
+    expect(r.contagem).toMatchObject({ aoVivo: 0, aoVivoFuturas: 0, ead: 1, eadFuturos: 1, futuros: 1 });
+  });
+
+  it("sem aula ao vivo e sem módulo gravado continua sem cronograma (422)", async () => {
+    const r = await carregarCronograma(adminCronograma({}), "t1");
+    expect(r).toMatchObject({ ok: false, status: 422, code: "sem_cronograma" });
+  });
+
+  it("aula que existe mas a RPC não devolve continua sendo 424, com ou sem gravado", async () => {
+    const sonda = [{ aula: { cancelada: false, tipo_aula: "ao_vivo" } }];
+    const r = await carregarCronograma(adminCronograma({ ead: [moduloFuturo], sonda }), "t1");
+    expect(r).toMatchObject({ ok: false, status: 424, code: "rpc_sem_acesso" });
+  });
+
+  it("gravado só no passado gera o PDF, mas não conta como futuro", async () => {
+    const passado = { ...moduloFuturo, data_liberacao_planejada: "2020-01-10" };
+    const r = await carregarCronograma(adminCronograma({ ead: [passado] }), "t1");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.contagem.futuros).toBe(0);
   });
 });

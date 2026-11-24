@@ -287,3 +287,17 @@ describe("marca e nome do arquivo", () => {
     expect(nomeArquivoAscii("")).toBe("cronograma.pdf");
   });
 });
+
+describe("turma só de módulos gravados (24/11/2026)", () => {
+  it("gera o PDF com os módulos e os meses de liberação, sem nenhuma aula ao vivo", () => {
+    const aulas = eadComoAulas([
+      { modulo_numero: 4, modulo_nome: "Crédito rural", data_liberacao_planejada: "2026-12-10", aulas: ["Linhas de crédito"] },
+      { modulo_numero: 5, modulo_nome: "Cooperativismo", data_liberacao_planejada: "2027-01-10", aulas: ["Sistema cooperativo"] },
+    ]);
+    const { pdf, bruto, texto } = gerar({ aulas, hoje: "2026-11-24" });
+    expect(bruto.startsWith("%PDF-")).toBe(true);
+    expect(pdf.paginas).toBeGreaterThanOrEqual(1);
+    expect(texto).toContain("Crédito rural");
+    expect(texto).toContain("Cooperativismo");
+  });
+});

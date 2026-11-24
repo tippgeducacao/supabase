@@ -8,7 +8,8 @@
 // CONTRATO (detalhe em docs/CRM — Integração do Aluno.md, seção "PDF do cronograma"):
 //
 //   GET  [/<nome>.pdf]?turma_id=<uuid>[&v=<qualquer coisa>]  → os bytes do PDF (application/pdf,
-//        inline) e o header X-Aulas-Futuras (aulas ao vivo de hoje em diante, ver ./dados.ts).
+//        inline) e o header X-Aulas-Futuras (aulas ao vivo E módulos gravados de hoje em diante,
+//        ver `contagem.futuros` em ./dados.ts; até 24/11/2026 eram só as aulas ao vivo).
 //        PÚBLICO, sem JWT: é o que o crm-whatsapp-send e a Meta baixam. Sem efeito colateral e
 //        sem cache nenhum (decisão do Rafael): cada chamada lê o banco e gera de novo.
 //        O caminho depois do nome da função é IGNORADO (o edge-runtime roteia pelo 1º segmento,
@@ -32,12 +33,13 @@
 // mandando por link.
 // ⚠️ Mesmo assim o 4xx NÃO deve chegar ao crm-whatsapp-send: o alerta dele agrupa pela URL, e
 // com o `v` único cada aluno abriria um alerta crítico separado. Quem dispara confere ANTES
-// (POST, ou HEAD na mesma URL) e só manda com 200 e aulas futuras > 0; o resto é o D+1 sem anexo.
+// (POST, ou HEAD na mesma URL) e só manda com 200 e aulas futuras > 0. Sem isso o D+1 não sai:
+// a régua espera 1 dia, avisa o Pedagógico e anda para o D+2 (docs, "Turma sem cronograma").
 //   400 turma_id_invalido · oportunidade_id_invalido · parametro_ausente
 //   401 nao_autorizado (só POST)
 //   404 turma_nao_encontrada · turma_nao_identificada (POST por oportunidade: sem turma, ou
 //       ambígua) · oportunidade_nao_encontrada (POST: o id não existe, erro de quem chamou)
-//   422 sem_cronograma (turma sem aula ao vivo publicada)
+//   422 sem_cronograma (turma sem aula ao vivo E sem módulo gravado publicados)
 //   424 rpc_sem_acesso (migration 20260911223000, ou a 20260911222900 no POST por
 //       oportunidade, não aplicada: as RPCs voltam vazias para a chave de serviço, ver ./dados.ts)
 //   500 erro_interno
@@ -142,8 +144,10 @@ async function gerarPdf(admin: Admin, turmaId: string, via: string): Promise<Ger
     bytes: pdf.bytes.length,
     paginas: pdf.paginas,
     aulas_ao_vivo: dados.contagem.aoVivo,
-    aulas_futuras: dados.contagem.aoVivoFuturas,
+    aulas_futuras: dados.contagem.futuros,
+    aulas_ao_vivo_futuras: dados.contagem.aoVivoFuturas,
     modulos_ead: dados.contagem.ead,
+    modulos_ead_futuros: dados.contagem.eadFuturos,
     praticos: dados.contagem.praticos,
     ms: (performance.now() - t0).toFixed(2),
   }));
@@ -161,7 +165,8 @@ function respostaPdf(pdf: PdfGerado, aulasFuturas: number, semCorpo: boolean): R
     // gerado na hora, sem cache: nem Cloudflare, nem navegador, nem a Meta guardam
     "Cache-Control": "no-store, max-age=0",
     "X-Content-Type-Options": "nosniff",
-    // a conferência de quem dispara: 0 = turma sem aula ao vivo daqui para a frente, D+1 sem anexo
+    // a conferência de quem dispara: 0 = nada no cronograma daqui para a frente (nem aula ao
+    // vivo nem módulo gravado), e o D+1 não leva o anexo
     "X-Aulas-Futuras": String(aulasFuturas),
   };
   return new Response(semCorpo ? null : pdf.bytes, { status: 200, headers });
@@ -175,7 +180,7 @@ async function servirPdf(req: Request): Promise<Response> {
   }
   const r = await gerarPdf(adminClient(), turmaId, req.method);
   if (!r.ok) return responderFalha(r);
-  return respostaPdf(r.pdf, r.dados.contagem.aoVivoFuturas, req.method === "HEAD");
+  return respostaPdf(r.pdf, r.dados.contagem.futuros, req.method === "HEAD");
 }
 
 /** POST: chave de serviço do container (edge→edge) ou JWT de usuário logado. */
@@ -262,9 +267,12 @@ async function gerarEGuardar(req: Request): Promise<Response> {
     marca: pdf.marca,
     paginas: pdf.paginas,
     aulas: dados.contagem.aoVivo,
-    // 0 = sem aula ao vivo daqui para a frente: quem dispara o D+1 manda sem anexo
-    aulas_futuras: dados.contagem.aoVivoFuturas,
+    // Aulas ao vivo + módulos gravados de hoje em diante (24/11/2026; antes, só ao vivo).
+    // 0 = nada no cronograma daqui para a frente: quem dispara o D+1 não manda o anexo.
+    aulas_futuras: dados.contagem.futuros,
+    aulas_ao_vivo_futuras: dados.contagem.aoVivoFuturas,
     modulos_ead: dados.contagem.ead,
+    modulos_ead_futuros: dados.contagem.eadFuturos,
     praticos: dados.contagem.praticos,
     origem_turma: origem,
     gerado_em: agora.toISOString(),

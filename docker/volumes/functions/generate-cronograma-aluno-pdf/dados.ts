@@ -38,8 +38,20 @@ export interface CronogramaCarregado {
   marca: string | null;
   aulas: CronogramaAlunoAula[];
   praticos: PraticoSessao[];
-  /** `aoVivoFuturas`: aulas ao vivo de hoje em diante (ver `contarAulasFuturas`). */
-  contagem: { aoVivo: number; aoVivoFuturas: number; ead: number; praticos: number };
+  /**
+   * `aoVivoFuturas`: aulas ao vivo de hoje em diante (ver `contarAulasFuturas`).
+   * `eadFuturos`: módulos gravados (EAD) com liberação de hoje em diante.
+   * `futuros`: a soma dos dois. É ELE que decide se o D+1 leva o PDF (24/11/2026): curso com
+   * módulos gravados tem cronograma mesmo sem nenhuma aula ao vivo pela frente.
+   */
+  contagem: {
+    aoVivo: number;
+    aoVivoFuturas: number;
+    ead: number;
+    eadFuturos: number;
+    futuros: number;
+    praticos: number;
+  };
 }
 
 const falha = (status: number, code: string, error: string): Falha => ({ ok: false, status, code, error });
@@ -50,12 +62,13 @@ export function hojeEmAmpere(agora: Date = new Date()): string {
 }
 
 /**
- * Aulas AO VIVO de hoje em diante, no calendário de Ampére. É o número que decide se o D+1 leva
- * o PDF: turma sem aula ao vivo daqui para a frente (só prático ou mentoria futuros, ou tudo já
- * passado) não serve de cronograma para quem acabou de entrar. Conta sobre as linhas da MESMA
- * RPC do PDF (sem cancelada, prático e mentoria); pré-abertura sem data não conta. O
- * `aulas_futuras` de onb_turma_do_aluno não serve para isso: conta prático, mentoria e
- * cancelada, e pede o id da venda.
+ * Itens com data de hoje em diante, no calendário de Ampére. Serve às aulas AO VIVO (linhas da
+ * MESMA RPC do PDF: sem cancelada, prático e mentoria) e aos módulos gravados (data = liberação
+ * planejada); pré-abertura sem data não conta. A soma dos dois (`contagem.futuros`) decide se o
+ * D+1 leva o PDF: turma sem nada daqui para a frente não serve de cronograma para quem acabou de
+ * entrar. Até 24/11/2026 só contavam as aulas ao vivo, e curso de módulos gravados (Crédito Rural,
+ * MBA em Liderança) ficava sem a boas-vindas. O `aulas_futuras` de onb_turma_do_aluno não serve
+ * para isso: conta prático, mentoria e cancelada, e pede o id da venda.
  */
 export function contarAulasFuturas(aulas: { data: string | null }[], hoje: string): number {
   return aulas.filter((a) => typeof a.data === "string" && a.data.slice(0, 10) >= hoje).length;
@@ -145,7 +158,10 @@ export async function carregarCronograma(admin: Admin, turmaId: string): Promise
     tipo_aula: a.tipo_aula,
   }));
 
-  // (3) Sem aula ao vivo: turma sem cronograma, ou a RPC cega para a chave de serviço?
+  const ead = eadComoAulas(eadRes.error ? [] : ((eadRes.data ?? []) as EadCronogramaRow[]));
+
+  // (3) Sem aula ao vivo: a RPC cega para a chave de serviço, curso só de gravados, ou turma
+  //     sem cronograma?
   if (aoVivo.length === 0) {
     const elegiveis = await aulasElegiveisDiretas(admin, turmaId);
     if (elegiveis === null) return falha(500, "erro_interno", "não foi possível conferir as aulas da turma");
@@ -156,10 +172,12 @@ export async function carregarCronograma(admin: Admin, turmaId: string): Promise
       );
       return falha(424, "rpc_sem_acesso", "as aulas existem mas a leitura com a chave de serviço voltou vazia (migration pendente)");
     }
-    return falha(422, "sem_cronograma", "esta turma ainda não tem cronograma publicado no Pedagógico");
+    // 24/11/2026: módulo gravado (EAD) também é cronograma. Turma só com gravados não tem aula ao
+    // vivo nenhuma, e o PDF dela lista os meses de liberação. "Sem cronograma" é sem os dois.
+    if (ead.length === 0) {
+      return falha(422, "sem_cronograma", "esta turma ainda não tem cronograma publicado no Pedagógico");
+    }
   }
-
-  const ead = eadComoAulas(eadRes.error ? [] : ((eadRes.data ?? []) as EadCronogramaRow[]));
   // Superfície do ALUNO: sessão anterior ao início da turma fica fora (ele não alcança).
   const praticos = normalizarPraticos(
     praticosRes.error ? [] : ((praticosRes.data ?? []) as PraticoCronogramaRow[]),
@@ -181,12 +199,29 @@ export async function carregarCronograma(admin: Admin, turmaId: string): Promise
     // O render ordena; aqui só junta ao vivo + gravados, como os dois chamadores do front.
     aulas: [...aoVivo, ...ead],
     praticos,
-    contagem: {
-      aoVivo: aoVivo.length,
-      aoVivoFuturas: contarAulasFuturas(aoVivo, hojeEmAmpere()),
-      ead: ead.length,
-      praticos: praticos.length,
-    },
+    contagem: contagemDoCronograma(aoVivo, ead, praticos.length, hojeEmAmpere()),
+  };
+}
+
+/**
+ * As contagens que viajam com o PDF. `futuros` (ao vivo + gravados de hoje em diante) é o número
+ * que decide se o D+1 leva o anexo; os outros ficam para log e diagnóstico.
+ */
+export function contagemDoCronograma(
+  aoVivo: { data: string | null }[],
+  ead: { data: string | null }[],
+  praticos: number,
+  hoje: string,
+): CronogramaCarregado["contagem"] {
+  const aoVivoFuturas = contarAulasFuturas(aoVivo, hoje);
+  const eadFuturos = contarAulasFuturas(ead, hoje);
+  return {
+    aoVivo: aoVivo.length,
+    aoVivoFuturas,
+    ead: ead.length,
+    eadFuturos,
+    futuros: aoVivoFuturas + eadFuturos,
+    praticos,
   };
 }
 
