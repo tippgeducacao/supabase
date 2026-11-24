@@ -1,6 +1,14 @@
-import { corpoEventoB2B, hashConteudoB2B, idEventoB2B, reuniaoCancelada, type ReuniaoB2B } from './regras.ts';
+import {
+  avisarConvidado, convidadoDaReuniao, convidadosDoEvento, corpoEventoB2B, hashConteudoB2B,
+  idEventoB2B, reuniaoCancelada, type ReuniaoB2B,
+} from './regras.ts';
 
-export type Config = { user_id: string; integration_id: string; ativo: boolean };
+/**
+ * `pessoal` = agenda pessoal habilitada em calendar_b2b_config (espelha TODA reunião B2B dela).
+ * `convite` = agenda global do vendedor (profiles.id_calendar): espelha só a reunião que pediu
+ * convite para o lead (view calendar_b2b_reunioes_convite, 24/11/2026).
+ */
+export type Config = { user_id: string; integration_id: string; ativo: boolean; tipo?: 'pessoal' | 'convite' };
 export type Espelho = {
   agendamento_id: string; user_id: string; integration_id: string; external_event_id: string;
   geracao: number; estado: string; hash_conteudo?: string | null;
@@ -9,7 +17,10 @@ export type Espelho = {
 export type CredencialGoogle = { accessToken: string; calendarId: string };
 export type EventoGoogle = {
   id?: string; status?: string; hangoutLink?: string;
-  extendedProperties?: { private?: { ppg_agendamento_id?: string; ppg_responsavel_id?: string } };
+  start?: { dateTime?: string; date?: string; timeZone?: string };
+  end?: { dateTime?: string; date?: string; timeZone?: string };
+  attendees?: Array<{ email?: string; responseStatus?: string; [campo: string]: unknown }>;
+  extendedProperties?: { private?: { ppg_agendamento_id?: string; ppg_responsavel_id?: string; ppg_convidado?: string } };
   conferenceData?: {
     createRequest?: { requestId?: string; status?: { statusCode?: string } };
     entryPoints?: Array<{ entryPointType: string; uri?: string }>;
@@ -65,8 +76,10 @@ export async function sincronizarReunioes(
     // deve impedir o DELETE que estava preparado pelo snapshot cancelado.
     const antesDaRemocao = await repositorio.buscarReuniao(espelho.agendamento_id, config.user_id);
     if (antesDaRemocao && !reuniaoCancelada(antesDaRemocao.status)) continue;
+    // Lead convidado pelo sistema recebe o cancelamento do Google; sem convite, silêncio.
+    const avisoCancelamento = original.json.extendedProperties?.private?.ppg_convidado ? 'all' : 'none';
     const res = original.ok && original.json.status !== 'cancelled'
-      ? await google(cred, `/${encodeURIComponent(espelho.external_event_id)}?sendUpdates=none`, 'DELETE')
+      ? await google(cred, `/${encodeURIComponent(espelho.external_event_id)}?sendUpdates=${avisoCancelamento}`, 'DELETE')
       : { ok: true, status: 204 };
     if (!res.ok && ![404, 410].includes(res.status)) throw new Error('Google não confirmou a remoção da reunião cancelada.');
     await repositorio.salvarEspelho({ ...espelho, estado: 'cancelado', hash_conteudo: null, sincronizado_em: new Date().toISOString(), erro: null });
@@ -103,20 +116,31 @@ export async function sincronizarReunioes(
       throw new Error('O identificador Google já pertence a outro evento; nenhuma alteração realizada.');
     }
     const comMeet = !reuniao.link_reuniao && !existente.json.hangoutLink && !existente.json.conferenceData?.createRequest;
-    const payload = { ...corpo, ...(comMeet ? { conferenceData: {
+    // Convite do lead (24/11/2026): mexe só no convidado que o sistema pôs e só avisa o lead
+    // por e-mail quando o convite é novo, troca de pessoa ou muda o horário.
+    const noGoogle = existente.ok ? existente.json : null;
+    const convidados = convidadosDoEvento(noGoogle, convidadoDaReuniao(reuniao));
+    const aviso = avisarConvidado(noGoogle, corpo as { start?: { dateTime?: string }; end?: { dateTime?: string } }, convidados);
+    const privado = (corpo.extendedProperties as { private: Record<string, string> }).private;
+    const base = {
+      ...corpo,
+      ...(convidados.gerido ? { attendees: convidados.attendees } : {}),
+      ...(convidados.limparMarca ? { extendedProperties: { private: { ...privado, ppg_convidado: '' } } } : {}),
+    };
+    const payload = { ...base, ...(comMeet ? { conferenceData: {
       createRequest: { requestId: eventId, conferenceSolutionKey: { type: 'hangoutsMeet' } },
     } } : {}) };
     const aindaAtual = await repositorio.buscarReuniao(reuniao.id, config.user_id);
     if (!aindaAtual || aindaAtual.updated_at !== reuniao.updated_at || reuniaoCancelada(aindaAtual.status)) continue;
     let res = existente.ok
-      ? await google(cred, `/${encodeURIComponent(eventId)}?conferenceDataVersion=1&sendUpdates=none`, 'PATCH', payload)
-      : await google(cred, '?conferenceDataVersion=1&sendUpdates=none', 'POST', { id: eventId, ...payload });
+      ? await google(cred, `/${encodeURIComponent(eventId)}?conferenceDataVersion=1&sendUpdates=${aviso}`, 'PATCH', payload)
+      : await google(cred, `?conferenceDataVersion=1&sendUpdates=${aviso}`, 'POST', { id: eventId, ...payload });
     // Timeout/repetição: o ID é determinístico, e só adotamos evento com a nossa marca.
     if (res.status === 409) {
       res = await google(cred, `/${encodeURIComponent(eventId)}`);
       if (res.ok && res.json.extendedProperties?.private?.ppg_agendamento_id === reuniao.id &&
           res.json.extendedProperties?.private?.ppg_responsavel_id === config.user_id) {
-        res = await google(cred, `/${encodeURIComponent(eventId)}?conferenceDataVersion=1&sendUpdates=none`, 'PATCH', corpo);
+        res = await google(cred, `/${encodeURIComponent(eventId)}?conferenceDataVersion=1&sendUpdates=${aviso}`, 'PATCH', base);
       }
     }
     if (!res.ok || res.json.extendedProperties?.private?.ppg_agendamento_id !== reuniao.id ||

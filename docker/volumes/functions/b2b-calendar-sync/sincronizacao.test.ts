@@ -51,7 +51,7 @@ class BancoMemoria implements RepositorioSincronizacao {
   get espelho() { return this.espelhos.get(`${reuniaoInicial.id}:${config.user_id}`)!; }
 }
 
-type Chamada = { metodo: string; id: string; corpo?: EventoGoogle };
+type Chamada = { metodo: string; id: string; corpo?: EventoGoogle; caminho: string };
 class GoogleMemoria {
   eventos = new Map<string, EventoGoogle>();
   chamadas: Chamada[] = [];
@@ -64,7 +64,7 @@ class GoogleMemoria {
   cliente: ClienteGoogle = async (_cred, caminho, metodo = 'GET', body) => {
     const corpo = body ? copia(body as EventoGoogle) : undefined;
     const id = metodo === 'POST' ? corpo!.id! : decodeURIComponent(caminho.split('?')[0].slice(1));
-    const chamada = { metodo, id, corpo };
+    const chamada = { metodo, id, corpo, caminho };
     this.chamadas.push(chamada);
     this.antes?.(chamada);
     if (metodo === 'GET') {
@@ -265,5 +265,93 @@ describe('sincronização B2B com banco e Google simulados', () => {
     await rodar();
     expect(google.porMetodo('DELETE')).toHaveLength(0);
     expect(banco.espelho.estado).toBe('sincronizado');
+  });
+
+  describe('convite do Google para o lead (24/11/2026)', () => {
+    const avisos = (google: GoogleMemoria) =>
+      google.chamadas.filter(c => c.metodo !== 'GET').map(c => `${c.metodo}:${new URLSearchParams(c.caminho.split('?')[1] ?? '').get('sendUpdates')}`);
+
+    it('convida o lead uma vez e não repete o e-mail quando o Meet chega depois', async () => {
+      const { banco, google, rodar } = ambiente();
+      banco.reuniao.link_reuniao = null;
+      banco.reuniao.convidado_email = 'decisora@empresa.com.br';
+      await rodar();
+      const id = banco.espelho.external_event_id;
+      expect(google.porMetodo('POST')[0].corpo?.attendees).toEqual([{ email: 'decisora@empresa.com.br' }]);
+      expect(google.porMetodo('POST')[0].corpo?.extendedProperties?.private?.ppg_convidado).toBe('decisora@empresa.com.br');
+      // Meet ficou pronto: o worker relê, grava o link e atualiza a descrição — sem e-mail novo.
+      const evento = google.eventos.get(id)!;
+      evento.hangoutLink = 'https://meet.google.com/aaa-bbbb-ccc';
+      await rodar();
+      banco.reuniao.updated_at = '2026-09-12T14:05:00Z';
+      await rodar();
+      expect(avisos(google)).toEqual(['POST:all', 'PATCH:none', 'PATCH:none']);
+      expect(banco.reuniao.link_reuniao).toBe('https://meet.google.com/aaa-bbbb-ccc');
+      expect(await rodar()).toBe(0);
+    });
+
+    it('remarcar avisa o lead; trocar o e-mail troca só o convidado do sistema', async () => {
+      const { banco, google, rodar } = ambiente();
+      banco.reuniao.convidado_email = 'antigo@empresa.com';
+      await rodar();
+      const id = banco.espelho.external_event_id;
+      // A dona da agenda acrescentou alguém à mão e o lead já respondeu "sim".
+      google.eventos.get(id)!.attendees = [
+        { email: 'antigo@empresa.com', responseStatus: 'accepted' },
+        { email: 'colega@ppg.com', responseStatus: 'needsAction' },
+      ];
+      banco.reuniao.data_agendamento = '2026-09-15T14:00:00Z';
+      banco.reuniao.data_fim_agendamento = '2026-09-15T15:00:00Z';
+      banco.reuniao.updated_at = '2026-09-12T14:10:00Z';
+      await rodar();
+      expect(google.eventos.get(id)!.attendees).toEqual([
+        { email: 'colega@ppg.com', responseStatus: 'needsAction' },
+        { email: 'antigo@empresa.com', responseStatus: 'accepted' },
+      ]);
+      banco.reuniao.convidado_email = 'novo@empresa.com';
+      banco.reuniao.updated_at = '2026-09-12T14:20:00Z';
+      await rodar();
+      expect(google.eventos.get(id)!.attendees).toEqual([
+        { email: 'colega@ppg.com', responseStatus: 'needsAction' },
+        { email: 'novo@empresa.com' },
+      ]);
+      expect(avisos(google)).toEqual(['POST:all', 'PATCH:all', 'PATCH:all']);
+    });
+
+    it('tirar o e-mail remove só o convidado do sistema e limpa a marca', async () => {
+      const { banco, google, rodar } = ambiente();
+      banco.reuniao.convidado_email = 'lead@empresa.com';
+      await rodar();
+      const id = banco.espelho.external_event_id;
+      banco.reuniao.convidado_email = null;
+      banco.reuniao.updated_at = '2026-09-12T14:30:00Z';
+      await rodar();
+      expect(google.eventos.get(id)!.attendees).toEqual([]);
+      expect(google.eventos.get(id)!.extendedProperties?.private?.ppg_convidado).toBe('');
+      expect(avisos(google)).toEqual(['POST:all', 'PATCH:all']);
+    });
+
+    it('cancelar envia o cancelamento ao lead; reunião sem convite segue em silêncio', async () => {
+      const comConvite = ambiente();
+      comConvite.banco.reuniao.convidado_email = 'lead@empresa.com';
+      await comConvite.rodar();
+      comConvite.banco.reuniao.status = 'cancelado';
+      await comConvite.rodar();
+      expect(avisos(comConvite.google)).toEqual(['POST:all', 'DELETE:all']);
+
+      const semConvite = ambiente();
+      await semConvite.rodar();
+      semConvite.banco.reuniao.status = 'cancelado';
+      await semConvite.rodar();
+      expect(avisos(semConvite.google)).toEqual(['POST:none', 'DELETE:none']);
+    });
+
+    it('reunião antiga sem convite não muda de conteúdo (nada de PATCH em massa)', async () => {
+      const { banco, google, rodar } = ambiente();
+      await rodar();
+      banco.reuniao.convidado_email = undefined;
+      expect(await rodar()).toBe(0);
+      expect(google.porMetodo('PATCH')).toHaveLength(0);
+    });
   });
 });
