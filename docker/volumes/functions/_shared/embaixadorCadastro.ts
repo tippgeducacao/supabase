@@ -7,11 +7,15 @@ export const UFS = [
   "PR", "RJ", "RN", "RO", "RR", "RS", "SC", "SE", "SP", "TO",
 ] as const;
 
+export const TRATAMENTOS = ["embaixador", "embaixadora"] as const;
+
 export const PIX_TIPOS = ["cnpj", "email", "celular", "aleatoria"] as const;
 export type PixTipo = (typeof PIX_TIPOS)[number];
 
 export interface CadastroEmbaixador {
   nome: string;
+  /** Como aparece na página: "Embaixador PPGVET" ou "Embaixadora PPGVET". */
+  tratamento: string;
   email: string;
   email_confirmacao: string;
   whatsapp: string;
@@ -111,6 +115,8 @@ export function validarCadastro(c: CadastroEmbaixador, opcoes: { pessoal?: boole
     else if (email !== limpar(c.email_confirmacao).toLowerCase()) e.email_confirmacao = "Os dois e-mails não são iguais.";
   }
 
+  if (!TRATAMENTOS.includes(limpar(c.tratamento) as (typeof TRATAMENTOS)[number])) e.tratamento = "Escolha como você quer aparecer na página.";
+
   if (!normalizarWhatsapp(c.whatsapp)) e.whatsapp = "WhatsApp com DDD, por exemplo (49) 99999-0000.";
 
   const t = (k: keyof CadastroEmbaixador, min: number, max: number, rotulo: string) => {
@@ -165,6 +171,7 @@ export function dadosNormalizados(c: CadastroEmbaixador) {
   if (limpar(c.linkedin)) redes.linkedin = limpar(c.linkedin);
   return {
     nome: limpar(c.nome),
+    tratamento: limpar(c.tratamento),
     email: limpar(c.email).toLowerCase(),
     whatsapp: normalizarWhatsapp(c.whatsapp),
     profissao: limpar(c.profissao),
