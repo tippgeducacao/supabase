@@ -141,6 +141,16 @@ describe("montarMaterial", () => {
     expect(txt).toContain("Ficha de venda já cadastrada");
   });
 
+  it("leva público-alvo e lead qualificado do Pedagógico, com as quebras de linha", () => {
+    const txt = montarMaterial(
+      { ...pos, publico_alvo: "  Veterinários   de granja\n\n  Zootecnistas ", lead_qualificado: "Formado na área" },
+      [], [], [], null,
+    );
+    expect(txt).toContain("## Público-alvo (escrito pelo Pedagógico)\nVeterinários de granja\nZootecnistas");
+    expect(txt).toContain("## Lead qualificado (escrito pelo Pedagógico)\nFormado na área");
+    expect(montarMaterial({ ...pos, publico_alvo: "   ", lead_qualificado: null }, [], [], [], null)).not.toMatch(/Público-alvo|Lead qualificado/);
+  });
+
   it("tira o rótulo interno «PÓS |» do nome (a IA copiava para as frases)", () => {
     const txt = montarMaterial({ ...pos, nome_comercial: "PÓS | PISCICULTURA E PRODUÇÃO DE TILÁPIA" }, [], [], [], null);
     expect(txt.split("\n")[0]).toBe("# Pós-graduação: PISCICULTURA E PRODUÇÃO DE TILÁPIA");

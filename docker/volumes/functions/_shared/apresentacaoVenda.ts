@@ -42,6 +42,9 @@ export interface PosMaterial {
   periodo_total_meses: number | null;
   tcc: string | null;
   produto_tipo: string | null;
+  /** Textos do Pedagógico (quadro «Público-alvo», 25/11/2026). */
+  publico_alvo?: string | null;
+  lead_qualificado?: string | null;
 }
 export interface LinhaGrade {
   modulo_numero: number | null;
@@ -70,6 +73,16 @@ function limpa(s: unknown, max = 600): string {
   return String(s ?? "").replace(/\s+/g, " ").trim().slice(0, max);
 }
 
+/** Como `limpa`, mas mantém as quebras de linha (texto corrido escrito pelo Pedagógico). */
+function limpaParagrafos(s: unknown, max = 4000): string {
+  return String(s ?? "")
+    .split(/\r?\n/)
+    .map((l) => l.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join("\n")
+    .slice(0, max);
+}
+
 /** Texto único com tudo que o sistema sabe da pós. Só fatos cadastrados: é a única fonte da IA. */
 export function montarMaterial(
   pos: PosMaterial,
@@ -93,6 +106,12 @@ export function montarMaterial(
     pos.tcc ? `TCC: ${limpa(pos.tcc, 200)}` : "",
   ].filter(Boolean);
   partes.push(ficha1.join("\n"));
+
+  // Público-alvo e lead qualificado, escritos pelo Pedagógico no cadastro do curso (25/11/2026).
+  const publico = limpaParagrafos(pos.publico_alvo);
+  if (publico) partes.push(`## Público-alvo (escrito pelo Pedagógico)\n${publico}`);
+  const lead = limpaParagrafos(pos.lead_qualificado);
+  if (lead) partes.push(`## Lead qualificado (escrito pelo Pedagógico)\n${lead}`);
 
   // Grade: módulo → aulas (com ementa). Partes da mesma aula viram uma linha só.
   const porModulo = new Map<string, { titulo: string; aulas: Map<string, string[]> }>();
@@ -170,7 +189,8 @@ const ETAPAS_SPIN: Record<string, { titulo: string; foco: string }> = {
     foco:
       "Perguntas de SITUAÇÃO: descobrir onde o lead atua, a rotina, a função, a formação, com quem " +
       "trabalha e em que momento de carreira está. Só perguntar, sem vender e sem concluir nada. " +
-      "Perguntas curtas e fáceis de responder.",
+      "Perguntas curtas e fáceis de responder. Se o MATERIAL traz «Lead qualificado», inclua perguntas " +
+      "que ajudem o vendedor a confirmar esses critérios, sem soar como triagem.",
   },
   spin_problema: {
     titulo: "Problema",

@@ -4,8 +4,9 @@
 // Pedido: { pos_id, bloco } — bloco é um de BLOCOS (_shared/apresentacaoVenda.ts).
 //
 // 1. confere a sessão e o Pedagógico (user_can_access_pedagogico, o mesmo gate do resto do módulo);
-// 2. junta o que o sistema já sabe da pós: cadastro, grade (ped_curso_aulas_blueprint), aulas ao vivo
-//    extras, professores e a ficha de venda (comercial_programa_data), se existir;
+// 2. junta o que o sistema já sabe da pós: cadastro (com público-alvo e lead qualificado, 25/11/2026),
+//    grade (ped_curso_aulas_blueprint), aulas ao vivo extras, professores e a ficha de venda
+//    (comercial_programa_data), se existir;
 // 3. pede à IA SÓ este bloco, com saída em JSON (schema por bloco); o que o material não traz vai
 //    para «lacunas», nunca para o texto;
 // 4. limpa e confere (normalizarBloco) e grava no RASCUNHO (ped_apresentacao_venda_gravar_ia).
@@ -92,7 +93,7 @@ async function chamarIA(apiKey: string, pedido: string, schema: Record<string, u
 async function juntarMaterial(db: Db, posId: string): Promise<{ texto: string; nome: string } | null> {
   const { data: pos, error: ePos } = await db
     .from("ped_pos_graduacoes")
-    .select("id, nome, nome_comercial, marca, instituicao, formato, carga_horaria, periodo_total_meses, tcc, produto_tipo, curso_comercial_id, coordenador_professor_id")
+    .select("id, nome, nome_comercial, marca, instituicao, formato, carga_horaria, periodo_total_meses, tcc, produto_tipo, curso_comercial_id, coordenador_professor_id, publico_alvo, lead_qualificado")
     .eq("id", posId)
     .maybeSingle();
   if (ePos) throw ePos;
