@@ -1,4 +1,5 @@
 import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
+import { regrasDeHtmlDoEditor } from "../_shared/iaTextoFormatado.ts";
 // Edge function: gt-ai-doc
 // Multi-action AI helper for the document editor (Notion-like)
 // Actions: improve | summarize | expand | shorten | translate | continue | generate
@@ -27,13 +28,18 @@ interface ReqBody {
   text?: string;
   instruction?: string;
   language?: "pt" | "en" | "es";
+  /** "html": o editor manda e quer de volta HTML dele, com peças fixas em ⟦n …⟧ (ver _shared/iaTextoFormatado.ts). */
+  formato?: "html" | "texto";
+  recursos?: string[];
 }
 
-function systemPromptFor(action: Action, opts: { instruction?: string; language?: string }): string {
-  const base =
-    "Você é um assistente de escrita profissional para um editor de documentos em Português do Brasil. " +
-    "Retorne APENAS o resultado final, sem comentários, sem markdown extra, sem aspas envolventes. " +
-    "Preserve o formato HTML simples (parágrafos, listas) quando o texto vier em HTML.";
+function systemPromptFor(action: Action, opts: { instruction?: string; language?: string; formato?: string; recursos?: unknown }): string {
+  const base = opts.formato === "html"
+    ? "Você é um assistente de escrita profissional para um editor de documentos em Português do Brasil.\n\n" +
+      regrasDeHtmlDoEditor(opts.recursos) + "\n"
+    : "Você é um assistente de escrita profissional para um editor de documentos em Português do Brasil. " +
+      "Retorne APENAS o resultado final, sem comentários, sem markdown extra, sem aspas envolventes. " +
+      "Preserve o formato HTML simples (parágrafos, listas) quando o texto vier em HTML.";
 
   switch (action) {
     case "improve":
@@ -72,7 +78,7 @@ Deno.serve(async (req) => {
     }
 
     const body = (await req.json()) as ReqBody;
-    const { action, text, instruction, language } = body;
+    const { action, text, instruction, language, formato, recursos } = body;
 
     if (!action) {
       return new Response(JSON.stringify({ error: "action é obrigatório" }), {
@@ -88,7 +94,7 @@ Deno.serve(async (req) => {
       });
     }
 
-    const sys = systemPromptFor(action, { instruction, language });
+    const sys = systemPromptFor(action, { instruction, language, formato, recursos });
     const userContent =
       action === "generate"
         ? instruction || ""
@@ -102,7 +108,8 @@ Deno.serve(async (req) => {
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: sys }] },
         contents: [{ role: "user", parts: [{ text: userContent }] }],
-        generationConfig: { temperature: 0.7, maxOutputTokens: 2048 },
+        // O 2.5-flash gasta parte disto pensando; 2048 cortava a resposta em HTML no meio.
+        generationConfig: { temperature: 0.7, maxOutputTokens: 8192 },
       }),
     });
 

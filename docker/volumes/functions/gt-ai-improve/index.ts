@@ -1,5 +1,6 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
+import { regrasDeHtmlDoEditor } from "../_shared/iaTextoFormatado.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -19,26 +20,33 @@ const FORMAT_RULES = `REGRAS DE FORMATAÇÃO OBRIGATÓRIAS:
 - Mantenha QUALQUER título/seção do texto original em uma linha própria seguida do conteúdo.
 - Devolva o TEXTO COMPLETO. Nunca corte no meio de uma frase. Nunca finalize com reticências indicando continuação.`;
 
-const DEFAULT_SYSTEM_PROMPT = `Você é um assistente de escrita profissional para um app de gestão de tarefas em Português do Brasil.
+// `formato: "html"` = os editores do Gestor (descrição da tarefa): o trecho chega em HTML com as
+// peças fixas trocadas por ⟦n …⟧ e volta em HTML. Sem ele (campos de texto simples, pílula global
+// "Melhorar escrita") segue o texto puro de sempre.
+function buildSystemPrompt(instruction?: string, formato?: string, recursos?: unknown): string {
+  const regras = formato === "html" ? regrasDeHtmlDoEditor(recursos) : FORMAT_RULES;
+  if (!instruction || !instruction.trim()) {
+    return `Você é um assistente de escrita profissional para um app de gestão de tarefas em Português do Brasil.
 Sua tarefa é MELHORAR o texto enviado: corrigir gramática, ortografia, pontuação, clareza e fluidez,
 mantendo o sentido original, o tom e o idioma. NÃO adicione conteúdo novo, NÃO faça comentários.
 
-${FORMAT_RULES}`;
-
-function buildSystemPrompt(instruction?: string): string {
-  if (!instruction || !instruction.trim()) return DEFAULT_SYSTEM_PROMPT;
+${regras}`;
+  }
   return `Você é um assistente de escrita profissional para um app de gestão de tarefas em Português do Brasil.
 O usuário selecionou um trecho de texto e pediu a seguinte ação: "${instruction.trim()}".
 Aplique essa instrução ao texto enviado, mantendo o idioma (PT-BR) e um tom profissional.
 NÃO faça comentários sobre o que mudou.
 
-${FORMAT_RULES}`;
+${regras}`;
 }
 
 interface ReqBody {
   text: string;
   instruction?: string;
   action?: "improve";
+  formato?: "html" | "texto";
+  /** Ferramentas do editor (chaves de FERRAMENTAS_DO_EDITOR); chave desconhecida é ignorada. */
+  recursos?: string[];
 }
 
 Deno.serve(async (req) => {
@@ -51,7 +59,7 @@ Deno.serve(async (req) => {
     const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(SUPABASE_URL, SERVICE_KEY);
 
-    const { text, instruction } = (await req.json()) as ReqBody;
+    const { text, instruction, formato, recursos } = (await req.json()) as ReqBody;
     if (!text || typeof text !== "string" || !text.trim()) {
       return new Response(JSON.stringify({ error: "text é obrigatório" }), {
         status: 400,
@@ -59,7 +67,7 @@ Deno.serve(async (req) => {
       });
     }
 
-    const systemPrompt = buildSystemPrompt(instruction);
+    const systemPrompt = buildSystemPrompt(instruction, formato, recursos);
 
     // Helper: chama Lovable AI Gateway (Gemini) como fallback
     const callLovableGateway = async (): Promise<{ improved?: string; error?: string; status?: number }> => {
@@ -113,7 +121,8 @@ Deno.serve(async (req) => {
         body: JSON.stringify({
           model: MODEL,
           system: systemPrompt,
-          max_tokens: 4096,
+          // HTML ocupa mais que texto puro; 4096 cortava descrição longa no meio.
+          max_tokens: 16000,
           messages: [{ role: "user", content: text }],
         }),
       });
