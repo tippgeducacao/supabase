@@ -1,4 +1,4 @@
-// acesso: publico — cadastro pelo LINK ÚNICO (/embaixador/cadastro, sem código) só com o interruptor ligado na gestão, Turnstile fail-closed e freio por IP; convite pessoal, nova senha e confirmar e-mail são por token de uso único (32 bytes, só o hash SHA-256 no banco); o "esqueci" só manda e-mail a embaixador com conta e no máximo 1 a cada 10 min.
+// acesso: publico — cadastro pelo LINK ÚNICO (/embaixador/cadastro, sem código) só com o interruptor ligado na gestão, Turnstile fail-closed e freio por IP; convite pessoal, nova senha e confirmar e-mail são por token de uso único (32 bytes, só o hash SHA-256 no banco); o "esqueci" só manda e-mail a embaixador com conta e no máximo 1 a cada 10 min. As ações minha_foto e trocar_foto exigem o token de uma conta 'embaixador' (conferido no Auth) e só mexem na foto dela.
 //
 // Edge Function: emb-cadastro-publico — Programa de Embaixadores (23/11/2026).
 // 24/11/2026: o cadastro aberto é um LINK ÚNICO, /embaixador/cadastro (sem código), que a gestão pausa e
@@ -23,7 +23,7 @@ const corsHeaders = {
 };
 
 interface Corpo {
-  acao?: "conferir" | "cadastrar" | "confirmar_email" | "criar_senha" | "esqueci";
+  acao?: "conferir" | "cadastrar" | "confirmar_email" | "criar_senha" | "esqueci" | "minha_foto" | "trocar_foto";
   token?: string;
   dados?: CadastroEmbaixador;
   senha?: string;
@@ -36,6 +36,11 @@ interface Convite {
   id: string; motivo: "cadastro" | "convite" | "nova_senha" | "confirmar_email"; embaixador_id: string | null;
   usos: number; usos_max: number | null; expira_em: string | null; ativo: boolean;
 }
+
+// O link assinado sai com o host interno (kong:8000): troca pela origem pública (a assinatura não depende dele).
+const API_PUBLICA = (Deno.env.get("SUPABASE_PUBLIC_URL") || Deno.env.get("PUBLIC_SUPABASE_URL") || "https://api.ppgeducacao.site")
+  .replace(/\/$/, "");
+const linkPublico = (assinado: string) => assinado.replace(/^https?:\/\/[^/]+/, API_PUBLICA);
 
 const LINK_INVALIDO = "Este link não vale mais. Peça um novo à equipe do Programa de Embaixadores.";
 const LINK_PAUSADO = "As inscrições para o Programa de Embaixadores estão pausadas no momento. Tente de novo mais tarde.";
@@ -135,6 +140,42 @@ Deno.serve(async (req) => {
         .select("id, user_id, nome, email, status").eq("id", c.embaixador_id).maybeSingle();
       return data as null | { id: string; user_id: string | null; nome: string; email: string; status: string };
     };
+
+    // ---------------------------------------------------------------------------------------------
+    // Foto do perfil do embaixador logado (26/11/2026). O Storage é privado e o papel 'embaixador' não o
+    // alcança: a conta é conferida aqui pelo token e só mexe na própria linha.
+    if (corpo.acao === "minha_foto" || corpo.acao === "trocar_foto") {
+      const token = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
+      const { data: quem } = token ? await admin.auth.getUser(token) : { data: { user: null } };
+      const conta = quem?.user as { id: string; role?: string } | null | undefined;
+      if (!conta || conta.role !== "embaixador") return json({ error: "Entre na sua conta de embaixador." }, 401);
+      const { data: linhaEmb } = await admin.from("emb_embaixadores")
+        .select("id, status, foto_path").eq("user_id", conta.id).maybeSingle();
+      const emb = linhaEmb as { id: string; status: string; foto_path: string | null } | null;
+      if (!emb || !["onboarding", "ativo", "encerrado"].includes(emb.status)) return json({ error: "Seu acesso ao painel não está ativo." }, 403);
+
+      let caminho = emb.foto_path;
+      if (corpo.acao === "trocar_foto") {
+        if (emb.status === "encerrado") return json({ error: "A participação foi encerrada: o perfil fica só para consulta." }, 403);
+        const nova = fotoDoDataUrl(corpo.foto);
+        if (!nova) return json({ error: "Envie uma foto de rosto (JPG ou PNG, até 1,5 MB)." }, 400);
+        const extensao = nova.mime === "image/png" ? "png" : nova.mime === "image/webp" ? "webp" : "jpg";
+        caminho = `${emb.id}/perfil-${Date.now()}.${extensao}`;
+        const conteudo = Uint8Array.from(atob(nova.base64), (ch) => ch.charCodeAt(0));
+        const { error: erroEnvio } = await admin.storage.from("emb-fotos").upload(caminho, conteudo, { contentType: nova.mime, upsert: false });
+        if (erroEnvio) return json({ error: "Não foi possível guardar a foto. Tente de novo." }, 500);
+        const { error: erroLinha } = await admin.from("emb_embaixadores")
+          .update({ foto_path: caminho, atualizado_em: new Date().toISOString() }).eq("id", emb.id);
+        if (erroLinha) {
+          await admin.storage.from("emb-fotos").remove([caminho]);
+          return json({ error: "Não foi possível gravar a foto. Tente de novo." }, 500);
+        }
+        await registrar(emb.id, "embaixador", "trocou_foto");
+      }
+      if (!caminho) return json({ ok: true, foto_url: null });
+      const { data: assinado } = await admin.storage.from("emb-fotos").createSignedUrl(caminho, 3600);
+      return json({ ok: true, foto_url: assinado?.signedUrl ? linkPublico(assinado.signedUrl) : null });
+    }
 
     // ---------------------------------------------------------------------------------------------
     if (corpo.acao === "conferir") {
