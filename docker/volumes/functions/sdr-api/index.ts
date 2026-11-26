@@ -667,11 +667,13 @@ Deno.serve(async (req) => {
 
     const { data: key } = await supabase
       .from('sdr_api_keys')
-      .select('id, sdr_id, ativo, revoked_at')
+      .select('id, sdr_id, ativo, revoked_at, sdr:profiles!sdr_api_keys_sdr_id_fkey(ativo)')
       .eq('key_hash', hash)
       .maybeSingle()
 
-    if (!key || key.ativo !== true || key.revoked_at) {
+    // SDR desligado (profiles.ativo = false) perde a chave junto com o login.
+    const sdrAtivo = !!key?.sdr && (key.sdr as { ativo: boolean | null }).ativo !== false
+    if (!key || key.ativo !== true || key.revoked_at || !sdrAtivo) {
       return json(401, { error: 'Chave de API inválida ou revogada' })
     }
     if (!allow(key.id)) {

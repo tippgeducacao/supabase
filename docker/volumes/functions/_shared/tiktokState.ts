@@ -1,6 +1,7 @@
 // `state` ASSINADO dos callbacks de OAuth do TikTok (29/10/2026).
 //
-// Por que existe: os callbacks (`tiktok-ads-oauth-callback`, `tiktok-perfil-oauth-callback`)
+// Por que existe: os callbacks (`tiktok-ads-oauth-callback`, `tiktok-perfil-oauth-callback` e,
+// desde 25/11/2026, `tiktok-oauth-callback`)
 // são públicos por natureza — quem chega neles é o navegador voltando do TikTok, sem login.
 // Antes, o `state` era fixo ("ppgvet") e o callback aceitava QUALQUER `auth_code`: quem tivesse
 // o endereço podia autorizar a PRÓPRIA conta de TikTok e plantá-la como conta de anúncio ou
@@ -15,7 +16,7 @@
 // Formato: <proposito>.<expira_ms base36>.<usuario>.<nonce>.<assinatura base64url>
 // Sem import por URL: carrega no vitest (crypto.subtle existe no Deno e no Node).
 
-export type PropositoState = "ads" | "perfil";
+export type PropositoState = "ads" | "perfil" | "organico"; // organico = tiktok-connect (25/11/2026)
 
 const enc = new TextEncoder();
 

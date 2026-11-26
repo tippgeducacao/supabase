@@ -735,7 +735,10 @@ Deno.serve(async (req) => {
       return json({ error: "assinatura inválida" }, 401);
     }
   } else {
-    console.warn("[crm-whatsapp-webhook] CRM_META_APP_SECRET ausente — validação de assinatura DESATIVADA (configurar no Dokploy)");
+    // Fechado por padrão (25/11/2026): sem secret qualquer um forjaria mensagem de lead. A Meta
+    // reenvia por horas, então a mensagem não se perde enquanto o env é corrigido.
+    console.error("[crm-whatsapp-webhook] CRM_META_APP_SECRET ausente — evento recusado (configurar no .env das functions)");
+    return json({ error: "webhook sem App Secret configurado" }, 503);
   }
 
   let capturaEntrada: CapturaWebhook | undefined;

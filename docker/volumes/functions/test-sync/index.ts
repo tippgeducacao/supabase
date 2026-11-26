@@ -1,21 +1,17 @@
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-
+// acesso: publico — desativada: responde 410 sem ler o pedido nem tocar em dado
+// DESATIVADA em 25/11/2026 (correção de segurança aprovada pelo usuário — docs/SECURITY.md,
+// "Edges mortas desativadas em 25/11/2026"). Motivo: teste de sincronização, sem chamador.
+// A pasta não pode sumir: o deploy só troca as funções que existem no repositório (não
+// desinstala), e a versão antiga continuaria no ar. O código original está no histórico do git.
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': "authorization, x-client-info, apikey, content-type, cache-control, pragma, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-serve(async (req) => {
-  if (req.method === 'OPTIONS') {
-    return new Response(null, { headers: corsHeaders });
-  }
-
-  console.log('🎯 Função de teste executada!');
-  
-  return new Response(JSON.stringify({ 
-    success: true,
-    message: 'Função de teste funcionando!'
-  }), {
+Deno.serve((req) => {
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
+  return new Response(JSON.stringify({ error: 'Função desativada.' }), {
+    status: 410,
     headers: { ...corsHeaders, 'Content-Type': 'application/json' },
   });
 });

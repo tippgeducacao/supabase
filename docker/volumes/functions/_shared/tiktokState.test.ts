@@ -23,6 +23,13 @@ describe("state assinado do OAuth do TikTok (29/10/2026)", () => {
     expect(await conferirState(SEGREDO, "ads", s, AGORA)).toEqual({ ok: false, motivo: "invalido" });
   });
 
+  it("recusa state de um app no callback do orgânico (25/11/2026)", async () => {
+    const s = await criarState(SEGREDO, "perfil", UID, 30 * 60_000, AGORA);
+    expect(await conferirState(SEGREDO, "organico", s, AGORA)).toEqual({ ok: false, motivo: "invalido" });
+    const o = await criarState(SEGREDO, "organico", UID, 30 * 60_000, AGORA);
+    expect(await conferirState(SEGREDO, "organico", o, AGORA)).toMatchObject({ ok: true, usuarioId: UID });
+  });
+
   it("recusa state do outro app (ads ≠ perfil)", async () => {
     const s = await criarState(SEGREDO, "ads", UID, 30 * 60_000, AGORA);
     expect(await conferirState(SEGREDO, "perfil", s, AGORA)).toEqual({ ok: false, motivo: "invalido" });

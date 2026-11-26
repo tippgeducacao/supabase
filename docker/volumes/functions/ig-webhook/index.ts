@@ -325,7 +325,9 @@ Deno.serve(async (req) => {
       return json({ error: "assinatura inválida" }, 401);
     }
   } else {
-    console.warn("[ig-webhook] IG_META_APP_SECRET ausente — validação de assinatura DESATIVADA (setar no Dokploy)");
+    // Fechado por padrão (25/11/2026): sem secret qualquer um forjaria DM. A Meta reenvia.
+    console.error("[ig-webhook] IG_META_APP_SECRET ausente — evento recusado (configurar no .env das functions)");
+    return json({ error: "webhook sem App Secret configurado" }, 503);
   }
 
   let payload: any = null;

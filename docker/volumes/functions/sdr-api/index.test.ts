@@ -30,7 +30,7 @@ beforeAll(async () => {
 afterAll(() => vi.unstubAllGlobals());
 beforeEach(() => {
   vi.resetAllMocks();
-  mocks.chave = { id: 'chave_teste', sdr_id: idSdrDaChave, ativo: true, revoked_at: null };
+  mocks.chave = { id: 'chave_teste', sdr_id: idSdrDaChave, ativo: true, revoked_at: null, sdr: { ativo: true } };
   mocks.lead = { id: idLead };
   mocks.from.mockImplementation((tabela: string) => {
     const resultado = () => ({ data: tabela === 'sdr_api_keys' ? mocks.chave : mocks.lead, error: null });
@@ -297,6 +297,13 @@ describe('agendamento exclusivo da IA', () => {
 
   it('chave revogada não resolve lead nem executa a criação', async () => {
     mocks.chave = { ...mocks.chave, revoked_at: '2030-01-01' };
+    expect((await chamar(corpoValido())).status).toBe(401);
+    expect(mocks.rpc).not.toHaveBeenCalled();
+    expect(mocks.from).not.toHaveBeenCalledWith('leads');
+  });
+
+  it('chave de SDR desligado (perfil inativo) não age', async () => {
+    mocks.chave = { ...mocks.chave, sdr: { ativo: false } };
     expect((await chamar(corpoValido())).status).toBe(401);
     expect(mocks.rpc).not.toHaveBeenCalled();
     expect(mocks.from).not.toHaveBeenCalledWith('leads');

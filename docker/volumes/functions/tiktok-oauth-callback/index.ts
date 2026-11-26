@@ -1,7 +1,9 @@
+// acesso: publico — callback de OAuth (navegador voltando do TikTok); só age com state assinado, no prazo e de uso único (_shared/tiktokState.ts)
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { escaparHtml } from "../_shared/escaparHtml.ts";
 import { getSegredo } from "../_shared/segredos.ts";
+import { conferirState, MSG_JA_USADO, MSG_STATE, reservarState } from "../_shared/tiktokState.ts";
 
 // Callback do OAuth do TikTok. O perfil autoriza o app e o TikTok redireciona pra cá
 // com ?code=...  Trocamos o code por access/refresh token, buscamos o perfil e salvamos
@@ -43,6 +45,14 @@ serve(async (req) => {
     const clientSecret = await getConfig(supabase, "TIKTOK_CLIENT_SECRET");
     if (!clientKey || !clientSecret) return page("Configuração ausente", "As credenciais do TikTok não estão configuradas no servidor.", false);
 
+    // 25/11/2026: só troca o código com o state assinado pela tiktok-connect (logada), no prazo e uma vez.
+    const conf = await conferirState(clientSecret, "organico", url.searchParams.get("state"));
+    if (!conf.ok) return page("Link não vale", MSG_STATE[conf.motivo], false);
+    const reserva = await reservarState(supabase, "organico", conf);
+    if (!reserva.ok) {
+      return page("Link não vale", reserva.jaUsado ? MSG_JA_USADO : "Não consegui conferir o link agora. Tente de novo em instantes.", false);
+    }
+
     // 1) Troca o code por tokens.
     const tokenResp = await fetch(TOKEN_URL, {
       method: "POST",
@@ -57,6 +67,7 @@ serve(async (req) => {
     });
     const token = await tokenResp.json();
     if (!tokenResp.ok || token.error || !token.access_token) {
+      await reserva.devolver();
       console.error("TikTok token error:", JSON.stringify(token));
       return page("Falha ao conectar", `O TikTok recusou a troca do código: ${token.error_description || token.error || tokenResp.status}.`, false);
     }

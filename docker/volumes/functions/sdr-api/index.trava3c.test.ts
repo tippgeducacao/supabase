@@ -39,7 +39,7 @@ beforeAll(async () => {
 afterAll(() => vi.unstubAllGlobals());
 beforeEach(() => {
   vi.resetAllMocks();
-  mocks.chave = { id: 'chave_teste', sdr_id: idSdrDaChave, ativo: true, revoked_at: null };
+  mocks.chave = { id: 'chave_teste', sdr_id: idSdrDaChave, ativo: true, revoked_at: null, sdr: { ativo: true } };
   mocks.from.mockImplementation((tabela: string) => {
     const resultado = () => ({ data: tabela === 'sdr_api_keys' ? mocks.chave : { id: idLead }, error: null });
     const consulta = {

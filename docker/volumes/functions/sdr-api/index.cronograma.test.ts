@@ -34,7 +34,7 @@ beforeEach(() => {
   mocks.erroMensagem = null
   mocks.from.mockImplementation((tabela: string) => {
     const resposta = () => tabela === 'sdr_api_keys'
-      ? { data: { id: 'chave-teste', sdr_id: 'sdr-teste', ativo: true, revoked_at: null }, error: null }
+      ? { data: { id: 'chave-teste', sdr_id: 'sdr-teste', ativo: true, revoked_at: null, sdr: { ativo: true } }, error: null }
       : { data: mocks.mensagem, error: mocks.erroMensagem }
     const consulta = {
       select: () => consulta, update: () => consulta,
