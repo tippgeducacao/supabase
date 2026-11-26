@@ -354,6 +354,8 @@ async function syncCaixa(admin: any, caixaId: string, forceInitial: boolean, soz
     const refs = headers['references'] || null;
     const dateHeader = headers['date'] ? new Date(headers['date']).toISOString() : new Date(parseInt(msg.internalDate || '0')).toISOString();
     const labelIds: string[] = msg.labelIds || [];
+    // O history traz TODA mensagem nova: spam, rascunho e lixeira não são caixa de entrada.
+    if (labelIds.some((l) => l === 'SPAM' || l === 'DRAFT' || l === 'TRASH')) continue;
     // Outgoing = label SENT do Gmail (mais confiável do que comparar emails)
     const isOutgoing = labelIds.includes('SENT') || fromP.email === caixa.email_caixa.toLowerCase();
     const parsed = parsePayload(msg.payload);

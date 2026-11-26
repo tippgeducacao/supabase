@@ -110,13 +110,8 @@ Deno.serve(async (req) => {
     const { data: cfg } = await supabase.from("ped_configuracoes").select("valor").eq("chave", "gravacao_dispatch_mode").maybeSingle();
     const mode = forceLive ? "on" : (cfg?.valor === "on" ? "on" : "off");
 
-    // lock (cron concorrente) — force_live não trava
-    if (!forceLive) {
-      const { data: gotLock } = await supabase.rpc("ped_gravacao_dispatch_try_lock");
-      if (gotLock === false) {
-        return new Response(JSON.stringify({ success: true, mode, processed: 0, skipped: "lock_busy" }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
-      }
-    }
+    // (25/11/2026) Sem o pg_try_advisory_lock via PostgREST: era de SESSÃO e nunca era solto,
+    // então a conexão do pool que o pegava fazia execuções aleatórias saírem "lock_busy".
 
     // conta WhatsApp pedagógica
     const { data: waRow, error: waErr } = await supabase.rpc("get_wa_account_pedagogico");

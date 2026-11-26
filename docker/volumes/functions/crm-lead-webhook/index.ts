@@ -66,7 +66,7 @@ import { aplicarFiltrosToken, parseTokenWebhook } from "./tokenFiltros.ts";
 import { processarWebhookModulosPraticos } from "./modulosPraticos.ts";
 import { receberModulosPraticosHttp } from "./modulosPraticosHttp.ts";
 import { obterMotivoExclusaoModulosPraticos } from "./modulosPraticosExclusoes.ts";
-import { executarAcaoEmail, type ResultadoAcaoEmail } from "./acaoEmail.ts";
+import { executarAcaoEmail, modeloEnviadoNas24h, type ResultadoAcaoEmail } from "./acaoEmail.ts";
 import { aplicarCursoDaInscricao } from "./cursoDaInscricao.ts";
 import { receberComArquivos } from "./arquivosWebhook.ts";
 import { etapaPorCampo } from "./arquivosValidacao.ts";
@@ -1033,7 +1033,12 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
       const { data } = await admin
         .from("leads")
         .select("id, nome, email, whatsapp, curso_interesse, profissao, area_interesse, tempo_formacao, regiao, pagina_nome, fonte, fonte_referencia, meta_campaign_id, meta_campaign_name, meta_adset_id, meta_adset_name, meta_ad_id, meta_ad_name, meta_form_id, meta_form_name, meta_platform, utm_source, utm_medium, utm_campaign, utm_content, utm_term, utm_id, gclid, gbraid, wbraid, fbclid, ttclid, ga_client_id, arquivado, arquivado_em")
-        .eq("email", email)
+        // Mesma régua do telefone (20260728160000): nunca o perdedor de um merge, o mais
+        // antigo primeiro, sem diferenciar maiúscula (1.255 e-mails gravados fora do padrão).
+        // ilike usa idx_leads_email_trgm; % e _ escapados para casar só o endereço exato.
+        .ilike("email", email.replace(/[\\%_]/g, "\\$&"))
+        .neq("status", "mesclado")
+        .order("created_at", { ascending: true })
         .limit(1);
       existing = data?.[0] ?? null;
     }
@@ -1743,6 +1748,7 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
         });
         return { ok: resposta.ok, status: resposta.status, corpo: await resposta.json().catch(() => null) };
       },
+      enviadoNas24h: (templateId, email) => modeloEnviadoNas24h(admin, templateId, email),
       resolverVariavel: resolveWebhookVar,
     });
     acoesEmailResultados.push(resultadoEmail);
@@ -2021,7 +2027,9 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
             console.warn("[crm-lead-webhook] enviar_mensagem_whatsapp barrado: pessoa com bloqueio de WhatsApp");
           }
         }
-        if (templateName && telCanon && whatsappLead && !pessoaBloqueada) {
+        // Reenvio da mesma LP pelo mesmo telefone em 60 min (duplicadoLote, guard acima) não
+        // repete o template: antes cada clique duplo mandava outro template pago.
+        if (templateName && telCanon && whatsappLead && !pessoaBloqueada && !duplicadoLote) {
           const variaveis = Array.isArray(pc.variaveis) ? pc.variaveis : [];
           const parameters = variaveis
             .map((v: unknown) => resolveWebhookVar(v, dados))

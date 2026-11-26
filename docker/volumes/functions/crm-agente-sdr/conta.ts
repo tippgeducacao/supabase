@@ -31,6 +31,11 @@ export function phoneVariants(raw: string): string[] {
 // tick processa dezenas/centenas de leads — não martelar a tabela a cada envio).
 // 14/09/2026: nome e numero_display entraram pra nota de TROCA DE NÚMERO (trocaDeNumero.ts)
 // dizer ao modelo por qual número o lead está falando agora e por qual falou antes.
+// Números que têm agente próprio: o João nunca responde por eles, venha a mensagem de onde vier
+// (relay, reconciliador, drenagem de buffer), nem os escolhe como conta do lead.
+// 'aluno' = assistente pedagógico; 'rh' = agente de RH.
+export const PERSONAS_DE_OUTRO_AGENTE = new Set(['aluno', 'rh']);
+
 export type DadosConta = { id: string; persona: string | null; nome: string | null; numero_display: string | null };
 let cacheContas: { at: number; mapa: Map<string, DadosConta> } | null = null;
 export async function mapaDeContas(supabase: any): Promise<Map<string, DadosConta>> {
@@ -119,9 +124,9 @@ export async function contaDoLead(
     // número da persona de no-show: nunca INICIA contato por ele (cadência);
     // respondendo conversa (incluirRecontato) ele vale — o lead escreveu lá.
     if (!opts?.incluirRecontato && personas.get(id) === 'recontato') continue;
-    // Linha do Suporte ao Aluno (persona 'aluno'): o João nunca fala por ela, nem
-    // respondendo. Quem atende lá é o assistente pedagógico (crm-agente-aluno).
-    if (personas.get(id) === 'aluno') continue;
+    // Números com agente próprio ('aluno' = assistente pedagógico, 'rh' = agente de RH):
+    // o João nunca fala por eles, nem respondendo.
+    if (PERSONAS_DE_OUTRO_AGENTE.has(personas.get(id) ?? '')) continue;
     return id;
   }
   return null;

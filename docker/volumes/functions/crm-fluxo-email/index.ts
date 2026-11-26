@@ -16,6 +16,7 @@
 // verify_jwt por função). Qualquer outra credencial recebe 401 antes de ler a fila.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { ehLimitePorSegundoDoProvedor, processarEmParalelo, processarItemFila, statusDoLog, type ItemFilaEmail } from "./despacho.ts";
+import { modeloEnviadoNas24h } from "../crm-lead-webhook/acaoEmail.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -91,6 +92,7 @@ Deno.serve(async (req) => {
           if (ehLimitePorSegundoDoProvedor({ status: resposta.status, corpo })) freio = true;
           return { ok: resposta.ok, status: resposta.status, corpo };
         },
+        enviadoNas24h: (templateId, email) => modeloEnviadoNas24h(admin, templateId, email),
         // As variáveis já chegam resolvidas pelo motor do fluxo.
         resolverVariavel: (modelo) => modelo,
       },

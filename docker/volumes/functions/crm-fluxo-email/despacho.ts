@@ -147,8 +147,9 @@ export async function processarItemFila(item: ItemFilaEmail, deps: DependenciasF
   });
 
   if (!assumiu) {
-    // "duplicado" aqui = outra rodada assumiu primeiro: ela é quem conclui a linha.
-    if (resultado.status !== "duplicado") await deps.descartar(item.id, resultado);
+    // "acao_ja_reservada" = outra rodada assumiu primeiro: ela é quem conclui a linha.
+    // Os demais (inclusive o mesmo modelo já enviado ao endereço em 24h) saem de `pendente`.
+    if (resultado.motivo !== "acao_ja_reservada") await deps.descartar(item.id, resultado);
   }
   try {
     // Automação de funil/SAC não tem execução de fluxo onde registrar.

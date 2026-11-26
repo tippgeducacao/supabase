@@ -126,14 +126,12 @@ describe('pós exclusiva de veterinário e formação de outra área: a conclus�
     expect(b.rpc).toHaveBeenCalledWith('crm_agente_elegibilidade_finalizar', expect.objectContaining({ p_decisao: 'reprovado' }));
   });
 
-  it('se a matriz não reprovar, nada é aprovado sem a conclusão', async () => {
+  it('se a matriz aprovar mesmo assim, o veto da tabela reprova (25/11/2026)', async () => {
     agronomo();
     mocks.modelo.mockResolvedValue(matriz({ e_medico_veterinario: true, pode_cursar: true, compativel: true, output: 'APROVADO' }));
     const b = banco();
     const r = await executar(b, pedidoAgronomo('nao-aprova'), contexto());
-    expect(r.pode_cursar).not.toBe(true);
-    // Volta ao caminho de sempre: pede a conclusão antes de qualquer aprovação.
-    expect(r).toMatchObject({ output: 'CONFIRMAR_CONCLUSAO', pergunta: 'vc já se formou em Agronomia?', elegibilidade_status: 'pendente' });
+    expect(r).toMatchObject({ pode_cursar: false, veto_so_veterinario: true, elegibilidade_status: 'reprovado' });
     expect(b.rpc).not.toHaveBeenCalledWith('crm_agente_elegibilidade_finalizar', expect.objectContaining({ p_decisao: 'aprovado' }));
   });
 

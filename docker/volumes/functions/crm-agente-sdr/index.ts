@@ -94,7 +94,8 @@ import { aplicarInscricaoPendente, notaDaInscricao } from './inscricaoNova.ts';
 import { corrigirLinksConhecidos } from './linksConhecidos.ts';
 import { contextoAulaPiloto, INSTRUCAO_AULA_PILOTO } from './contextoAulaPiloto.ts';
 import { ehAcaoV9, rotaV9 } from './rotasV9.ts';
-import { contaDoLead, dadosDaConta, personaDaConta } from './conta.ts';
+import { contaDoLead, dadosDaConta, PERSONAS_DE_OUTRO_AGENTE, personaDaConta } from './conta.ts';
+import { toolsDaVez } from './toolsDaVez.ts';
 import { rodarEsteiraFollowup } from './followup.ts';
 import { contextoEspecialidadeCannabis } from './especialidadeCannabis.ts';
 import { rodarEsteiraFollowupTemplate } from './followup-template.ts';
@@ -122,9 +123,6 @@ const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 const TOKEN = Deno.env.get('AGENTE_SDR_TOKEN') ?? '';
 const LOCK_TTL_SEGUNDOS = 240; // mesmo TTL do lock Redis do n8n
 const MAX_RODADAS_TOOLS = 8;   // trava de segurança (o n8n não limitava)
-// Números que têm agente próprio: o João nunca responde por eles, venha a mensagem de onde vier
-// (relay, reconciliador, drenagem de buffer). 'aluno' = assistente pedagógico; 'rh' = agente de RH.
-const PERSONAS_DE_OUTRO_AGENTE = new Set(['aluno', 'rh']);
 
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE);
 
@@ -315,20 +313,6 @@ function toolsDoAgente(agente: string, provedor: ProvedorIA | null): Promise<any
   return carregarTools(supabase, agente, provedor, 'luna');
 }
 
-// Tools da vez. Na campanha direta a ABERTURA usa a persona própria (que tem a
-// atualizar_dados_lead); no FECHAMENTO o qualificador segue idêntico ao dos outros
-// números, só ganhando a atualizar_dados_lead — o lead pode corrigir o nome lá também.
-// ⚠️ Ordem estável: os extras entram sempre no fim (a ordem das tools compõe o
-// prefixo do prompt cache; ordem variável = cache miss silencioso).
-export async function toolsDaVez(agenteEfetivo: string, ehCampanha: boolean, provedor: ProvedorIA | null): Promise<any[]> {
-  if (!ehCampanha) return await toolsDoAgente(agenteEfetivo, provedor);
-  if (agenteEfetivo === 'agente_validacao') return await toolsDoAgente('agente_campanha_direta', provedor);
-  const base = await toolsDoAgente(agenteEfetivo, provedor);
-  const extras = (await toolsDoAgente('agente_campanha_direta', provedor))
-    // 13/11/2026: o qualificador já tem coleta no catálogo; não ofereça duas funções de mesmo nome.
-    .filter((t: any) => t?.name === 'atualizar_dados_lead' && !base.some((b: any) => b.name === t.name));
-  return [...base, ...extras];
-}
 
 // ═══ NÓS 4 → 11 — UMA RODADA DO JOÃO ═════════════════════════════════════════
 // Recebe o lote de mensagens do lead (já agrupadas pela espera do nó 2) e faz, em ordem:
@@ -747,7 +731,7 @@ async function definirAgente(pre: PreRouter, provedor: ProvedorIA | null, tel: T
       agenteAtual === 'agente_qualificador' ? textosDoPrompt.qualificador : AGENTE_CAMPANHA_DIRETA,
       vars,
     );
-    tools = await toolsDaVez(agenteAtual, true, provedor);
+    tools = await toolsDaVez((a) => toolsDoAgente(a, provedor), agenteAtual, true);
   } else {
     // ▸ Caminho C — padrão (e aula): o router decide e o ratchet grava em agente_atual.
     // Router (em erro, mantém o agente atual — não derruba a conversa).
@@ -1057,6 +1041,9 @@ async function rodadaAgente(remotejid: string, itensDoLote: any[], tel: Telemetr
   // No máximo MAX_RODADAS_TOOLS (8) voltas; passou disso, é erro.
   // Loop agêntico: igual ao n8n, o histórico é relido do banco a cada volta.
   for (let rodada = 0; rodada < MAX_RODADAS_TOOLS; rodada++) {
+    // Cada volta chama a IA (e às vezes ferramentas lentas): sem renovar, 8 voltas passam do
+    // TTL do lock (240 s) e outra execução assume a mesma conversa no meio.
+    await renovar();
     const [historico, contextoEntregaMateriais, fichaLida] = await Promise.all([
       carregarHistorico(supabase, remotejid),
       carregarStatusMateriais(supabase, ctx, desdeLimpeza),

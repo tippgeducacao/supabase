@@ -88,8 +88,24 @@ export interface DependenciasAcaoEmail {
   /** true exclusivamente para quem inseriu a chave única; conflitos retornam false. */
   reservar(reserva: ReservaEmail): Promise<boolean>;
   finalizar(chave: string, resultado: ResultadoAcaoEmail): Promise<void>;
+  /** emails_enviados tem o mesmo modelo para o mesmo endereço (já normalizado) nas últimas 24h. */
+  enviadoNas24h(templateId: string, email: string): Promise<boolean>;
   enviar(payload: PayloadEmailWebhook): Promise<{ ok: boolean; status: number; corpo: unknown }>;
   resolverVariavel(modelo: string, dados: unknown): string;
+}
+
+/** `enviadoNas24h` no banco. O e-mail chega normalizado (como é gravado); o filtro por
+ *  destinatário vem primeiro para usar idx_emails_enviados_dest_modelo. */
+export async function modeloEnviadoNas24h(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- cliente de versões diferentes do supabase-js (webhook × fila)
+  admin: { from(tabela: string): any }, templateId: string, email: string,
+): Promise<boolean> {
+  const { data, error } = await admin.from("emails_enviados").select("id")
+    .eq("destinatario_email", email).eq("template_id", templateId)
+    .gte("criado_em", new Date(Date.now() - 24 * 3600_000).toISOString())
+    .neq("status", "falhou").limit(1);
+  if (error) throw error;
+  return (data ?? []).length > 0;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -250,6 +266,9 @@ export async function executarEnvioModeloEmail(entrada: {
       return resultado("ignorado", "template_invalido");
     }
 
+    // Leads que dividem o mesmo e-mail rodam cada um o seu fluxo: sem isto o mesmo
+    // endereço recebia o mesmo modelo 17–23 vezes (25/11/2026).
+    if (await deps.enviadoNas24h(params.template_id, email)) return resultado("duplicado", "mesmo_modelo_24h");
     chave = await chaveReserva(contexto.namespace, [...contexto.partesChave, acaoId], email);
     payload = {
       template_id: params.template_id, remetente_id: params.remetente_id,

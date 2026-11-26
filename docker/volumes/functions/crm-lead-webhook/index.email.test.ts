@@ -44,7 +44,7 @@ beforeEach(() => {
   }));
   cliente.rpc.mockImplementation(async (nome: string) => { throw new Error(`RPC não esperada: ${nome}`); });
   cliente.from.mockImplementation((tabela: string) => {
-    if (!["crm_webhook_integrations", "crm_webhook_escutas", "leads", "lead_oportunidades", "crm_whatsapp_accounts", "crm_webhook_logs", "crm_lead_atividades", "email_templates", "email_remetentes", "crm_webhook_email_envios", "crm_saudacao_guard", "cliente_ppg_leads_sdr", "crm_pipeline_settings"].includes(tabela)) throw new Error(`Tabela não esperada: ${tabela}`);
+    if (!["crm_webhook_integrations", "crm_webhook_escutas", "leads", "lead_oportunidades", "crm_whatsapp_accounts", "crm_webhook_logs", "crm_lead_atividades", "email_templates", "email_remetentes", "crm_webhook_email_envios", "crm_saudacao_guard", "cliente_ppg_leads_sdr", "crm_pipeline_settings", "emails_enviados"].includes(tabela)) throw new Error(`Tabela não esperada: ${tabela}`);
     let operacao = "select";
     let error: { code: string } | null = null;
     let valorEscrito: Registro = {};
@@ -59,7 +59,7 @@ beforeEach(() => {
       return { data: operacao === "insert" ? { id: LEAD } : unico ? null : [], error: null };
     };
     const consulta = {
-      select: () => consulta, eq: () => consulta, gt: () => consulta, order: () => consulta, in: () => consulta, limit: () => consulta,
+      select: () => consulta, eq: () => consulta, gt: () => consulta, gte: () => consulta, neq: () => consulta, ilike: () => consulta, order: () => consulta, in: () => consulta, limit: () => consulta,
       upsert: () => consulta,
       insert: (valor: Registro) => {
         operacao = "insert";

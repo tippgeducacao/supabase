@@ -159,3 +159,22 @@ describe('pós exclusiva de médico veterinário, sem alternativa', () => {
     expect(T.reprovacaoIndependeDaConclusao(null, 'Cannabis Medicinal', 'Agronomia', '')).toBe(false);
   });
 });
+
+describe('veto duro de pós só para veterinário (25/11/2026)', () => {
+  const aprovado = (formacao: string, curso: string) => ({
+    ...reprovado(formacao, curso), e_medico_veterinario: true, pode_cursar: true, compativel: true, output: 'APROVADO',
+  });
+  it('a IA aprovou zootecnista em Sanidade Avícola: reprovado pela tabela, com a alternativa fixa', () => {
+    const r = T.vetoSoVeterinario(aprovado('Zootecnia', 'Sanidade Avícola'), TABELA, 'Sanidade Avícola', 'Zootecnia');
+    expect(r).toMatchObject({ pode_cursar: false, compativel: false, e_medico_veterinario: false, veto_so_veterinario: true });
+    expect(r.output).not.toBe('APROVADO');
+  });
+  it.each(['Medicina Veterinária', 'med vet', 'Médica Veterinária'])('formação "%s" segue aprovada', (formacao) => {
+    const daMatriz = aprovado(formacao, 'Sanidade Avícola');
+    expect(T.vetoSoVeterinario(daMatriz, TABELA, 'Sanidade Avícola', formacao)).toBe(daMatriz);
+  });
+  it('pós aberta a outras formações não é vetada', () => {
+    const daMatriz = aprovado('Zootecnia', 'Produção de Suínos');
+    expect(T.vetoSoVeterinario(daMatriz, TABELA, 'Produção de Suínos', 'Zootecnia')).toBe(daMatriz);
+  });
+});

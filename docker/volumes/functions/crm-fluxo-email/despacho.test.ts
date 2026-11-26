@@ -24,6 +24,7 @@ beforeEach(() => {
       carregarTemplate: vi.fn(async () => ({ id: TEMPLATE, ativo: true, assunto: "Oi {{primeiro_nome}}", corpo_html: "<p>{{titulo}}</p>", corpo_texto: null, uso: "transacional" })),
       carregarRemetente: vi.fn(async () => ({ id: REMETENTE, ativo: true, provider: "ses", dominio_verificado: true })),
       enviar: vi.fn(async () => ({ ok: true, status: 200, corpo: { ok: true, log_id: LOG } })),
+      enviadoNas24h: vi.fn(async () => false),
       resolverVariavel: (modelo: string) => modelo,
     },
     assumir: vi.fn(async () => true),
@@ -34,6 +35,15 @@ beforeEach(() => {
 });
 
 describe("despachante da fila de e-mail dos fluxos", () => {
+  it("mesmo modelo ao mesmo endereço em 24h: não envia e tira a linha de pendente", async () => {
+    deps.nucleo.enviadoNas24h = vi.fn(async () => true);
+    const r = await processarItemFila(item(), deps);
+    expect(r).toMatchObject({ status: "duplicado", motivo: "mesmo_modelo_24h" });
+    expect(deps.nucleo.enviar).not.toHaveBeenCalled();
+    expect(deps.assumir).not.toHaveBeenCalled();
+    expect(deps.descartar).toHaveBeenCalledWith("fila-1", r);
+  });
+
   it("assume, envia com contexto do fluxo e conclui a linha", async () => {
     const r = await processarItemFila(item(), deps);
     expect(r).toEqual({ acao_id: "bloco-acao-1", status: "enviado", log_id: LOG });

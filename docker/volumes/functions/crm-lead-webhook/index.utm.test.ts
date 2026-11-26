@@ -37,7 +37,7 @@ beforeEach(() => {
       return { data: operacao === "insert" ? { id: `${tabela}-1` } : unico ? null : [], error: null };
     };
     const consulta = {
-      select: () => consulta, eq: () => consulta, gt: () => consulta, order: () => consulta, in: () => consulta,
+      select: () => consulta, eq: () => consulta, gt: () => consulta, order: () => consulta, in: () => consulta, ilike: () => consulta, neq: () => consulta,
       insert: (valor: Record<string, unknown>) => {
         operacao = "insert";
         (gravacoes[tabela] ??= []).push(valor);

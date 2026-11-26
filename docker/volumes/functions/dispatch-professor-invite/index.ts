@@ -36,9 +36,6 @@ const BATCH_LIMIT = 50;
 // Delay entre envios pra respeitar rate limit da Meta.
 const SEND_DELAY_MS = 150;
 
-// Advisory lock key (qualquer bigint constante) pra serializar execuções concorrentes.
-const ADVISORY_LOCK_KEY = 4283719_001;
-
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const STATUSES_DISPATCHABLE = [
@@ -456,18 +453,8 @@ Deno.serve(async (req) => {
       );
     }
 
-    // 1.5) Advisory lock: garante que só UMA execução do cron roda por vez.
-    // Se outra instância já está rodando, esta sai sem fazer nada.
-    // force_live (aprovação manual de 1 convite específico) ignora o lock.
-    if (!forceLive) {
-      const { data: gotLock } = await supabase.rpc("ped_dispatch_try_lock");
-      if (gotLock === false) {
-        return new Response(
-          JSON.stringify({ success: true, mode, processed: 0, sent: 0, errors: 0, details: [], skipped: "lock_busy" }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } },
-        );
-      }
-    }
+    // (25/11/2026) Sem o pg_try_advisory_lock via PostgREST: era de SESSÃO e nunca era solto,
+    // então a conexão do pool que o pegava fazia execuções aleatórias saírem "lock_busy".
 
     // 2) WA account
     const { data: waRow, error: waErr } = await supabase.rpc("get_wa_account_pedagogico");

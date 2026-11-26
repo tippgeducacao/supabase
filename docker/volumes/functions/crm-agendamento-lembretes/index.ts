@@ -4,7 +4,7 @@
 // CRM): cada toque diz QUANTO TEMPO ANTES dispara (minutos_antes) e o CONTEÚDO por
 // canal — template Meta (template_name/lang/variaveis) e texto livre (linha Uazapi).
 // Padrão semeado: 2 horas e 30 minutos antes (comportamento histórico). Disparado por
-// cron (a cada ~10 min). NÃO passa pela trava de 24h de marketing — lembrete de
+// cron (a cada 5 min desde 25/11/2026). NÃO passa pela trava de 24h de marketing — lembrete de
 // reunião é essencial e tem que sair sempre.
 //
 // NÚMERO QUE ENVIA — configurável POR RESPONSÁVEL (tabela crm_lembrete_numeros,
@@ -21,7 +21,8 @@
 //
 // Janela de cada toque (minutos restantes até a reunião): dispara quando
 //   max(minutos_antes − 30, 10) <= resta <= minutos_antes + 5
-// — banda de 30 min garante que o cron de 10 min sempre acerta; piso de 10 min evita
+// — banda de 30 min; o toque de 10 min tem janela de só 5 min ([10, 15]), por isso o cron é
+// de 5 min (com 10 min metade das reuniões ficava sem ele); piso de 10 min evita
 // lembrete em cima da hora; reunião marcada DEPOIS da banda do toque não recebe aquele
 // toque (igual ao comportamento histórico do T-2h).
 //

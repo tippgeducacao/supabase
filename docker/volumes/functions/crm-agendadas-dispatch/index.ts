@@ -3,8 +3,7 @@
 // mensagens agendadas do CRM Comercial (crm_mensagens_agendadas) cujo enviar_em venceu.
 //
 // REUSA a edge function crm-whatsapp-send para o envio de fato — assim herda toda a
-// lógica já testada: resolução da conta WhatsApp, trava de frequência de template
-// (1/24h por número), montagem do payload Meta, persistência em crm_whatsapp_messages
+// lógica já testada: resolução da conta WhatsApp, montagem do payload Meta, persistência em crm_whatsapp_messages
 // e mirror para o thread do SAC. Aqui só fazemos o claim atômico e a atualização de
 // status do agendamento.
 //
@@ -101,25 +100,19 @@ Deno.serve(async (req) => {
 
   try {
     // Higiene de órfãos: linha presa em 'enviando' há >5min = execução anterior morreu
-    // no meio (não chegou a enviar). Auto-cura:
-    //  • TEMPLATE → volta pra 'agendado' (re-enfileira). É seguro porque a crm-whatsapp-send
-    //    tem trava de 1 template/24h por número: se a Meta JÁ recebeu, o reenvio é PULADO
-    //    (não duplica). Sem isso, um disparo em massa perdia milhares de órfãos como erro.
-    //  • TEXTO LIVRE → 'erro' (sem trava 24h, reenviar duplicaria a mensagem).
+    // no meio. Auto-cura:
+    //  • TEMPLATE → volta pra 'agendado' (re-enfileira), MAS só se a crm-whatsapp-send não
+    //    gravou envio dela: se a Meta já aceitou e o worker morreu antes da baixa, a linha
+    //    vira 'enviado' (25/11/2026: o reenvio cego cobrava o template pago duas vezes).
+    //  • TEXTO LIVRE → 'erro' (reenviar duplicaria a mensagem).
     //  ⚠️ 23/09/2026: "preso há >5min" é medido pelo CLAIM (processando_desde), não pelo
     //  enviar_em. Com fila acumulada (Fluxo grande), uma linha agendada há 6 min e agarrada
     //  agora ainda está EM VOO — resetá-la pelo enviar_em fazia a próxima execução enviá-la
-    //  de novo. A trava 1 template/24h citada acima foi REMOVIDA da crm-whatsapp-send, então
-    //  nada mais protegia contra essa duplicata. Coluna ausente (migration não aplicada) ⇒
-    //  cai na régua antiga.
+    //  de novo. Coluna ausente (migration não aplicada) ⇒ cai na régua antiga.
     const presoDesde = new Date(Date.now() - 5 * 60_000).toISOString();
     const limparOrfaos = async (coluna: "processando_desde" | "enviar_em") => {
-      const r1 = await admin
-        .from("crm_mensagens_agendadas")
-        .update({ status: "agendado", enviar_em: new Date().toISOString(), erro_detalhe: null })
-        .eq("status", "enviando").eq("tipo_mensagem", "template")
-        .lt(coluna, presoDesde);
-      if (r1?.error) return r1.error;
+      const erroTemplate = await reconciliarTemplatesOrfaos(admin, coluna, presoDesde);
+      if (erroTemplate) return erroTemplate;
       await admin
         .from("crm_mensagens_agendadas")
         .update({ status: "erro", erro_detalhe: "Envio interrompido (timeout). Reagende se necessário." })
@@ -176,6 +169,47 @@ Deno.serve(async (req) => {
     return jsonResp({ error: msg }, 500);
   }
 });
+
+/**
+ * Templates presos em 'enviando': quem tem envio aceito gravado em crm_whatsapp_messages
+ * (metadata.mensagem_agendada_id, gravado pela crm-whatsapp-send) vira 'enviado'; o resto
+ * volta à fila. Filtra por telefone + created_at para usar idx_crm_wa_msg_telefone.
+ */
+export async function reconciliarTemplatesOrfaos(
+  admin: ReturnType<typeof createClient>,
+  coluna: "processando_desde" | "enviar_em",
+  presoDesde: string,
+) {
+  const { data: presos, error } = await admin.from("crm_mensagens_agendadas")
+    .select(`id,telefone,${coluna}`)
+    .eq("status", "enviando").eq("tipo_mensagem", "template")
+    .lt(coluna, presoDesde).limit(1000);
+  if (error) return error;
+  const linhas = (presos ?? []) as Array<Record<string, string>>;
+  for (let i = 0; i < linhas.length; i += 50) {
+    const lote = linhas.slice(i, i + 50);
+    const desde = lote.map((l) => l[coluna]).filter(Boolean).sort()[0] ?? presoDesde;
+    const { data: envios, error: erroEnvios } = await admin.from("crm_whatsapp_messages")
+      .select("agendada:metadata->>mensagem_agendada_id,wa_message_id,created_at")
+      .in("telefone", [...new Set(lote.flatMap((l) => phoneVariants(l.telefone)))])
+      .eq("direcao", "outbound").neq("status_entrega", "failed").gte("created_at", desde)
+      .in("metadata->>mensagem_agendada_id", lote.map((l) => l.id));
+    if (erroEnvios) return erroEnvios;
+    const aceitos = new Map(((envios ?? []) as Array<Record<string, string>>).map((m) => [m.agendada, m]));
+    for (const [id, m] of aceitos) {
+      await admin.from("crm_mensagens_agendadas")
+        .update({ status: "enviado", enviado_em: m.created_at, wa_message_id: m.wa_message_id ?? null, erro_detalhe: null })
+        .eq("id", id).eq("status", "enviando");
+    }
+    const reenviar = lote.map((l) => l.id).filter((id) => !aceitos.has(id));
+    if (reenviar.length) {
+      await admin.from("crm_mensagens_agendadas")
+        .update({ status: "agendado", enviar_em: new Date().toISOString(), erro_detalhe: null })
+        .in("id", reenviar).eq("status", "enviando");
+    }
+  }
+  return null;
+}
 
 export async function processarUma(
   admin: ReturnType<typeof createClient>,
@@ -329,12 +363,6 @@ export async function processarUma(
       }
     }
 
-    // crm-whatsapp-send pode pular o envio (trava de frequência de template 1/24h)
-    if ((resp as any)?.skipped) {
-      return await falhar(
-        String((resp as any)?.motivo ?? "Envio pulado pela trava de frequência de template (Meta)."),
-      );
-    }
     if (!r.ok || (resp as any)?.error || !(resp as any)?.success) {
       return await falhar(String((resp as any)?.error ?? `Falha no envio (status ${r.status})`));
     }
@@ -342,7 +370,7 @@ export async function processarUma(
       return await falhar('Envio da aula sem identificador de aceite do WhatsApp.');
     }
 
-    await admin.from("crm_mensagens_agendadas")
+    const { error: erroBaixa } = await admin.from("crm_mensagens_agendadas")
       .update({
         status: "enviado",
         enviado_em: (resp as any)?.sent_at ?? new Date().toISOString(),
@@ -350,6 +378,12 @@ export async function processarUma(
         erro_detalhe: null,
       })
       .eq("id", row.id);
+    // Já saiu: NÃO marcar erro (induziria reenvio). Fica 'enviando' e a higiene de órfãos
+    // acha o envio gravado e dá a baixa.
+    if (erroBaixa) {
+      console.error("[crm-agendadas-dispatch] baixa falhou", row.id, erroBaixa.message);
+      return `enviado_sem_baixa: ${erroBaixa.message}`;
+    }
     return "enviado";
   } catch (e) {
     return await falhar(e instanceof Error ? e.message : String(e));

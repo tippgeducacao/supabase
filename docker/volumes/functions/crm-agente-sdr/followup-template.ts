@@ -574,24 +574,27 @@ async function processarLead(
     // que o lead é atendido (janela/thread são por número na Meta).
     const conta = contaSel ?? (await contaDoLead(supabase, telefone)) ?? t.wa_account_id ?? null;
 
+    // Marca o toque + âncora ANTES de enviar (claim, como o followup.ts): marcar depois
+    // fazia uma falha da marcação reprovar o job da fila, e o retry (até 5x) reenviava o
+    // mesmo template pago. Recusa explícita do envio desfaz a marca (sai no próximo tick).
+    const coluna = colunaToque(t.toque);
+    await atualizarLead(supabase, remotejid, { [coluna]: true, template_followup_em: new Date().toISOString() });
+    const desfazerMarca = () =>
+      atualizarLead(supabase, remotejid, { [coluna]: false, template_followup_em: lead.template_followup_em ?? null });
+
     let usouFallback = false;
     let r = await enviarTemplate(telefone, { ...envioPrincipal(t), wa_account_id: conta }, lead);
     if (!r.ok) {
       tel.registrar('followup_template_falhou', { toque: t.toque, template: t.template_name, conta, status: r.status, meta_code: r.metaCode });
-      if (!temFallback(t)) return false; // não marca o toque: tenta de novo no próximo tick elegível
+      if (!temFallback(t)) { await desfazerMarca(); return false; } // tenta de novo no próximo tick elegível
       r = await enviarTemplate(telefone, { ...envioFallback(t), wa_account_id: conta }, lead);
       if (!r.ok) {
         tel.registrar('followup_template_fallback_falhou', { toque: t.toque, template_fallback: t.fallback_template_name, modo: 'sincrono', conta, status: r.status, meta_code: r.metaCode });
+        await desfazerMarca();
         return false;
       }
       usouFallback = true;
     }
-
-    // Marca o toque + âncora. (A msg já está logada em crm_whatsapp_messages pelo send.)
-    await atualizarLead(supabase, remotejid, {
-      [colunaToque(t.toque)]: true,
-      template_followup_em: new Date().toISOString(),
-    });
     if (usouFallback) {
       tel.registrar('followup_template_fallback_enviado', {
         toque: t.toque, dia: t.dia, modo: 'sincrono', conta,

@@ -565,6 +565,8 @@ async function confirmarAgendamento(supabase: any, input: any, ctx: CtxConversa,
       agendamento_id: null, simulado: true, id: toolUseId,
     };
   }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- resposta JSON da sdr-api
+  let ag: any;
   try {
     // ⚠️ MANDE O lead_id QUANDO EXISTIR. O sdr-api resolve o lead por busca (8 últimos
     // dígitos, e só entre os NÃO arquivados) e, se não achar, precisa de `nome` pra
@@ -590,8 +592,21 @@ async function confirmarAgendamento(supabase: any, input: any, ctx: CtxConversa,
     if (!post.ok || resp.error || !resp.data) {
       throw new Error(typeof resp.error === 'string' ? resp.error : `HTTP ${post.status} ao agendar`);
     }
-    const ag = resp.data;
+    ag = resp.data;
+  } catch (e) {
+    return { resultado: `Erro ao agendar: ${(e as Error).message}`, agendamento_id: null, id: toolUseId };
+  }
 
+  // O agendamento JÁ existe daqui em diante: falha da agenda do Google não pode devolver
+  // agendamento_id null (o modelo tentava de novo e a reunião ficava sem confirmação).
+  const confirmar = (link: string) => {
+    const vendedor = ag.vendedor?.name || ag.vendedor_id || 'monitor';
+    // `confirmacao` estruturada: se a fala do modelo não entregar data/monitor/link, o
+    // index.ts manda a confirmação em código (confirmacaoAgendamento.ts).
+    const confirmacao = { data: formataBrasiliaDataHora(ag.data_agendamento), monitor: String(vendedor), link };
+    return { resultado: resultadoConfirmacao(ag.id, confirmacao), agendamento_id: ag.id, confirmacao, id: toolUseId };
+  };
+  try {
     const calendarId = ag.vendedor?.id_calendar;
     if (!calendarId) {
       // Vendedor sem agenda vinculada — falha visível em vez de evento na agenda errada.
@@ -626,22 +641,10 @@ async function confirmarAgendamento(supabase: any, input: any, ctx: CtxConversa,
       console.log(`[crm-agente-sdr] salvar google_event_id falhou (segue): ${(e as Error).message}`);
     }
 
-    const vendedor = ag.vendedor?.name || ag.vendedor_id || 'monitor';
-    // `confirmacao` estruturada: se a fala do modelo não entregar data/monitor/link, o
-    // index.ts manda a confirmação em código (confirmacaoAgendamento.ts).
-    const confirmacao = {
-      data: formataBrasiliaDataHora(ag.data_agendamento),
-      monitor: String(vendedor),
-      link: String(evento.hangoutLink ?? ag.link_reuniao ?? ''),
-    };
-    return {
-      resultado: resultadoConfirmacao(ag.id, confirmacao),
-      agendamento_id: ag.id,
-      confirmacao,
-      id: toolUseId,
-    };
+    return confirmar(String(evento.hangoutLink ?? ag.link_reuniao ?? ''));
   } catch (e) {
-    return { resultado: `Erro ao agendar: ${(e as Error).message}`, agendamento_id: null, id: toolUseId };
+    console.error(`[crm-agente-sdr] agenda do Google falhou após criar o agendamento ${ag.id}: ${(e as Error).message}`);
+    return confirmar(String(ag.link_reuniao ?? ''));
   }
 }
 
@@ -818,8 +821,11 @@ const ALTERNATIVAS: Record<string, string> = {
   'Clínica Médica de Bovinos': 'Produção, Nutrição e Gestão de Bovinos',
 };
 
+/** A formação que o lead informou é medicina veterinária (texto normalizado). */
+const formacaoVeterinaria = (formacao: unknown) => /veterin|med ?vet/.test(semPontuacao(formacao));
+
 // Port do code node "Saida Estruturada" (validação + correções de lógica).
-function validarMatriz(resultado: any): any {
+function validarMatriz(resultado: any, formacaoInformada: unknown): any {
   const obrigatorios = [
     'formacao_identificada', 'e_medico_veterinario', 'curso_solicitado', 'pode_cursar',
     'curso_alternativo_recomendado', 'mensagem_para_lead', 'compativel', 'output',
@@ -843,7 +849,10 @@ function validarMatriz(resultado: any): any {
       resultado.curso_alternativo_recomendado = true;
     }
   }
-  if (resultado.e_medico_veterinario && ehExclusivo && resultado.pode_cursar === false) {
+  // Só promove a aprovado quando a formação INFORMADA é veterinária: o "e_medico_veterinario"
+  // da IA sozinho aprovava pós exclusiva para quem não é (25/11/2026).
+  if (resultado.e_medico_veterinario && ehExclusivo && resultado.pode_cursar === false
+    && formacaoVeterinaria(formacaoInformada)) {
     resultado.pode_cursar = true;
     resultado.compativel = true;
     resultado.curso_alternativo = null;
@@ -890,6 +899,27 @@ export function reprovacaoIndependeDaConclusao(
   if (/^(formad[oa]?|graduad[oa]?|superior|outra|nao|sim)( |$)/.test(f)) return false;
   const linha = linhaDoCurso(cursos, cursoInteresse);
   return Boolean(linha && soParaVeterinario(linha));
+}
+
+/**
+ * Veto duro (25/11/2026): pós que a TABELA só aceita de médico veterinário e formação informada que
+ * não é veterinária ⇒ reprovado, diga a IA da matriz o que disser. Roda depois do validarMatriz.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- saída livre da IA da matriz, como em alternativasPelaTabela
+type SaidaMatriz = any;
+export function vetoSoVeterinario(
+  resultado: SaidaMatriz, cursos: LinhaDaMatriz[] | null | undefined, cursoInteresse: unknown, formacao: unknown,
+): SaidaMatriz {
+  const linha = linhaDoCurso(cursos, cursoInteresse);
+  if (!linha || !soParaVeterinario(linha) || formacaoVeterinaria(formacao)) return resultado;
+  if (resultado.pode_cursar !== true && resultado.e_medico_veterinario !== true) return resultado;
+  const alternativa = ALTERNATIVAS[resultado.curso_solicitado] ?? null;
+  const exclusiva = `A pós de ${resultado.curso_solicitado} é exclusiva para Médicos Veterinários.`;
+  return {
+    ...resultado, e_medico_veterinario: false, pode_cursar: false, compativel: false, curso_exclusivo_veterinario: true,
+    curso_alternativo: alternativa, curso_alternativo_recomendado: alternativa != null,
+    mensagem_para_lead: exclusiva, output: exclusiva, veto_so_veterinario: true,
+  };
 }
 
 export function alternativasPelaTabela(resultado: any, cursos: LinhaDaMatriz[] | null | undefined, soInformar = false): any {
@@ -1160,7 +1190,8 @@ async function avaliarCompatibilidade(supabase: any, input: any, ctx: CtxConvers
   try { parsed = JSON.parse(semMarkdown.trim()); } catch (e) {
     throw new Error(`IA da matriz não retornou JSON válido: ${(e as Error).message}`);
   }
-  return { ...alternativasPelaTabela(validarMatriz(parsed), cursos, ctx.soInformar === true), modelo_matriz: modelo, id: toolUseId };
+  const validado = vetoSoVeterinario(validarMatriz(parsed, input.formacao_academica), cursos, input.curso_interesse, input.formacao_academica);
+  return { ...alternativasPelaTabela(validado, cursos, ctx.soInformar === true), modelo_matriz: modelo, id: toolUseId };
 }
 
 /**

@@ -26,12 +26,22 @@ beforeEach(() => {
     carregarLead: vi.fn(async () => lead), carregarTemplate: vi.fn(async () => template), carregarRemetente: vi.fn(async () => remetente),
     reservar: vi.fn(async (r: ReservaEmail) => { if (reservas.has(r.chave)) return false; reservas.add(r.chave); return true; }),
     finalizar: vi.fn(async () => {}),
+    enviadoNas24h: vi.fn(async () => false),
     enviar: vi.fn(async () => ({ ok: true, status: 200, corpo: { ok: true, log_id: LOG } })),
     resolverVariavel: (modelo, dados) => modelo.replace(/\{webhook=([^}]+)\}/g, (_m, k: string) => String((dados as Record<string, string>)[k] ?? "")),
   };
 });
 
 describe("ação de e-mail da integração", () => {
+  it("mesmo modelo já enviado ao endereço em 24h sai como duplicado, sem reservar nem enviar", async () => {
+    deps.enviadoNas24h = vi.fn(async () => true);
+    const r = await executarAcaoEmail(entrada(), deps);
+    expect(r).toEqual({ acao_id: "acao-email-1", status: "duplicado", motivo: "mesmo_modelo_24h" });
+    expect(deps.enviadoNas24h).toHaveBeenCalledWith(TEMPLATE, "maria@example.com");
+    expect(deps.reservar).not.toHaveBeenCalled();
+    expect(deps.enviar).not.toHaveBeenCalled();
+  });
+
   it("envia ao contato persistido, com os IDs da configuração e variáveis padrão", async () => {
     const pedido = entrada();
     pedido.dados = { ...pedido.dados, template_id: "invasor", remetente_id: "invasor" } as typeof pedido.dados;

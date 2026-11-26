@@ -79,17 +79,6 @@ beforeAll(async () => {
 });
 afterAll(() => vi.unstubAllGlobals());
 
-describe('catálogo efetivo no fechamento de campanha', () => {
-  it.each([true, false])('coleta presente na base=%s: recebe uma única função de coleta', async (jaTemColeta) => {
-    const coleta = { name: 'atualizar_dados_lead', description: 'coleta', input_schema: { type: 'object' } };
-    const criar = { name: 'confirmar_agendamento', description: 'agenda', input_schema: { type: 'object' } };
-    fronteiras.tools.mockImplementation(async (_banco, agente) => agente === 'agente_qualificador' ? [...(jaTemColeta ? [coleta] : []), criar] : [coleta]);
-    const { toolsDaVez } = await import('./index');
-    const tools = await toolsDaVez('agente_qualificador', true, null);
-    expect(tools.filter(t => t.name === 'atualizar_dados_lead')).toHaveLength(1);
-    expect(tools.filter(t => t.name === 'confirmar_agendamento')).toHaveLength(1);
-  });
-});
 beforeEach(() => {
   vi.resetAllMocks();
   fronteiras.buffer = [];
@@ -639,6 +628,7 @@ describe('sincronização de áudio na entrada HTTP', () => {
     fronteiras.rpc.mockImplementation(async (nome: string) => {
       if (nome === 'crm_sdr_registrar_entrada') return { data: { estado: 'ativa', gravada: true }, error: null };
       if (nome === 'crm_agente_sdr_lock_claim') return { data: true, error: null };
+      if (nome === 'crm_agente_sdr_lock_renovar') return { data: null, error: null };
       if (['crm_e_aluno_telefone', 'crm_esta_na_escola'].includes(nome)) return { data: false, error: null };
       throw new Error('RPC inesperada no caso de áudio: ' + nome);
     });

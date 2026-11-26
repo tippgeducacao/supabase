@@ -19,6 +19,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.50.3';
 import { blocosDoPrompt } from '../crm-agente-sdr/conjuntoPrompt.ts';
 import { AGENTE_CAMPANHA_DIRETA } from '../crm-agente-sdr/prompts-campanha-direta.ts';
 import { AGENTE_AULA, montarVarsAula } from '../crm-agente-sdr/prompts-aula.ts';
+import { toolsDaVez } from '../crm-agente-sdr/toolsDaVez.ts';
 import { carregarTools, chamarAgentePrincipal, chamarRouter, executarPedidoPrincipal, montarPedidoPrincipal, MODELO_AGENTE, provedorAnthropicModelo, provedorDeepseek, provedorOpenai } from '../crm-agente-sdr/agente.ts';
 import { exigirAcesso } from '../_shared/acesso.ts';
 import { semDadosPrivados, type RegistroModelo } from '../crm-agente-sdr/capturaModelo.ts';
@@ -524,13 +525,13 @@ Deno.serve(async (req) => {
         // agente_aula ainda não tem linha própria em lista_tools_claude: usa as tools da
         // validação (que já incluem atualizar_dados_lead), como o PRD prevê.
         const agenteTools = entrada.agente_override || (agente === 'agente_aula' ? 'agente_validacao' : agente);
-        let tools = agente === 'agente_aula' && entrada.v2?.ferramentas
+        // Fechamento do número de anúncio: a MESMA regra da produção (toolsDaVez.ts), sem
+        // repetir a atualizar_dados_lead quando o qualificador já a tem.
+        const fechamentoCampanha = !!entrada.usar_router && !entrada.agente_override
+          && entrada.persona === 'campanha_direta' && agente === 'agente_qualificador';
+        const tools = agente === 'agente_aula' && entrada.v2?.ferramentas
           ? entrada.v2.ferramentas.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters, ...(t.strict ? { strict: true } : {}) }))
-          : await toolsDe(agenteTools);
-        if (entrada.usar_router && !entrada.agente_override && entrada.persona === 'campanha_direta' && agente === 'agente_qualificador') {
-          const extras = (await toolsDe('agente_campanha_direta')).filter((t) => t?.name === 'atualizar_dados_lead');
-          tools = [...tools, ...extras];
-        }
+          : await toolsDaVez(toolsDe, agenteTools, fechamentoCampanha);
         // Canário: gancho do primeiro lote + CONVITE DE AGENDA, como em crm-agente-sdr/index.ts.
         const promptFinal = fichaSim && !aulaPiloto ? comGanchoDoLote(promptAgente, { nome: vars.nome, curso: vars.curso_interesse_original }).prompt : promptAgente;
         // Dias fechados só com as ferramentas REAIS: a agenda simulada (simulacao.ts) não os conhece e
