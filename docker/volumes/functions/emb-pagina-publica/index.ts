@@ -20,7 +20,7 @@ const APP = "https://sistemappgvet.ppgeducacao.site";
 const API_PUBLICA = (Deno.env.get("SUPABASE_PUBLIC_URL") || Deno.env.get("PUBLIC_SUPABASE_URL") || "https://api.ppgeducacao.site")
   .trim().replace(/\/+$/, "");
 const linkPublico = (assinado: string, base = API_PUBLICA) => assinado.replace(/^https?:\/\/[^/]+/, base);
-const CUPOM_PERCENTUAL = 50;
+const CUPOM_PERCENTUAL = 80;
 // Mesmo widget do Turnstile da agenda pública (mesmo domínio): src/lib/agendaLeadPublica.ts.
 const CHAVE_TURNSTILE = "AGENDA_LEAD_TURNSTILE_SECRET";
 
