@@ -64,6 +64,8 @@ Deno.serve(async (req) => {
       return json({
         fontes: fontes.data,
         nossas_contas: nossasContas,
+        // Todas as nossas contas (com as de fora da análise): post delas ou em collab nunca vira inspiração.
+        nossas_contas_nomes: (contas.data ?? []).map((c) => c.username),
         avaliacoes_do_time: resumirAvaliacoes((avaliacoes.data ?? []) as Avaliacao[], nossos,
           Object.fromEntries(nossasContas.por_conta.map((c) => [c.conta, c.alcance_medio]))),
         // Só métricas e títulos: é o que o robô usa para a linha de base e para não repetir ideia.
