@@ -14,6 +14,7 @@ import { MAX_BYTES_AUDIO_CURTO, transcreverBytes } from "./transcrever.ts";
 import { enfileirarTranscricao, enfileirarReuniaoAudio, processarTranscricoes } from "./transcricao.ts";
 import { processarAgendaEntrevistas } from "./entrevistas.ts";
 import { processarAlertaIa } from "./alertaIaTick.ts";
+import { processarAlertaInstagram } from "./alertaInstagramTick.ts";
 import { processarRoteiroConteudo } from "./roteiroConteudoTick.ts";
 import { processarRelatoriosGrupo } from "./relatoriosGrupoTick.ts";
 import { processarAvisosTarefas, sugerirParaTarefa } from "./avisosTarefasTick.ts";
@@ -48,7 +49,7 @@ Deno.serve(async (req) => {
 
   // Crons (gated pelo segredo do config): transcricao = 1 job da fila de reunião;
   // entrevistas = resumo das 8h + aviso 30 min antes das entrevistas do RH;
-  // alerta_ia = IA do João sem crédito/chave (a cada 2 min) → WhatsApp do TI;
+  // alerta_ia = IA do João sem crédito/chave + Instagram sem acesso (token morto) (a cada 2 min) → WhatsApp do TI;
   // roteiro = roteiro de conteúdo das 7h + lembrete do print na aula da noite (a cada 5 min);
   // relatorios_grupo = comercial das 8h + feedback do TI completo → grupo de WhatsApp (a cada 5 min);
   // avisos_tarefas = tarefa criada/arrastada numa etapa vigiada → grupo (gatilho + a cada 5 min);
@@ -64,7 +65,11 @@ Deno.serve(async (req) => {
     if (!cfg?.cron_secret || req.headers.get("x-assist-cron") !== cfg.cron_secret) return json({ error: "não autorizado" }, 401);
     try {
       const r = cron === "entrevistas" ? await processarAgendaEntrevistas(admin)
-        : cron === "alerta_ia" ? await processarAlertaIa(admin)
+        // Os dois alertas são independentes: um que quebre não cala o outro.
+        : cron === "alerta_ia" ? {
+          ...(await processarAlertaIa(admin).catch((e) => ({ erro_ia: String(e) }))),
+          instagram: await processarAlertaInstagram(admin).catch((e) => ({ erro: String(e) })),
+        }
         : cron === "roteiro" ? await processarRoteiroConteudo(admin, { previa: url.searchParams.get("previa") })
         : cron === "relatorios_grupo" ? await processarRelatoriosGrupo(admin, {
           previa: url.searchParams.get("previa"),

@@ -31,8 +31,9 @@ async function destinatarios(admin: any): Promise<{ telefones: string[]; semTele
   return { telefones: [...telefones], semTelefone };
 }
 
-/** Manda para todos; conta quantos a Uazapi aceitou (ela devolve ok:false sem lançar). */
-async function enviarATodos(admin: any, texto: string, erros: string[]): Promise<number> {
+/** Manda para todos; conta quantos a Uazapi aceitou (ela devolve ok:false sem lançar).
+ *  Também usado pelo alerta de Instagram sem acesso (alertaInstagramTick.ts). */
+export async function enviarATodos(admin: any, texto: string, erros: string[]): Promise<number> {
   const { telefones, semTelefone } = await destinatarios(admin);
   if (semTelefone.length) erros.push(`sem telefone válido: ${semTelefone.join(", ")}`);
   if (!telefones.length) { erros.push("nenhum destinatário com telefone"); return 0; }
