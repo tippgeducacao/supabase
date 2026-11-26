@@ -1,5 +1,6 @@
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
+import { decodificarEntidadesHtml } from "../_shared/entidadesHtml.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -99,9 +100,10 @@ Deno.serve(async (req) => {
     });
     const html = (await res.text()).slice(0, 200_000);
     const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-    const title = pickMeta(html, ["og:title", "twitter:title"]) || (titleMatch ? titleMatch[1].trim() : "");
-    const description = pickMeta(html, ["og:description", "twitter:description", "description"]);
-    let image = pickMeta(html, ["og:image", "twitter:image"]);
+    // O atributo vem do HTML com entidades (`&quot;`, `&#xe1;`, `&amp;` na URL da imagem): sai como texto.
+    const title = decodificarEntidadesHtml(pickMeta(html, ["og:title", "twitter:title"]) || (titleMatch ? titleMatch[1].trim() : ""));
+    const description = decodificarEntidadesHtml(pickMeta(html, ["og:description", "twitter:description", "description"]));
+    let image = decodificarEntidadesHtml(pickMeta(html, ["og:image", "twitter:image"]));
     if (image && image.startsWith("/")) {
       const u = new URL(url);
       image = `${u.origin}${image}`;

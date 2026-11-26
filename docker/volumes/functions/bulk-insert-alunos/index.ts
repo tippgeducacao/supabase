@@ -14,16 +14,12 @@ Deno.serve(async (req) => {
     );
 
     // Gate de autorização — roda com service_role, sem verify_jwt, e faz INSERT em massa
-    // em fin_alunos. Sem isto qualquer um na internet com a anon key (pública) inseria
-    // linhas arbitrárias. Não tem chamador no front hoje; exige usuário logado OU a
-    // própria service_role. (Apagar a pasta não removeria a function da VPS — o deploy
+    // em fin_alunos, passando por cima da RLS. Não tem chamador no front; desde 26/11/2026
+    // aceita SÓ a própria service_role (antes qualquer conta logada, ex. um vendedor,
+    // inseria alunos à vontade). (Apagar a pasta não removeria a function da VPS — o deploy
     // usa docker cp, que não apaga; por isso o gate, que protege via git push.)
     const authToken = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
-    let autorizado = !!authToken && authToken === serviceKey;
-    if (!autorizado && authToken) {
-      const { data: u } = await supabase.auth.getUser(authToken);
-      autorizado = !!u?.user?.id && u.user.role === "authenticated"; // conta de fora (Portal da IES) não entra
-    }
+    const autorizado = !!authToken && authToken === serviceKey;
     if (!autorizado) {
       return new Response(
         JSON.stringify({ error: "não autorizado" }),
