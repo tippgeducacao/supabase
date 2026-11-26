@@ -2,6 +2,9 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 import { AcessoNegado, exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 
 import { autorizarPublicacao } from "./autorizacao.ts";
+import {
+  SUBCODE_CONTA_INACESSIVEL, avisoDeContasDeFora, contasRecusadas, semAsContas, separarContas,
+} from "./contas.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -20,6 +23,16 @@ function graphErrorMessage(error: any): string {
   const partes = [error.error_user_title, error.error_user_msg].filter(Boolean);
   const base = partes.length ? partes.join(" — ") : (error.message || "Erro do Instagram");
   return error.error_subcode ? `${base} (subcode ${error.error_subcode})` : base;
+}
+
+// Erro devolvido pela Graph API, com o subcode à mão: é ele que diz se dá para tentar de novo sem uma
+// das contas marcadas (2207018 = perfil privado ou que não existe).
+class ErroDaGraph extends Error {
+  readonly subcode: number | null;
+  constructor(erro: any, prefixo = "") {
+    super(prefixo + graphErrorMessage(erro));
+    this.subcode = Number(erro?.error_subcode) || null;
+  }
 }
 
 Deno.serve(async (req) => {
@@ -184,10 +197,8 @@ function tagPositions(n: number): { x: number; y: number }[] {
 }
 
 // withCoords=true para foto de feed (x/y obrigatórios); false para vídeo/REELS (só username).
-function parseUserTags(tagsStr: string | null, withCoords: boolean): string | undefined {
-  if (!tagsStr?.trim()) return undefined;
-  // Instagram aceita no máx. 20 marcações por foto.
-  const usernames = tagsStr.split(",").map((t) => t.trim().replace(/^@/, "")).filter(Boolean).slice(0, 20);
+// `usernames` já vem separado e cortado no teto (separarContas + slice em publishPost).
+function parseUserTags(usernames: string[], withCoords: boolean): string | undefined {
   if (!usernames.length) return undefined;
   if (withCoords) {
     const pos = tagPositions(usernames.length);
@@ -200,11 +211,8 @@ function parseUserTags(tagsStr: string | null, withCoords: boolean): string | un
   return `[${tags.join(",")}]`;
 }
 
-function parseCollaborators(collabStr: string | null): string | undefined {
-  if (!collabStr?.trim()) return undefined;
-  const usernames = collabStr.split(",").map((t) => t.trim().replace(/^@/, "")).filter(Boolean).slice(0, 3);
-  if (!usernames.length) return undefined;
-  return usernames.join(",");
+function parseCollaborators(usernames: string[]): string | undefined {
+  return usernames.length ? usernames.join(",") : undefined;
 }
 
 // Nome curto do arquivo p/ a mensagem de erro não despejar a URL gigante.
@@ -261,9 +269,11 @@ async function preflightMedia(post: any) {
 async function publishPost(supabase: any, post: any, account: any) {
   try {
     const { ig_user_id, access_token } = account;
-    const collaborators = parseCollaborators(post.collaborators);
-    // user_tags é parseado DENTRO de cada builder (createSingleContainer/publishCarousel),
-    // porque o formato depende do tipo de CADA mídia: foto de feed exige x/y, vídeo/REELS não.
+    // Teto da Meta: 20 marcações por mídia e 3 colaboradores (a tela avisa quando passa).
+    // user_tags é MONTADO dentro de cada builder, porque o formato depende do tipo de CADA mídia:
+    // foto de feed exige x/y, vídeo/REELS não.
+    const marcacoesPedidas = separarContas(post.user_tags).slice(0, 20);
+    const colaboradoresPedidos = separarContas(post.collaborators).slice(0, 3);
 
     // PRÉ-VALIDAÇÃO da mídia ANTES de gastar processamento no Instagram: confirma que cada
     // URL existe (HTTP ok) e é do tipo certo (imagem/vídeo). Falha aqui vira uma mensagem
@@ -271,13 +281,41 @@ async function publishPost(supabase: any, post: any, account: any) {
     // "Media processing failed" cru da Meta — o time entende que precisa reexportar/reanexar.
     await preflightMedia(post);
 
-    let containerId: string;
+    // Conta PRIVADA ou que NÃO EXISTE em "Marcar Perfis"/"Collab" (subcode 2207018) derrubava o post
+    // inteiro — 8 posts parados em Erro de 23/09 a 26/11/2026. Pedido do diretor (26/11/2026): publicar
+    // mesmo assim e avisar quem ficou de fora. Então tira a conta recusada e cria o container de novo.
+    // Seguro: é a CRIAÇÃO do container que falhou, nada foi ao ar. Termina sempre: cada volta tira ao
+    // menos uma conta, e sem conta nenhuma o erro deixa de ser de conta e sobe.
+    let marcacoes = marcacoesPedidas;
+    let colaboradores = colaboradoresPedidos;
+    const deFora: string[] = [];
+    let itensDoCarrossel: { marcacoes: string; ids: string[] } | null = null;
+    let containerId: string | null = null;
 
-    if (post.media_type === "CAROUSEL") {
-      containerId = await publishCarousel(ig_user_id, access_token, post, collaborators);
-    } else {
-      containerId = await createSingleContainer(ig_user_id, access_token, post, collaborators);
+    while (!containerId) {
+      try {
+        if (post.media_type === "CAROUSEL") {
+          // As marcações vão em cada ITEM; o collab, no container-pai. Recusa só do collab reaproveita
+          // os itens já criados, em vez de subir as mídias (e esperar os vídeos) de novo.
+          const chave = marcacoes.join(",");
+          if (!itensDoCarrossel || itensDoCarrossel.marcacoes !== chave) {
+            itensDoCarrossel = { marcacoes: chave, ids: await createCarouselItems(ig_user_id, access_token, post, marcacoes) };
+          }
+          containerId = await createCarouselContainer(ig_user_id, access_token, post, itensDoCarrossel.ids, colaboradores);
+        } else {
+          containerId = await createSingleContainer(ig_user_id, access_token, post, marcacoes, colaboradores);
+        }
+      } catch (err) {
+        const contas = separarContas([...marcacoes, ...colaboradores].join(","));
+        if (!(err instanceof ErroDaGraph) || err.subcode !== SUBCODE_CONTA_INACESSIVEL || !contas.length) throw err;
+        const recusadas = contasRecusadas(err.message, contas);
+        console.warn(`[ig-publish] ${post.id}: a Meta recusou ${recusadas.map((c) => `@${c}`).join(", ")}; tentando sem.`);
+        deFora.push(...recusadas);
+        marcacoes = semAsContas(marcacoes, recusadas);
+        colaboradores = semAsContas(colaboradores, recusadas);
+      }
     }
+    const aviso = avisoDeContasDeFora(deFora, marcacoesPedidas, colaboradoresPedidos);
 
     // Aguarda o container ficar FINISHED antes de publicar — vale para TODOS os tipos,
     // INCLUSIVE carrossel (o container-pai também processa). Chamar media_publish cedo
@@ -302,17 +340,27 @@ async function publishPost(supabase: any, post: any, account: any) {
 
     if (publishData.error) throw new Error(graphErrorMessage(publishData.error));
 
-    await supabase
+    const publicado = {
+      status: "published",
+      published_at: new Date().toISOString(),
+      ig_media_id: publishData.id,
+      ig_container_id: containerId,
+    };
+    // aviso_publicacao vai SEMPRE (NULL quando saiu completo): um Reenviar não pode herdar o aviso velho.
+    const { error: erroAoGravar } = await supabase
       .from("ig_scheduled_posts")
-      .update({
-        status: "published",
-        published_at: new Date().toISOString(),
-        ig_media_id: publishData.id,
-        ig_container_id: containerId,
-      })
+      .update({ ...publicado, aviso_publicacao: aviso })
       .eq("id", post.id);
+    if (erroAoGravar) {
+      // O post JÁ ESTÁ NO AR: gravar 'published' é o que impede um Reenviar de publicar 2×. Grava sem o
+      // aviso, se for ele o problema (coluna fora do cache do PostgREST, por exemplo).
+      console.error(`[ig-publish] ${post.id}: publicado, mas a gravação com aviso falhou: ${erroAoGravar.message}`);
+      await supabase.from("ig_scheduled_posts").update(publicado).eq("id", post.id);
+    }
 
-    return { post_id: post.id, status: "published", ig_media_id: publishData.id };
+    if (aviso) await avisarContasDeFora(supabase, post, aviso);
+
+    return { post_id: post.id, status: "published", ig_media_id: publishData.id, ...(aviso ? { aviso } : {}) };
   } catch (err) {
     const errorMessage = getErrorMessage(err);
     // updated_at = âncora do backoff do retry automático (ig_claim_due_posts re-tenta após
@@ -326,6 +374,40 @@ async function publishPost(supabase: any, post: any, account: any) {
   }
 }
 
+// Post que saiu SEM alguma conta recusada pela Meta: avisa no sino quem agendou + a lista de quem recebe
+// os avisos de post (`marketing_post_aviso_destinatarios`) — a mesma gente que o vigia
+// `marketing_avisar_posts_com_erro` chama quando o post NÃO sai. Sem WhatsApp: o post saiu, não é urgência.
+// Nunca derruba a publicação: o post já está no ar.
+async function avisarContasDeFora(supabase: any, post: any, aviso: string) {
+  try {
+    const { data: lista, error: erroLista } = await supabase.from("marketing_post_aviso_destinatarios").select("user_id");
+    if (erroLista) console.error(`[ig-publish] ${post.id}: lista de avisos indisponível: ${erroLista.message}`);
+    const destinatarios = [...new Set([post.user_id, ...(lista ?? []).map((d: any) => d.user_id)].filter(Boolean))];
+    const perfil = post.ig_accounts?.username ? `@${post.ig_accounts.username}` : "Instagram";
+    const quando = post.scheduled_at
+      ? new Intl.DateTimeFormat("pt-BR", {
+        timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit",
+      }).format(new Date(post.scheduled_at))
+      : null;
+    for (const user_id of destinatarios) {
+      // Um por vez: user_id é FK de auth.users, e um destinatário que não existe mais não pode calar os outros.
+      const { error } = await supabase.from("gt_notifications").insert({
+        user_id,
+        type: "post_publicado_sem_marcacao",
+        title: `Post publicado sem marcação: ${perfil}`,
+        body: `${quando ? `Agendado para ${quando}. ` : ""}${aviso}`,
+        link: "/portal-marketing/agendar",
+        reference_type: "marketing_post_agendado",
+        reference_id: post.id,
+        category: "primary",
+      });
+      if (error) console.error(`[ig-publish] ${post.id}: aviso de conta recusada não gravado para ${user_id}: ${error.message}`);
+    }
+  } catch (e) {
+    console.error(`[ig-publish] ${post.id}: aviso de conta recusada falhou: ${getErrorMessage(e)}`);
+  }
+}
+
 function applyOptionalParams(params: URLSearchParams, userTags?: string, collaborators?: string) {
   if (userTags) params.set("user_tags", userTags);
   if (collaborators) params.set("collaborators", collaborators);
@@ -333,7 +415,7 @@ function applyOptionalParams(params: URLSearchParams, userTags?: string, collabo
 
 async function createSingleContainer(
   igUserId: string, accessToken: string, post: any,
-  collaborators?: string
+  marcacoes: string[], colaboradores: string[],
 ): Promise<string> {
   const params = new URLSearchParams({
     access_token: accessToken,
@@ -349,19 +431,20 @@ async function createSingleContainer(
   }
 
   // Foto de feed exige x/y nas marcações; vídeo/REELS usa só o username.
-  const userTags = parseUserTags(post.user_tags, !isVideo);
-  applyOptionalParams(params, userTags, collaborators);
+  const userTags = parseUserTags(marcacoes, !isVideo);
+  applyOptionalParams(params, userTags, parseCollaborators(colaboradores));
 
   const res = await fetch(`${META_API}/${igUserId}/media`, { method: "POST", body: params });
   const data = await res.json();
-  if (data.error) throw new Error(graphErrorMessage(data.error));
+  if (data.error) throw new ErroDaGraph(data.error);
   return data.id;
 }
 
-async function publishCarousel(
+// Carrossel, etapa 1: um container por item, com as marcações. Devolve os ids na ordem das mídias.
+async function createCarouselItems(
   igUserId: string, accessToken: string, post: any,
-  collaborators?: string
-): Promise<string> {
+  marcacoes: string[],
+): Promise<string[]> {
   let mediaUrls: string[];
   try {
     mediaUrls = JSON.parse(post.media_url);
@@ -390,20 +473,26 @@ async function publishCarousel(
     }
 
     // user_tags também valem nos itens do carrossel — item de imagem exige x/y, item de vídeo não.
-    const itemUserTags = parseUserTags(post.user_tags, !isVideo);
+    const itemUserTags = parseUserTags(marcacoes, !isVideo);
     if (itemUserTags) params.set("user_tags", itemUserTags);
 
     const res = await fetch(`${META_API}/${igUserId}/media`, { method: "POST", body: params });
     const data = await res.json();
-    if (data.error) throw new Error(`Carousel item error: ${graphErrorMessage(data.error)}`);
+    if (data.error) throw new ErroDaGraph(data.error, "Carousel item error: ");
     childIds.push(data.id);
 
     if (isVideo) {
       await waitForContainer(data.id, accessToken);
     }
   }
+  return childIds;
+}
 
-  // Step 2: Create carousel container
+// Carrossel, etapa 2: o container-pai, com a legenda e o collab.
+async function createCarouselContainer(
+  igUserId: string, accessToken: string, post: any,
+  childIds: string[], colaboradores: string[],
+): Promise<string> {
   const carouselParams = new URLSearchParams({
     access_token: accessToken,
     media_type: "CAROUSEL",
@@ -411,11 +500,12 @@ async function publishCarousel(
     children: childIds.join(","),
   });
 
+  const collaborators = parseCollaborators(colaboradores);
   if (collaborators) carouselParams.set("collaborators", collaborators);
 
   const res = await fetch(`${META_API}/${igUserId}/media`, { method: "POST", body: carouselParams });
   const data = await res.json();
-  if (data.error) throw new Error(graphErrorMessage(data.error));
+  if (data.error) throw new ErroDaGraph(data.error);
   return data.id;
 }
 
