@@ -115,36 +115,39 @@ Deno.serve(async (req) => {
 
     console.log(`🗑️ Excluindo usuário: ${targetProfile.name} (${userId})`)
 
-    // Delete user_roles
-    console.log('🔄 Deletando user_roles...')
-    await adminClient.from('user_roles').delete().eq('user_id', userId)
-
-    // Delete profile (cascades should handle most related records)
-    console.log('🔄 Deletando profile...')
-    const { error: deleteProfileError } = await adminClient
-      .from('profiles')
-      .delete()
-      .eq('id', userId)
-
-    if (deleteProfileError) {
-      console.error('❌ Erro ao deletar profile:', deleteProfileError)
-      return new Response(
-        JSON.stringify({ error: `Erro ao deletar perfil: ${deleteProfileError.message}` }),
-        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    // Delete auth user
-    console.log('🔄 Deletando auth user...')
+    // Tudo ou nada (25/11/2026): apagar o usuário da autenticação é UM comando no banco, que leva o
+    // perfil junto (profiles.id → auth.users ON DELETE CASCADE). Se o perfil tem histórico (reuniões,
+    // pontos, recontatos, feedbacks, SAC…), as FKs sem cascade barram e nada é apagado. Antes o
+    // perfil saía primeiro e a falha seguinte deixava a conta pela metade.
+    const VINCULOS =
+      'Este usuário tem registros ligados a ele (reuniões, pontos, recontatos, feedbacks, atendimentos…) e não pode ser excluído. Mantenha-o desativado.'
+    console.log('🔄 Deletando auth user (leva o perfil junto)...')
     const { error: deleteAuthError } = await adminClient.auth.admin.deleteUser(userId)
 
     if (deleteAuthError) {
       console.error('❌ Erro ao deletar auth user:', deleteAuthError)
-      return new Response(
-        JSON.stringify({ error: `Erro ao deletar usuário da autenticação: ${deleteAuthError.message}` }),
-        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
+      if (deleteAuthError.status !== 404) {
+        // O Auth devolve só "Database error deleting user"; com o perfil existindo, a causa é FK.
+        return new Response(
+          JSON.stringify({ error: VINCULOS, detalhe: deleteAuthError.message }),
+          { status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        )
+      }
+      // Perfil sem conta no Auth (sobra de exclusão antiga): apaga só o perfil, um comando só.
+      const { error: deleteProfileError } = await adminClient.from('profiles').delete().eq('id', userId)
+      if (deleteProfileError) {
+        console.error('❌ Erro ao deletar profile:', deleteProfileError)
+        const fk = deleteProfileError.code === '23503'
+        return new Response(
+          JSON.stringify({ error: fk ? VINCULOS : `Erro ao deletar perfil: ${deleteProfileError.message}` }),
+          { status: fk ? 409 : 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        )
+      }
     }
+
+    // user_roles não tem FK: só depois de a conta sair (se falhar, o papel sobra sem dono, sem efeito).
+    console.log('🔄 Deletando user_roles...')
+    await adminClient.from('user_roles').delete().eq('user_id', userId)
 
     console.log(`✅ Usuário ${targetProfile.name} excluído com sucesso`)
 
