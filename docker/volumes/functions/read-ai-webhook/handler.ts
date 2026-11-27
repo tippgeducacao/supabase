@@ -1,5 +1,6 @@
-// Webhook do Read AI (etapa 1): confere a assinatura no corpo CRU e só guarda o que chegou.
-// Nada é escrito em empresa, reunião ou tarefa. Mapa: docs/CRM Comercial.md → "Read AI".
+// Webhook do Read AI: confere a assinatura no corpo CRU, registra a reunião na empresa (processar.ts)
+// e guarda o que chegou. Mapa: docs/CRM Comercial.md → "Read AI".
+import type { ResultadoProcesso } from "./processar.ts";
 
 export const LIMITE_CORPO_BYTES = 5 * 1024 * 1024;
 
@@ -16,12 +17,16 @@ export interface RegistroReadAi {
   corpo_sha256: string;
   assinatura_formato: string;
   payload: Record<string, unknown>;
+  situacao?: ResultadoProcesso["situacao"] | "erro";
+  empresa_id?: string | null;
+  atividade_id?: string | null;
 }
 
 export interface DepsReadAi {
   /** Valor de app_secrets('READ_AI_SIGNING_KEY'): uma ou várias chaves, separadas por vírgula ou linha. */
   lerChaves: () => Promise<string | null>;
   gravar: (registro: RegistroReadAi) => Promise<{ error: { message?: string; code?: string } | null }>;
+  processar: (payload: Record<string, unknown>) => Promise<ResultadoProcesso>;
 }
 
 const json = (corpo: unknown, status = 200) =>
@@ -129,7 +134,19 @@ export async function tratarWebhookReadAi(req: Request, deps: DepsReadAi): Promi
     }
 
     const texto = (v: unknown) => (typeof v === "string" && v ? v.slice(0, 200) : null);
+    // Falha ao registrar na ficha não pode perder a entrega: guarda com "erro" e devolve 500.
+    let resultado: ResultadoProcesso | null = null;
+    let falha: unknown = null;
+    try {
+      resultado = await deps.processar(dados);
+    } catch (e) {
+      falha = e;
+    }
+
     const { error } = await deps.gravar({
+      situacao: resultado?.situacao ?? "erro",
+      empresa_id: resultado?.empresa_id ?? null,
+      atividade_id: resultado?.atividade_id ?? null,
       session_id: texto(dados.session_id),
       evento: texto(dados.trigger),
       corpo_sha256: emHex(new Uint8Array(await crypto.subtle.digest("SHA-256", corpo))),
@@ -137,6 +154,7 @@ export async function tratarWebhookReadAi(req: Request, deps: DepsReadAi): Promi
       payload: dados,
     });
     if (error) throw new Error(error.message ?? error.code ?? "falha ao gravar");
+    if (falha) throw falha;
 
     return json({ ok: true });
   } catch (e) {

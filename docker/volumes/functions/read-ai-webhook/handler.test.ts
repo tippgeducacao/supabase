@@ -18,7 +18,12 @@ const pedido = (assinatura: string | null, corpo = CORPO) =>
 
 function deps(chaves: string | null = CHAVE) {
   const gravar = vi.fn<DepsReadAi["gravar"]>(async () => ({ error: null }));
-  return { lerChaves: async () => chaves, gravar };
+  const processar = vi.fn<DepsReadAi["processar"]>(async () => ({
+    situacao: "criada",
+    empresa_id: "E1",
+    atividade_id: "atv-1",
+  }));
+  return { lerChaves: async () => chaves, gravar, processar };
 }
 
 describe("webhook do Read AI", () => {
@@ -76,6 +81,17 @@ describe("webhook do Read AI", () => {
       expect(await r.json()).toEqual({ ok: true, ignorada: true });
       expect(d.gravar).not.toHaveBeenCalled();
     }
+  });
+
+  it("guarda junto o resultado do registro na ficha; se falhar, guarda como erro e devolve 500", async () => {
+    const ok = deps();
+    await tratarWebhookReadAi(pedido(hmac(CHAVE)), ok);
+    expect(ok.gravar.mock.calls[0][0]).toMatchObject({ situacao: "criada", empresa_id: "E1", atividade_id: "atv-1" });
+
+    const ruim = deps();
+    ruim.processar.mockRejectedValue(new Error("falhou"));
+    expect((await tratarWebhookReadAi(pedido(hmac(CHAVE)), ruim)).status).toBe(500);
+    expect(ruim.gravar.mock.calls[0][0]).toMatchObject({ situacao: "erro", atividade_id: null });
   });
 
   it("falha ao gravar devolve 500 para o Read tentar de novo", async () => {
