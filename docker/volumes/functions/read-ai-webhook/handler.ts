@@ -3,6 +3,13 @@
 
 export const LIMITE_CORPO_BYTES = 5 * 1024 * 1024;
 
+/**
+ * Modo teste: o webhook é pessoal e o Read manda TODAS as reuniões da conta (entrevista, reunião
+ * interna…). Até a etapa 2 ligar reunião a empresa, só é guardada a que tem esta marca no título;
+ * o resto é descartado sem salvar.
+ */
+export const MARCA_TESTE = "zz teste";
+
 export interface RegistroReadAi {
   session_id: string | null;
   evento: string | null;
@@ -94,7 +101,7 @@ export async function tratarWebhookReadAi(req: Request, deps: DepsReadAi): Promi
   try {
     const chaves = ((await deps.lerChaves()) ?? "").split(/[\s,;]+/).filter(Boolean);
     // 503 e não 200: o Read tenta de novo, então a entrega não se perde enquanto a chave não é salva.
-    if (chaves.length === 0) return json({ erro: "chave_nao_configurada" }, 503);
+    if (chaves.length === 0) return json({ erro: "chave_nao_configurada", modo: "teste" }, 503);
 
     const corpo = await lerCorpo(req);
     if (corpo === null) return json({ erro: "corpo_grande_demais" }, 413);
@@ -114,6 +121,13 @@ export async function tratarWebhookReadAi(req: Request, deps: DepsReadAi): Promi
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) return json({ erro: "json_invalido" }, 400);
 
     const dados = payload as Record<string, unknown>;
+    const titulo = typeof dados.title === "string" ? dados.title : "";
+    if (!titulo.toLowerCase().includes(MARCA_TESTE)) {
+      // Só os NOMES dos campos vão para o log: se o título não vier em `title`, o teste mostra onde está.
+      console.warn(`[read-ai-webhook] ignorada (modo teste); campos: ${Object.keys(dados).join(",").slice(0, 300)}`);
+      return json({ ok: true, ignorada: true });
+    }
+
     const texto = (v: unknown) => (typeof v === "string" && v ? v.slice(0, 200) : null);
     const { error } = await deps.gravar({
       session_id: texto(dados.session_id),

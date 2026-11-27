@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { LIMITE_CORPO_BYTES, tratarWebhookReadAi, type DepsReadAi } from "./handler.ts";
 
 const CHAVE = Buffer.from("chave-de-teste-do-read-ai").toString("base64");
-const CORPO = JSON.stringify({ session_id: "S1", trigger: "meeting_end", title: "Reunião de descoberta" });
+const CORPO = JSON.stringify({ session_id: "S1", trigger: "meeting_end", title: "Reunião B2B — ZZ Teste Read" });
 
 const hmac = (chave: string | Buffer, corpo = CORPO, saida: "hex" | "base64" = "hex") =>
   createHmac("sha256", chave).update(corpo).digest(saida);
@@ -66,6 +66,16 @@ describe("webhook do Read AI", () => {
       expect((await tratarWebhookReadAi(pedido(hmac(CHAVE, corpo), corpo), d)).status).toBe(400);
     }
     expect(d.gravar).not.toHaveBeenCalled();
+  });
+
+  it("modo teste: reunião sem a marca no título é aceita e descartada sem gravar", async () => {
+    for (const corpo of [JSON.stringify({ session_id: "S2", title: "Entrevista" }), JSON.stringify({ session_id: "S3" })]) {
+      const d = deps();
+      const r = await tratarWebhookReadAi(pedido(hmac(CHAVE, corpo), corpo), d);
+      expect(r.status).toBe(200);
+      expect(await r.json()).toEqual({ ok: true, ignorada: true });
+      expect(d.gravar).not.toHaveBeenCalled();
+    }
   });
 
   it("falha ao gravar devolve 500 para o Read tentar de novo", async () => {
