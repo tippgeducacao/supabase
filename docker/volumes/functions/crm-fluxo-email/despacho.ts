@@ -36,6 +36,8 @@ export interface ItemFilaEmail {
   /** Só nas automações (crm_v2/sac_v2): a automação e a reserva única da linha. */
   automacao_id?: string | null;
   chave?: string | null;
+  /** O card que disparou a automação de funil — entra no link pessoal do e-mail (27/11/2026). */
+  oportunidade_id?: string | null;
   /** `<bloco>:<md5 dos parâmetros>` — um bloco pode ter mais de uma ação de e-mail. */
   acao_ref: string;
   lead_id: string;

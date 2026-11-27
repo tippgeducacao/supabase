@@ -1750,6 +1750,15 @@ async function receberWebhook(req: Request, arquivosConferidos = false): Promise
       },
       enviadoNas24h: (templateId, email) => modeloEnviadoNas24h(admin, templateId, email),
       resolverVariavel: resolveWebhookVar,
+      // Links pessoais do contato (agenda, cronograma e respostas do e-mail da cadência por
+      // pós): assinados pelo banco, já com o card que esta captação criou ou reaproveitou.
+      linksPessoais: async (idDoLead, templateId) => {
+        const { data, error } = await admin.rpc("crm_cadencia_email_links", {
+          p_lead: idDoLead, p_template: templateId, p_oportunidade: oportunidadeId ?? null,
+        });
+        if (error) throw error;
+        return data;
+      },
     });
     acoesEmailResultados.push(resultadoEmail);
     if (resultadoEmail.status === "enviado") {

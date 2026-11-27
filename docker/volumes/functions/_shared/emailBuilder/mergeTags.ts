@@ -126,8 +126,15 @@ export function escaparHtml(v: string): string {
     .replace(/'/g, "&#39;");
 }
 
+/**
+ * Primeira letra de cada palavra em maiúscula.
+ *
+ * Não usa `\b`: no JavaScript ele só conhece letra SEM acento, então "joão" tinha uma
+ * "fronteira" depois do "ã" e saía "JoãO" no e-mail (achado do Rafael, 27/11/2026). Aqui
+ * a letra só sobe quando o caractere anterior não é letra nem acento solto.
+ */
 function capitalizar(s: string): string {
-  return s.replace(/\b\p{L}/gu, (c) => c.toUpperCase());
+  return s.replace(/(^|[^\p{L}\p{M}])(\p{L})/gu, (_m, antes: string, letra: string) => antes + letra.toUpperCase());
 }
 
 /**

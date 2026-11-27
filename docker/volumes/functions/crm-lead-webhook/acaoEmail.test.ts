@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
-import { executarAcaoEmail, executarEnvioModeloEmail, normalizarDestinatarioEmail, type DependenciasAcaoEmail, type LeadEmail, type RemetenteEmail, type ReservaEmail, type TemplateEmail } from "./acaoEmail.ts";
+import { executarAcaoEmail, executarEnvioModeloEmail, linkPessoalBemUsado, normalizarDestinatarioEmail, type DependenciasAcaoEmail, type LeadEmail, type RemetenteEmail, type ReservaEmail, type TemplateEmail } from "./acaoEmail.ts";
 
 const INTEGRACAO = "11111111-1111-4111-8111-111111111111";
 const LEAD = "22222222-2222-4222-8222-222222222222";
@@ -234,6 +234,119 @@ describe("ação de e-mail da integração", () => {
     expect(await executarAcaoEmail(entrada(), deps)).toMatchObject({ status: "enviado", log_id: LOG, motivo: "registro_resultado_pendente" });
     expect((await executarAcaoEmail(entrada(), deps)).status).toBe("duplicado");
     expect(deps.enviar).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("links pessoais do contato (27/11/2026, cadência por pós v2)", () => {
+  const AGENDA = "https://sistemappgvet.ppgeducacao.site/agendar-reuniao/abc";
+  const CRONO = "https://sistemappgvet.ppgeducacao.site/meu-atendimento/" + "a".repeat(122);
+  const corpoComLinks = '<p><a href="{{link_agenda_reuniao | fallback:&quot;https://agenda.geral/x&quot;}}">Agendar comigo</a>'
+    + '<a href="{{link_cronograma | fallback:&quot;https://pdf.site/c.pdf&quot;}}">Ver o cronograma completo</a>'
+    + '<a href="{{link_resposta_1 | fallback:&quot;https://wa.me/554699222253&quot;}}">Sim</a></p>';
+
+  it("modelo com link pessoal pede os links ao banco e manda o que veio; o resto fica no fallback", async () => {
+    template.corpo_html = corpoComLinks;
+    deps.linksPessoais = vi.fn(async () => ({ link_agenda_reuniao: AGENDA, link_cronograma: CRONO }));
+    const r = await executarAcaoEmail(entrada(), deps);
+    expect(r.status).toBe("enviado");
+    expect(deps.linksPessoais).toHaveBeenCalledWith(LEAD, TEMPLATE);
+    const variaveis = (deps.enviar as ReturnType<typeof vi.fn>).mock.calls[0][0].variaveis;
+    expect(variaveis.link_agenda_reuniao).toBe(AGENDA);
+    expect(variaveis.link_cronograma).toBe(CRONO);
+    expect(variaveis.link_resposta_1).toBeUndefined();
+  });
+
+  it("modelo sem link pessoal nem consulta o banco", async () => {
+    deps.linksPessoais = vi.fn(async () => ({ link_cronograma: CRONO }));
+    expect((await executarAcaoEmail(entrada(), deps)).status).toBe("enviado");
+    expect(deps.linksPessoais).not.toHaveBeenCalled();
+  });
+
+  it("falha ao montar o link não segura o e-mail: sai com o fallback do modelo", async () => {
+    template.corpo_html = corpoComLinks;
+    deps.linksPessoais = vi.fn(async () => { throw new Error("banco fora"); });
+    expect((await executarAcaoEmail(entrada(), deps)).status).toBe("enviado");
+    expect((deps.enviar as ReturnType<typeof vi.fn>).mock.calls[0][0].variaveis.link_cronograma).toBeUndefined();
+  });
+
+  it("só entra endereço https e só nas variáveis de link — nada de javascript: nem de sobrescrever o nome", async () => {
+    template.corpo_html = corpoComLinks;
+    deps.linksPessoais = vi.fn(async () => ({
+      link_cronograma: "javascript:alert(1)", link_resposta_1: "http://sem-s.site/x", link_agenda_reuniao: 42, nome: "Invasor",
+    }));
+    expect((await executarAcaoEmail(entrada(), deps)).status).toBe("enviado");
+    const variaveis = (deps.enviar as ReturnType<typeof vi.fn>).mock.calls[0][0].variaveis;
+    expect(variaveis.link_cronograma).toBeUndefined();
+    expect(variaveis.link_resposta_1).toBeUndefined();
+    expect(variaveis.link_agenda_reuniao).toBeUndefined();
+    expect(variaveis.nome).toBe("Maria Silva");
+  });
+
+  it("valor MAPEADO para um link pessoal é ignorado — nem payload de página, nem vazio, nem texto fixo passam por cima", async () => {
+    template.corpo_html = corpoComLinks;
+    deps.linksPessoais = vi.fn(async () => ({ link_agenda_reuniao: AGENDA, link_cronograma: CRONO }));
+    const pedido = entrada();
+    pedido.dados = { ...pedido.dados, destino: "https://site-de-terceiro.example/golpe" } as typeof pedido.dados;
+    pedido.acao.params.variaveis = { link_cronograma: "{webhook=destino}", link_agenda_reuniao: "", link_resposta_1: "https://fixo.example/x" };
+    expect((await executarAcaoEmail(pedido, deps)).status).toBe("enviado");
+    const variaveis = (deps.enviar as ReturnType<typeof vi.fn>).mock.calls[0][0].variaveis;
+    expect(variaveis.link_cronograma).toBe(CRONO);
+    expect(variaveis.link_agenda_reuniao).toBe(AGENDA);
+    expect(variaveis.link_resposta_1).toBeUndefined();
+  });
+
+  it("link pessoal fora de um href inteiro não é entregue (imagem, pedaço de outro endereço, assunto)", async () => {
+    deps.linksPessoais = vi.fn(async () => ({ link_cronograma: CRONO, link_resposta_1: CRONO, link_agenda_reuniao: AGENDA }));
+    template.corpo_html = '<p><img src="https://fora.example/p.gif?x={{link_resposta_1 | fallback:&quot;x&quot;}}">'
+      + '<a href="https://fora.example/r?u={{link_cronograma | fallback:&quot;x&quot;}}">Ver</a>'
+      + '<a href="{{link_agenda_reuniao | fallback:&quot;https://agenda.geral/x&quot;}}">Agendar comigo</a></p>';
+    expect((await executarAcaoEmail(entrada(), deps)).status).toBe("enviado");
+    const variaveis = (deps.enviar as ReturnType<typeof vi.fn>).mock.calls[0][0].variaveis;
+    expect(variaveis.link_resposta_1).toBeUndefined();
+    expect(variaveis.link_cronograma).toBeUndefined();
+    expect(variaveis.link_agenda_reuniao).toBe(AGENDA);
+    expect(linkPessoalBemUsado("link_cronograma", { assunto: "Veja {{link_cronograma}}", corpo_html: '<a href="{{link_cronograma}}">x</a>' })).toBe(false);
+    // as duas formas de escrever o fallback valem (aspas retas do gerador do Rafael e &quot;)
+    expect(linkPessoalBemUsado("link_cronograma", { assunto: "Oi", corpo_html: '<a href="{{link_cronograma | fallback:"https://x.site/a.pdf"}}" target="_blank">x</a>' })).toBe(true);
+    expect(linkPessoalBemUsado("link_resposta_2", { assunto: "Oi", corpo_html: "<a class='b' href='{{link_resposta_2}}'>x</a><a href=\"{{link_resposta_2 | fallback:&quot;https://wa.me/55&quot;}}\">y</a>" })).toBe(true);
+    expect(linkPessoalBemUsado("contato.nome", { assunto: "Oi", corpo_html: '<a href="{{contato.nome}}">x</a>' })).toBe(false);
+  });
+
+  it("webhook: link de resposta SEM fallback e sem link pessoal continua barrando o envio", async () => {
+    template.corpo_html = '<p><a href="{{link_resposta_1}}">Sim</a></p>';
+    deps.linksPessoais = vi.fn(async () => ({}));
+    expect(await executarAcaoEmail(entrada(), deps)).toMatchObject({ status: "ignorado", motivo: "variavel_ausente" });
+  });
+});
+
+describe("nome que resolve vazio usa o fallback do modelo (27/11/2026)", () => {
+  it("valor mapeado vazio + fallback no modelo: sai o fallback, não a 1ª palavra crua do cadastro", async () => {
+    lead.nome = "MV 123";
+    template.assunto = '{{contato.primeiro_nome | fallback:"Oi"}}, uma pergunta';
+    template.corpo_html = '<p>{{contato.primeiro_nome | fallback:"Olá"}}, tudo bem?</p>';
+    template.corpo_texto = null;
+    const pedido = entrada();
+    // É assim que a automação manda quando o {primeiro_nome_limpo} recusa o nome.
+    pedido.acao.params.variaveis = { "contato.primeiro_nome": "" };
+    const r = await executarEnvioModeloEmail({
+      contexto: { tipo: "automacao_crm", id: INTEGRACAO, namespace: "crm-v2-email/v1", partesChave: ["k"] },
+      acao: pedido.acao, leadId: LEAD, dados: null,
+    }, { ...deps, reservar: vi.fn(async () => true) });
+    expect(r.status).toBe("enviado");
+    expect((deps.enviar as ReturnType<typeof vi.fn>).mock.calls[0][0].variaveis["contato.primeiro_nome"]).toBe("");
+  });
+
+  it("sem fallback no modelo, a automação segue com o valor automático do contato (como antes)", async () => {
+    template.assunto = "Olá";
+    template.corpo_html = "<p>{{contato.primeiro_nome}}, tudo bem?</p>";
+    template.corpo_texto = null;
+    const pedido = entrada();
+    pedido.acao.params.variaveis = { "contato.primeiro_nome": "" };
+    await executarEnvioModeloEmail({
+      contexto: { tipo: "automacao_crm", id: INTEGRACAO, namespace: "crm-v2-email/v1", partesChave: ["k"] },
+      acao: pedido.acao, leadId: LEAD, dados: null,
+    }, { ...deps, reservar: vi.fn(async () => true) });
+    expect((deps.enviar as ReturnType<typeof vi.fn>).mock.calls[0][0].variaveis["contato.primeiro_nome"]).toBe("Maria");
   });
 });
 

@@ -51,7 +51,7 @@ Deno.serve(async (req) => {
 
   const { data: fila, error } = await admin
     .from("crm_fluxo_email_envios")
-    .select("id, origem, fluxo_id, execucao_id, passagem, no_id, automacao_id, chave, acao_ref, lead_id, params")
+    .select("id, origem, fluxo_id, execucao_id, passagem, no_id, automacao_id, oportunidade_id, chave, acao_ref, lead_id, params")
     .eq("status", "pendente")
     .order("criado_em", { ascending: true })
     .limit(LOTE);
@@ -95,6 +95,15 @@ Deno.serve(async (req) => {
         enviadoNas24h: (templateId, email) => modeloEnviadoNas24h(admin, templateId, email),
         // As variáveis já chegam resolvidas pelo motor do fluxo.
         resolverVariavel: (modelo) => modelo,
+        // Links pessoais do contato (agenda, cronograma, respostas): assinados pelo banco, com
+        // o card que disparou a automação quando a linha tem um.
+        linksPessoais: async (leadId, templateId) => {
+          const { data, error } = await admin.rpc("crm_cadencia_email_links", {
+            p_lead: leadId, p_template: templateId, p_oportunidade: item.oportunidade_id ?? null,
+          });
+          if (error) throw error;
+          return data;
+        },
       },
       assumir: async (id) => {
         const { data, error } = await admin.from("crm_fluxo_email_envios")

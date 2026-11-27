@@ -822,6 +822,8 @@ Deno.serve(async (req) => {
         const overrideUrl = String(header_media_url ?? "").trim();
         let hdrUrl = "";
         let hdrFmt = "";
+        // Nome que o lead vê no cartão do PDF, quando o modelo define um (27/11/2026).
+        let hdrNomeExibido = "";
         if (overrideUrl) {
           // Override por envio: usa a URL passada (fluxo/automação escolheu a imagem).
           // Formato vem explícito ou é derivado da extensão (default IMAGE).
@@ -837,12 +839,15 @@ Deno.serve(async (req) => {
           // Sem override: mídia FIXA configurada por template (crm_whatsapp_template_media).
           const { data: media } = await admin
             .from("crm_whatsapp_template_media")
-            .select("header_format, media_url")
+            // `*` de propósito: `nome_exibido` nasceu em 27/11/2026 e a edge não pode ficar
+            // sem cabeçalho se subir antes da migration.
+            .select("*")
             .eq("template_name", template_name)
             .maybeSingle();
           if (media?.media_url && media?.header_format) {
             hdrUrl = String(media.media_url);
             hdrFmt = String(media.header_format).toUpperCase();
+            hdrNomeExibido = String((media as { nome_exibido?: unknown }).nome_exibido ?? "").trim();
           }
         }
         if (hdrUrl) {
@@ -887,7 +892,10 @@ Deno.serve(async (req) => {
             } catch { return ""; }
           })();
           const extPadrao = key === "video" ? "header.mp4" : key === "document" ? "header.pdf" : "header.jpg";
-          const nomeArq = String(header_media_filename ?? "").trim() || nomeDaUrl || extPadrao;
+          // Ordem: o que o chamador mandou → o nome definido no modelo (`nome_exibido`, só PDF:
+          // "Cronograma - Pós em Cannabis….pdf" em vez de "cannabis-medicinal.pdf") → o da URL.
+          const nomeArq = String(header_media_filename ?? "").trim()
+            || (key === "document" ? hdrNomeExibido : "") || nomeDaUrl || extPadrao;
           headerMediaUrl = hdrUrl;
           headerMediaKey = key;
           const midiaHdr = await resolverMediaId(midia, admin, phoneNumberId, accessToken, hdrUrl, mime, nomeArq);

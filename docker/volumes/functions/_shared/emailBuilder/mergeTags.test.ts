@@ -62,6 +62,22 @@ describe("render com dados", () => {
   it("filtro desconhecido é ignorado no render em vez de derrubar o envio", () => {
     expect(renderizarTags("{{contato.primeiro_nome | inventado}}", dados)).toBe("Ana");
   });
+
+  it("capitalize não quebra nome com acento (era 'JoãO', 27/11/2026)", () => {
+    expect(renderizarTags("{{n | capitalize}}", { n: "joão" })).toBe("João");
+    expect(renderizarTags("{{n | capitalize}}", { n: "JOSÉ DA CONCEIÇÃO" })).toBe("José Da Conceição");
+    expect(renderizarTags("{{n | capitalize}}", { n: "ana-lúcia d'ávila" }, { escapar: false })).toBe("Ana-Lúcia D'Ávila");
+    // Acento decomposto (a letra e o til como dois caracteres) também não vira fronteira.
+    expect(renderizarTags("{{n | capitalize}}", { n: "joão" })).toBe("João");
+  });
+
+  it("fallback com endereço inteiro (link pessoal que não pôde ser montado)", () => {
+    expect(renderizarTags('<a href="{{link_cronograma | fallback:"https://x.site/a/b.pdf"}}">', {}))
+      .toBe('<a href="https://x.site/a/b.pdf">');
+    expect(renderizarTags('<a href="{{link_cronograma | fallback:"https://x.site/a/b.pdf"}}">',
+      { link_cronograma: "https://y.site/meu-atendimento/abc" }))
+      .toBe('<a href="https://y.site/meu-atendimento/abc">');
+  });
 });
 
 describe("compatibilidade com os 29 templates legados", () => {
