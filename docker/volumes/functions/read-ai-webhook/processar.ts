@@ -1,6 +1,6 @@
 // Descobre a empresa da reunião e cria (ou atualiza) a "reunião registrada". Nunca chuta: com zero
 // ou mais de uma empresa possível, não grava nada na ficha e a entrega fica na caixa de chegada.
-import { codigoDoMeet, dataDe, emailsExternos, montarRegistro, type DadosRegistro, type Payload } from "./registro.ts";
+import { codigoDoMeet, dataDe, emailPessoal, emailsExternos, montarRegistro, type DadosRegistro, type Payload } from "./registro.ts";
 
 export interface Agendamento {
   id: string;
@@ -13,6 +13,8 @@ export interface Repo {
   agendamentosPorMeet: (codigo: string) => Promise<Agendamento[]>;
   /** Empresas não arquivadas que têm este e-mail (na própria empresa ou num contato dela). */
   empresasPorEmail: (email: string) => Promise<string[]>;
+  /** E-mails dos contatos da empresa (amostra de até 1.000). */
+  emailsDosContatos: (empresaId: string) => Promise<string[]>;
   registroDaSessao: (sessionId: string) => Promise<{ id: string; empresa_id: string; metadata: Record<string, unknown> } | null>;
   criar: (linha: DadosRegistro & { empresa_id: string }) => Promise<string>;
   atualizar: (id: string, dados: DadosRegistro) => Promise<void>;
@@ -25,6 +27,15 @@ export interface ResultadoProcesso {
 }
 
 const DIA_MS = 24 * 60 * 60 * 1000;
+
+// Cadastro com contatos de domínios demais é lista geral (evento, importação), não um cliente:
+// em 27/11/2026 um tinha 1.616 domínios e o seguinte, 10.
+const MAX_DOMINIOS = 30;
+
+async function ehListaGeral(empresaId: string, repo: Repo): Promise<boolean> {
+  const emails = await repo.emailsDosContatos(empresaId);
+  return new Set(emails.map((e) => e.split("@")[1]?.toLowerCase()).filter(Boolean)).size > MAX_DOMINIOS;
+}
 
 async function acharEmpresa(
   payload: Payload,
@@ -46,8 +57,12 @@ async function acharEmpresa(
   }
 
   const empresas = new Set<string>();
-  for (const email of emailsExternos(payload).slice(0, 30)) {
+  // E-mail pessoal não aponta empresa: candidato em entrevista ou aluno não pode cair na ficha de alguém.
+  for (const email of emailsExternos(payload).filter((e) => !emailPessoal(e)).slice(0, 30)) {
     for (const id of await repo.empresasPorEmail(email)) empresas.add(id);
+  }
+  for (const id of [...empresas]) {
+    if (await ehListaGeral(id, repo)) empresas.delete(id);
   }
   if (empresas.size === 0) return "sem_empresa";
   if (empresas.size > 1) return "empresa_ambigua";

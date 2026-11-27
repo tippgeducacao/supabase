@@ -1,15 +1,29 @@
 // Webhook do Read AI: confere a assinatura no corpo CRU, registra a reunião na empresa (processar.ts)
 // e guarda o que chegou. Mapa: docs/CRM Comercial.md → "Read AI".
 import type { ResultadoProcesso } from "./processar.ts";
+import { codigoDoMeet } from "./registro.ts";
 
 export const LIMITE_CORPO_BYTES = 5 * 1024 * 1024;
 
 /**
- * Modo teste: o webhook é pessoal e o Read manda TODAS as reuniões da conta (entrevista, reunião
- * interna…). Até a etapa 2 ligar reunião a empresa, só é guardada a que tem esta marca no título;
- * o resto é descartado sem salvar.
+ * O webhook é pessoal e o Read manda TODAS as reuniões da conta (entrevista, reunião interna…).
+ * Só a que achou empresa fica guardada inteira; das outras fica apenas o formato dos campos.
  */
-export const MARCA_TESTE = "zz teste";
+const GUARDA_INTEIRA: ReadonlyArray<ResultadoProcesso["situacao"]> = [
+  "criada",
+  "atualizada",
+  "mantida_editada",
+  "empresa_ambigua",
+];
+
+/** Nomes e tipos dos campos, sem nenhum valor. */
+export function formatoDe(v: unknown, nivel = 0): unknown {
+  if (v === null) return "nulo";
+  if (Array.isArray(v)) return nivel > 2 ? "lista" : { lista: v.length, item: v.length ? formatoDe(v[0], nivel + 1) : null };
+  if (typeof v !== "object") return typeof v;
+  if (nivel > 2) return "objeto";
+  return Object.fromEntries(Object.entries(v as object).slice(0, 40).map(([k, x]) => [k, formatoDe(x, nivel + 1)]));
+}
 
 export interface RegistroReadAi {
   session_id: string | null;
@@ -106,7 +120,7 @@ export async function tratarWebhookReadAi(req: Request, deps: DepsReadAi): Promi
   try {
     const chaves = ((await deps.lerChaves()) ?? "").split(/[\s,;]+/).filter(Boolean);
     // 503 e não 200: o Read tenta de novo, então a entrega não se perde enquanto a chave não é salva.
-    if (chaves.length === 0) return json({ erro: "chave_nao_configurada", modo: "teste" }, 503);
+    if (chaves.length === 0) return json({ erro: "chave_nao_configurada" }, 503);
 
     const corpo = await lerCorpo(req);
     if (corpo === null) return json({ erro: "corpo_grande_demais" }, 413);
@@ -126,15 +140,8 @@ export async function tratarWebhookReadAi(req: Request, deps: DepsReadAi): Promi
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) return json({ erro: "json_invalido" }, 400);
 
     const dados = payload as Record<string, unknown>;
-    const titulo = typeof dados.title === "string" ? dados.title : "";
-    if (!titulo.toLowerCase().includes(MARCA_TESTE)) {
-      // Só os NOMES dos campos vão para o log: se o título não vier em `title`, o teste mostra onde está.
-      console.warn(`[read-ai-webhook] ignorada (modo teste); campos: ${Object.keys(dados).join(",").slice(0, 300)}`);
-      return json({ ok: true, ignorada: true });
-    }
-
     const texto = (v: unknown) => (typeof v === "string" && v ? v.slice(0, 200) : null);
-    // Falha ao registrar na ficha não pode perder a entrega: guarda com "erro" e devolve 500.
+    // Falha ao registrar na ficha: marca "erro" e devolve 500, para o Read entregar de novo.
     let resultado: ResultadoProcesso | null = null;
     let falha: unknown = null;
     try {
@@ -151,7 +158,10 @@ export async function tratarWebhookReadAi(req: Request, deps: DepsReadAi): Promi
       evento: texto(dados.trigger),
       corpo_sha256: emHex(new Uint8Array(await crypto.subtle.digest("SHA-256", corpo))),
       assinatura_formato: formato,
-      payload: dados,
+      payload:
+        resultado && GUARDA_INTEIRA.includes(resultado.situacao)
+          ? dados
+          : { descartado: true, tem_meet: !!codigoDoMeet(dados.platform_meeting_id), formato: formatoDe(dados) },
     });
     if (error) throw new Error(error.message ?? error.code ?? "falha ao gravar");
     if (falha) throw falha;

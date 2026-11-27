@@ -73,14 +73,27 @@ describe("webhook do Read AI", () => {
     expect(d.gravar).not.toHaveBeenCalled();
   });
 
-  it("modo teste: reunião sem a marca no título é aceita e descartada sem gravar", async () => {
-    for (const corpo of [JSON.stringify({ session_id: "S2", title: "Entrevista" }), JSON.stringify({ session_id: "S3" })]) {
+  it("reunião sem empresa: aceita e guarda só o formato, sem nenhum conteúdo", async () => {
+    const corpo = JSON.stringify({
+      session_id: "S2",
+      title: "Entrevista com Fulana",
+      summary: "assunto reservado",
+      participants: [{ name: "Fulana", email: "fulana@gmail.com" }],
+    });
+    for (const situacao of ["sem_empresa", "sem_conteudo"] as const) {
       const d = deps();
-      const r = await tratarWebhookReadAi(pedido(hmac(CHAVE, corpo), corpo), d);
-      expect(r.status).toBe(200);
-      expect(await r.json()).toEqual({ ok: true, ignorada: true });
-      expect(d.gravar).not.toHaveBeenCalled();
+      d.processar.mockResolvedValue({ situacao, empresa_id: null, atividade_id: null });
+      expect((await tratarWebhookReadAi(pedido(hmac(CHAVE, corpo), corpo), d)).status).toBe(200);
+      const salvo = JSON.stringify(d.gravar.mock.calls[0][0]);
+      expect(salvo).not.toMatch(/Fulana|reservado|gmail/);
+      expect(d.gravar.mock.calls[0][0].payload).toMatchObject({ descartado: true });
     }
+  });
+
+  it("reunião que achou empresa fica guardada inteira", async () => {
+    const d = deps();
+    await tratarWebhookReadAi(pedido(hmac(CHAVE)), d);
+    expect(d.gravar.mock.calls[0][0].payload).toEqual(JSON.parse(CORPO));
   });
 
   it("guarda junto o resultado do registro na ficha; se falhar, guarda como erro e devolve 500", async () => {

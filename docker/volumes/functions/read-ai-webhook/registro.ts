@@ -144,3 +144,10 @@ export function montarRegistro(payload: Payload): DadosRegistro | null {
     },
   };
 }
+
+const PROVEDORES_PESSOAIS = new Set(
+  ("gmail.com googlemail.com hotmail.com hotmail.com.br outlook.com outlook.com.br live.com msn.com yahoo.com " +
+    "yahoo.com.br icloud.com me.com bol.com.br uol.com.br terra.com.br ig.com.br globo.com protonmail.com proton.me").split(" "),
+);
+
+export const emailPessoal = (email: string) => PROVEDORES_PESSOAIS.has(email.split("@")[1]?.toLowerCase() ?? "");

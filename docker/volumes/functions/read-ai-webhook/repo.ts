@@ -37,6 +37,13 @@ export function repoDoBanco(admin: SupabaseClient): Repo {
       return (ativas ?? []).map((e) => e.id);
     },
 
+    emailsDosContatos: async (empresaId) =>
+      (
+        (ou(
+          await admin.from("leads").select("email").eq("empresa_id", empresaId).not("email", "is", null).limit(1000),
+        ) as Array<{ email: string }> | null) ?? []
+      ).map((l) => l.email),
+
     registroDaSessao: async (sessionId) =>
       ou(
         await admin

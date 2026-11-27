@@ -29,6 +29,7 @@ function repo(extra: Partial<Repo> = {}) {
   return {
     agendamentosPorMeet: vi.fn<Repo["agendamentosPorMeet"]>(async () => []),
     empresasPorEmail: vi.fn<Repo["empresasPorEmail"]>(async () => []),
+    emailsDosContatos: vi.fn<Repo["emailsDosContatos"]>(async () => ["a@clienteexemplo.com.br"]),
     registroDaSessao: vi.fn<Repo["registroDaSessao"]>(async () => null),
     criar: vi.fn<Repo["criar"]>(async () => "atv-1"),
     atualizar: vi.fn<Repo["atualizar"]>(async () => {}),
@@ -109,6 +110,20 @@ describe("em qual empresa a reunião entra", () => {
       expect((await processarReuniao(PAYLOAD, r)).situacao).toBe(situacao);
       expect(r.criar).not.toHaveBeenCalled();
     }
+  });
+
+  it("e-mail pessoal e cadastro que é lista geral não apontam empresa", async () => {
+    const pessoal = repo({ empresasPorEmail: vi.fn(async () => ["E1"]) });
+    const entrevista = { ...PAYLOAD, participants: [{ name: "Candidata", email: "candidata@gmail.com" }] };
+    expect((await processarReuniao(entrevista, pessoal)).situacao).toBe("sem_empresa");
+    expect(pessoal.empresasPorEmail).not.toHaveBeenCalled();
+
+    const muitos = Array.from({ length: 31 }, (_, i) => `x@dominio${i}.com`);
+    const geral = repo({
+      empresasPorEmail: vi.fn(async () => ["LISTA", "E2"]),
+      emailsDosContatos: vi.fn(async (id: string) => (id === "LISTA" ? muitos : ["a@clienteexemplo.com.br"])),
+    });
+    expect((await processarReuniao(PAYLOAD, geral)).empresa_id).toBe("E2");
   });
 
   it("reenvio atualiza o mesmo registro e respeita o que foi editado à mão", async () => {
