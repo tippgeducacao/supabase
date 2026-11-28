@@ -19,6 +19,7 @@ import { exigirAcesso, respostaAcessoNegado } from "../_shared/acesso.ts";
 import { AUTOR_REENVIO_MATERIAL, LIMITE_REENVIO_MS, proximaTentativaMaterial } from '../_shared/reenvioMaterial.ts';
 import { interpretarEnvioMaterial } from '../_shared/resultadoEnvioMaterial.ts';
 import { phoneVariants } from '../crm-whatsapp-send/telefoneConversa.ts';
+import { arquivoDoEnvioPermitido, nomeDoArquivoDoEnvio } from './arquivoDoEnvio.ts';
 import {
   chaveDaConta, CODIGO_RATE_LIMIT, criarRitmo, intercalarPorConta,
   MAX_REAGENDAMENTOS_RATE_LIMIT, proximaTentativaRateLimit,
@@ -298,9 +299,17 @@ export async function processarUma(
         // do funil (28/11/2026 — cronograma da cadência por pós: um modelo só, o PDF muda por
         // pós). Quem grava é o gatilho trg_crm_cadencia_email_fila, lendo a ação que
         // enfileirou a linha; a `origem: "automacao"` do envio continua como está.
-        sendBody.header_media_url = row.contexto_campanha.header_media_url;
-        sendBody.header_media_format = row.contexto_campanha.header_media_format || undefined;
-        sendBody.header_media_filename = row.contexto_campanha.header_media_filename || undefined;
+        // ⚠️ A fila é gravável por quem usa o CRM: o que está na linha não prova que veio do
+        // motor. Só passa PDF do acervo PÚBLICO de ementas — nunca endereço de fora nem de
+        // bucket privado, que este pedido (com a chave de serviço) faria o envio abrir.
+        const arquivo = arquivoDoEnvioPermitido(row.contexto_campanha.header_media_url, [Deno.env.get("PUBLIC_SUPABASE_URL")]);
+        if (arquivo) {
+          sendBody.header_media_url = arquivo;
+          sendBody.header_media_format = "DOCUMENT";
+          sendBody.header_media_filename = nomeDoArquivoDoEnvio(row.contexto_campanha.header_media_filename);
+        } else {
+          console.warn(`[crm-agendadas-dispatch] arquivo do cabeçalho recusado (fora do acervo de ementas) na linha ${row.id}`);
+        }
       }
     } else if (row.tipo_mensagem === "midia") {
       // MÍDIA (imagem/vídeo/documento). Quem enfileira hoje é a ação "Enviar texto livre" do

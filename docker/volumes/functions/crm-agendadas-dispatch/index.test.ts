@@ -122,15 +122,33 @@ describe('reenvio do cronograma na fila real, com transporte simulado', () => {
     expect(mocks.fetch).not.toHaveBeenCalled();
   });
   it('template de automação do funil leva o arquivo do cabeçalho escolhido na ação (PDF por envio)', async () => {
+    const PDF = 'https://api.ppgeducacao.site/storage/v1/object/public/ementas/producao-suinos.pdf';
     linha = { ...linha, tipo_mensagem: 'template', template_name: 'cadencia_cronograma_pdf', criado_por_nome: 'Automação', automacao_id: 'auto-1',
       anexo_url: null, filename: null, mime_type: null,
-      contexto_campanha: { header_media_url: 'https://materiais.invalid/ementas/suinos.pdf', header_media_format: 'DOCUMENT', header_media_filename: 'Cronograma - Pós em Suínos.pdf' } };
+      contexto_campanha: { header_media_url: PDF, header_media_format: 'IMAGE', header_media_filename: 'Cronograma - Pós em Suínos.pdf' } };
     flags = { permitido: true };
     expect(await chamar()).toBe('enviado');
     const corpo = JSON.parse(mocks.fetch.mock.calls[0][1].body);
+    // o formato é sempre documento: o que vem na linha não manda
     expect(corpo).toMatchObject({ tipo: 'template', template_name: 'cadencia_cronograma_pdf', origem: 'automacao',
-      header_media_url: 'https://materiais.invalid/ementas/suinos.pdf', header_media_format: 'DOCUMENT', header_media_filename: 'Cronograma - Pós em Suínos.pdf' });
+      header_media_url: PDF, header_media_format: 'DOCUMENT', header_media_filename: 'Cronograma - Pós em Suínos.pdf' });
     expect(corpo.fluxo_id).toBeUndefined();
+  });
+  it.each([
+    'https://externo.example/ementas/qualquer.pdf',
+    'https://api.ppgeducacao.site/storage/v1/object/sign/whatsapp-recebidos/abc/documento.pdf',
+    'https://api.ppgeducacao.site/storage/v1/object/public/whatsapp-anexos/abc/documento.pdf',
+    'https://api.ppgeducacao.site/storage/v1/object/public/ementas/../whatsapp-anexos/x.pdf',
+  ])('arquivo fora do acervo público de ementas não é repassado ao envio: %s', async (url) => {
+    linha = { ...linha, tipo_mensagem: 'template', template_name: 'cadencia_cronograma_pdf', criado_por_nome: 'Automação', automacao_id: 'auto-1',
+      anexo_url: null, filename: null, mime_type: null,
+      contexto_campanha: { header_media_url: url, header_media_format: 'DOCUMENT', header_media_filename: 'x.pdf' } };
+    flags = { permitido: true };
+    await chamar();
+    const corpo = JSON.parse(mocks.fetch.mock.calls[0][1].body);
+    expect(corpo.header_media_url).toBeUndefined();
+    expect(corpo.header_media_format).toBeUndefined();
+    expect(corpo.header_media_filename).toBeUndefined();
   });
   it('template de automação sem arquivo escolhido segue sem cabeçalho no pedido (vale a mídia fixa do modelo)', async () => {
     linha = { ...linha, tipo_mensagem: 'template', template_name: 'cadencia_email_resposta', criado_por_nome: 'Automação', automacao_id: 'auto-1',
