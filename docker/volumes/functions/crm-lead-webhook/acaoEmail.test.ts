@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
-import { executarAcaoEmail, executarEnvioModeloEmail, linkPessoalBemUsado, normalizarDestinatarioEmail, type DependenciasAcaoEmail, type LeadEmail, type RemetenteEmail, type ReservaEmail, type TemplateEmail } from "./acaoEmail.ts";
+import { executarAcaoEmail, executarEnvioModeloEmail, linkPessoalBemUsado, normalizarDestinatarioEmail, VARIAVEL_DO_TOQUE, variavelDoSistema, type DependenciasAcaoEmail, type LeadEmail, type RemetenteEmail, type ReservaEmail, type TemplateEmail } from "./acaoEmail.ts";
 
 const INTEGRACAO = "11111111-1111-4111-8111-111111111111";
 const LEAD = "22222222-2222-4222-8222-222222222222";
@@ -316,6 +316,51 @@ describe("links pessoais do contato (27/11/2026, cadência por pós v2)", () => 
     template.corpo_html = '<p><a href="{{link_resposta_1}}">Sim</a></p>';
     deps.linksPessoais = vi.fn(async () => ({}));
     expect(await executarAcaoEmail(entrada(), deps)).toMatchObject({ status: "ignorado", motivo: "variavel_ausente" });
+  });
+});
+
+describe("o WhatsApp do toque no e-mail (28/11/2026: o número segue o toque, lido do fluxo)", () => {
+  const corpo = '<p><a href="{{link_whatsapp | fallback:&quot;https://wa.me/554699222253&quot;}}">Falar no WhatsApp</a> '
+    + 'ou chame no {{whatsapp_numero | fallback:"(46) 99922-2253"}}.</p>';
+
+  it("o número vem do banco e entra no link e no texto; só ele já basta para consultar", async () => {
+    template.corpo_html = corpo;
+    deps.linksPessoais = vi.fn(async () => ({ link_whatsapp: "https://wa.me/5546999159811", whatsapp_numero: "(46) 99915-9811" }));
+    expect((await executarAcaoEmail(entrada(), deps)).status).toBe("enviado");
+    expect(deps.linksPessoais).toHaveBeenCalledWith(LEAD, TEMPLATE);
+    const variaveis = (deps.enviar as ReturnType<typeof vi.fn>).mock.calls[0][0].variaveis;
+    expect(variaveis.link_whatsapp).toBe("https://wa.me/5546999159811");
+    expect(variaveis.whatsapp_numero).toBe("(46) 99915-9811");
+  });
+
+  it("fora do formato exato não entra: vale o fallback do modelo", async () => {
+    template.corpo_html = corpo;
+    deps.linksPessoais = vi.fn(async () => ({
+      link_whatsapp: "https://wa.me/5546999159811?text=golpe", whatsapp_numero: "<b>46</b> 99915-9811",
+    }));
+    expect((await executarAcaoEmail(entrada(), deps)).status).toBe("enviado");
+    const variaveis = (deps.enviar as ReturnType<typeof vi.fn>).mock.calls[0][0].variaveis;
+    expect(variaveis.link_whatsapp).toBeUndefined();
+    expect(variaveis.whatsapp_numero).toBeUndefined();
+    for (const ruim of ["https://wa.me.golpe.site/5546999159811", "http://wa.me/5546999159811", "https://wa.me/46999159811", "https://wa.me/5546999159811/"]) {
+      expect(VARIAVEL_DO_TOQUE.link_whatsapp.test(ruim)).toBe(false);
+    }
+    expect(VARIAVEL_DO_TOQUE.link_whatsapp.test("https://wa.me/554699222253")).toBe(true);
+    expect(VARIAVEL_DO_TOQUE.whatsapp_numero.test("(46) 9922-2253")).toBe(true);
+  });
+
+  it("valor mapeado na tela ou vindo do payload não passa por cima do número do toque", async () => {
+    template.corpo_html = corpo;
+    deps.linksPessoais = vi.fn(async () => ({ link_whatsapp: "https://wa.me/5546999159811", whatsapp_numero: "(46) 99915-9811" }));
+    const pedido = entrada();
+    pedido.dados = { ...pedido.dados, zap: "https://wa.me/5511900000000" } as typeof pedido.dados;
+    pedido.acao.params.variaveis = { link_whatsapp: "{webhook=zap}", whatsapp_numero: "" };
+    expect((await executarAcaoEmail(pedido, deps)).status).toBe("enviado");
+    const variaveis = (deps.enviar as ReturnType<typeof vi.fn>).mock.calls[0][0].variaveis;
+    expect(variaveis.link_whatsapp).toBe("https://wa.me/5546999159811");
+    expect(variaveis.whatsapp_numero).toBe("(46) 99915-9811");
+    expect(variavelDoSistema("link_whatsapp") && variavelDoSistema("whatsapp_numero") && variavelDoSistema("link_resposta_3")).toBe(true);
+    expect(variavelDoSistema("nome") || variavelDoSistema("constructor") || variavelDoSistema("toString")).toBe(false);
   });
 });
 

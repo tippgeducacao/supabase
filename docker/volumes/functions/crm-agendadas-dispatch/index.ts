@@ -65,6 +65,9 @@ type Agendada = {
   contexto_campanha?: {
     persona?: string; aula_id?: string; origem?: string; fluxo_id?: string;
     header_media_url?: string; header_media_format?: string;
+    // Nome do arquivo no cartão do PDF (28/11/2026: arquivo do cabeçalho escolhido na ação
+    // "Template WhatsApp" do funil — ver trg_crm_cadencia_email_fila).
+    header_media_filename?: string;
   } | null;
   // Reagendamentos já feitos por 130429. Ausente = migration 20260923200000 ainda não
   // aplicada ⇒ o dispatcher não adia (comportamento antigo: a falha é gravada).
@@ -290,6 +293,14 @@ export async function processarUma(
         sendBody.fluxo_id = row.contexto_campanha.fluxo_id || row.automacao_id || undefined;
         sendBody.header_media_url = row.contexto_campanha.header_media_url || undefined;
         sendBody.header_media_format = row.contexto_campanha.header_media_format || undefined;
+      } else if (row.contexto_campanha?.header_media_url) {
+        // Arquivo do cabeçalho DESTE envio, escolhido na ação "Template WhatsApp" da automação
+        // do funil (28/11/2026 — cronograma da cadência por pós: um modelo só, o PDF muda por
+        // pós). Quem grava é o gatilho trg_crm_cadencia_email_fila, lendo a ação que
+        // enfileirou a linha; a `origem: "automacao"` do envio continua como está.
+        sendBody.header_media_url = row.contexto_campanha.header_media_url;
+        sendBody.header_media_format = row.contexto_campanha.header_media_format || undefined;
+        sendBody.header_media_filename = row.contexto_campanha.header_media_filename || undefined;
       }
     } else if (row.tipo_mensagem === "midia") {
       // MÍDIA (imagem/vídeo/documento). Quem enfileira hoje é a ação "Enviar texto livre" do

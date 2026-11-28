@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { acaoValida, deveAcordarDespachante, FILA_CURTA_ATE, respostaDaPagina, tipoDoToken, TOKEN_OK } from "./regras.ts";
+import { acaoValida, deveAcordarDespachante, FILA_CURTA_ATE, respostaDaPagina, respostaDoRegistro, tipoDoToken, TOKEN_OK } from "./regras.ts";
 
 const token = (opcao: string) => "a".repeat(96) + opcao + "b".repeat(24);
 
@@ -78,6 +78,23 @@ describe("o que sai para a página", () => {
   it("link inválido devolve só o motivo", () => {
     expect(respostaDaPagina({ ok: false, motivo: "link_invalido", primeiro_nome: "Ana" })).toEqual({ ok: false, motivo: "link_invalido" });
     expect(respostaDaPagina(null)).toEqual({ ok: false, motivo: "link_invalido" });
+  });
+});
+
+describe("o que volta do registrar", () => {
+  it("devolve o número que pôs a mensagem na fila, só no formato de WhatsApp", () => {
+    expect(respostaDoRegistro({ ok: true, enviou: true, whatsapp: "5546999159811" })).toEqual({ ok: true, enviou: true, repetido: false, whatsapp: "5546999159811" });
+    expect(respostaDoRegistro({ ok: true, enviou: true, whatsapp: "554699222253" })).toMatchObject({ whatsapp: "554699222253" });
+  });
+  it("número torto, id de conta ou qualquer outro campo não saem", () => {
+    for (const ruim of ["46999159811", "5546999159811; drop", "b3ee31b2-e160-4ccb-8488-5064468ae4ad", 5546999159811, null]) {
+      expect(respostaDoRegistro({ ok: true, enviou: true, whatsapp: ruim })).toEqual({ ok: true, enviou: true, repetido: false });
+    }
+    expect(respostaDoRegistro({ ok: true, enviou: false, repetido: true, lead_id: "x", execucoes: [1] })).toEqual({ ok: true, enviou: false, repetido: true });
+  });
+  it("recusa do banco vira motivo, sem mais nada", () => {
+    expect(respostaDoRegistro({ ok: false, motivo: "link_invalido", whatsapp: "5546999159811" })).toEqual({ ok: false, motivo: "link_invalido" });
+    expect(respostaDoRegistro(null)).toEqual({ ok: false, motivo: "link_invalido" });
   });
 });
 

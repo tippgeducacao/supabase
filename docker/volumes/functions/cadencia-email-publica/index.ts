@@ -1,7 +1,7 @@
 // acesso: publico — página /meu-atendimento/<token> do lead (link pessoal dos e-mails da cadência por pós), sem login; a credencial é o token de 122 hex assinado pelo banco (HMAC por lead + e-mail + card + opção), o formato é conferido antes de qualquer consulta, há freio por IP e toda regra mora em RPCs só de service_role
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { corsHeaders } from '../_shared/cors.ts';
-import { acaoValida, deveAcordarDespachante, respostaDaPagina, TOKEN_OK } from './regras.ts';
+import { acaoValida, deveAcordarDespachante, respostaDaPagina, respostaDoRegistro, TOKEN_OK } from './regras.ts';
 
 /**
  * CADÊNCIA POR PÓS, E-MAILS v2 — o lado do LEAD (27/11/2026, especificação do Rafael).
@@ -14,6 +14,7 @@ import { acaoValida, deveAcordarDespachante, respostaDaPagina, TOKEN_OK } from '
  *   registrar → grava o clique e avisa o motor do CRM V2. O que sai no WhatsApp (modelo, número,
  *               texto) é AUTOMAÇÃO DO FUNIL, com os gatilhos "O lead responder a um e-mail da
  *               cadência" e "O lead pedir o cronograma pelo e-mail" — nada é enviado daqui.
+ *               Devolve o número que pôs a mensagem na fila (o do toque, lido do fluxo).
  *
  * Por que duas chamadas: o verificador de links dos provedores de e-mail abre o endereço
  * sozinho (o do Hotmail abriu 1 minuto depois da entrega, no teste de 27/11). A página só
@@ -126,7 +127,7 @@ Deno.serve(async (req) => {
         /* o cron de 1 minuto cobre */
       }
     }
-    return json({ ok: true, enviou: r.enviou === true, repetido: r.repetido === true });
+    return json(respostaDoRegistro(r));
   } catch (e) {
     console.error('[cadencia-email-publica]', e instanceof Error ? e.message : e);
     return json({ ok: false, motivo: 'falhou' }, 500);

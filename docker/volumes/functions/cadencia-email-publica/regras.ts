@@ -57,3 +57,16 @@ export function respostaDaPagina(dados: unknown): Record<string, unknown> {
       : null,
   };
 }
+
+/**
+ * O que volta do REGISTRAR. `whatsapp` é o número que pôs a mensagem na fila (28/11/2026): o
+ * número é o do toque, lido do fluxo do funil, e pode não ser o que a página recebeu no `abrir`
+ * — o botão "Abrir o WhatsApp" tem de cair na conversa em que a mensagem chega.
+ */
+export function respostaDoRegistro(dados: unknown): Record<string, unknown> {
+  const d = (dados && typeof dados === "object" ? dados : {}) as Record<string, unknown>;
+  if (d.ok !== true) return { ok: false, motivo: typeof d.motivo === "string" ? d.motivo : "link_invalido" };
+  const saida: Record<string, unknown> = { ok: true, enviou: d.enviou === true, repetido: d.repetido === true };
+  if (typeof d.whatsapp === "string" && /^55[0-9]{10,11}$/.test(d.whatsapp)) saida.whatsapp = d.whatsapp;
+  return saida;
+}

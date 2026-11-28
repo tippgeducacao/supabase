@@ -97,13 +97,32 @@ export interface DependenciasAcaoEmail {
    * (`link_agenda_reuniao`), o cronograma (`link_cronograma`) e cada opção de resposta
    * (`link_resposta_<n>`). Quem assina é o banco (`crm_cadencia_email_links`). Só é chamado
    * quando o modelo usa alguma dessas variáveis; o que não vier fica com o fallback do modelo.
+   * Na mesma resposta vem o NÚMERO DO TOQUE (28/11/2026): `link_whatsapp` e `whatsapp_numero`,
+   * lidos do fluxo do funil — ver VARIAVEL_DO_TOQUE.
    */
   linksPessoais?(leadId: string, templateId: string): Promise<Record<string, unknown> | null>;
 }
 
 /** Variáveis de link pessoal que o envio monta sozinho (ninguém mapeia na tela). */
 export const VARIAVEL_LINK_PESSOAL = /^(?:link_agenda_reuniao|link_cronograma|link_resposta_[0-9]{1,2})$/;
-const USA_LINK_PESSOAL = /\{\{\s*(?:link_agenda_reuniao|link_cronograma|link_resposta_[0-9]{1,2})\b/;
+
+/**
+ * O WhatsApp do toque (28/11/2026): o número que aparece no e-mail é o do modelo de WhatsApp do
+ * MESMO toque, lido do fluxo do funil pelo banco — trocou o número do toque no fluxo, o e-mail
+ * acompanha. Não é pessoal (é igual para todo contato), então pode aparecer em qualquer ponto
+ * do modelo; em troca, só entra no formato EXATO (endereço do wa.me de um número brasileiro e
+ * o número escrito "(46) 99915-9811"). Fora disso, vale o fallback do modelo.
+ */
+export const VARIAVEL_DO_TOQUE: Readonly<Record<string, RegExp>> = Object.freeze({
+  link_whatsapp: /^https:\/\/wa\.me\/55[0-9]{10,11}$/,
+  whatsapp_numero: /^\([0-9]{2}\) [0-9]{4,5}-[0-9]{4}$/,
+});
+const formatoDoToque = (nome: string): RegExp | null =>
+  Object.prototype.hasOwnProperty.call(VARIAVEL_DO_TOQUE, nome) ? VARIAVEL_DO_TOQUE[nome] : null;
+/** Nome que o envio preenche sozinho: valor mapeado na tela (ou vindo do payload) é ignorado. */
+export const variavelDoSistema = (nome: string): boolean => VARIAVEL_LINK_PESSOAL.test(nome) || formatoDoToque(nome) !== null;
+
+const USA_LINK_PESSOAL = /\{\{\s*(?:link_agenda_reuniao|link_cronograma|link_resposta_[0-9]{1,2}|link_whatsapp|whatsapp_numero)\b/;
 
 /**
  * O link pessoal só entra quando é o endereço INTEIRO de um `href` (e, no texto puro, onde for).
@@ -261,7 +280,13 @@ export async function executarEnvioModeloEmail(entrada: {
       try {
         const links = await deps.linksPessoais(lead.id, params.template_id);
         for (const [nomeLink, endereco] of Object.entries(objeto(links) ? links : {})) {
-          if (VARIAVEL_LINK_PESSOAL.test(nomeLink) && typeof endereco === "string"
+          if (typeof endereco !== "string") continue;
+          const doToque = formatoDoToque(nomeLink);
+          if (doToque) {
+            if (doToque.test(endereco)) variaveis[nomeLink] = endereco;
+            continue;
+          }
+          if (VARIAVEL_LINK_PESSOAL.test(nomeLink)
             && /^https:\/\/[^\s"'<>{}]{1,600}$/.test(endereco)
             && linkPessoalBemUsado(nomeLink, template)) variaveis[nomeLink] = endereco;
         }
@@ -284,7 +309,8 @@ export async function executarEnvioModeloEmail(entrada: {
       // ele (inclusive vindo do payload público de uma página de captação) é ignorado — senão um
       // endereço escolhido por terceiros sairia num e-mail assinado pela casa, ou um valor vazio
       // apagaria o link do contato.
-      if (VARIAVEL_LINK_PESSOAL.test(chaveVariavel)) continue;
+      // Idem o número do toque (`link_whatsapp`, `whatsapp_numero`): quem diz é o fluxo do funil.
+      if (variavelDoSistema(chaveVariavel)) continue;
       if (!VARIAVEL.test(chaveVariavel) || ["descadastro_url", "__proto__", "prototype", "constructor"].includes(chaveVariavel)
         || typeof modelo !== "string" || modelo.length > 10_000) return resultado("ignorado", "variaveis_invalidas");
       // Resolver o texto inteiro sem validar cada token mascararia "Olá {ausente}".
